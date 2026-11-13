@@ -764,7 +764,7 @@ not allocate from the heap.
 
 ## Concurrency Model
 
-- `DeviceManager::bus_mgr` uses `SpinNoPreempt`: bus enumeration, rescan,
+- `DeviceManager::bus_mgr` uses a sleepable `Mutex`: bus enumeration, rescan,
   quiesce, and remove run in process context with mutual exclusion.
 - `EnumerationContext` has no interior locking: it is a single-threaded
   bridge between bus backends and probe, filled only inside the `bus_mgr`
@@ -945,3 +945,15 @@ buffer. The current entropy integration uses one worker per selected VirtIO RNG 
 issuing reads serially.
 
 The `hwrng` feature compiles this provider for injection into concrete drivers.
+
+## Discovery mapping context
+
+Bus enumeration/rescan prepares MMIO mappings and may wait for confirmed TLB
+publication. DeviceManager serializes its backends with a task mutex, without
+holding a preemption-disable spinlock across those operations. The manager's
+entry points require sleepable task context; IRQ handlers never enumerate buses.
+This allows the MM owner to release its short IRQ-safe PTE lock before waiting.
+
+`DeviceManager` requires `ksync::Mutex` for bus enumeration and resource mapping
+in every driver configuration. `ksync` is an unconditional dependency, including
+console/RNG-only builds without `block` or `unittest-threads` features.

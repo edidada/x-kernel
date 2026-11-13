@@ -8,15 +8,15 @@ use core::panic::Location;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult};
-use kalloc::{UsageKind, global_allocator};
-use khal::mem::v2p;
+use kalloc::{PageRef, UsageKind, alloc_dma_pages_ref};
+use khal::mem::{p2v, v2p};
 use kiface_mm_api::{DmaMappingIf, DmaMappingMode};
 use kspin::{SpinNoIrq, static_lock};
 use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 
 use crate::{
-    DmaBusAddress, DmaDirection, DmaInfo,
+    DmaBusAddress, DmaInfo,
     bounce_pool::{BounceMapping, BouncePool, DMA_BOUNCE_POOL_PAGES, bounce_pool_size},
     p2b,
 };
@@ -69,6 +69,160 @@ struct CoherentAllocation {
     site: TraceSite,
 }
 
+fn can_change_dma_mapping() -> bool {
+    karch::local_irq_enabled()
+        && !kiface_irq_context_api::InterruptContextIf::is_in_interrupt_context()
+        && kiface_task_api::TaskBlockingContextIf::is_sleepable_context()
+}
+
+/// Allocate arbitrary number of bytes. Returns the left bound of the
+/// allocated region.
+///
+/// DMA memory is allocated in page granularity so page-table attributes and
+/// platform share/unshare hooks remain balanced for every allocation.
+///
+/// The returned allocation is private until its caller publishes it to a device.
+#[track_caller]
+pub(crate) fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
+    alloc_coherent_pages(layout)
+}
+
+#[track_caller]
+fn alloc_coherent_pages(layout: Layout) -> AllocResult<DmaInfo> {
+    if !can_change_dma_mapping() {
+        return Err(AllocError::InvalidInput);
+    }
+    let num_pages = layout_pages(&layout);
+    let pages = alloc_dma_pages_ref(num_pages, PAGE_SIZE_4K.max(layout.align()), UsageKind::Dma)?;
+    let vaddr = p2v(pages.phys_addr());
+    let vaddr_raw = vaddr.as_usize();
+    if let Err(error) = update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent) {
+        // A failed transition may leave uncached/shared PTEs or stale translations.
+        // Retain the existing PageRef hold; no independent lifetime protocol exists.
+        core::mem::forget(pages);
+        return Err(error);
+    }
+    if let Err(error) = prepare_platform_dma(pages.phys_addr(), num_pages * PAGE_SIZE_4K) {
+        core::mem::forget(pages);
+        return Err(error);
+    }
+    // DmaInfo plus the original layout carries one exact PageRef transfer through
+    // the legacy driver ABI. The matching release restores this hold once.
+    let _page_transfer = pages.into_raw();
+    let dma_info = DmaInfo {
+        // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
+        // and therefore cannot be null.
+        cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
+        bus_addr: v2b(vaddr),
+    };
+    {
+        let mut allocator = ALLOCATOR.lock();
+        allocator.trace_coherent_alloc(dma_info, num_pages);
+        #[cfg(unittest)]
+        allocator.test_coherent_allocs.insert(
+            dma_info.cpu_addr.as_ptr() as usize,
+            num_pages * PAGE_SIZE_4K,
+        );
+    }
+    Ok(dma_info)
+}
+
+fn update_mapping_mode(vaddr: VirtAddr, num_pages: usize, mode: DmaMappingMode) -> AllocResult<()> {
+    let expand_size = num_pages * PAGE_SIZE_4K;
+    DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
+        error!("change table flag fail");
+        AllocError::NoMemory
+    })
+}
+
+fn prepare_platform_dma(paddr: PhysAddr, size: usize) -> AllocResult<()> {
+    kplat::dma::prepare(paddr.as_usize(), size).map_err(|_| {
+        error!("platform dma prepare failed");
+        AllocError::NoMemory
+    })
+}
+
+fn release_platform_dma(paddr: PhysAddr, size: usize) -> AllocResult<()> {
+    kplat::dma::release(paddr.as_usize(), size).map_err(|_| {
+        error!("platform dma release failed");
+        AllocError::NoMemory
+    })
+}
+
+/// Gives back the allocated region to the byte allocator.
+///
+/// # Safety
+///
+/// `dma` must come from a prior successful [`allocate_dma_memory`] call on
+/// this allocator, and `layout` must exactly match that allocation.
+#[track_caller]
+pub(crate) unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
+    if !can_change_dma_mapping() {
+        error!("coherent DMA release requires sleepable task context; retaining pages");
+        return;
+    }
+    debug_assert!(layout.size() != 0);
+    debug_assert!(
+        (dma.cpu_addr.as_ptr() as usize).is_multiple_of(PAGE_SIZE_4K.max(layout.align()))
+    );
+    let num_pages = layout_pages(&layout);
+    // Address and geometry are cheap to check. Exact allocation identity follows
+    // from the unsafe caller contract; no second owner registry is maintained.
+    if !ALLOCATOR.lock().trace_coherent_free(dma, num_pages) {
+        return;
+    }
+    let virt_raw = dma.cpu_addr.as_ptr() as usize;
+    let size = num_pages * PAGE_SIZE_4K;
+    let vaddr = va!(virt_raw);
+
+    // SAFETY: successful allocation transferred exactly this PageRef range;
+    // the caller supplies its original address/layout and releases it once.
+    let pages = unsafe { PageRef::from_raw(v2p(vaddr), num_pages) };
+    // A failed release must quarantine the existing reference: reusing these
+    // pages could expose a new owner to firmware or old mapping attributes.
+    if release_platform_dma(v2p(vaddr), size).is_err()
+        || update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal).is_err()
+    {
+        error!(
+            "quarantining DMA pages after failed release: vaddr={:?}, pages={}",
+            vaddr, num_pages
+        );
+        core::mem::forget(pages);
+        return;
+    }
+
+    #[cfg(unittest)]
+    ALLOCATOR.lock().test_coherent_allocs.remove(&virt_raw);
+    drop(pages);
+}
+
+/// Prepares the shared pool without holding metadata across mapping changes.
+pub(crate) fn ensure_bounce_pool() -> AllocResult<()> {
+    if !can_change_dma_mapping() {
+        return Err(AllocError::InvalidInput);
+    }
+    if ALLOCATOR.lock().bounce_pool.is_initialized() {
+        return Ok(());
+    }
+    let layout = layout_for_pages(DMA_BOUNCE_POOL_PAGES);
+    let dma = alloc_coherent_pages(layout)?;
+    let is_installed = {
+        let mut allocator = ALLOCATOR.lock();
+        if allocator.bounce_pool.is_initialized() {
+            false
+        } else {
+            allocator.bounce_pool.initialize(dma, bounce_pool_size());
+            true
+        }
+    };
+    if !is_installed {
+        // SAFETY: this candidate was never published or handed to a device,
+        // and the layout is exactly the one used for its allocation.
+        unsafe { deallocate_dma_memory(dma, layout) };
+    }
+    Ok(())
+}
+
 impl DmaAllocator {
     pub(crate) const fn new() -> Self {
         Self {
@@ -81,110 +235,13 @@ impl DmaAllocator {
         }
     }
 
-    /// Allocate arbitrary number of bytes. Returns the left bound of the
-    /// allocated region.
-    ///
-    /// DMA memory is allocated in page granularity so page-table attributes and
-    /// platform share/unshare hooks remain balanced for every allocation.
-    ///
-    /// # Safety
-    ///
-    /// The caller must treat the returned [`DmaInfo`] as coherent DMA memory:
-    /// deallocate it exactly once with the same `layout`, do not forge or
-    /// offset the returned CPU address, and only hand the bus address to a
-    /// device that is allowed to DMA that range.
-    #[track_caller]
-    pub(crate) unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
-        self.alloc_coherent_pages(layout)
-    }
-
-    #[track_caller]
-    fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
-        let num_pages = layout_pages(&layout);
-        let vaddr_raw = global_allocator().alloc_dma_pages(
-            num_pages,
-            PAGE_SIZE_4K.max(layout.align()),
-            UsageKind::Dma,
-        )?;
-        let vaddr = va!(vaddr_raw);
-        self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?;
-        self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
-        let dma_info = DmaInfo {
-            // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
-            // and therefore cannot be null.
-            cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
-            bus_addr: v2b(vaddr),
-        };
-        self.trace_coherent_alloc(dma_info, num_pages);
-        #[cfg(unittest)]
-        self.test_coherent_allocs.insert(
-            dma_info.cpu_addr.as_ptr() as usize,
-            num_pages * PAGE_SIZE_4K,
-        );
-        Ok(dma_info)
-    }
-
-    fn update_mapping_mode(
-        &mut self,
-        vaddr: VirtAddr,
-        num_pages: usize,
-        mode: DmaMappingMode,
-    ) -> AllocResult<()> {
-        let expand_size = num_pages * PAGE_SIZE_4K;
-        DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
-            error!("change table flag fail");
-            AllocError::NoMemory
-        })
-    }
-
-    fn prepare_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::prepare(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma prepare failed");
-            AllocError::NoMemory
-        })
-    }
-
-    fn release_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::release(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma release failed");
-            AllocError::NoMemory
-        })
-    }
-
-    /// Gives back the allocated region to the byte allocator.
-    ///
-    /// # Safety
-    ///
-    /// `dma` must come from a prior successful [`allocate_dma_memory`] call on
-    /// this allocator, and `layout` must exactly match that allocation.
-    #[track_caller]
-    pub(crate) unsafe fn deallocate_dma_memory(&mut self, dma: DmaInfo, layout: Layout) {
-        let num_pages = layout_pages(&layout);
-        if !self.trace_coherent_free(dma, num_pages) {
-            return;
-        }
-        #[cfg(unittest)]
-        self.test_coherent_allocs
-            .remove(&(dma.cpu_addr.as_ptr() as usize));
-        let virt_raw = dma.cpu_addr.as_ptr() as usize;
-        let size = num_pages * PAGE_SIZE_4K;
-        let vaddr = va!(virt_raw);
-
-        // Deallocation cannot fail; the helper already logs platform release errors.
-        let _ = self.release_platform_dma(v2p(vaddr), size);
-        // Deallocation cannot fail; update_mapping_mode already logs restoration errors.
-        let _ = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
-
-        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
-    }
-
     /// Returns a read-only snapshot of in-use DMA resources for test baselines.
     #[cfg(unittest)]
     pub(crate) fn test_stats(&self) -> DmaTestStats {
         let (bounce_used_bytes, bounce_total_bytes) = self.bounce_pool.test_used_total_bytes();
         DmaTestStats {
             active_mappings: self.active_mappings.len(),
-            active_mapping_bytes: self.active_mappings.values().map(|m| m.len).sum(),
+            active_mapping_bytes: self.active_mappings.values().map(BounceMapping::len).sum(),
             bounce_used_bytes,
             bounce_total_bytes,
             coherent_allocations: self.test_coherent_allocs.len(),
@@ -192,74 +249,41 @@ impl DmaAllocator {
         }
     }
 
-    /// Maps an existing CPU buffer through the bounce pool for a temporary DMA transaction.
-    ///
-    /// # Safety
-    ///
-    /// `buffer` must remain live and exclusively owned by the caller until the
-    /// matching [`unmap_dma_buffer`] call. The caller must not let the device
-    /// access the returned bus address after unmapping.
-    pub(crate) unsafe fn map_dma_buffer(
-        &mut self,
-        buffer: NonNull<[u8]>,
-        _direction: DmaDirection,
-    ) -> AllocResult<DmaInfo> {
-        use core::sync::atomic::{Ordering, fence};
-
-        let len = buffer.len();
+    /// Reserves exclusive staging storage without publishing an active mapping.
+    pub(crate) fn reserve_mapping(&mut self, len: usize) -> AllocResult<(DmaInfo, BounceMapping)> {
         if len == 0 {
             return Err(AllocError::InvalidInput);
         }
-
-        fence(Ordering::SeqCst);
-        let (dma_info, layout) = self.alloc_bounce_buffer(len)?;
-
-        // Stage the current bytes for every direction, including DeviceToDriver.
-        // The device's writes still overwrite them, but a mapping that is
-        // released without device access (queue-setup rollback) then returns
-        // exactly the original data instead of copied-back pool contents.
-        // SAFETY: the bounce buffer and source slice are distinct live regions
-        // of `len` bytes established by the caller and allocator.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                buffer.as_ptr() as *const u8,
-                dma_info.cpu_addr.as_ptr(),
-                len,
-            );
-        }
-        fence(Ordering::SeqCst);
-
+        let (dma_info, mapping) = self.bounce_pool.allocate(len)?;
         if self
             .active_mappings
             .contains_key(&dma_info.bus_addr.as_u64())
         {
             error!("DMA mapping is already active: {:?}", dma_info.bus_addr);
-            self.recycle_bounce_buffer(dma_info.cpu_addr.as_ptr() as usize, layout);
+            self.recycle_bounce_buffer(mapping);
             return Err(AllocError::InvalidInput);
         }
-        self.active_mappings.insert(
-            dma_info.bus_addr.as_u64(),
-            BounceMapping {
-                cpu_addr: dma_info.cpu_addr.as_ptr() as usize,
-                len,
-                layout,
-            },
-        );
+        Ok((dma_info, mapping))
+    }
 
-        Ok(dma_info)
+    /// Publishes a reserved mapping after staging has finished outside the lock.
+    pub(crate) fn activate_mapping(&mut self, dma_addr: DmaBusAddress, mapping: BounceMapping) {
+        // TLSF cannot return this extent again before its token is recycled.
+        let previous = self.active_mappings.insert(dma_addr.as_u64(), mapping);
+        debug_assert!(previous.is_none());
     }
 
     /// Releases a bounced mapping that the device never received.
     ///
     /// The mapping must be unpublished: no device may have accessed its bus
-    /// address. Unlike [`Self::unmap_dma_buffer`] this performs no copy-back,
+    /// address. This performs no copy-back,
     /// so rollback cannot overwrite the original buffer with stale or
     /// uninitialized bounce contents.
     ///
     /// # Safety
     ///
     /// `dma_addr` must be the still-active mapping returned by
-    /// [`Self::map_dma_buffer`] and must be cancelled exactly once. The device
+    /// [`crate::map_dma_buffer`] and must be cancelled exactly once. The device
     /// must never have been given the address.
     pub(crate) unsafe fn cancel_dma_mapping(&mut self, dma_addr: DmaBusAddress, len: usize) {
         #[expect(
@@ -273,30 +297,19 @@ impl DmaAllocator {
             .unwrap_or_else(|| panic!("DMA mapping is not active: {:?}", dma_addr));
 
         assert_eq!(
-            len, mapping.len,
+            len,
+            mapping.len(),
             "DMA buffer length mismatch for {:?}: expected {}, got {}",
-            dma_addr, mapping.len, len
+            dma_addr,
+            mapping.len(),
+            len
         );
 
-        self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
+        self.recycle_bounce_buffer(mapping);
     }
 
-    /// Unmaps a previously bounced DMA buffer and synchronizes data back.
-    ///
-    /// # Safety
-    ///
-    /// `dma_addr` must be the still-active mapping returned by
-    /// [`map_dma_buffer`] for the same `buffer`, and this function must be
-    /// called exactly once for that mapping.
-    pub(crate) unsafe fn unmap_dma_buffer(
-        &mut self,
-        dma_addr: DmaBusAddress,
-        buffer: NonNull<[u8]>,
-        direction: DmaDirection,
-    ) {
-        use core::sync::atomic::{Ordering, fence};
-
-        let len = buffer.len();
+    /// Removes a live mapping before its caller synchronizes and recycles it.
+    pub(crate) fn take_mapping(&mut self, dma_addr: DmaBusAddress, len: usize) -> BounceMapping {
         #[expect(
             clippy::panic,
             reason = "CG-021-no-panic-on-reachable-failure: The Safety contract requires dma_addr \
@@ -308,43 +321,19 @@ impl DmaAllocator {
             .unwrap_or_else(|| panic!("DMA mapping is not active: {:?}", dma_addr));
 
         assert_eq!(
-            len, mapping.len,
+            len,
+            mapping.len(),
             "DMA buffer length mismatch for {:?}: expected {}, got {}",
-            dma_addr, mapping.len, len
+            dma_addr,
+            mapping.len(),
+            len
         );
 
-        fence(Ordering::SeqCst);
-        if direction != DmaDirection::DriverToDevice {
-            // SAFETY: the bounce buffer and destination slice are distinct live
-            // regions of `len` bytes tracked by the active mapping record.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    mapping.cpu_addr as *const u8,
-                    buffer.as_ptr() as *mut u8,
-                    len,
-                );
-            }
-            fence(Ordering::SeqCst);
-        }
-
-        self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
+        mapping
     }
 
-    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
-        let pool = self.bounce_pool_mut()?;
-        pool.allocate(len)
-    }
-
-    fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
-        self.bounce_pool.deallocate(cpu_addr, layout);
-    }
-
-    fn bounce_pool_mut(&mut self) -> AllocResult<&mut BouncePool> {
-        if !self.bounce_pool.is_initialized() {
-            let dma = self.alloc_coherent_pages(layout_for_pages(DMA_BOUNCE_POOL_PAGES))?;
-            self.bounce_pool.initialize(dma, bounce_pool_size());
-        }
-        Ok(&mut self.bounce_pool)
+    pub(crate) fn recycle_bounce_buffer(&mut self, mapping: BounceMapping) {
+        self.bounce_pool.deallocate(mapping);
     }
 
     #[cfg(feature = "dma-trace")]

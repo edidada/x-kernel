@@ -23,12 +23,18 @@ pub trait DmaMappingIf {
     /// Applies one DMA mapping mode to an existing kernel virtual range.
     ///
     /// Requires initialized kernel address-space management and an exclusively
-    /// owned, page-aligned allocation. The caller quiesces device access before
+    /// owned, page-aligned allocation. Runtime callers require sleepable task context.
+    /// The provider prepares PTE changes under short IRQ-safe serialization,
+    /// releases it, and completes TLB invalidation before returning. The caller quiesces device access before
     /// restoring Normal and retains ownership until this operation completes.
     /// This does not allocate pages, share them with firmware or synchronize
     /// device DMA. The provider owns page-table locking and flag selection.
+    /// A successful return includes completion of all required TLB invalidations;
+    /// the range must not be published or recycled before that boundary.
     ///
     /// # Errors
-    /// Propagates range validation and page-table protection failures.
+    /// Propagates range validation and page-table protection failures, including
+    /// unconfirmed TLB invalidation. On error the caller retains its allocation;
+    /// partial PTE changes do not authorize device publication or page reuse.
     fn set_mode(vaddr: VirtAddr, size_bytes: usize, mode: DmaMappingMode) -> kerrno::KResult;
 }

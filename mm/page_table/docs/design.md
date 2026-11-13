@@ -713,3 +713,23 @@ Sv39 and Sv48 reserve W=1,R=0, so both new_page and set_flags must use this
 normalization, including first write-only file faults and later mprotect updates.
 This changes the hardware leaf only; VMA permission policy remains with memspace.
 The managed software bit is preserved independently during protection changes.
+
+## Detached kernel completion
+
+`PageTableMut::defer_kernel_flush` moves the existing invalidation summary and
+RetiredReferences into `KernelTlbFlush`, ending the mutable table borrow without
+performing its final shootdown. This adds a completion boundary, not another
+reference-count protocol. The owner can release PTE serialization before calling
+`try_finish`; success releases the original retained holds, failure keeps them
+and requests a full retry. Dropping an incomplete batch performs local
+invalidation or fresh-map ordering without waiting for remote CPUs; it retains
+unretired holds because local completion cannot authorize remote reuse. The table tree and raw backing must outlive completion, and the
+owner must serialize conflicting updates. User tables reject detachment because
+ASID/residency providers are tied to their live address-space state.
+
+This does not defer earlier bounded managed-retirement drains. Kernel IRQ-safe
+PTE preparation uses raw linear leaves, which create no such drains. General
+managed users preserve existing retirement behavior. `finish_boot_local` is unsafe:
+only a root never activated/cached by any other CPU may use it. Runtime seals this
+exception before AP startup; normal completion retains architecture barriers and
+all required remote acknowledgements.

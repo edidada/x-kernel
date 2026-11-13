@@ -862,7 +862,7 @@ fn empty_permissions_and_invalid_capabilities_install_no_owned_leaf() {
 }
 
 #[def_test(serial)]
-fn guard_drop_does_not_release_a_hold_after_unconfirmed_invalidation() {
+fn guard_and_detached_drop_retain_holds_after_unconfirmed_invalidation() {
     // This synthetic capability contains no heap allocation or actual backing;
     // forgetting it can test destructor suppression without leaking test RAM.
     static RELEASES: AtomicUsize = AtomicUsize::new(0);
@@ -927,6 +927,21 @@ fn guard_drop_does_not_release_a_hold_after_unconfirmed_invalidation() {
         .prevent_flush_completion
         .store(true, Ordering::Relaxed);
     drop(edit);
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
+    drop(table);
+    assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
+
+    let mut table = PageTable64::<GatherMeta, TestEntry, Handler>::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    edit.map(VirtAddr::from(0), Hold, PagingFlags::READ)
+        .unwrap();
+    edit.unmap(VirtAddr::from(0)).unwrap();
+    let mut completion = edit.defer_kernel_flush().unwrap();
+    assert_eq!(completion.try_finish(), Err(TlbFlushError::TimedOut));
+    let fulls_before = fixture.0.fulls.load(Ordering::Relaxed);
+    drop(completion);
+    // The remote provider still fails, so this is local invalidation only.
+    assert_eq!(fixture.0.fulls.load(Ordering::Relaxed), fulls_before + 1);
     assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
     drop(table);
     assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
@@ -1396,4 +1411,54 @@ fn map_existing_huge_leaf_requires_exact_bases_and_preserves_geometry() {
     edit.unmap(alias).unwrap();
     edit.finish();
     fixture.0.assert_drops(0, 2);
+}
+
+#[def_test(serial)]
+fn detached_kernel_batch_preserves_existing_mapping_hold_until_confirmation() {
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    edit.map(VirtAddr::from(0), fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.try_finish().unwrap();
+    fixture.0.withdraw(0);
+    edit.unmap(VirtAddr::from(0)).unwrap();
+    let mut completion = edit.defer_kernel_flush().unwrap();
+    // The edit borrow has ended, so callers can release their PTE lock now.
+    assert_eq!(table.query(VirtAddr::from(0)), Err(PtError::NotMapped));
+    fixture.0.assert_counts(0, 0);
+    fixture.0.assert_drops(0, 0);
+    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
+    assert_eq!(completion.try_finish(), Err(TlbFlushError::TimedOut));
+    fixture.0.assert_drops(0, 0);
+    completion.try_finish().unwrap();
+    fixture.0.assert_counts(0, 1);
+    fixture.0.assert_drops(0, 1);
+}
+
+#[def_test(serial)]
+fn detached_fresh_map_drop_orders_publication_without_remote_completion() {
+    let fixture = Fixture::new([]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    edit.map_raw(
+        VirtAddr::from(0),
+        PhysAddr::from(0x4000_0000),
+        PageSize::Size4K,
+        PagingFlags::READ,
+    )
+    .unwrap();
+    let completion = edit.defer_kernel_flush().unwrap();
+    fixture
+        .0
+        .prevent_flush_completion
+        .store(true, Ordering::Relaxed);
+    let fences_before = fixture.0.fences.load(Ordering::Relaxed);
+    drop(completion);
+    assert_eq!(fixture.0.fences.load(Ordering::Relaxed), fences_before + 1);
+    fixture.0.assert_counts(0, 0);
+    fixture
+        .0
+        .prevent_flush_completion
+        .store(false, Ordering::Relaxed);
 }

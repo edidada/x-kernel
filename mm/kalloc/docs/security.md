@@ -367,3 +367,20 @@ the allocator. MMIO, device memory, shared/DMA-visible buffers and arbitrary C
 buffers are outside the contract. The block size comes from `DCZID_EL0`; if the
 register forbids `DC ZVA` or no complete aligned block fits, the helper falls
 back to `write_bytes` over exactly the requested range.
+
+## DMA32 PageRef admission
+
+`alloc_dma_pages_ref` selects the existing DMA32 inventory allocation inside the
+same `allocate_range` implementation used by exact/compound PageRef admission.
+It shares resident metadata counters, fallible admission rollback, spare-tail
+return and final PageRef retirement. The full rounded backing must satisfy the
+existing below-4-GiB constraint before admission. Raw DMA free remains a separate
+API and must never release a PageRef-owned allocation. Cloning a selected page
+keeps that page live after the original DMA owner drops; no DMA-specific
+reference counter or physical-page release protocol exists.
+
+The high-memory DMA32 regression distinguishes address-policy selection from
+PageRef retirement: a general allocation above 4 GiB proves matching inventory
+exists before the DMA32 request is rejected. The test uses only existing public
+allocation APIs and normal PageRef Drop; it adds no inventory injection or
+production hook and is ignored when that high-memory fixture is unavailable.

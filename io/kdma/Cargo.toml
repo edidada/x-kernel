@@ -15,6 +15,9 @@ dma-trace = []
 
 [dependencies]
 kiface-mm-api.workspace = true
+kiface-irq-context-api.workspace = true
+kiface-task-api.workspace = true
+karch.workspace = true
 alloc-engine = { workspace = true, features = ["tlsf"] }
 kalloc.workspace = true
 khal = { workspace = true }

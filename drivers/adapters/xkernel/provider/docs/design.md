@@ -137,3 +137,26 @@ are not silently included in this contract update.
 Provider tests distinguish conversion-only fixtures from real KIRQ allocation
 and action lifecycle checks. Neither kind programs a device to issue MSI;
 hardware stop and message-ordering validation belongs to the device owner.
+
+## DMA execution context
+
+Coherent allocation/free forwards to kdma's sleepable-task mapping path.
+The host prepares the streaming pool before device publication. Streaming map,
+unmap and guard release may run in ordinary IRQ/BH context using only prepared
+coherent backing, with no lazy mapping initialization or remote completion wait.
+A coherent request from a forbidden context cannot authorize page reuse.
+
+MMIO preparation and teardown follow the same sleepable-task runtime boundary.
+The boot CPU may map firmware/controller regions before AP startup; the handoff
+to ready TLB services excludes mutation.
+Runtime mutation requires a sleepable task before taking its update mutex; an
+infallible
+release from a forbidden context cannot complete teardown and retains the iomap
+reference. Drivers must prepare/cache mappings and perform teardown in task
+context rather than invoking these operations from IRQ callbacks.
+
+DMA coherent backing now uses kalloc's existing DMA32 PageRef admission. The
+legacy address/layout ABI carries one exact raw PageRef transfer until release;
+this is not a new reference counter. The matching release restores that hold,
+finishes platform and mapping transitions, then drops it. Kernel mappings use
+short IRQ-safe PTE/registry locks and task-owned completion outside both locks.

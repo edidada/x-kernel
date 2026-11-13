@@ -234,6 +234,19 @@ Safeguards:
 - `IntrManagerIf::notify_cpu` now states this contract as an interface requirement;
 - The AArch64 / RISC-V backends have explicitly added a barrier on the send path.
 
+### 4. Function-pointer restoration in `run_before_ack_hook_for_test()`
+
+This boundary is compiled only under `#[cfg(unittest)]`. Only
+`with_before_ack_hook_for_test()` may install a valid static `fn()` pointer or
+zero in `BEFORE_ACK_HOOK`; scope exit restores a previous value of the same kind.
+Data pointers and closures with borrowed environments must never be stored.
+`run_before_ack_hook_for_test()` excludes zero before converting the integer back
+to the original function-pointer type. Its `SAFETY:` prerequisite is that all
+writes follow this interface and static functions remain valid after scope exit.
+Release/Acquire publication makes the installed value visible to the handler.
+Serial tests must also keep hooks IRQ-safe; restoring the previous value does
+not drain handlers already in flight.
+
 ## Memory-Safety Invariants
 
 The following invariants are critical to both the robustness and the memory safety of `kipi`:

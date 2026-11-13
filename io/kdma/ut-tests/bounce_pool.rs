@@ -13,6 +13,9 @@ fn register_pool_and_recycle_mixed_size_buffers() {
     let bus_base = DmaBusAddress::new(0x1000_0000);
     let mut pool = BouncePool::new();
     assert!(!pool.is_initialized());
+    assert!(matches!(pool.allocate(64), Err(AllocError::NotInitialized)));
+    assert!(!pool.is_initialized());
+    assert_eq!(pool.test_used_total_bytes(), (0, 0));
     pool.initialize(
         DmaInfo {
             cpu_addr: cpu_base,
@@ -25,23 +28,29 @@ fn register_pool_and_recycle_mixed_size_buffers() {
     for _ in 0..8 {
         let mut allocations = alloc::vec::Vec::new();
         for (index, len) in [64, 4096, 8193].into_iter().enumerate() {
-            let (dma, layout) = pool.allocate(len).unwrap();
+            let (dma, mut mapping) = pool.allocate(len).unwrap();
             let offset = dma.cpu_addr.as_ptr() as usize - cpu_base.as_ptr() as usize;
             assert!(offset + len <= backing.len());
             assert_eq!(dma.bus_addr.as_u64(), bus_base.as_u64() + offset as u64);
-            // SAFETY: TLSF returned exclusive writable storage for `len` bytes
-            // within the live backing region, retained until deallocation below.
-            let buffer = unsafe { core::slice::from_raw_parts_mut(dma.cpu_addr.as_ptr(), len) };
-            buffer.fill(index as u8 + 1);
-            allocations.push((dma, layout, index as u8 + 1));
+            let pattern = index as u8 + 1;
+            mapping.copy_from_slice(&alloc::vec![MaybeUninit::new(pattern); len]);
+            allocations.push((dma, mapping, pattern));
         }
-        for (dma, layout, pattern) in allocations {
-            // SAFETY: this allocation has not been recycled, and the backing
-            // region remains live; no other allocation aliases these bytes.
-            let buffer =
-                unsafe { core::slice::from_raw_parts(dma.cpu_addr.as_ptr(), layout.size()) };
-            assert!(buffer.iter().all(|byte| *byte == pattern));
-            pool.deallocate(dma.cpu_addr.as_ptr() as usize, layout);
+        for (dma, mapping, pattern) in allocations {
+            // SAFETY: this token retains exclusive live storage; all bytes were
+            // initialized by copy_from_slice. Simulate a completed device write.
+            let bounce =
+                unsafe { core::slice::from_raw_parts_mut(dma.cpu_addr.as_ptr(), mapping.len()) };
+            assert!(bounce.iter().all(|byte| *byte == pattern));
+            bounce.fill(pattern + 16);
+            let mut received = alloc::vec![MaybeUninit::uninit(); mapping.len()];
+            mapping.sync_for_cpu(Some(&mut received));
+            assert!(received.iter().all(|byte| {
+                // SAFETY: the simulated device initialized every bounce byte and
+                // sync_for_cpu copied the complete matching extent above.
+                unsafe { byte.assume_init() == pattern + 16 }
+            }));
+            pool.deallocate(mapping);
         }
     }
 }

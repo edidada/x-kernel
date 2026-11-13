@@ -272,6 +272,25 @@ timer service owns the pause gate and final arbitration. Platform PM must
 restore controller access/routing and quiesce competing programming first.
 
 
+## Deferred kernel TLB completion
+
+`paging` exports the architecture-selected `KernelTlbFlush` alias alongside
+`PageTable` and `PageTableMut`. It represents an owned kernel invalidation batch
+returned by `PageTableMut::defer_kernel_flush()`, carrying the pending flush,
+fresh-map ordering and existing retired mapping holds beyond the PTE-edit borrow.
+It does not own the kernel page-table tree or raw backing; callers retain those
+resources and serialize conflicting mapping changes until completion.
+
+`memspace::KernelLayout` prepares raw linear mapping changes under its short
+IRQ-safe PTE lock, releases that lock, then completes the batch with
+`KernelTlbFlush::try_finish()` while holding its task-context update mutex.
+Confirmed completion releases the retired holds. On failure, memspace retains
+the batch and retries a full kernel invalidation before another update; dropping
+an unfinished batch performs local invalidation or fresh-map ordering without
+waiting, and pins unconfirmed holds instead of authorizing reuse. The local-only `finish_boot_local()` path is restricted to bootstrap before
+any secondary CPU activates the root. `khal` selects the metadata and handler for
+each architecture; page_table owns batch mechanics and memspace owns update policy.
+
 ## Page-table storage lifetime references
 
 `PagingHandlerImpl::alloc_frame` obtains kalloc's single-page `PageRef` range from the global

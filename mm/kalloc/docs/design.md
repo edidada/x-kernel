@@ -496,3 +496,20 @@ global `alloc_zeroed` path and exact zeroed page allocation. On AArch64 it may
 use `DC ZVA` when the requested range contains a complete aligned cache block;
 the unaligned prefix and tail use bounded byte stores. The helper never widens
 stores beyond the caller's allocation.
+
+## DMA32 PageRef admission
+
+`alloc_dma_pages_ref` selects the existing DMA32 inventory allocation inside the
+same `allocate_range` implementation used by exact/compound PageRef admission.
+It shares resident metadata counters, fallible admission rollback, spare-tail
+return and final PageRef retirement. The full rounded backing must satisfy the
+existing below-4-GiB constraint before admission. Raw DMA free remains a separate
+API and must never release a PageRef-owned allocation. Cloning a selected page
+keeps that page live after the original DMA owner drops; no DMA-specific
+reference counter or physical-page release protocol exists.
+
+The DMA32 selector regression runs with guest RAM crossing 4 GiB. It first
+allocates a 4 GiB-aligned page through the general path, releases that PageRef,
+then requires the same geometry to fail through the DMA32 path without an
+accounting imbalance. Low-memory guests explicitly ignore this test; the
+ordinary DMA32 retirement regression still exercises their reference lifecycle.

@@ -365,7 +365,7 @@ pub fn alloc_pages_exact_ref(
     align_pow2: usize,
     kind: UsageKind,
 ) -> AllocResult<PageRef> {
-    allocate_range(num_pages, align_pow2, kind, false)
+    allocate_range(num_pages, align_pow2, kind, false, RangeSource::General)
 }
 
 /// Explicitly allocates one shared reference unit of contiguous physical pages.
@@ -386,7 +386,29 @@ pub fn alloc_compound_pages_ref(
     if !num_pages.is_power_of_two() {
         return Err(AllocError::InvalidInput);
     }
-    allocate_range(num_pages, align_pow2, kind, true)
+    allocate_range(num_pages, align_pow2, kind, true, RangeSource::General)
+}
+
+/// Allocates DMA32 backing with the same metadata-owned lifecycle as exact pages.
+///
+/// Each base page owns an independent reference. The DMA address constraint is
+/// checked by the existing DMA inventory allocator before metadata admission.
+/// Release is exclusively through `PageRef`, never `dealloc_dma_pages`.
+///
+/// # Errors
+/// Returns the geometry/admission errors of `alloc_pages_exact_ref` and
+/// `NoMemory` when the inventory cannot supply backing below 4 GiB.
+pub fn alloc_dma_pages_ref(
+    num_pages: usize,
+    align_pow2: usize,
+    kind: UsageKind,
+) -> AllocResult<PageRef> {
+    allocate_range(num_pages, align_pow2, kind, false, RangeSource::Dma32)
+}
+
+enum RangeSource {
+    General,
+    Dma32,
 }
 
 fn allocate_range(
@@ -394,6 +416,7 @@ fn allocate_range(
     align_pow2: usize,
     kind: UsageKind,
     is_compound: bool,
+    source: RangeSource,
 ) -> AllocResult<PageRef> {
     checked_page_count(num_pages)?;
     if !align_pow2.is_power_of_two() {
@@ -410,7 +433,11 @@ fn allocate_range(
     if !allocator.is_page_allocator_ready() || page_meta::global_table().is_none() {
         return Err(AllocError::NotInitialized);
     }
-    let va = allocator.alloc_pages(backing_pages, align_pow2.max(PAGE_SIZE_4K), kind)?;
+    let alignment_bytes = align_pow2.max(PAGE_SIZE_4K);
+    let va = match source {
+        RangeSource::General => allocator.alloc_pages(backing_pages, alignment_bytes, kind)?,
+        RangeSource::Dma32 => allocator.alloc_dma_pages(backing_pages, alignment_bytes, kind)?,
+    };
     let paddr = PhysAddr::from(kaddr_layout::v2p(va));
     let result = if kaddr_layout::p2v(paddr.as_usize()) != va {
         Err(PageMetaError::InvalidRange)

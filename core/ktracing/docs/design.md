@@ -97,3 +97,11 @@ until close rather than silently regenerating on read, which would invalidate
 the snapshot ABI. It does not introduce a per-inode aggregate quota, change
 the default simple-file permissions, or treat descriptor limits as a byte
 budget. Sharing an existing snapshot through clone keeps one allocation.
+
+## Kernel text protection
+
+Text patching reads flags under KernelLayout's short IRQ-safe read guard and
+changes permissions through its task-owned protect method. TLB completion runs
+after the PTE lock is released. IRQ trace capture still writes preallocated ring
+storage without changing mappings. Permission-update errors stop the patch;
+restoration remains best effort under the existing static-key patching contract.

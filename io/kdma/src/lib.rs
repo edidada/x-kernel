@@ -51,7 +51,7 @@ mod dma;
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use alloc_engine::AllocResult;
+use alloc_engine::{AllocError, AllocResult};
 use memaddr::PhysAddr;
 
 use self::dma::ALLOCATOR;
@@ -65,6 +65,22 @@ pub use self::dma::DmaTestStats;
 #[cfg(unittest)]
 pub fn dma_test_stats() -> DmaTestStats {
     ALLOCATOR.lock().test_stats()
+}
+
+/// Attempts to prepare the fixed streaming pool before driver discovery.
+///
+/// Must run in task context with local IRQs enabled, after MM and CPU services
+/// are initialized. Subsequent map/unmap operations never modify page tables.
+/// Repeated calls reuse the prepared pool.
+///
+/// # Errors
+/// Returns an allocation/preparation error, including `InvalidInput` for an
+/// IRQ-off or interrupt/BH caller. The host may continue booting on failure.
+/// A later streaming map in sleepable task context retries preparation once;
+/// IRQ/BH mappings fail while backing is unavailable. Unrelated drivers do not
+/// require a prepared streaming pool.
+pub fn init_streaming_pool() -> AllocResult<()> {
+    dma::ensure_bounce_pool()
 }
 
 /// Converts a physical address to a bus address.
@@ -87,7 +103,7 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 /// Allocates **coherent** memory that meets Direct Memory Access (DMA)
 /// requirements.
 ///
-/// This function allocates a block of memory through the global allocator. The
+/// This function allocates a block through the existing DMA32 PageRef allocator. The
 /// memory pages must be contiguous, undivided, and have consistent read and
 /// write access.
 ///
@@ -98,10 +114,15 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 /// memory, such as the starting address and size. If it's not possible to
 /// allocate memory meeting the criteria, returns [`None`].
 ///
+/// Requires sleepable task context. Page allocation, mapping
+/// transitions and platform hooks run outside the DMA metadata lock. Callers
+/// must not hold locks required by remote CPUs to complete a TLB shootdown.
+///
 /// # Errors
 ///
-/// Returns `AllocError::NoMemory` when pages cannot be allocated, the
-/// mapping-attribute update fails, or the platform `prepare` hook fails.
+/// Returns `AllocError::InvalidInput` for non-sleepable callers,
+/// and `AllocError::NoMemory` when pages, mapping updates or platform preparation
+/// fail. Failed preparation retains private pages rather than publishing them.
 ///
 /// # Safety
 ///
@@ -110,15 +131,16 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 /// returned bus address to devices that are allowed to DMA that buffer.
 #[track_caller]
 pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
-    // SAFETY: forwards the caller's DMA allocation preconditions to the global DMA allocator.
-    unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
+    dma::allocate_dma_memory(layout)
 }
 
 /// Frees coherent memory previously allocated.
 ///
 /// This function releases the memory block that was previously allocated and
 /// marked as coherent. It ensures proper deallocation and management of resources
-/// associated with the memory block.
+/// associated with the memory block. Requires sleepable task context.
+/// An invalid context, failed platform release, or unconfirmed mapping
+/// restoration is logged and retains the pages rather than reusing them.
 ///
 /// - `dma_info`: An instance of [`DmaInfo`] containing the details of the memory
 ///   block to be freed, such as its starting address and size.
@@ -130,7 +152,7 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
 #[track_caller]
 pub unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
     // SAFETY: forwards the caller's matching deallocation contract to the global DMA allocator.
-    unsafe { ALLOCATOR.lock().deallocate_dma_memory(dma, layout) }
+    unsafe { dma::deallocate_dma_memory(dma, layout) }
 }
 
 /// Direction for a temporary DMA mapping of an existing buffer.
@@ -147,7 +169,14 @@ pub enum DmaDirection {
 /// Maps an existing buffer for temporary DMA access.
 ///
 /// The current backend always stages the mapping through pooled coherent bounce
-/// memory and copies the original bytes for every direction. Keeping this
+/// memory and copies the original bytes for every direction. The host must
+/// attempt pool preparation with [`init_streaming_pool`] before driver discovery;
+/// mapping returns an error if the pool is unavailable.
+/// If backing is missing, a sleepable task retries preparation once outside
+/// the metadata lock. IRQ/BH and IRQ-off mappings return an error instead of
+/// entering MM or waiting for another CPU. A prepared pool never grows.
+/// Copying runs outside the metadata lock while the bounce
+/// allocation remains exclusively owned. Keeping this
 /// behind `kdma` lets future implementations restore direct-map optimizations
 /// with stricter page-granularity safety checks without changing driver code.
 ///
@@ -156,7 +185,9 @@ pub enum DmaDirection {
 /// Returns `AllocError::InvalidInput` for a zero-length buffer or a bus
 /// address that is already actively mapped, and
 /// `AllocError::NoMemory` when the bounce pool cannot satisfy the
-/// request.
+/// request or task-context pool preparation fails. Returns `AllocError::InvalidInput`
+/// if preparation is required in a non-sleepable context. After preparation,
+/// mapping/unmapping supports ordinary IRQ and BH contexts, but not NMI.
 ///
 /// # Safety
 ///
@@ -165,10 +196,27 @@ pub enum DmaDirection {
 /// returned bus address after unmapping.
 pub unsafe fn map_dma_buffer(
     buffer: NonNull<[u8]>,
-    direction: DmaDirection,
+    _direction: DmaDirection,
 ) -> AllocResult<DmaInfo> {
-    // SAFETY: forwards the caller's exclusive-buffer contract to the DMA mapper.
-    unsafe { ALLOCATOR.lock().map_dma_buffer(buffer, direction) }
+    let reservation = ALLOCATOR.lock().reserve_mapping(buffer.len());
+    let (dma, mut mapping) = match reservation {
+        Err(AllocError::NotInitialized) => {
+            // The metadata guard has ended. Preparation admits only sleepable
+            // task context, so an IRQ caller never enters the mapping slow path.
+            dma::ensure_bounce_pool()?;
+            ALLOCATOR.lock().reserve_mapping(buffer.len())?
+        }
+        result => result?,
+    };
+    // Stage every direction so cancellation cannot expose stale pool bytes.
+    let buffer =
+        NonNull::slice_from_raw_parts(buffer.cast::<core::mem::MaybeUninit<u8>>(), buffer.len());
+    // SAFETY: the caller retains this buffer exclusively until unmap; the token
+    // owns distinct staging storage. MaybeUninit preserves RX bytes without
+    // requiring the device's destination to be initialized before submission.
+    mapping.copy_from_slice(unsafe { buffer.as_ref() });
+    ALLOCATOR.lock().activate_mapping(dma.bus_addr, mapping);
+    Ok(dma)
 }
 
 /// Unmaps a previously mapped DMA buffer and synchronizes data back if needed.
@@ -194,12 +242,19 @@ pub unsafe fn unmap_dma_buffer(
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) {
-    // SAFETY: forwards the caller's matching mapping contract to the DMA mapper.
-    unsafe {
-        ALLOCATOR
-            .lock()
-            .unmap_dma_buffer(dma_addr, buffer, direction)
+    let mapping = ALLOCATOR.lock().take_mapping(dma_addr, buffer.len());
+    if direction == DmaDirection::DriverToDevice {
+        mapping.sync_for_cpu(None);
+    } else {
+        let mut buffer = NonNull::slice_from_raw_parts(
+            buffer.cast::<core::mem::MaybeUninit<u8>>(),
+            buffer.len(),
+        );
+        // SAFETY: the caller has stopped device access and exclusively owns the
+        // original buffer. The removed mapping retains its distinct extent.
+        mapping.sync_for_cpu(Some(unsafe { buffer.as_mut() }));
     }
+    ALLOCATOR.lock().recycle_bounce_buffer(mapping);
 }
 
 /// Releases a mapping that was never handed to a device.
@@ -257,7 +312,11 @@ impl core::fmt::Debug for DmaBusAddress {
     }
 }
 
-/// Represents information related to a DMA operation.
+/// DMA addresses, not a clonable ownership handle.
+///
+/// For coherent allocations the original address/Layout pair carries one exact
+/// PageRef transfer; copying this record never acquires another reference.
+/// Streaming mappings instead retain their pool extent in DMA bookkeeping.
 #[derive(Debug, Clone, Copy)]
 pub struct DmaInfo {
     /// The address at which the CPU accesses this memory region. This address

@@ -91,18 +91,26 @@ cfg_if::cfg_if! {
         /// The architecture-specific page table.
         pub type PageTable = page_table::x86_64::X64PageTable<PagingHandlerImpl>;
         pub type PageTableMut<'a> = page_table::x86_64::X64PageTableMut<'a, PagingHandlerImpl>;
+        /// Owned kernel invalidation completed after releasing PTE serialization.
+        pub type KernelTlbFlush = page_table::KernelTlbFlush<page_table::x86_64::X64PagingMetaData, PagingHandlerImpl>;
     } else if #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))] {
         /// The architecture-specific page table.
         pub type PageTable = page_table::riscv::Sv39PageTable<PagingHandlerImpl>;
         pub type PageTableMut<'a> = page_table::riscv::Sv39PageTableMut<'a, PagingHandlerImpl>;
+        /// Owned kernel invalidation completed after releasing PTE serialization.
+        pub type KernelTlbFlush = page_table::KernelTlbFlush<page_table::riscv::Sv39MetaData<VirtAddr>, PagingHandlerImpl>;
     } else if #[cfg(target_arch = "aarch64")]{
         /// The architecture-specific page table.
         pub type PageTable = page_table::aarch64::A64PageTable<PagingHandlerImpl>;
         pub type PageTableMut<'a> = page_table::aarch64::A64PageTableMut<'a, PagingHandlerImpl>;
+        /// Owned kernel invalidation completed after releasing PTE serialization.
+        pub type KernelTlbFlush = page_table::KernelTlbFlush<page_table::aarch64::A64PagingMetaData, PagingHandlerImpl>;
     } else if #[cfg(target_arch = "loongarch64")] {
         /// The architecture-specific page table.
         pub type PageTable = page_table::loongarch64::LA64PageTable<PagingHandlerImpl>;
         pub type PageTableMut<'a> = page_table::loongarch64::LA64PageTableMut<'a, PagingHandlerImpl>;
+        /// Owned kernel invalidation completed after releasing PTE serialization.
+        pub type KernelTlbFlush = page_table::KernelTlbFlush<page_table::loongarch64::LA64MetaData, PagingHandlerImpl>;
     }
 }
 
