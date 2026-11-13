@@ -1,5 +1,28 @@
 # kruntime — Security and Reliability Analysis
 
+Unit-test entry preparation failure terminates the fixture at its assertion
+boundary; it is not a production OOM recovery protocol. NOWAIT preparation in
+boot and retained-reader handshakes only constrains the entry allocation, not
+task stacks, names, captured resources or their destruction. No new entry is
+activated after its preparation fails. This does not promise recovery of an
+already active multi-stage reader fixture after a fatal test assertion.
+
+Benchmark task entries are prepared with KERNEL permissions in the sleepable,
+reclaim-safe coordinator, not in the child task's future read or IRQ context.
+Complete preparation precedes activation of every concurrent group. An entry
+allocation error therefore cannot strand an activated task behind an unopened
+gate or an unset stop flag. Dropped prepared task references release captures
+through the existing deferred finalizer; cleanup is not guaranteed synchronous
+with the error return. Successful guest runs do not prove global OOM recovery.
+
+RCU benchmark record allocation occurs before publication in sleepable,
+reclaim-safe task context. The batch fixture reserves storage before creating
+a record whose destructor decrements its live count; failed reservation cannot
+underflow that count. Invocation and cancellation reconstruct only the original
+KBox allocation through its zero-offset node projection, exactly once. The
+softirq destructor remains nonblocking. Local failure injection checks owner
+reservation only, not nested allocation, global OOM, or production recovery.
+
 Network device-owner reservation failure is fatal only at the configured boot
 network boundary. It occurs before global stack publication and NIC scheduler
 attachment; ordinary namespace callers receive NoMemory. Late init provides

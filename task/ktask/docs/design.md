@@ -1,5 +1,20 @@
 # ktask — Design
 
+## Prepared unit-test entries
+
+Direct unit-test task constructors transfer PreparedTaskEntry owners rather
+than allocating legacy boxed closures. new_kthread_with_entry preserves the
+root PID identity of new_kthread; PID-less fixtures use the existing prepared
+constructor. Entry preparation precedes PID allocation and task publication.
+The legacy closure constructors and spawn wrappers remain unchanged.
+
+Ordinary fixtures prepare with KERNEL in sleepable, reclaim-safe task context.
+Freezer helpers use NOWAIT under their serialization/admission gates; PI workers
+use NOWAIT because their callers can hold an RtMutex. Scheduler helpers used
+under exclusion guards, the BH-disabled preparation fixture and the abandoned
+RCU reader's sentinel also use NOWAIT. Entry flags do not grant those callers
+permission to sleep or change the existing stack/bookkeeping allocations.
+
 ## Priority inheritance
 
 `pi::TaskPiHost` binds `krtmutex` to `KtaskRef` and the `PiTaskNode` embedded
@@ -1633,8 +1648,9 @@ On successful cleanup it first removes freeze requests and thaws old tasks,
 then detaches the deferred activation list and reopens admission. Deferred tasks
 re-enter normal admission before enqueue, so a subsequent freeze can retain them
 again. No allocation or callback occurs while modifying list links; registration
-and list ownership use the project intrusive list. The pending strong owner is
-released on activation, including when callers dropped every external reference.
+and list ownership use an `Arc` adapter over `intrusive_collections::LinkedList`.
+The pending strong owner is released on activation, including when callers
+dropped every external reference.
 
 This corresponds to the task preparation responsibilities of Linux v6.12
 `kernel/power/process.c` (`freeze_processes`, `freeze_kernel_threads`, thaw),

@@ -1171,7 +1171,9 @@ dependencies = [
  "lazyinit",
  "linux-raw-sys",
  "macros",
+ "memaddr",
  "osvm",
+ "pagecache",
  "posix-types",
  "tee_crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
@@ -2229,6 +2231,7 @@ dependencies = [
  "lazyinit",
  "log",
  "net",
+ "unittest",
  "virtio",
  "vsock",
 ]
@@ -2365,6 +2368,7 @@ dependencies = [
  "driver_base",
  "hwrng",
  "input",
+ "intrusive-collections",
  "kalloc",
  "kalloc-types",
  "karch",
@@ -2383,7 +2387,6 @@ dependencies = [
  "ktime_types",
  "kworkng",
  "lazyinit",
- "linked_list_r4l",
  "log",
  "memaddr",
  "memspace",
@@ -2462,6 +2465,7 @@ dependencies = [
  "entropy",
  "filemap",
  "kaddr_layout",
+ "kalloc-types",
  "kcred",
  "kernel-elf-parser",
  "kerrno",
@@ -3109,6 +3113,7 @@ version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "fs_context",
+ "intrusive-collections",
  "kaddr_layout",
  "kalloc-types",
  "karch",
@@ -3133,7 +3138,6 @@ dependencies = [
  "ktimer",
  "kvfs",
  "lazyinit",
- "linked_list_r4l",
  "linux_sysno",
  "memaddr",
  "memspace",
@@ -3444,6 +3448,7 @@ dependencies = [
  "backtrace",
  "event-listener",
  "futures-util",
+ "intrusive-collections",
  "kalloc-types",
  "karch",
  "kbuild_config",
@@ -3472,7 +3477,6 @@ dependencies = [
  "ktime_types",
  "ktimer-core",
  "lazyinit",
- "linked_list_r4l",
  "log",
  "memaddr",
  "unittest",
@@ -3596,7 +3600,7 @@ dependencies = [
  "kvfs",
  "kworkng",
  "linux-raw-sys",
- "osvm",
+ "posix-types",
  "ringbuf",
  "unittest",
 ]
@@ -3848,12 +3852,6 @@ dependencies = [
  "cfg-if",
  "windows-link",
 ]
-
-[[package]]
-name = "linked_list_r4l"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1730c4ce817dc3edb092739ca5c109fe551018e5ea5a8361a8ddaa13d79ac8ed"
 
 [[package]]
 name = "linkme"
@@ -4508,6 +4506,7 @@ dependencies = [
 name = "posix-fs"
 version = "0.3.0-dev"
 dependencies = [
+ "anon_inodefs",
  "bitflags 2.13.2",
  "fs_context",
  "iov_iter",
@@ -6180,9 +6179,9 @@ dependencies = [
  "driver_base",
  "hwrng",
  "input",
+ "intrusive-collections",
  "kspin",
  "kvirtiodrivers",
- "linked_list_r4l",
  "log",
  "net",
  "pci",
