@@ -772,7 +772,28 @@ pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistr
 /// line at any time. Activation that installs the interrupt owner later masks
 /// INTx first and unmasks it only once the action is registered, so a shared
 /// line never sees an unrouted assertion.
+///
+/// Every caller belongs to a device kind that installs its interrupt owner
+/// late, so a configuration that enables `virtio` but none of those kinds —
+/// virtcca enables virtio without display or input — has no user of this.
+///
+/// Only the device kinds that mask INTx at probe and unmask it after
+/// registering their handler call this. A configuration with `virtio` but
+/// neither kind (virtcca enables virtio without display or input) has no
+/// caller, so the definition is expected to be dead there. `unittest` alone is
+/// not a caller either: the input test module that names it is gated on
+/// `virtio-input` as well.
 #[cfg(feature = "virtio")]
+#[cfg_attr(
+    not(any(feature = "virtio-gpu", feature = "virtio-input")),
+    expect(
+        dead_code,
+        reason = "CG-021-no-panic-on-reachable-failure: probe-time INTx masking is shared by \
+                  every device kind that installs its interrupt owner late; a virtio \
+                  configuration may enable neither kind (virtcca), so the definition stays and is \
+                  expected to be unused there"
+    )
+)]
 pub(super) fn set_pci_intx_disabled(
     config: &mut pci::PciConfigAccess,
     bdf: pci::DeviceFunction,
