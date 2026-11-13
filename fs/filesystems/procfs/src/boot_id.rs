@@ -13,7 +13,12 @@ use alloc::string::String;
 
 use ksync::Mutex;
 
-static BOOT_ID: Mutex<Option<String>> = Mutex::new(None);
+// `Mutex::new` binds a per-init-site lock class when `lock_stat` is enabled, so
+// it is not a constant expression there; `static_lock!` is the workspace's
+// portable spelling for a static lock and is a plain item otherwise.
+ksync::static_lock! {
+    static BOOT_ID: Mutex<Option<String>> = Mutex::new(None);
+}
 
 /// Returns the boot's UUID, generating it on first use.
 pub(crate) fn boot_id() -> String {
