@@ -18,6 +18,7 @@ use kcpu_id_map::text::{CpuTextDomain, bitmap_capacity, list_capacity, write_bit
 use kcred::Cred;
 use kfd_objects::inotify::Inotify;
 use khal::paging::MappingFlags;
+use kidentity::PidNamespace;
 use kprocess::{AsThread, LiveAddressSpace, PidFd, Process, TaskStat, procfs};
 use ktask::{KCpuMask, KtaskRef, WeakKtaskRef, current};
 use ktime_types::SystemTime;
@@ -1265,7 +1266,7 @@ fn task_namespace_inode(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<u64> {
         ProcNsKind::Ipc => process.ipc_ns()?.id().as_u64(),
         ProcNsKind::Uts => process.uts_ns()?.id().as_u64(),
         ProcNsKind::Cgroup => process.cgroup_ns()?.id().as_u64(),
-        ProcNsKind::User => kcred::initial_user_namespace().id().as_u64(),
+        ProcNsKind::User => task.as_thread().real_cred().user_ns().id().as_u64(),
     })
 }
 
@@ -1283,7 +1284,7 @@ fn task_namespace_fd(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<kns::NsFd> 
         ProcNsKind::Ipc => kns::NsFd::Ipc(process.ipc_ns()?),
         ProcNsKind::Uts => kns::NsFd::Uts(process.uts_ns()?),
         ProcNsKind::Cgroup => kns::NsFd::Cgroup(process.cgroup_ns()?),
-        ProcNsKind::User => kns::NsFd::User(kcred::initial_user_namespace()),
+        ProcNsKind::User => kns::NsFd::User(task.as_thread().real_cred().user_ns_arc().clone()),
     })
 }
 
@@ -1451,11 +1452,13 @@ impl SimpleDirOps for ThreadDir {
                 "mountstats",
                 "cgroup",
                 "ns",
+                "uid_map",
+                "gid_map",
+                "setgroups",
                 "cmdline",
                 "comm",
                 "exe",
                 "root",
-                "auxv",
                 "fd",
                 "fdinfo",
             ]
@@ -1630,6 +1633,27 @@ impl SimpleDirOps for ThreadDir {
                     ),
                 ))
             }
+            "uid_map" => lookup.file(
+                name,
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Uid),
+                ),
+            ),
+            "gid_map" => lookup.file(
+                name,
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Gid),
+                ),
+            ),
+            "setgroups" => lookup.file(
+                name,
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    super::userns::SetgroupsFile::new(task_weak.clone()),
+                ),
+            ),
             "cmdline" => lookup.file(
                 name,
                 SimpleFile::new_regular(fs.clone(), {
@@ -1682,39 +1706,6 @@ impl SimpleDirOps for ThreadDir {
                     }),
                 ),
             ),
-            "auxv" => {
-                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
-                let owner = task.as_thread().real_cred();
-                lookup.file(
-                    name,
-                    SimpleFile::new_snapshot_with_owner(
-                        fs.clone(),
-                        NodePermission::OWNER_READ,
-                        owner.euid(),
-                        owner.egid(),
-                        {
-                            let task_weak = task_weak.clone();
-                            move || {
-                                let task = upgrade_task(&task_weak)?;
-                                // Linux exposes auxv only to a reader that may
-                                // inspect the target task and keeps the file
-                                // readable by the target's effective uid. The
-                                // snapshot captures this image generation when
-                                // the descriptor is opened.
-                                if let Some(caller) = ktask::current().try_as_thread() {
-                                    kprocess::ptrace::check_read_fs_creds_access(
-                                        caller,
-                                        task.as_thread(),
-                                    )
-                                    .map_err(|_| VfsError::PermissionDenied)?;
-                                }
-                                let auxv = task.as_thread().process().auxv()?;
-                                Ok((*auxv).clone())
-                            }
-                        },
-                    ),
-                )
-            }
             "exe" => proc_exe_link_child(lookup, name, ProcExeLink::new(fs.clone(), task_weak)),
             "root" => proc_root_link_child(lookup, name, ProcRootLink::new(fs.clone(), task_weak)),
             "fd" => {
@@ -1765,18 +1756,22 @@ impl SimpleDirOps for ThreadDir {
 
 pub(crate) struct ProcFsHandler {
     fs: Arc<SimpleFs>,
+    observer_ns: Option<alloc::sync::Arc<PidNamespace>>,
 }
 
 impl ProcFsHandler {
-    pub(crate) fn new(fs: Arc<SimpleFs>) -> Self {
-        Self { fs }
+    pub(crate) fn new(
+        fs: Arc<SimpleFs>,
+        observer_ns: Option<alloc::sync::Arc<PidNamespace>>,
+    ) -> Self {
+        Self { fs, observer_ns }
     }
 }
 
 impl SimpleDirOps for ProcFsHandler {
     fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         Ok(KBox::new(
-            procfs::visible_processes()
+            procfs::visible_processes_in_namespace(self.observer_ns.as_ref())
                 .into_iter()
                 .map(|process| Cow::Owned(process.pid().to_string()))
                 .chain([Cow::Borrowed("self")]),
@@ -1792,7 +1787,8 @@ impl SimpleDirOps for ProcFsHandler {
         }
 
         let pid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
-        let task = procfs::process_task(pid).map_err(|_| VfsError::NotFound)?;
+        let task = procfs::process_task_in_namespace(pid, self.observer_ns.as_ref())
+            .map_err(|_| VfsError::NotFound)?;
         Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
     }
 

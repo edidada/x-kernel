@@ -350,7 +350,7 @@ fn status_test_root() -> kvfs::Path {
     let fs = kvfs::SimpleFs::new_with(&STATUS_TEST_FS_TYPE, 0x9fa0, |fs| {
         kvfs::SimpleDir::new_maker(
             fs.clone(),
-            alloc::sync::Arc::new(super::ProcFsHandler::new(fs)),
+            alloc::sync::Arc::new(super::ProcFsHandler::new(fs, None)),
         )
     })
     .unwrap();

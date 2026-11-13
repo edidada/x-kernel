@@ -104,7 +104,7 @@ pub use cgroup::{
     cgroup_member_process_ids, current_cgroup, current_memcg, migrate_cgroup_process,
 };
 pub use credentials::{current_cred, current_real_cred};
-pub use kidentity::PidHandle as PidIdentity;
+pub use kidentity::{PidHandle as PidIdentity, PidNamespace};
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
 pub use process::{
@@ -127,7 +127,7 @@ pub use thread::{
     SeccompContext, Thread, current_files, current_fs_context, current_thread_cpu_clock,
     current_user_mm_id, current_user_pid, current_user_ppid, current_user_process,
     current_user_process_address_space, current_user_process_fs_context, current_user_thread,
-    current_user_tid, with_current_user_thread,
+    current_user_tid, try_current_user_process, with_current_user_thread,
 };
 pub(crate) use thread::{PrevCputime, TaskCputime};
 pub use timer_delivery::{

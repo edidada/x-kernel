@@ -173,12 +173,26 @@ impl MntNamespace {
     /// shared with the source filesystem instances, matching Linux's mount-tree
     /// copy semantics.
     pub fn clone_with_root_and_pwd(&self, root: &Path, pwd: &Path) -> VfsResult<NamespaceClone> {
+        self.clone_with_root_and_pwd_in(root, pwd, self.user_ns.clone())
+    }
+
+    /// Clones this mount namespace with `owner` as its owning user namespace.
+    ///
+    /// Linux gives a new mount namespace the caller's effective user namespace,
+    /// which differs from the source namespace's owner when `CLONE_NEWUSER` and
+    /// `CLONE_NEWNS` are combined.
+    pub fn clone_with_root_and_pwd_in(
+        &self,
+        root: &Path,
+        pwd: &Path,
+        owner: Arc<UserNamespace>,
+    ) -> VfsResult<NamespaceClone> {
         let _mounts_guard = self.mounts.lock();
         let mut mount_map = HashMap::new();
         let cloned_root = clone_mount_tree(&self.root, None, &mut mount_map);
         let namespace = Arc::new(Self {
             id: NamespaceId::new(),
-            user_ns: self.user_ns.clone(),
+            user_ns: owner,
             root: cloned_root,
             mounts: Mutex::default(),
         });
@@ -1674,13 +1688,37 @@ impl Path {
     }
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
+    ///
+    /// The `uid`/`gid` arguments are interpreted in the caller's user
+    /// namespace and stored as global values (`Kuid`/`Kgid` projection).
+    /// Unmapped IDs fail with `EOVERFLOW` instead of being stored raw. The
+    /// `CAP_CHOWN` override is evaluated in the inode's owning namespace
+    /// (Linux `s_user_ns`), so a child-namespace capability cannot reown
+    /// files whose superblock belongs to the initial namespace.
     pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
-        let is_owner = cred.fsuid() == metadata.uid;
-        let can_chown = cred.has_cap_chown();
+        let inode_ns = self.dentry.user_namespace();
+        let caller_ns = cred.user_ns_arc().clone();
 
-        if uid.is_some_and(|uid| !can_chown && (!is_owner || uid != metadata.uid)) {
+        let uid_kuid = uid.map(|uid| crate::kid::Kuid::from_inside(uid, &caller_ns));
+        let gid_kgid = gid.map(|gid| crate::kid::Kgid::from_inside(gid, &caller_ns));
+        if uid_kuid.is_some_and(crate::kid::Kuid::is_invalid)
+            || gid_kgid.is_some_and(crate::kid::Kgid::is_invalid)
+        {
+            return Err(VfsError::from(kerrno::LinuxError::EOVERFLOW));
+        }
+
+        // Stored IDs are global values; compare the caller's filesystem ID
+        // through the same projection so identity checks stay valid for
+        // callers inside a child namespace.
+        let fsuid_global = crate::kid::Kuid::from_inside(cred.fsuid(), &caller_ns);
+        let is_owner = fsuid_global.as_raw() == metadata.uid;
+        let can_chown = cred.has_cap_in(&inode_ns, kcred::CAP_CHOWN);
+
+        if uid.is_some_and(|_| {
+            !can_chown && (!is_owner || uid_kuid != Some(crate::kid::Kuid::from_raw(metadata.uid)))
+        }) {
             return Err(VfsError::OperationNotPermitted);
         }
         if gid.is_some_and(|gid| {
@@ -1698,13 +1736,17 @@ impl Path {
         // successful no-op for an unrelated caller unless it would actually
         // clear a set-ID bit.
         if mode.bits() != metadata.mode.permission().bits()
-            && cred.fsuid() != metadata.uid
-            && !cred.has_cap_fowner()
+            && fsuid_global.as_raw() != metadata.uid
+            && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER)
         {
             return Err(VfsError::OperationNotPermitted);
         }
+        let stored_uid = match uid_kuid {
+            Some(kuid) => kuid.as_raw(),
+            None => metadata.uid,
+        };
         self.dentry.update_metadata(MetadataUpdate {
-            owner: Some((uid.unwrap_or(metadata.uid), new_gid)),
+            owner: Some((stored_uid, new_gid)),
             mode: Some(mode),
             ..Default::default()
         })
@@ -1714,12 +1756,13 @@ impl Path {
     pub fn chmod(&self, mut mode: NodePermission, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
-        if cred.fsuid() != metadata.uid && !cred.has_cap_fowner() {
+        let inode_ns = self.dentry.user_namespace();
+        if cred.fsuid() != metadata.uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
             return Err(VfsError::OperationNotPermitted);
         }
         if mode.contains(NodePermission::SET_GID)
             && !cred.in_group(metadata.gid)
-            && !cred.has_cap(kcred::CAP_FSETID)
+            && !cred.has_cap_in(&inode_ns, kcred::CAP_FSETID)
         {
             mode.remove(NodePermission::SET_GID);
         }

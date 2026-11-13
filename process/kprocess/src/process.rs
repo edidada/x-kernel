@@ -65,6 +65,8 @@ pub struct Process {
     group_exit: SpinNoIrq<ThreadGroupExitState>,
     /// Process-wide `exec` serialization gate (Linux `cred_guard_mutex`).
     exec_gate: exec_gate::ExecGate,
+    /// Readiness source for a user namespace whose ID maps a process may be
+    /// waiting on before it first enters user space.
     lifecycle: ProcessLifecycleState,
     /// Signal delivered to the parent's `wait` when this process's parent dies
     /// first (`prctl(PR_SET_PDEATHSIG)`).
