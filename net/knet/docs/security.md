@@ -296,8 +296,12 @@ The trust relationships in the diagram define the security responsibilities of e
 | Netlink port IDs and subscription masks | `port::bind` allocates or validates the port ID per protocol, rejects nonzero group subscriptions for unknown protocols (`EPERM` without `CAP_NET_ADMIN`, `ENOENT` with it), and stores only the protocol's implemented group bits. `NETLINK_ROUTE` additionally requires `CAP_NET_ADMIN` for the reverse-path groups 30 and 31, matching `rtnetlink_bind`; authorization finishes before any stored address changes. A bound socket cannot change its port ID, and conflicting explicit IDs fail with `EADDRINUSE`. `port::publish` filters recipients by protocol, live weak reference, the socket's own subscription mask, sender exclusion, and
 requested unicast port before enqueueing. The mask lives on the socket rather than on its bound address because
 `NETLINK_ADD_MEMBERSHIP` is valid before `bind()` (`netlink_realloc_groups` needs no port id), so an unbound subscriber is still
-a recipient; `bind()` merges its `nl_groups` into the same mask. Membership changes require `CAP_NET_ADMIN` only when the
-protocol's table lacks `NL_CFG_F_NONROOT_RECV`, which no protocol implemented here does. |
+a recipient; `bind()` merges its `nl_groups` into the same mask. Membership changes require `CAP_NET_ADMIN` when the protocol's table lacks
+`NL_CFG_F_NONROOT_RECV` and the caller does not hold it. `NETLINK_ROUTE` and
+`NETLINK_KOBJECT_UEVENT` set that flag; `NETLINK_USERSOCK` sets only
+`NL_CFG_F_NONROOT_SEND`, so its groups are privileged while its sends are not.
+The answer comes from the netlink layer's own per-protocol `GroupPolicy`, so
+the bind-time and setsockopt-time policies cannot diverge. |
 | Pathname socket inode and binding identity | `lookup_bind_entry` in [src/unix.rs](../src/unix.rs) checks final-inode `MAY_WRITE` through kvfs, verifies `NodeType::Socket`, and uses `path_bind_matches` to compare the upgraded inode with the resolved inode through `Arc::ptr_eq`. A stale or missing binding returns `ConnectionRefused`. |
 | Filesystem ownership fields | Path lookup and creation pass the same `Cred` to kvfs. kvfs uses `fsuid`, `fsgid`, supplementary groups, inode owner/group, and mode bits for DAC and ownership initialization. User bind supplies `0777 & !umask`; `bind_with_cred` receives an explicit mode from its kernel caller. |
 | Driver RX/TX memory and `PacketBuf` data | `EthernetDevice::poll_rx` finishes `handle_rx_frame` before `recycle_rx`; the provider owns buffer validity. `PacketBuf` owns packet storage and validates offsets and ranges through its accessors. Reference-counted handles keep storage alive across queues. |

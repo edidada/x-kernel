@@ -651,11 +651,25 @@ pub fn sys_mount_setattr(
     if propagation & !PROPAGATION_FLAGS != 0 || (propagation & PROPAGATION_FLAGS).count_ones() > 1 {
         return Err(KError::InvalidInput);
     }
+    // `build_mount_idmapped` decides an idmap request from the attribute word,
+    // not from `userns_fd`: clearing an idmap is `EINVAL` ("we currently do not
+    // support clearing an idmapped mount"), and setting one resolves the
+    // descriptor, whose absence is `EBADF`. Accepting `attr_set = IDMAP` with
+    // `userns_fd = 0` returned success for a request that changed nothing.
+    const MOUNT_ATTR_IDMAP: u64 = 0x10_0000;
+    if attr_clr & MOUNT_ATTR_IDMAP != 0 {
+        return Err(KError::InvalidInput);
+    }
+    if attr_set & MOUNT_ATTR_IDMAP != 0 {
+        // Idmapped mounts are not implemented, so the descriptor can never be
+        // honoured; report the errno the reference kernel uses for a descriptor
+        // that does not resolve, rather than claiming success.
+        return Err(KError::BadFileDescriptor);
+    }
     if userns_fd != 0 {
-        // Idmapped mounts are not implemented; `MOUNT_ATTR_IDMAP` is rejected
-        // by `check_mount_attr_bits` only for the attribute word, so a caller
-        // that passes the descriptor without the bit is refused here instead of
-        // having the field dropped.
+        // A descriptor without the attribute bit is meaningless in Linux's
+        // handler (it returns 0 when neither word names IDMAP), so the field
+        // must not be dropped silently.
         return Err(KError::OperationNotSupported);
     }
     let (set_flags, clr_flags) = mount_attr_set_clr(attr_set, attr_clr);

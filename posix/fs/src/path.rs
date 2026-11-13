@@ -42,6 +42,17 @@ pub(crate) fn with_fs_at<R>(
     filename: &Filename,
     f: impl FnOnce(&FsStruct) -> KResult<R>,
 ) -> KResult<R> {
+    // `path_init` applies the `d_can_lookup`/ENOTDIR test only when there is a
+    // pathname to walk. An empty path with `AT_EMPTY_PATH` names the fd itself,
+    // so a non-directory descriptor must reach the caller (which decides what
+    // the fd means) instead of being refused here.
+    if dirfd != AT_FDCWD && filename.as_pathname().as_str().is_empty() {
+        let file = kprocess::current_files().get_file(dirfd)?;
+        let dir = file.path().clone();
+        let fs = kprocess::current_user_process_fs_context();
+        let snapshot = fs.lock().snapshot().clone_with_pwd(dir)?;
+        return f(&snapshot);
+    }
     with_fs(at_path_dirfd(dirfd, filename), f)
 }
 
