@@ -944,7 +944,22 @@ credential-free `SocketOps::bind` callers have no administrative authority.
 Kernel publishers deliver a message only to live, bound sockets whose mask
 contains the event group. Delivery snapshots the registry under its lock, then
 enqueues and wakes receivers after releasing it. Receive queues model Linux's
-default `sk_rcvbuf` of 212992 bytes. `SO_RCVBUF` clamps its hint to
+default `sk_rcvbuf` of 212992 bytes. The general socket layer applies the same
+`sock_setsockopt` rule to every family: `SO_SNDBUF`/`SO_RCVBUF` clamp the hint
+to the modeled `wmem_max`/`rmem_max` (4 MiB), double it, and floor it at
+`SOCK_MIN_SNDBUF`/`SOCK_MIN_RCVBUF` (4608/2304), while `SO_SNDBUFFORCE` and
+`SO_RCVBUFFORCE` skip only the clamp. `getsockopt` reports the doubled value,
+which is what a client that sets N and reads back expects.
+
+`SIOCOUTQ` and `SIOCINQ`/`FIONREAD` are served by `SocketOps::queue_lengths`, a
+per-transport queue-depth query rather than a generic counter. Unix stream and
+seqpacket report their channel ring occupancy (Linux's `unix_outq_len`/
+`unix_inq_len`), and TCP reports its receive queue for `SIOCINQ` and its unsent
+transmit buffer for `SIOCOUTQ`; a listening TCP socket answers `EINVAL` like
+`tcp_ioctl`. Unix datagram has no peek operation in its channel, so both answer
+0 — a conservative "nothing queued" rather than a wrong byte count, and unlike
+the stream case it cannot make a client such as dbus-broker treat a working
+socket as broken. `SO_RCVBUF` clamps its hint to
 `net.core.rmem_max` (4 MiB), doubles it, and applies the
 `SOCK_MIN_RCVBUF` floor of 2304; `getsockopt` reports the effective limit.
 Lowering the limit does not purge packets already queued. Admission adds the
