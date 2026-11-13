@@ -47,12 +47,13 @@ kfd resources / kvfs / device and pipe implementations
 |------|----------|----------|
 | User path strings | `openat`, `linkat`, `statx`, `mount`, `move_mount` | Null pointers, strings not NUL-terminated, over-long strings, path traversal, symbolic link loops |
 | mount data byte page | `mount(..., data)` | Bad pointers, crossing into unreadable pages, binary content, and malicious or unknown options interpreted by the specific filesystem |
-| New mount API inputs | `fsopen`, `fsconfig`, `fsmount`, `move_mount` | Unregistered fs type, unknown commands/flags, missing superblock, non-empty `from_path`, unprivileged caller (all require `CAP_SYS_ADMIN`) |
+| New mount API inputs | `fsopen`, `fsconfig`, `fsmount`, `move_mount`, `open_tree`, `mount_setattr` | Unregistered fs type, unknown commands/flags/`MOUNT_ATTR_*` bits, missing superblock, non-empty `from_path`, undersized `mount_attr`, unprivileged caller (all require `CAP_SYS_ADMIN`) |
 | User read/write buffers | `read`, `write`, `readlinkat`, `getdents64`, `statfs` | Bad addresses, short buffers, cross-page access failures, malformed kernel information written back |
 | xattr names and values | `set/get/list/remove*xattr` | Missing NUL terminator, over-long name/value/list, non-UTF-8 suffix, short output buffers, namespace privilege violations |
 | User iovec | `readv`, `writev`, `preadv2`, `pwritev2` | Too many iovecs, range overflow, wrong read/write direction |
 | fd numbers | Almost all fd syscalls | Closed fds, type mismatch, fd reuse, confusion of `CLOEXEC`/non-blocking flags |
 | Current process state | `chdir`, `openat`, `close_range` | Process resource lock, fs_struct updates, umask and current directory semantics |
+| Mount namespace (new API) | `open_tree`, `mount_setattr` | Cloning or re-attribute a subtree before `CAP_SYS_ADMIN`; `O_PATH` vs read access; unknown `MOUNT_ATTR_*` bits |
 | VFS magic link | `/proc/self/fd/<fd>`, `/proc/<pid>/fd/<fd>` | Cross-process fd access, target process exit, concurrent fd table changes, no-follow policy |
 | VFS/device objects | `open`, `ioctl`, `mount`, `syncfs` | Device-specific ioctls, terminal objects, mount flags, differences between filesystem implementations |
 | FIEMAP variable-length output | `ioctl(FS_IOC_FIEMAP)` | User-declared extent count, address of the array after the header, block mappings returned by the backend |
@@ -94,7 +95,7 @@ and check that a short buffer is not written, that normal output does not go pas
 ### New mount API input validation
 
 The new mount API (`mount_api.rs`) validates every user-controlled branch before touching namespace state,
-and all four entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (same authority as legacy `mount(2)`):
+and all six entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (same authority as legacy `mount(2)`):
 
 - `fsopen`: `flags & !FSOPEN_CLOEXEC != 0` → `InvalidInput`; the fs type name is bounded by `PATH_MAX` and must be
   registered (`kvfs::get_filesystem_type`), otherwise `NoSuchDevice`. The fs-context fd is an `anon_inodefs` anonymous inode.
@@ -104,6 +105,15 @@ and all four entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (same
 - `move_mount`: `flags & !MOVE_MOUNT_F_EMPTY_PATH != 0` → `InvalidInput`; a non-empty `from_path` → `InvalidInput`
   (only detached `fsmount` mounts are supported). The target path is resolved before the `fsmount` mount is consumed, so a
   failed lookup leaves the descriptor reusable; a failed attach restores the mount instead of spending the fd.
+- `open_tree`: the flag word admits exactly `OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_RECURSIVE |
+  AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT`, and `AT_RECURSIVE` without `OPEN_TREE_CLONE` is `InvalidInput` — the same word and
+  the same rejection as `SYSCALL_DEFINE3(open_tree)`. `OPEN_TREE_CLONE` (the only branch that clones a subtree) requires
+  `CAP_SYS_ADMIN`; the non-cloning form does not, matching Linux, where only the `detached` branch calls `may_mount()`.
+  The descriptor is opened `O_PATH`, so it names the mount without granting read access to what it covers.
+- `mount_setattr`: the flag word admits only `AT_EMPTY_PATH | AT_RECURSIVE | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT`
+  (Linux rejects anything else), `usize` below `MOUNT_ATTR_SIZE_VER0` (32) is `InvalidInput`, and an `attr_set`/`attr_clr` bit
+  outside `MOUNT_SETATTR_VALID_FLAGS` is `InvalidInput` rather than a silently ignored request. The whole call requires
+  `CAP_SYS_ADMIN`, as `may_mount()` gates it in `SYSCALL_DEFINE5(mount_setattr)`.
 
 ## Memory Safety Invariants
 

@@ -367,6 +367,15 @@ pub fn sys_move_mount(
 }
 
 /// Clones the mount subtree at a path into a detached mount fd (`open_tree(2)`).
+///
+/// # Execution context
+///
+/// Requires a current process thread: it checks the caller's credentials
+/// (`OPEN_TREE_CLONE` needs CAP_SYS_ADMIN), resolves a pathname against its
+/// root/pwd/mount namespace and allocates a descriptor in its fd table. It may
+/// sleep while resolving the path (`lookup_at`) and cloning the subtree, so it
+/// must not be called from IRQ context or while holding a spinlock or
+/// IRQ-preemption guard.
 pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let path = path.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_open_tree <= dfd: {dfd}, path: {path:?}, flags: {flags:#x}");
