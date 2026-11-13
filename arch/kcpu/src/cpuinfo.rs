@@ -23,20 +23,54 @@ pub fn cpu_info(cpu_id: LogicalCpuId) -> Option<&'static CpuInfo> {
 
 /// Returns the calling CPU's identity and capability snapshot.
 ///
-/// A caller that needs "the platform's capabilities" — the `AT_HWCAP` word
-/// published to a user process, for instance — asks the CPU it is running on
-/// rather than assuming a fixed logical id. Logical ids follow device-tree
-/// node order, so the boot CPU is not guaranteed to be slot 0; reading the
-/// current CPU's entry also guarantees that identification for that CPU has
-/// already published, because trap initialization runs on every CPU before it
-/// executes any task. On a homogeneous system every CPU reports the same bits;
-/// on a heterogeneous one this reports the bits of the core the process
-/// actually runs on, which is what instruction selection must match.
+/// Unlike [`system_cpu_info`] this describes the core it runs on, so callers
+/// must not cache it across a migration when the answer feeds instruction
+/// selection. It is still useful for diagnostics that report a specific core.
 ///
 /// Returns `None` before this CPU's identification is published.
 pub fn current_cpu_info() -> Option<&'static CpuInfo> {
     let cpu_id = kcpu_slot::current_area()?.cpu();
     cpu_info(cpu_id)
+}
+
+/// Calls `visit` for every published CPU identification.
+///
+/// Slots are published during each CPU's trap initialization; a CPU whose trap
+/// has not run yet is skipped. Callers that need a platform-wide answer must
+/// account for the CPUs that are not published yet.
+pub fn for_each_cpu_info(mut visit: impl FnMut(&CpuInfo)) {
+    for slot in &CPU_INFO {
+        if let Some(info) = slot.get() {
+            visit(info);
+        }
+    }
+}
+
+/// The userspace-visible capability word that is safe on every online CPU.
+///
+/// Instruction selection must stay valid on whichever core a task is migrated
+/// to, so this is the intersection of the usable-feature sets of the CPUs whose
+/// identification has been published — not one core's set. Publishing a single
+/// core's word would let a task that migrated to a weaker core execute an
+/// instruction it does not implement. Linux derives the same answer from its
+/// sanitised system-wide feature registers and parks CPUs that lack an
+/// announced capability.
+///
+/// Identification is published per CPU during trap initialization, and boot
+/// starts every present secondary CPU before the first user process, so at exec
+/// time the intersection covers the whole online set. Returns zero when no CPU
+/// has been identified yet.
+#[cfg(target_arch = "aarch64")]
+pub fn system_hwcap() -> usize {
+    let mut intersection: Option<usize> = None;
+    for_each_cpu_info(|cpu| {
+        let hwcap = cpu.hwcap();
+        intersection = Some(match intersection {
+            Some(current) => current & hwcap,
+            None => hwcap,
+        });
+    });
+    intersection.unwrap_or(0)
 }
 
 fn lookup_cpu_info(slots: &[Once<CpuInfo>], cpu_id: LogicalCpuId) -> Option<&CpuInfo> {

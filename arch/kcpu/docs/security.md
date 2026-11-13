@@ -20,12 +20,13 @@ FP/SIMD claims require supported kernel context preservation; SVE, RISC-V V/Zve,
 and LoongArch LSX/LASX are omitted. This reporting policy does not enable those
 units, constrain userspace instruction execution, or change hwprobe.
 
-`CpuInfo::hwcap()` converts the same usable set into the `AT_HWCAP` word that
-exec hands to userspace, so the published bits never claim a capability the
-kernel does not itself consider usable. It publishes only the aarch64 encoding;
-other architectures report zero, which is a conservative claim rather than a
-grant. Callers must still account for per-CPU differences: the published word
-is the boot CPU's snapshot.
+`CpuInfo::hwcap()` converts the same usable set into the `AT_HWCAP` encoding for
+one CPU, and `system_hwcap()` intersects the identified CPUs before exec
+publishes the word. Both steps are conservative: a bit is announced only when
+the kernel deems it usable and every online CPU advertises it, so user-selected
+instruction paths stay valid after a migration. Only the aarch64 encoding is
+produced; other architectures report zero, which is a claim of no capability
+rather than a grant.
 
 ## x86_64 CPU capability reporting
 

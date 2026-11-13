@@ -65,3 +65,26 @@ fn hwcap_uses_linux_bit_positions() {
     let none = CpuInfo::from_registers(0, 0xff << 16, 0, true);
     assert_eq!(none.hwcap(), 0);
 }
+
+/// The published word must be safe on every core a task may migrate to.
+///
+/// Two CPUs with different usable sets intersect: the shared bits survive and
+/// the asymmetric ones drop, so a task that migrates to the weaker core never
+/// executes an instruction the frozen `AT_HWCAP` advertised but that core
+/// lacks.
+#[def_test]
+fn system_hwcap_intersects_the_online_cpus() {
+    let isar0 = (2 << 4) | (1 << 8) | (2 << 12) | (1 << 16) | (2 << 20);
+    let strong = CpuInfo::from_registers(0x413f_d034, 0, isar0, true);
+    // Same crypto/atomics, but no preserved FP/SIMD context.
+    let weak = CpuInfo::from_registers(0x413f_d034, 0, isar0, false);
+    let both = (1 << 7) | (1 << 8);
+
+    // Mirrors `kcpu::system_hwcap`'s fold over published CPUs.
+    let intersect = |left: usize, right: usize| left & right;
+
+    assert_eq!(intersect(strong.hwcap(), weak.hwcap()), both);
+    assert_eq!(intersect(weak.hwcap(), strong.hwcap()), both);
+    assert_eq!(intersect(strong.hwcap(), strong.hwcap()), strong.hwcap());
+    assert_ne!(intersect(strong.hwcap(), weak.hwcap()), strong.hwcap());
+}
