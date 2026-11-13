@@ -116,3 +116,25 @@ fn an_atime_request_outside_the_cleared_group_is_rejected() {
         Err(kerrno::KError::InvalidInput)
     );
 }
+
+#[def_test]
+fn only_representable_atime_values_are_accepted() {
+    use super::check_mount_attr_atime;
+
+    const ATIME: u64 = 0x70;
+    const NOATIME: u64 = 0x10;
+    const STRICTATIME: u64 = 0x20;
+
+    // The field is an enum: 0 (relatime), NOATIME and STRICTATIME. Linux's
+    // `switch` has no case for a combination and its `default` arm is EINVAL.
+    assert!(check_mount_attr_atime(0, ATIME).is_ok());
+    assert!(check_mount_attr_atime(NOATIME, ATIME).is_ok());
+    assert!(check_mount_attr_atime(STRICTATIME, ATIME).is_ok());
+    for invalid in [NOATIME | STRICTATIME, 0x40, 0x70, NOATIME | 0x40] {
+        assert_eq!(
+            check_mount_attr_atime(invalid, ATIME),
+            Err(kerrno::KError::InvalidInput),
+            "atime value {invalid:#x} is not representable"
+        );
+    }
+}

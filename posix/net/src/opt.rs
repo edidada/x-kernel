@@ -524,6 +524,63 @@ fn put_list_memberships(
     Ok(bytes.len() as socklen_t)
 }
 
+/// Reads an `IP_*` integer option the way `do_ip_setsockopt` does.
+///
+/// Linux's `IP_*` option handlers accept either a full `int` or a single
+/// `unsigned char` (`if (optlen >= sizeof(int)) ... else if (optlen >=
+/// sizeof(char))`), because callers commonly pass a boolean as one byte.
+fn get_int_or_byte(val: UserConstPtr<u8>, len: socklen_t) -> KResult<i32> {
+    if len as usize >= size_of::<i32>() {
+        val.cast::<i32>().read_vm().map_err(KError::from)
+    } else if len as usize >= size_of::<u8>() {
+        let byte = val.read_vm().map_err(KError::from)?;
+        Ok(i32::from(byte))
+    } else {
+        Err(KError::InvalidInput)
+    }
+}
+
+/// Applies an `IP_*` option whose argument Linux reads as an `int` *or* a byte.
+///
+/// `do_ip_setsockopt` handles `IP_PKTINFO`, `IP_RECVTTL`, `IP_RECVTOS` and
+/// `IP_MULTICAST_TTL` (among others) with `if (optlen >= sizeof(int)) ... else
+/// if (optlen >= sizeof(char))`, because callers commonly pass a boolean as one
+/// byte. This mirrors that, and reports whether the option was one of them.
+fn set_ip_length_tolerant(
+    socket: &Arc<Socket>,
+    optname: u32,
+    optval: UserConstPtr<u8>,
+    optlen: socklen_t,
+) -> KResult<Option<()>> {
+    let value = match optname {
+        linux_raw_sys::net::IP_PKTINFO
+        | linux_raw_sys::net::IP_RECVTTL
+        | linux_raw_sys::net::IP_RECVTOS => get_int_or_byte(optval, optlen)?,
+        linux_raw_sys::net::IP_MULTICAST_TTL => get_int_or_byte(optval, optlen)?,
+        _ => return Ok(None),
+    };
+    match optname {
+        linux_raw_sys::net::IP_PKTINFO => {
+            let enabled = value != 0;
+            socket.set_option(SetSocketOption::IpPktinfo(&enabled))?;
+        }
+        linux_raw_sys::net::IP_RECVTTL => {
+            let enabled = value != 0;
+            socket.set_option(SetSocketOption::IpRecvTtl(&enabled))?;
+        }
+        linux_raw_sys::net::IP_RECVTOS => {
+            let enabled = value != 0;
+            socket.set_option(SetSocketOption::IpRecvTos(&enabled))?;
+        }
+        linux_raw_sys::net::IP_MULTICAST_TTL => {
+            let ttl = u32::try_from(value).map_err(|_| KError::InvalidInput)?;
+            socket.set_option(SetSocketOption::IpMulticastTtl(&ttl))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(Some(()))
+}
+
 /// Sets a socket option at a specified protocol level.
 ///
 /// # Errors
@@ -605,6 +662,9 @@ pub fn sys_setsockopt(
         socket.set_option(SetSocketOption::NetlinkCapAck(&enabled))?;
         return Ok(0);
     }
+    if level == PROTO_IP && set_ip_length_tolerant(&socket, optname, optval, optlen)?.is_some() {
+        return Ok(0);
+    }
     if level == SOL_SOCKET
         && (optname == linux_raw_sys::net::SO_SNDBUFFORCE
             || optname == linux_raw_sys::net::SO_RCVBUFFORCE)
@@ -613,7 +673,8 @@ pub fn sys_setsockopt(
         // CAP_NET_ADMIN)`: they bypass the `wmem_max`/`rmem_max` clamp, which is
         // exactly the privilege a non-root caller must not have.
         if !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN) {
-            return Err(KError::PermissionDenied);
+            // `sockopt_capable` returns `capable(cap)`, whose failure is EPERM.
+            return Err(KError::OperationNotPermitted);
         }
     }
     if level == SOL_NETLINK
@@ -628,7 +689,8 @@ pub fn sys_setsockopt(
         if !socket.allows_unprivileged_group_subscribe()
             && !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN)
         {
-            return Err(KError::PermissionDenied);
+            // `netlink_allowed` fails through `ns_capable`, which is EPERM.
+            return Err(KError::OperationNotPermitted);
         }
     }
     if level == SOL_SOCKET && optname == SO_BINDTODEVICE {

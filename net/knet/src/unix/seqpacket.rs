@@ -264,22 +264,27 @@ impl Configurable for SeqpacketTransport {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
+        // `AcceptConn` must be answered before the shared general options: that
+        // handler answers it with a constant `false` and reports the option as
+        // handled, so delegating first shadowed this transport's own state and a
+        // listening seqpacket socket reported 0.
+        if let O::AcceptConn(listening) = opt {
+            // `unix_listen` accepts SOCK_SEQPACKET like SOCK_STREAM, so
+            // `sk_getsockopt` reports `sk_state == TCP_LISTEN` here too.
+            **listening = self
+                .listener
+                .lock()
+                .as_ref()
+                .map(|listener| listener.state.lock().is_listening())
+                .unwrap_or(false);
+            return Ok(OptionHandled::Yes);
+        }
         if self.options.get_option_inner(opt)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
 
         match opt {
             O::PassCredentials(_) => {}
-            O::AcceptConn(listening) => {
-                // `unix_listen` accepts SOCK_SEQPACKET like SOCK_STREAM, so
-                // `sk_getsockopt` reports `sk_state == TCP_LISTEN` here too.
-                **listening = self
-                    .listener
-                    .lock()
-                    .as_ref()
-                    .map(|listener| listener.state.lock().is_listening())
-                    .unwrap_or(false);
-            }
             O::PeerCredentials(cred) => {
                 **cred = self
                     .peer

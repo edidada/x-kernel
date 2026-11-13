@@ -81,6 +81,17 @@ fn check_mount_attr_atime(attr_set: u64, attr_clr: u64) -> KResult<()> {
     if attr_set & MOUNT_ATTR__ATIME != 0 && attr_clr & MOUNT_ATTR__ATIME == 0 {
         return Err(KError::InvalidInput);
     }
+    // The atime field is an enum, not a bitmap: `build_mount_kattr` switches on
+    // `attr_set & MOUNT_ATTR__ATIME` and its `default` arm is EINVAL, so only
+    // RELATIME (0), NOATIME and STRICTATIME are representable. A combination
+    // such as `NOATIME | STRICTATIME` (0x30) must be refused rather than
+    // silently applied as relatime, which is what a bitwise read would do.
+    if attr_clr & MOUNT_ATTR__ATIME != 0 {
+        let value = attr_set & MOUNT_ATTR__ATIME;
+        if value != 0 && value != MOUNT_ATTR_NOATIME && value != MOUNT_ATTR_STRICTATIME {
+            return Err(KError::InvalidInput);
+        }
+    }
     Ok(())
 }
 
@@ -680,8 +691,12 @@ pub fn sys_mount_setattr(
     if flags & AT_EMPTY_PATH != 0 {
         lookup |= LookupFlags::EMPTY_PATH;
     }
+    // `Stat` rather than `Open`: `mount_setattr` re-attributes a mount and never
+    // opens the target, and `Open` rejects a non-directory, which returned
+    // ENOTDIR for `AT_EMPTY_PATH` on an fd naming a file. Linux's `user_path_at`
+    // performs no such check.
     let target = with_fs_at(dfd, &filename, |fs| {
-        filename.lookup_at(fs.root(), fs.pwd(), LookupIntent::Open, lookup, &cred)
+        filename.lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup, &cred)
     })?;
     let namespace = kprocess::current_user_process().mnt_ns()?;
     namespace.set_mount_attributes(&target, set_flags, clr_flags, recursive)?;

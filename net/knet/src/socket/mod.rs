@@ -507,19 +507,20 @@ impl Socket {
         }
     }
 
-    /// Whether `NETLINK_ADD_MEMBERSHIP` needs CAP_NET_ADMIN on this socket.
+    /// Whether `NETLINK_ADD_MEMBERSHIP` is admitted without CAP_NET_ADMIN.
     ///
-    /// `netlink_setsockopt` admits an unprivileged subclass only for a protocol
-    /// whose table sets `NL_CFG_F_NONROOT_RECV`. `NETLINK_ROUTE` does (route
-    /// monitors are routinely unprivileged) and `NETLINK_KOBJECT_UEVENT` does
-    /// not, so joining a uevent group must be checked against the capability.
-    /// A non-netlink socket answers `false`; its own option dispatcher rejects
-    /// the command with `EINVAL` before privilege matters.
+    /// `netlink_setsockopt` gates both membership commands on
+    /// `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`, which passes when the
+    /// protocol's table carries that flag *or* the caller has CAP_NET_ADMIN.
+    /// Every netlink protocol this kernel implements sets it: `NETLINK_ROUTE`
+    /// (`rtnetlink_net_init`) and `NETLINK_KOBJECT_UEVENT`
+    /// (`uevent_net_init`) both do, so unprivileged udev-style subscribers are
+    /// normal. The capability therefore only matters for a protocol that does
+    /// not, and none is implemented here; the check stays so adding one cannot
+    /// silently grant subscription. A non-netlink socket answers `false`; its
+    /// own option dispatcher rejects the command before privilege matters.
     pub fn allows_unprivileged_group_subscribe(&self) -> bool {
-        match self {
-            Self::Netlink(socket) => !socket.is_kobject_uevent(),
-            _ => false,
-        }
+        matches!(self, Self::Netlink(_))
     }
 
     /// Connects using the credential active at the syscall boundary.
