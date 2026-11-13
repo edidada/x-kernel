@@ -168,6 +168,22 @@ impl DrmDevice {
         let Some((object, width, height)) = self.framebuffer_object(fb) else {
             return Err(DrmError::NotFound);
         };
+        // The transfer rectangle must stay inside the resource this present
+        // targets. A framebuffer that does not cover its whole object is shown
+        // through a view resource created from the framebuffer's own geometry
+        // (`scanout_resource`), which may be smaller than the object: an object
+        // created with 832 rows can hold a 1280x800 framebuffer. Reporting the
+        // object's size here would ask the host to transfer rows the view does
+        // not have, and the display rejects the command.
+        let (width, height) = self
+            .framebuffers
+            .lock()
+            .get(fb)
+            .map(|framebuffer| {
+                let geometry = framebuffer.geometry();
+                (geometry.width, geometry.height)
+            })
+            .unwrap_or((width, height));
         // Resolve the backend and the resource before touching the slot: a
         // failure here must not leave the slot pointing at a resource that was
         // never presented.
