@@ -229,12 +229,14 @@ display before it overwrites the pixels.
   sync_file. `DRM_CAP_PRIME` reports import and export only because both are
   implemented.
 
-  The descriptor is opened with `FMode::LSEEK` and its ops answer
-  `lseek(SEEK_END, 0)` with the buffer size, matching `dma_buf_llseek`. The mode
-  flag is load-bearing: `VfsFile::llseek` rejects the syscall with `ESPIPE` when
-  the open mode lacks it, before the file's own `llseek` op runs. Mesa sizes an
-  imported buffer this way before mapping it, so a descriptor that cannot seek
-  is not importable.
+  The descriptor is opened with `FMode::LSEEK`. Its ops answer
+  `lseek(SEEK_END, 0)` with the buffer size and `lseek(SEEK_SET, 0)` with zero,
+  matching `dma_buf_llseek`, which keeps the idiomatic SEEK_END(0)/SEEK_SET(0)
+  pattern working; every other whence, and any non-zero offset, is `EINVAL`. The
+  mode flag is load-bearing: `VfsFile::llseek` rejects the syscall with `ESPIPE`
+  when the open mode lacks it, before the file's own `llseek` op runs. Mesa
+  sizes an imported buffer this way before mapping it, so a descriptor that
+  cannot seek is not importable.
 - Client property blobs are owned by the creating file and the id registry.
   `DESTROY_BLOB` accepts only an id in the calling file's set: an existing id
   owned by another file, or a driver-owned system blob, is `EPERM`, while an

@@ -50,7 +50,7 @@ pub use active_exception_context::{
 
 mod cpuinfo;
 mod userspace_common;
-pub use cpuinfo::{boot_cpu_info, cpu_info};
+pub use cpuinfo::{cpu_info, current_cpu_info};
 
 unittest::path_mod_test!(tests_current_task, "../ut-tests/lib.rs");
 

@@ -21,14 +21,22 @@ pub fn cpu_info(cpu_id: LogicalCpuId) -> Option<&'static CpuInfo> {
     lookup_cpu_info(&CPU_INFO, cpu_id)
 }
 
-/// Returns the boot CPU's identity and capability snapshot.
+/// Returns the calling CPU's identity and capability snapshot.
 ///
-/// Callers that need the platform's capability set rather than one specific
-/// CPU's use this: logical CPU 0 is the boot CPU, and every CPU in a running
-/// system agrees on the bits such a caller publishes (for example the
-/// `AT_HWCAP` word given to user processes).
-pub fn boot_cpu_info() -> Option<&'static CpuInfo> {
-    cpu_info(LogicalCpuId::new(0))
+/// A caller that needs "the platform's capabilities" — the `AT_HWCAP` word
+/// published to a user process, for instance — asks the CPU it is running on
+/// rather than assuming a fixed logical id. Logical ids follow device-tree
+/// node order, so the boot CPU is not guaranteed to be slot 0; reading the
+/// current CPU's entry also guarantees that identification for that CPU has
+/// already published, because trap initialization runs on every CPU before it
+/// executes any task. On a homogeneous system every CPU reports the same bits;
+/// on a heterogeneous one this reports the bits of the core the process
+/// actually runs on, which is what instruction selection must match.
+///
+/// Returns `None` before this CPU's identification is published.
+pub fn current_cpu_info() -> Option<&'static CpuInfo> {
+    let cpu_id = kcpu_slot::current_area()?.cpu();
+    cpu_info(cpu_id)
 }
 
 fn lookup_cpu_info(slots: &[Once<CpuInfo>], cpu_id: LogicalCpuId) -> Option<&CpuInfo> {

@@ -70,8 +70,11 @@ per-architecture formatter and spelling table. Keep hardware filtering in kcpu
 and Linux field names in procfs. Update both crates' design/security documents.
 
 These are per-CPU diagnostic snapshots, not Linux's system-wide capability
-intersection. AT_HWCAP/AT_HWCAP2 generation and scheduler placement policy remain
-separate; this change does not synchronize those interfaces with cpuinfo.
+intersection. `CpuInfo::hwcap()` derives the userspace-visible `AT_HWCAP` word
+from the *usable* capability set of one CPU, and `boot_cpu_info()` exposes the
+boot CPU's snapshot for that purpose; exec publishes it, so the word describes
+the boot CPU rather than an intersection across CPUs. Scheduler placement
+policy remains separate and is not synchronized with cpuinfo.
 
 ## x86_64 extended state
 
