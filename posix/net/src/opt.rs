@@ -12,11 +12,11 @@
 //! Linux stores nonzero send and receive timeouts in jiffies. Socket timeout
 //! conversion therefore rounds a userspace `timeval` up to one kernel tick.
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
-    SocketOps,
+    Socket, SocketOps,
     options::{Configurable, GetSocketOption, PeerCredentials, SetSocketOption, UnixCredentials},
     sock_from_file,
 };
@@ -494,16 +494,34 @@ pub fn sys_getsockopt(
         }
         optlen = buf.len() as socklen_t;
     } else if level == SOL_NETLINK && optname == NETLINK_LIST_MEMBERSHIPS {
-        // Per-socket multicast membership lists are not tracked; report an empty
-        // set so callers probing the option (systemd-resolved) do not see
-        // ENOPROTOOPT. The bound group mask remains available via getsockname.
-        optlen = 0;
+        optlen = put_list_memberships(&socket, optval, optlen)?;
     } else {
         call_dispatch!(dispatch, (level, optname));
     }
 
     optlen_ptr.write_vm(optlen)?;
     Ok(0)
+}
+
+/// Writes `NETLINK_LIST_MEMBERSHIPS` and returns the new `optlen`.
+///
+/// `netlink_getsockopt(NETLINK_LIST_MEMBERSHIPS)` copies as much of the socket's
+/// group bitmap as fits and reports the bitmap's full byte length, so a caller
+/// can size the buffer from a zero-length query. Reporting a zero length for a
+/// socket that did join groups would tell it there are no memberships at all.
+fn put_list_memberships(
+    socket: &Arc<Socket>,
+    optval: UserPtr<u8>,
+    optlen: socklen_t,
+) -> KResult<socklen_t> {
+    let mut groups = 0u32;
+    socket.get_option(GetSocketOption::NetlinkMemberships(&mut groups))?;
+    let bytes = groups.to_ne_bytes();
+    if optlen > 0 {
+        let copy = (optlen as usize).min(bytes.len());
+        osvm::write_vm_bytes(optval.as_ptr() as *mut u8, &bytes[..copy])?;
+    }
+    Ok(bytes.len() as socklen_t)
 }
 
 /// Sets a socket option at a specified protocol level.

@@ -498,6 +498,17 @@ impl Configurable for NetlinkSocket {
             **enabled = self.inner.cap_ack.load(Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
+        if let GetSocketOption::NetlinkMemberships(groups) = opt {
+            // `netlink_getsockopt(NETLINK_LIST_MEMBERSHIPS)` copies the
+            // socket's `nlk->groups` bitmap, one bit per zero-based group.
+            **groups = self
+                .inner
+                .local_addr
+                .read()
+                .as_ref()
+                .map_or(0, |addr| addr.groups);
+            return Ok(OptionHandled::Yes);
+        }
         if let GetSocketOption::Error(error) = opt {
             // `SO_ERROR` returns the pending positive errno and clears it.
             // Clearing this field does not clear receive-queue congestion;

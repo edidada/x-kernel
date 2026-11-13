@@ -546,9 +546,16 @@ impl MntNamespace {
             let new_location = Path::new(new_parent.clone(), location.dentry.clone());
             let new_child = Arc::new(Mount::clone_mnt(&child.root_path()));
             *new_child.mnt_location.lock() = Some(new_location.clone());
-            new_location
+            // A stacked mountpoint holds the whole chain in its `covers` links,
+            // so a displaced mount must be recorded there rather than dropped:
+            // `collect_subtree_under` yields every layer, and the clone has to
+            // reproduce the stack it saw.
+            if let Some(covered) = new_location
                 .mnt
-                .install_child_mount(&new_location.dentry, &new_child);
+                .install_child_mount(&new_location.dentry, &new_child)
+            {
+                *new_child.covers.lock() = Some(covered);
+            }
             clone_map.insert(child.mount_id(), new_child.clone());
             kept.push(new_child);
         }

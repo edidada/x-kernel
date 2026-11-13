@@ -163,6 +163,9 @@ define_options! {
     /// `NETLINK_ADD_MEMBERSHIP` / `NETLINK_DROP_MEMBERSHIP`: multicast group id.
     NetlinkAddMembership(u32),
     NetlinkDropMembership(u32),
+    /// `NETLINK_LIST_MEMBERSHIPS`: the socket's bound multicast group mask,
+    /// zero-based bit per group (`netlink_getsockopt` copies `nlk->groups`).
+    NetlinkMemberships(u32),
     /// `IP_PKTINFO`: receive packet-info ancillary data on UDP. Tracked only.
     IpPktinfo(bool),
     /// `IP_RECVTTL` / `IP_RECVTOS`: receive TTL/TOS ancillary data. Tracked only.

@@ -1827,3 +1827,44 @@ fn test_recursive_bind_skips_sibling_submounts_outside_source() {
     // With no unreachable cloned child, a plain unmount succeeds.
     namespace.detach(&bind_root).unwrap();
 }
+
+#[def_test]
+fn test_clone_mount_tree_reproduces_a_stacked_mountpoint() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let lower_fs = mock_filesystem(StatFsFlags::empty());
+    let upper_fs = mock_filesystem(StatFsFlags::empty());
+
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+
+    // Two mounts stacked on one mountpoint: Linux keeps the upper one visible
+    // and chains the lower one through `mnt->mnt_mountpoint`/overmount links.
+    let lower = namespace.attach(&mountpoint, &lower_fs).unwrap();
+    let upper = namespace.attach(&mountpoint, &upper_fs).unwrap();
+    let visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(visible.mount(), &upper));
+    assert!(!Arc::ptr_eq(&lower, &upper));
+
+    // `open_tree(OPEN_TREE_CLONE)` must clone the stack, not just the top: a
+    // clone that dropped the displaced mount would show a single layer where
+    // the source has two, so an unmount of the clone's top would reveal
+    // something the source never had.
+    let (cloned_root, kept) = namespace.clone_mount_tree(&root).unwrap();
+    let cloned_mountpoint = lookup_no_follow(&cloned_root.root_path(), "mnt").unwrap();
+    let cloned_visible = cloned_mountpoint.mount();
+    assert!(
+        !Arc::ptr_eq(cloned_visible, &upper),
+        "the clone must not alias the source's mount"
+    );
+    assert_eq!(cloned_visible.filesystem_name(), upper.filesystem_name());
+
+    // The layer under the cloned top is the cloned lower mount, so the whole
+    // stack survived the clone and is kept alive by the returned handles.
+    let covered = cloned_visible.covered_mount().expect("the lower layer survives");
+    assert_eq!(covered.filesystem_name(), lower.filesystem_name());
+    assert!(
+        kept.iter().any(|mount| Arc::ptr_eq(mount, &covered)),
+        "the displaced layer is part of the kept set"
+    );
+}
