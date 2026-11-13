@@ -620,9 +620,10 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
         if let Err(err) = process.exit_fs() {
             error!("exit_fs on process exit failed: {err:?}");
         }
-        if let Err(err) = process.exit_namespaces() {
-            error!("exit_namespaces on process exit failed: {err:?}");
-        }
+        // Namespace release is deferred to reap (`release_zombie_namespaces`),
+        // like Linux `release_task()`: an unreaped zombie must keep serving
+        // `/proc/<pid>/ns/*` so runtimes can pin the container init's
+        // namespaces after the container process exits.
         #[cfg(feature = "tipc")]
         if let Err(err) = process.close_all_tipc_handles() {
             error!("close_all_tipc_handles on process exit failed: {err:?}");
