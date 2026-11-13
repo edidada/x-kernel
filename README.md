@@ -4,8 +4,6 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-<!-- TODO(badge): add CI/release badges when public URLs are available. -->
-
 X-Kernel is a monolithic kernel written in Rust that targets the Linux ABI. It runs Linux userspace built for musl/glibc on x86_64, AArch64, RISC-V 64, and LoongArch64, provides in-kernel TEE support for confidential-computing guests, and runs Wayland/X11 desktop workloads including Chromium, niri, and Xorg/Xwayland.
 
 <p align="center">
@@ -15,7 +13,7 @@ X-Kernel is a monolithic kernel written in Rust that targets the Linux ABI. It r
 
 Subsystems are separated into crates with explicit ownership boundaries; see [Source layout](#source-layout). The project is under active development on `main` (`0.3.0-dev`), with quarterly milestone releases ([release policy](docs/release.md)).
 
-**Data baseline:** capability and CI data were last verified on 2026-11-13. Performance uses daily-test #139; syscall-coverage and workload rows marked `TBD` are placeholders for the next measurement run.
+**Data baseline:** capability and CI data were last verified on 2026-11-13. Performance uses daily-test #139.
 
 ## Contents
 
@@ -92,15 +90,14 @@ bash scripts/start.sh
 
 ### Real workloads
 
-These are the end-to-end workloads that distinguish X-Kernel from a syscall-only Linux ABI implementation. Rows marked `TBD` are placeholders for the next measurement run.
+These are the end-to-end workloads that distinguish X-Kernel from a syscall-only Linux ABI implementation.
 
 | Workload | Command | Expected | Status |
 |---|---|---|---|
 | systemd + glibc | `make rootfs ROOTFS_VARIANT=debian-systemd` | systemd 257 + glibc 2.41 reach a shell | Captured 2026-11-12 |
-| Docker | `docker run --network=host --rm hello-world` | `Hello from Docker!` | `TBD` |
+| Docker | `docker run --network=host --rm hello-world` | `Hello from Docker!` | Manual |
 | Wayland desktop | `make run GRAPHIC=y DISK_IMG=<desktop-image>` | Chromium/niri/Xorg starts | Captured 2026-11-12 |
 
-<!-- TODO(data): add the kernel commit and log/CI link for each workload. -->
 
 ![systemd + glibc on X-Kernel](docs/images/systemd-glibc.png)
 
@@ -173,7 +170,7 @@ Status definitions:
 - **Manual** — a documented run path exists, but there is no automated CI.
 - **Experimental** — feature-flag or feature-branch work, not a default `main` target.
 
-CI stage definitions are in the [Jenkinsfile](Jenkinsfile). <!-- TODO(data): add public CI run/status links. -->
+CI stage definitions are in the [Jenkinsfile](Jenkinsfile).
 
 ## Capability Status
 
@@ -201,10 +198,7 @@ The desktop path uses the kernel's DRM/KMS, virtio-gpu (2D/3D, EDID), and virtio
 - **niri** — reference compositor disk built from niri v26.04; host-window resize and pointer/keyboard input.
 - **Xorg/Xwayland** — X11 workloads through the Xorg/Xwayland path.
 
-Compositor and desktop rootfs images are maintained as separate userspace artifacts; the kernel build and boot do not depend on them.
-
-<!-- TODO(data): add the public desktop rootfs/compositor image URL or the make target that produces it. -->
-> **Desktop image source:** `TBD` - add a public URL or make target here.
+Compositor and desktop rootfs images are maintained as separate userspace artifacts; the kernel build and boot do not depend on them. The reference desktop image is maintained in [openkylin/x-agentos](https://gitee.com/openkylin/x-agentos).
 
 ## Design
 
@@ -247,19 +241,9 @@ Notes:
 - The 51 guest cases are 38 from `ci` plus 13 from `ci-test-iter`; the 1 `ci-debian` APT case is separate and is not part of the PR gate.
 - `ci` is the Harness directory name; the suite is registered as `ci-test` in `tests/ci/suite.toml`. The X-Kernel entry point is `make ci-test`.
 - Dated pass-rate reports for LTP, Open POSIX, pjdfstest, xfstests, libc-test, and Go stdlib are not yet published. The Harness contains the workload definitions; the reports are a roadmap item.
+- The x86_64 ABI table contains 467 entries; implemented and guest-tested counts are not yet published.
 
 The [Jenkinsfile](Jenkinsfile) defines 18 arch/check stages (excluding Prepare/Post and the optional documentation check): build and unit/runtime tests for three architectures, TEE tests for two, crosvm/virtCCA build checks, and dylint for x86_64/AArch64.
-
-### Linux ABI coverage
-
-| Metric | Value | Definition |
-|---|---:|---|
-| ABI table entries | 467 | x86_64 syscall numbers listed in `api/linux_sysno` |
-| Dispatched syscalls | `TBD` | Unique `Sysno::*` handlers in `core/ksyscall/src/dispatch.rs` |
-| Guest-tested syscalls | `TBD` | Syscalls exercised by Harness/LTP/Open POSIX/libc-test |
-| systemd-required set | `TBD` | Syscalls needed by the systemd + glibc boot path |
-
-<!-- TODO(data): fill the TBD rows and add the exact counting script. Do not conflate ABI table entries with implemented syscalls. -->
 
 ## Performance
 
@@ -278,8 +262,6 @@ Source: [daily-test #139](https://jenkins.openkylin.top/job/daily-test/139/) (20
 Δ = X-Kernel relative to Linux; lower is better for latency. x86_64 compute/scheduler results lead Linux, and fio write is close to parity; fio read and both TCP directions are behind. AArch64 is mixed: scheduler RPS leads, while UnixBench syscall, fio, and TCP throughput trail. TCP throughput is the largest remaining gap and should not be presented as "close to Linux" until it is fixed.
 
 Hosts: x86_64 `xkernel-amd64-01` (Xeon Gold 6548Y+), AArch64 `xkernel-arm64-01` (Kunpeng 920). Raw logs, CSV ratios, and Linux `results.json` are linked from the [build page](https://jenkins.openkylin.top/job/daily-test/139/).
-
-<!-- TODO(data): add a public dashboard/report URL when externally reachable; confirm the archived Linux baseline is from the same host and QEMU version before a release claim. -->
 
 ## Configuration
 
@@ -349,7 +331,7 @@ Please report suspected vulnerabilities privately to the maintainers rather than
 - pKVM is feature-flag only; there is no defconfig or PR CI coverage.
 - CSV and LoongArch64 have no PR CI; crosvm and virtCCA have build checks only.
 - Container support is validated by a host-network `hello-world` smoke test; user namespaces and full OCI isolation are still in progress.
-- Syscall-coverage numbers are not yet published; rows marked `TBD` are placeholders. The current performance table shows both leads and gaps versus Linux; TCP throughput is the largest gap.
+- Syscall-coverage numbers are not yet published. The current performance table shows both leads and gaps versus Linux; TCP throughput is the largest gap.
 - Architecture and platform maturity differs; see [Platform Support](#platform-support).
 
 ## Roadmap

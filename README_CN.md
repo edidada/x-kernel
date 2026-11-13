@@ -4,8 +4,6 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-<!-- TODO(badge): 有公开 CI/release URL 后补充 badge。 -->
-
 X-Kernel 是一个使用 Rust 编写、面向 Linux ABI 的单体内核。它可以在 x86_64、AArch64、RISC-V 64 和 LoongArch64 上运行基于 musl/glibc 构建的 Linux 用户态程序，在内核内为机密计算 guest 提供 TEE 支持，并可运行 Chromium、niri、Xorg/Xwayland 等 Wayland/X11 桌面负载。
 
 <p align="center">
@@ -15,7 +13,7 @@ X-Kernel 是一个使用 Rust 编写、面向 Linux ABI 的单体内核。它可
 
 各子系统按明确的职责与所有权边界拆分为 crate，详见[源码布局](#源码布局)。项目当前在 `main` 分支活跃开发（`0.3.0-dev`），按季度发布里程碑版本，见[发布规范](docs/release.md)。
 
-**数据基线：** 能力与 CI 数据最后核对于 2026-11-13。性能数据来自 daily-test #139；syscall 覆盖和 workload 表中标记为 `TBD` 的数据仍是占位符。
+**数据基线：** 能力与 CI 数据最后核对于 2026-11-13。性能数据来自 daily-test #139。
 
 ## 目录
 
@@ -92,15 +90,14 @@ bash scripts/start.sh
 
 ### 真实负载
 
-这些端到端负载用于区分 X-Kernel 与只实现系统调用表的 Linux ABI 内核。标记为 `TBD` 的行是下一次测量前的占位符。
+这些端到端负载用于区分 X-Kernel 与只实现系统调用表的 Linux ABI 内核。
 
 | 负载 | 命令 | 预期结果 | 状态 |
 |---|---|---|---|
 | systemd + glibc | `make rootfs ROOTFS_VARIANT=debian-systemd` | systemd 257 + glibc 2.41 进入 shell | 已截图 2026-11-12 |
-| Docker | `docker run --network=host --rm hello-world` | `Hello from Docker!` | `TBD` |
+| Docker | `docker run --network=host --rm hello-world` | `Hello from Docker!` | 手动 |
 | Wayland 桌面 | `make run GRAPHIC=y DISK_IMG=<desktop-image>` | Chromium/niri/Xorg 启动 | 已截图 2026-11-12 |
 
-<!-- TODO(data): 补充每个负载的内核 commit 和日志/CI 链接。 -->
 
 ![X-Kernel 上的 systemd + glibc](docs/images/systemd-glibc.png)
 
@@ -173,7 +170,7 @@ make ci-test          # 拉取 Starry Test Harness 并运行 CI suite
 - **手动验证**：有文档化的运行路径，但没有自动化 CI。
 - **实验性**：feature flag 或特性分支上的工作，不是 `main` 的默认目标。
 
-CI stage 定义见 [Jenkinsfile](Jenkinsfile)。<!-- TODO(data): 补充公开 CI 运行/状态链接。 -->
+CI stage 定义见 [Jenkinsfile](Jenkinsfile)。
 
 ## 能力状态
 
@@ -201,10 +198,7 @@ CI stage 定义见 [Jenkinsfile](Jenkinsfile)。<!-- TODO(data): 补充公开 CI
 - **niri**：基于 niri v26.04 构建的参考合成器磁盘；支持宿主窗口 resize 和指针/键盘输入。
 - **Xorg/Xwayland**：通过 Xorg/Xwayland 路径运行 X11 负载。
 
-合成器与桌面 rootfs 作为独立的用户态产物维护；内核的构建和启动不依赖它们。
-
-<!-- TODO(data): 补充公开的桌面 rootfs/合成器镜像地址或生成它的 make target。 -->
-> **桌面镜像来源：** `TBD` - 后续补充公开 URL 或 make target。
+合成器与桌面 rootfs 作为独立的用户态产物维护；内核的构建和启动不依赖它们。参考桌面镜像维护在 [openkylin/x-agentos](https://gitee.com/openkylin/x-agentos)。
 
 ## 设计
 
@@ -247,19 +241,9 @@ ABI：ksyscall / posix / tee
 - 51 个 guest 用例 = `ci` 的 38 个 + `ci-test-iter` 的 13 个；`ci-debian` 的 1 个 APT 用例单独计算，且不属于 PR 门禁。
 - `ci` 是 Harness 的目录名，suite 在 `tests/ci/suite.toml` 中注册为 `ci-test`；X-Kernel 的入口是 `make ci-test`。
 - LTP、Open POSIX、pjdfstest、xfstests、libc-test、Go 标准库的带日期通过率报告尚未发布。Harness 中已有 workload 定义，报告是路线图项。
+- x86_64 ABI 表包含 467 个表项；已实现和已 guest 测试的数量尚未发布。
 
 [Jenkinsfile](Jenkinsfile) 定义了 18 个架构/检查 stage（不含 Prepare/Post 和可选的文档检查）：三个架构的构建与单测/运行时、两个架构的 TEE、crosvm/virtCCA 构建检查，以及 x86_64/AArch64 的 dylint。
-
-### Linux ABI 覆盖
-
-| 指标 | 数值 | 定义 |
-|---|---:|---|
-| ABI 表项 | 467 | `api/linux_sysno` 中列出的 x86_64 系统调用编号 |
-| 已分发 syscall | `TBD` | `core/ksyscall/src/dispatch.rs` 中唯一的 `Sysno::*` 处理项 |
-| 已 guest 测试 syscall | `TBD` | 由 Harness/LTP/Open POSIX/libc-test 实际覆盖的 syscall |
-| systemd 所需集合 | `TBD` | systemd + glibc 启动路径所需的 syscall |
-
-<!-- TODO(data): 补充 TBD 行和精确统计脚本。不要把 ABI 表项数等同于已实现 syscall 数。 -->
 
 ## 性能
 
@@ -278,8 +262,6 @@ ABI：ksyscall / posix / tee
 Δ = X-Kernel 相对 Linux；延迟类指标越低越好。x86_64 的计算/调度领先 Linux，fio 写接近持平；fio 读和两个方向的 TCP 吞吐落后。AArch64 为混合结果：调度 RPS 领先，UnixBench syscall、fio 和 TCP 吞吐落后。TCP 吞吐是当前最大差距，修复前不应表述为“接近 Linux”。
 
 Host：x86_64 `xkernel-amd64-01`（Xeon Gold 6548Y+），AArch64 `xkernel-arm64-01`（Kunpeng 920）。原始日志、CSV 比值和 Linux `results.json` 均从[构建页](https://jenkins.openkylin.top/job/daily-test/139/)可追溯。
-
-<!-- TODO(data): 看板可公开访问后补充链接；发布版本性能结论前确认归档 Linux 基线来自同一 host 和 QEMU 版本。 -->
 
 ## 配置
 
@@ -349,7 +331,7 @@ X-Kernel 使用 Rust 的内存安全模型、带 `SAFETY:` 说明的显式 `unsa
 - pKVM 仅有 feature flag；没有 defconfig，也没有 PR CI。
 - CSV 和 LoongArch64 没有 PR CI；crosvm 和 virtCCA 只有构建检查。
 - 容器支持目前由 host-network 的 `hello-world` smoke 验证；user namespace 和完整 OCI 隔离仍在推进。
-- syscall 覆盖数据尚未发布；标记为 `TBD` 的行仍是占位符。当前性能表同时给出了领先项和差距，TCP 吞吐是最大差距。
+- syscall 覆盖数据尚未发布。当前性能表同时给出了领先项和差距，TCP 吞吐是最大差距。
 - 各架构和平台成熟度不同，详见[平台支持](#平台支持)。
 
 ## 路线图
