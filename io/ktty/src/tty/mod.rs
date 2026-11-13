@@ -402,6 +402,12 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         // never leaves the terminal with no session at all.
         let previous = self.terminal.job_control.session();
         let restored_previous = previous.clone();
+        // `clear_session_if_matches` drops the foreground group together with
+        // the session, so the previous owner's group is captured first: a
+        // rollback that restored only the session would leave the terminal
+        // owned but with no foreground group, which is the half-state this
+        // whole ordering exists to prevent.
+        let previous_foreground = self.terminal.job_control.foreground();
         if let Some(previous) = previous.as_ref()
             && !Arc::ptr_eq(previous, &session)
         {
@@ -413,9 +419,13 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         let restore = || {
             session.unset_terminal(&terminal);
             self.terminal.job_control.clear_session_if_matches(&session);
-            if let Some(previous) = restored_previous.as_ref() {
-                let _ = self.terminal.job_control.ensure_session(previous);
+            if let Some(previous) = restored_previous.as_ref()
+                && self.terminal.job_control.ensure_session(previous).is_ok()
+            {
                 let _ = previous.set_terminal(&terminal);
+                if let Some(pg) = previous_foreground.as_ref() {
+                    let _ = self.terminal.job_control.set_foreground(pg);
+                }
             }
         };
         if let Err(err) = self.terminal.job_control.ensure_session(&session) {
