@@ -81,7 +81,11 @@ This boundary carries the Linux-visible ABI policy:
 - `munmap(addr, 0)` returns `InvalidInput`;
 - `MprotectRequest` rejects `PROT_GROWSDOWN` / `PROT_GROWSUP`;
 - `MsyncRequest` rejects unknown flags and the conflicting `MS_ASYNC | MS_SYNC` combination, and converts the
-  raw `MS_*` bitmask into `memspace::MsyncPolicy`.
+  raw `MS_*` bitmask into `memspace::MsyncPolicy`;
+- `mlockall` validates its `MCL_*` word before accepting the request: an empty word, a bit outside
+  `MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT`, and the bare `MCL_ONFAULT` are `InvalidInput`, matching
+  `SYSCALL_DEFINE1(mlockall)`. The call still does no work because the kernel has no swap, so every page is
+  already resident; only the input contract is enforced.
 
 ### file-backed mapping handoff
 

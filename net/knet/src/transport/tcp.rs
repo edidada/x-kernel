@@ -589,6 +589,28 @@ impl SocketOps for TcpSocket {
         linux_raw_sys::net::IPPROTO_TCP as i32
     }
 
+    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+        // `tcp_ioctl(SIOCINQ)` reports `tcp_inq()` -- the bytes queued for
+        // reading -- and answers EINVAL to a listening socket, which holds no
+        // data of its own. `SIOCOUTQ` reports `tp->write_seq - tp->snd_una`,
+        // the bytes handed to the peer but not yet acknowledged; smoltcp's
+        // `send_queue()` is the unsent transmit buffer instead, so it is the
+        // closest quantity this stack exposes and is reported as such.
+        if self.is_listening() {
+            return Err(KError::InvalidInput);
+        }
+        let (received, queued) = self.with_smol_socket(|socket| {
+            if !socket.is_open() {
+                return Err(KError::NotConnected);
+            }
+            Ok((socket.recv_queue(), socket.send_queue()))
+        })?;
+        let to_i32 = |bytes: usize| i32::try_from(bytes).unwrap_or(i32::MAX);
+        *inq = to_i32(received);
+        *outq = to_i32(queued);
+        Ok(())
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut local_addr = local_addr.into_ip()?;
         self.state

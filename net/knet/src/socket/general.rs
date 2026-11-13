@@ -447,8 +447,12 @@ impl Configurable for GeneralOptions {
                 self.tcp_fastopen.store(*queue as i32, Ordering::Relaxed);
             }
             O::ReceiveBufferForce(size) => {
+                // `SO_RCVBUFFORCE` is the CAP_NET_ADMIN form: it skips the
+                // `rmem_max` clamp but still doubles the hint and applies
+                // `SOCK_MIN_RCVBUF` (`__sock_set_rcvbuf`).
+                let effective = (*size).saturating_mul(2).max(RCVBUF_MIN);
                 self.receive_buffer_bytes
-                    .store(*size as u64, Ordering::Relaxed);
+                    .store(effective as u64, Ordering::Relaxed);
             }
             O::IpMulticastTtl(ttl) => {
                 self.ip_multicast_ttl.store(*ttl as i32, Ordering::Relaxed);

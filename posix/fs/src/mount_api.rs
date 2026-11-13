@@ -55,14 +55,33 @@ const MOUNT_ATTR_SIZE_VER0: usize = 32;
 ///
 /// `MOUNT_SETATTR_VALID_FLAGS` in `fs/namespace.c` is `FSMOUNT_VALID_FLAGS`
 /// (`RDONLY|NOSUID|NODEV|NOEXEC|__ATIME|NODIRATIME|NOSYMFOLLOW`) plus
-/// `MOUNT_ATTR_IDMAP`. A bit outside this set is `EINVAL` there, so silently
-/// dropping it would report success for a request the kernel did not honour.
-const MOUNT_ATTR_VALID_FLAGS: u64 = 0x0030_10ff;
+/// `MOUNT_ATTR_IDMAP`, i.e. `0x3000ff`. A bit outside this set is `EINVAL`
+/// there, so silently dropping it would report success for a request the kernel
+/// did not honour.
+const MOUNT_ATTR_VALID_FLAGS: u64 = 0x0030_00ff;
 
 /// Rejects an `attr_set`/`attr_clr` word with a bit the ABI does not define.
 fn check_mount_attr_bits(attr: u64) -> KResult<()> {
     if attr & !MOUNT_ATTR_VALID_FLAGS != 0 {
         return Err(KError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Requires the bytes past the published `mount_attr` to be zero.
+///
+/// `copy_struct_from_user` copies the interoperable prefix and then checks the
+/// extra bytes: a non-zero tail means the caller relies on a field this kernel
+/// does not implement, so it must fail (`E2BIG`) instead of having its request
+/// silently truncated to the fields that are known.
+fn check_mount_attr_tail(base: usize, size: usize) -> KResult<()> {
+    let tail_len = size.saturating_sub(MOUNT_ATTR_SIZE_VER0);
+    if tail_len == 0 {
+        return Ok(());
+    }
+    let tail = UserConstPtr::<u8>::from(base + MOUNT_ATTR_SIZE_VER0).load_vm_vec(tail_len)?;
+    if tail.iter().any(|byte| *byte != 0) {
+        return Err(KError::ArgumentListTooLong);
     }
     Ok(())
 }
@@ -113,9 +132,10 @@ fn mount_fd(file: &VfsFile) -> KResult<Arc<MountFd>> {
 /// # Execution context
 ///
 /// Requires a current process thread: it reads the caller's credentials and
-/// installs the new fd into the caller's fd table. It may sleep (anonymous-inode
-/// file creation and fd allocation), so it must not be called from IRQ context
-/// or while holding a spinlock or IRQ-preemption guard.
+/// installs the new fd into the caller's fd table. An IRQ handler, a softirq or
+/// a kernel task without a current process cannot call it. It may sleep
+/// (anonymous-inode file creation and fd allocation), so callers must hold no
+/// spinlock and no IRQ-disable or preempt-disable guard.
 pub fn sys_fsopen(fs_type: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let fs_type = fs_type.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_fsopen <= fs_type: {fs_type:?}, flags: {flags:#x}");
@@ -155,8 +175,7 @@ pub fn sys_fsopen(fs_type: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
 /// Requires a current process thread: it reads the caller's fd table and
 /// credentials. `FSCONFIG_CMD_CREATE`/`CMD_RECONFIGURE` build or reconfigure a
 /// superblock and may sleep (filesystem `get_tree`/`reconfigure` callbacks), so
-/// it must not be called from IRQ context or while holding a spinlock or
-/// IRQ-preemption guard.
+/// callers must hold no spinlock and no IRQ-disable or preempt-disable guard.
 pub fn sys_fsconfig(
     fd: c_int,
     cmd: u32,
@@ -256,8 +275,8 @@ fn mount_attr_to_flags(attr: u32) -> MountFlags {
 ///
 /// Requires a current process thread: it reads the caller's fd table and mount
 /// namespace. It may sleep (`dentry_open` of the detached root and fd
-/// allocation), so it must not be called from IRQ context or while holding a
-/// spinlock or IRQ-preemption guard.
+/// allocation), so callers must hold no spinlock and no IRQ-disable or
+/// preempt-disable guard.
 pub fn sys_fsmount(fd: c_int, flags: u32, attr_flags: u32) -> KResult<isize> {
     debug!("sys_fsmount <= fd: {fd}, flags: {flags:#x}, attr_flags: {attr_flags:#x}");
     if flags & !FSMOUNT_CLOEXEC != 0 {
@@ -372,10 +391,13 @@ pub fn sys_move_mount(
 ///
 /// Requires a current process thread: it checks the caller's credentials
 /// (`OPEN_TREE_CLONE` needs CAP_SYS_ADMIN), resolves a pathname against its
-/// root/pwd/mount namespace and allocates a descriptor in its fd table. It may
-/// sleep while resolving the path (`lookup_at`) and cloning the subtree, so it
-/// must not be called from IRQ context or while holding a spinlock or
-/// IRQ-preemption guard.
+/// root/pwd/mount namespace and allocates a descriptor in its fd table. An IRQ
+/// handler, a softirq or a kernel task without a current process cannot call
+/// it. It may sleep while resolving the path (`lookup_at`) and cloning the
+/// subtree, so callers must hold no spinlock and no IRQ-disable or
+/// preempt-disable guard. The namespace registry lock is taken and released
+/// inside the call; a caller must not already hold it (nor the inode locks of
+/// the resolved path) when entering.
 pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let path = path.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_open_tree <= dfd: {dfd}, path: {path:?}, flags: {flags:#x}");
@@ -470,9 +492,12 @@ fn mount_attr_set_clr(attr_set: u64, attr_clr: u64) -> (MountFlags, MountFlags) 
 /// # Execution context
 ///
 /// Requires a current process thread: it checks the caller's credentials, reads
-/// its fd table (`AT_EMPTY_PATH`) and mount namespace. It may sleep while
-/// resolving the target path and applying attributes, so it must not be called
-/// from IRQ context or while holding a spinlock or IRQ-preemption guard.
+/// its fd table (`AT_EMPTY_PATH`) and mount namespace. An IRQ handler, a
+/// softirq or a kernel task without a current process cannot call it. It may
+/// sleep while resolving the target path and applying attributes, so callers
+/// must hold no spinlock and no IRQ-disable or preempt-disable guard. The
+/// namespace registry lock is taken and released inside the call; a caller must
+/// not already hold it (nor the inode locks of the resolved path) on entry.
 pub fn sys_mount_setattr(
     dfd: c_int,
     path: UserConstPtr<c_char>,
@@ -487,9 +512,13 @@ pub fn sys_mount_setattr(
         return Err(KError::Unsupported);
     }
     // Linux `mount_setattr` admits the four path-resolution flags only, and
-    // bounds the structure size before reading it.
+    // bounds the structure size before reading it: `usize > PAGE_SIZE` is
+    // `E2BIG`, anything below the published struct is `EINVAL`.
     if flags & !(AT_EMPTY_PATH | AT_RECURSIVE | 0x100 | 0x800) != 0 {
         return Err(KError::InvalidInput);
+    }
+    if size > memaddr::PAGE_SIZE_4K {
+        return Err(KError::ArgumentListTooLong);
     }
     if size < MOUNT_ATTR_SIZE_VER0 {
         return Err(KError::InvalidInput);
@@ -503,6 +532,10 @@ pub fn sys_mount_setattr(
     let base = attr.as_ptr() as usize;
     let attr_set = UserConstPtr::<u64>::from(base).read_vm()?;
     let attr_clr = UserConstPtr::<u64>::from(base + 8).read_vm()?;
+    // `copy_struct_from_user` handles a larger structure by requiring the bytes
+    // this kernel does not know to be zero: a newer caller's extension must not
+    // be silently ignored, so a non-zero tail is `E2BIG` rather than success.
+    check_mount_attr_tail(base, size)?;
     // `build_mount_kattr` rejects an attr bit the ABI does not define, so an
     // unknown bit is an error rather than a silent no-op.
     check_mount_attr_bits(attr_set)?;
@@ -535,3 +568,5 @@ pub fn sys_mount_setattr(
     namespace.set_mount_attributes(&target, set_flags, clr_flags, recursive)?;
     Ok(0)
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/mount_api.rs");
