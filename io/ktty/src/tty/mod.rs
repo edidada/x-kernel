@@ -389,27 +389,37 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         if !kprocess::current_cred().has_sys_admin() {
             return Err(KError::OperationNotPermitted);
         }
-        // Drop any prior session's claim before installing the new one.
-        if let Some(previous) = self.terminal.job_control.session() {
-            let terminal: Arc<dyn ControllingTerminal> = self.clone();
-            previous.unset_terminal(&terminal);
-            self.terminal
-                .job_control
-                .clear_session_if_matches(&previous);
-        }
         let terminal: Arc<dyn ControllingTerminal> = self.clone();
-        self.terminal.job_control.ensure_session(&session)?;
+        // Bind this session first, while the previous owner is still intact: a
+        // steal that cannot complete must leave the terminal exactly as it was.
+        // Both failure modes below are decided before anything is torn down.
+        let installed = self.terminal.job_control.ensure_session(&session)?;
         match session.set_terminal(&terminal) {
             SetTerminalResult::Installed | SetTerminalResult::AlreadySetToSame => {}
             SetTerminalResult::Occupied => {
-                self.terminal.job_control.clear_session_if_matches(&session);
+                if installed {
+                    self.terminal.job_control.clear_session_if_matches(&session);
+                }
                 return Err(KError::ResourceBusy);
             }
         }
         if let Err(err) = self.terminal.job_control.set_foreground(&pg) {
             session.unset_terminal(&terminal);
-            self.terminal.job_control.clear_session_if_matches(&session);
+            if installed {
+                self.terminal.job_control.clear_session_if_matches(&session);
+            }
             return Err(err);
+        }
+        // The new session owns the terminal now, so the old one's claim is safe
+        // to drop. Doing this last keeps a rejected steal from stranding the VT
+        // with no session at all.
+        if let Some(previous) = self.terminal.job_control.session()
+            && !Arc::ptr_eq(&previous, &session)
+        {
+            previous.unset_terminal(&terminal);
+            self.terminal
+                .job_control
+                .clear_session_if_matches(&previous);
         }
         Ok(())
     }

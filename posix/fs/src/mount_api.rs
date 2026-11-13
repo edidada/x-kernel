@@ -666,14 +666,15 @@ pub fn sys_mount_setattr(
         return Ok(0);
     }
     let filename = Filename::new(path.as_str());
+    // The flag word admits `AT_SYMLINK_NOFOLLOW`/`AT_NO_AUTOMOUNT`, so the walk
+    // has to honour them: following a symlink here would re-attribute a
+    // different mount than the caller named.
+    let mut lookup = LookupFlags::follow();
+    if flags & 0x100 != 0 {
+        lookup = LookupFlags::no_follow();
+    }
     let target = with_fs_at(dfd, &filename, |fs| {
-        filename.lookup_at(
-            fs.root(),
-            fs.pwd(),
-            LookupIntent::Open,
-            LookupFlags::follow(),
-            &cred,
-        )
+        filename.lookup_at(fs.root(), fs.pwd(), LookupIntent::Open, lookup, &cred)
     })?;
     let namespace = kprocess::current_user_process().mnt_ns()?;
     namespace.set_mount_attributes(&target, set_flags, clr_flags, recursive)?;

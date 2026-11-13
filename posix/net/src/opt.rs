@@ -605,6 +605,17 @@ pub fn sys_setsockopt(
         socket.set_option(SetSocketOption::NetlinkCapAck(&enabled))?;
         return Ok(0);
     }
+    if level == SOL_SOCKET
+        && (optname == linux_raw_sys::net::SO_SNDBUFFORCE
+            || optname == linux_raw_sys::net::SO_RCVBUFFORCE)
+    {
+        // `sock_setsockopt` gates both force forms on `sockopt_capable(
+        // CAP_NET_ADMIN)`: they bypass the `wmem_max`/`rmem_max` clamp, which is
+        // exactly the privilege a non-root caller must not have.
+        if !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN) {
+            return Err(KError::PermissionDenied);
+        }
+    }
     if level == SOL_NETLINK
         && (optname == NETLINK_ADD_MEMBERSHIP || optname == NETLINK_DROP_MEMBERSHIP)
     {
