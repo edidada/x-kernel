@@ -19,11 +19,11 @@ members = [
     "entry",
     # boot and loader
     "boot/*",
+    "task/kbandwidth",
     "task/kworkng/crates/kworkerpool_ng",
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
-    "task/kbandwidth",
     "sync/krtmutex",
     "tee/tee_crypto",
     "tee/xdice",
