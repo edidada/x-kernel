@@ -278,7 +278,7 @@ ABI：ksyscall / posix / tee
 
 <!-- TODO(data): 看板可公开访问后补充链接；发布版本性能结论前确认 Linux 基线配置。 -->
 
-## 配置## 配置
+## 配置
 
 ```bash
 make menuconfig        # 修改配置

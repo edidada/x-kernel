@@ -278,7 +278,7 @@ Source: [daily-test #140](https://jenkins.openkylin.top/job/daily-test/140/) (20
 
 <!-- TODO(data): add the dashboard URL or a public report link once it is externally reachable; verify the Linux baseline configuration before publishing release claims. -->
 
-## Configuration## Configuration
+## Configuration
 
 ```bash
 make menuconfig        # edit the configuration
