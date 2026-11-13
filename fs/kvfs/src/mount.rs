@@ -616,6 +616,26 @@ impl MntNamespace {
         Ok(())
     }
 
+    /// Applies a propagation request to a mount that need not be registered.
+    ///
+    /// `mount_setattr` accepts `AT_EMPTY_PATH` on a mount fd, which names a
+    /// detached mount (`fsmount`/`open_tree` clone). Linux's `do_mount_setattr`
+    /// changes propagation on such a mount too, and it becomes observable once
+    /// `move_mount` attaches it, so requiring namespace registration here would
+    /// reject a legal request. KVFS models no shared propagation groups, so
+    /// every one of the four policies is a validated idempotent operation; this
+    /// entry point only checks that `target` is a mount root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is a mount root.
+    pub fn set_mount_propagation(&self, target: &Path) -> VfsResult<()> {
+        if !target.is_mount_root() {
+            return Err(VfsError::InvalidInput);
+        }
+        Ok(())
+    }
+
     /// Makes the mount rooted at `target` unbindable.
     ///
     /// KVFS does not yet model shared propagation groups, so an unbindable

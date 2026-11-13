@@ -657,11 +657,10 @@ pub fn sys_mount_setattr(
         let mount = mfd.mount.lock().clone().ok_or(KError::InvalidInput)?;
         let namespace = kprocess::current_user_process().mnt_ns()?;
         namespace.set_mount_attributes_on(&mount, set_flags, clr_flags, recursive)?;
-        // Propagation is applied through the mount's own root path: the fd
-        // names the mount, and these entry points validate that path is a
-        // registered mount root, which a mount fd's root is by construction.
+        // The fd may name a detached mount (`fsmount`), which is not in the
+        // namespace registry yet, so this uses the registration-free form.
         if propagation != 0 {
-            apply_mount_propagation(&namespace, &mount.root_path(), propagation)?;
+            namespace.set_mount_propagation(&mount.root_path())?;
         }
         return Ok(0);
     }
