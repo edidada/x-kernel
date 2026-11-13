@@ -15,7 +15,7 @@ X-Kernel 是一个使用 Rust 编写、面向 Linux ABI 的单体内核。它可
 
 各子系统按明确的职责与所有权边界拆分为 crate，详见[源码布局](#源码布局)。项目当前在 `main` 分支活跃开发（`0.3.0-dev`），按季度发布里程碑版本，见[发布规范](docs/release.md)。
 
-**数据基线：** 能力与 CI 数据最后核对于 2026-11-12。性能、syscall 覆盖和 workload 表中标记为 `TBD` 的数据是下一次测量前的占位符。
+**数据基线：** 能力与 CI 数据最后核对于 2026-11-13。性能数据来自 daily-test #140；syscall 覆盖和 workload 表中标记为 `TBD` 的数据仍是占位符。
 
 ## 目录
 
@@ -44,7 +44,7 @@ X-Kernel 是一个使用 Rust 编写、面向 Linux ABI 的单体内核。它可
 - **四种架构，三种进入 CI。** x86_64、AArch64、RISC-V 64、LoongArch64 均受支持；x86_64、AArch64、RISC-V 进入 PR 流水线（构建、单测、运行时测试，x86_64/AArch64 另有 TEE 测试）。LoongArch64、CSV、pKVM、RK3588 目前有文档和手动路径，但尚未进入 PR CI。
 - **内核内的机密计算。** 海光 CSV 支持硬件根密钥（HUK）和 attestation（远程证明）；ARM virtCCA 支持 HUK 派生；pKVM 是实验性的 guest 模式。TEE 支持 TA（可信应用）生命周期、安全存储，以及基于 RustCrypto 的 SM2/ECC/RSA。
 - **桌面级图形能力。** DRM/KMS、virtio-gpu 2D/3D、EDID、page-flip/vblank、fbdev 与 virtio-input 支持 Chromium（Wayland）、niri、Xorg/Xwayland，包含键盘/鼠标输入和宿主窗口 resize。合成器与 rootfs 属于用户态产物；内核提供显示、GPU 和输入接口。
-- **成体系的验证。** 代码树内有 4,731 个 `#[def_test]` 和 1,165 个 `#[test]` 用例；外部 [Starry Test Harness](https://gitee.com/openkylin/starry-test-harness) 在 `ci` 和 `ci-test-iter` 中提供 51 个 guest 用例。带日期的公开通过率报告尚未发布，详见[验证](#验证)和[已知限制](#已知限制)。
+- **成体系的验证。** 代码树内有 4,733 个 `#[def_test]` 和 1,167 个 `#[test]` 用例；外部 [Starry Test Harness](https://gitee.com/openkylin/starry-test-harness) 在 `ci` 和 `ci-test-iter` 中提供 51 个 guest 用例。带日期的公开通过率报告尚未发布，详见[验证](#验证)和[已知限制](#已知限制)。
 
 ## 快速开始
 
@@ -233,7 +233,7 @@ ABI：ksyscall / posix / tee
 
 | 层级 | 运行方式 | 规模 | CI 覆盖 |
 |---|---|---|---|
-| 内核单测 | `make unittest` | 4,731 个 `#[def_test]`；1,165 个 `#[test]`；122 个 `ut-tests` 目录 / 796 个文件 | x86_64、AArch64、RISC-V |
+| 内核单测 | `make unittest` | 4,733 个 `#[def_test]`；1,167 个 `#[test]`；122 个 `ut-tests` 目录 / 797 个文件 | x86_64、AArch64、RISC-V |
 | PR 系统调用回归 | `make ci-test`（拉取 Starry Harness） | 40 个用例：38 guest + 1 boot + 1 powercut | x86_64、AArch64、RISC-V |
 | 迭代 suite | Harness `make ci-test-iter run` | 14 个用例：13 guest + 1 powercut | 非 PR 门禁 |
 | Debian APT suite | Harness `make ci-debian run` | 1 个 APT guest 用例 | 非 PR 门禁 |
@@ -263,18 +263,22 @@ ABI：ksyscall / posix / tee
 
 ## 性能
 
-> **状态：占位。** 下表故意使用 `TBD`，后续从 CI 性能运行结果填充。
+来源：[daily-test #140](https://jenkins.openkylin.top/job/daily-test/140/)（2026-11-12 18:27 UTC，内核 commit `150d0c7`），Linux 基线来自同一次 daily run。该构建因为性能回归告警被标记为 `UNSTABLE`，但表中的 workload 均已完成。
 
-| Workload | X-Kernel | Linux 基线 | 比值 | 配置 |
-|---|---:|---:|---:|---|
-| UnixBench syscall | `TBD` | `TBD` | `TBD` | `TBD` |
-| schbench p99 延迟 | `TBD` | `TBD` | `TBD` | `TBD` |
-| fio 4k 随机读 IOPS | `TBD` | `TBD` | `TBD` | `TBD` |
-| iperf3 TCP 吞吐 | `TBD` | `TBD` | `TBD` | `TBD` |
+| Workload | x86_64 X-Kernel | x86_64 Linux | Δ | AArch64 X-Kernel | AArch64 Linux | Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| UnixBench syscall | 846.4 | 809.6 | +4.5% | 215.7 | 319.1 | -32.4% |
+| schbench p50 唤醒延迟（µs） | 4.0 | 5.0 | -20.0% | 12.0 | 5.0 | +140.0% |
+| schbench 平均 RPS | 3,239 | 1,213 | +167.1% | 616 | 416 | +48.0% |
+| pagecache 热读（MiB/s） | 6,809 | 5,567 | +22.3% | 1,598 | 2,816 | -43.3% |
+| fio 4k 随机读（IOPS） | 994,236 | 1,281,667 | -22.4% | 425,515 | 509,865 | -16.5% |
+| iperf3 guest→host TCP（Mbps） | 101.0 | 2,256.4 | -95.5% | 11.0 | 1,484.4 | -99.3% |
 
-<!-- TODO(data): 补充内核 commit、日期、host、QEMU 参数、rootfs、CPU 数以及原始日志/报告链接。X-Kernel 与 Linux 必须使用同一配置。 -->
+Δ = X-Kernel 相对 Linux；延迟类指标越低越好。x86_64 的计算/调度/pagecache 领先 Linux 基线，但存储和 TCP 吞吐落后；AArch64 则是调度 RPS 领先，syscall、pagecache、fio、iperf3 落后。完整的 per-suite 看板数据是后续工作的依据。
 
-## 配置
+<!-- TODO(data): 看板可公开访问后补充链接；发布版本性能结论前确认 Linux 基线配置。 -->
+
+## 配置## 配置
 
 ```bash
 make menuconfig        # 修改配置
@@ -342,7 +346,7 @@ X-Kernel 使用 Rust 的内存安全模型、带 `SAFETY:` 说明的显式 `unsa
 - pKVM 仅有 feature flag；没有 defconfig，也没有 PR CI。
 - CSV 和 LoongArch64 没有 PR CI；crosvm 和 virtCCA 只有构建检查。
 - 容器支持目前由 host-network 的 `hello-world` smoke 验证；user namespace 和完整 OCI 隔离仍在推进。
-- 性能与 syscall 覆盖数据尚未发布；标记为 `TBD` 的表格是下一次测量前的占位符。
+- syscall 覆盖数据尚未发布；标记为 `TBD` 的行仍是占位符。当前性能表同时给出了领先项和差距。
 - 各架构和平台成熟度不同，详见[平台支持](#平台支持)。
 
 ## 路线图
@@ -354,7 +358,8 @@ X-Kernel 使用 Rust 的内存安全模型、带 `SAFETY:` 说明的显式 `unsa
 - 将 RK3588 VOP2 显示支持合入 `main`。
 - 补齐 user namespace 与 cgroup，支持完整 OCI 容器。
 - 跟进 Linux 新增系统调用和 ABI 修订。
-- 发布性能报告（UnixBench、schbench、fio、iperf3），包含 Linux 基线。
+- 收敛 daily-test #140 暴露的存储/TCP 吞吐差距。
+- 发布包含 Linux 基线配置的稳定性能报告。
 - 发布 syscall 覆盖清单和统计脚本。
 
 ## 许可证

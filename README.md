@@ -15,7 +15,7 @@ X-Kernel is a monolithic kernel written in Rust that targets the Linux ABI. It r
 
 Subsystems are separated into crates with explicit ownership boundaries; see [Source layout](#source-layout). The project is under active development on `main` (`0.3.0-dev`), with quarterly milestone releases ([release policy](docs/release.md)).
 
-**Data baseline:** capability and CI data were last verified on 2026-11-12. Performance, syscall-coverage, and workload tables marked `TBD` are placeholders for the next measurement run.
+**Data baseline:** capability and CI data were last verified on 2026-11-13. Performance uses daily-test #140; syscall-coverage and workload rows marked `TBD` are placeholders for the next measurement run.
 
 ## Contents
 
@@ -44,7 +44,7 @@ Subsystems are separated into crates with explicit ownership boundaries; see [So
 - **Four architectures, three in CI.** x86_64, AArch64, RISC-V 64, and LoongArch64 are supported; x86_64, AArch64, and RISC-V run the PR pipeline (build, unit tests, runtime tests, and TEE tests on x86_64/AArch64). LoongArch64, CSV, pKVM, and RK3588 are documented but not yet in PR CI.
 - **Confidential computing in the kernel.** Hygon CSV has hardware-rooted key derivation (HUK) and attestation. ARM virtCCA has HUK derivation; pKVM is an experimental guest mode. TEE support includes TA (Trusted Application) lifecycle, secure storage, and SM2/ECC/RSA through RustCrypto.
 - **Desktop-ready graphics.** DRM/KMS, virtio-gpu 2D/3D, EDID, page-flip/vblank, fbdev, and virtio-input support Chromium (Wayland), niri, and Xorg/Xwayland, including keyboard/mouse input and host-window resize. The compositor and rootfs are userspace artifacts; the kernel provides the display, GPU, and input interfaces.
-- **Verification at scale.** The tree contains 4,731 `#[def_test]` cases and 1,165 `#[test]` cases; the external [Starry Test Harness](https://gitee.com/openkylin/starry-test-harness) adds 51 guest cases across `ci` and `ci-test-iter`. Dated public pass-rate reports are not yet published; see [Verification](#verification) and [Known Limitations](#known-limitations).
+- **Verification at scale.** The tree contains 4,733 `#[def_test]` cases and 1,167 `#[test]` cases; the external [Starry Test Harness](https://gitee.com/openkylin/starry-test-harness) adds 51 guest cases across `ci` and `ci-test-iter`. Dated public pass-rate reports are not yet published; see [Verification](#verification) and [Known Limitations](#known-limitations).
 
 ## Quick Start
 
@@ -233,7 +233,7 @@ The project uses three primary verification layers (in-kernel unit tests, extern
 
 | Layer | How it runs | Scale | CI coverage |
 |---|---|---|---|
-| Kernel unit tests | `make unittest` | 4,731 `#[def_test]` cases; 1,165 `#[test]` cases; 122 `ut-tests` directories / 796 files | x86_64, AArch64, RISC-V |
+| Kernel unit tests | `make unittest` | 4,733 `#[def_test]` cases; 1,167 `#[test]` cases; 122 `ut-tests` directories / 797 files | x86_64, AArch64, RISC-V |
 | PR syscall regression | `make ci-test` (clones the Starry Harness) | 40 cases: 38 guest + 1 boot + 1 powercut | x86_64, AArch64, RISC-V |
 | Iteration suite | Harness `make ci-test-iter run` | 14 cases: 13 guest + 1 powercut | Not a PR gate |
 | Debian APT suite | Harness `make ci-debian run` | 1 APT guest case | Not a PR gate |
@@ -263,18 +263,22 @@ The [Jenkinsfile](Jenkinsfile) defines 18 arch/check stages (excluding Prepare/P
 
 ## Performance
 
-> **Status: placeholder.** The table below is intentionally `TBD`; fill it from the CI performance run.
+Source: [daily-test #140](https://jenkins.openkylin.top/job/daily-test/140/) (2026-11-12 18:27 UTC, kernel commit `150d0c7`), with the Linux baseline from the same daily run. The build is marked `UNSTABLE` because the dashboard raised a performance-regression alert; the measured workloads completed.
 
-| Workload | X-Kernel | Linux baseline | Ratio | Configuration |
-|---|---:|---:|---:|---|
-| UnixBench syscall | `TBD` | `TBD` | `TBD` | `TBD` |
-| schbench p99 latency | `TBD` | `TBD` | `TBD` | `TBD` |
-| fio 4k randread IOPS | `TBD` | `TBD` | `TBD` | `TBD` |
-| iperf3 TCP throughput | `TBD` | `TBD` | `TBD` | `TBD` |
+| Workload | x86_64 X-Kernel | x86_64 Linux | Δ | AArch64 X-Kernel | AArch64 Linux | Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| UnixBench syscall | 846.4 | 809.6 | +4.5% | 215.7 | 319.1 | -32.4% |
+| schbench p50 wakeup (µs) | 4.0 | 5.0 | -20.0% | 12.0 | 5.0 | +140.0% |
+| schbench average RPS | 3,239 | 1,213 | +167.1% | 616 | 416 | +48.0% |
+| pagecache hot read (MiB/s) | 6,809 | 5,567 | +22.3% | 1,598 | 2,816 | -43.3% |
+| fio 4k randread (IOPS) | 994,236 | 1,281,667 | -22.4% | 425,515 | 509,865 | -16.5% |
+| iperf3 guest→host TCP (Mbps) | 101.0 | 2,256.4 | -95.5% | 11.0 | 1,484.4 | -99.3% |
 
-<!-- TODO(data): add kernel commit, date, host, QEMU args, rootfs, CPU count, and raw log/report links. Use the same configuration for X-Kernel and Linux. -->
+Δ = X-Kernel relative to Linux; for latency, lower is better. The x86_64 compute/scheduler/pagecache results are ahead of the Linux baseline, while storage and TCP throughput are behind. AArch64 is mixed: scheduler RPS is ahead, but syscall, pagecache, fio, and iperf3 are behind. The full per-suite dashboard is the source of truth for follow-up work.
 
-## Configuration
+<!-- TODO(data): add the dashboard URL or a public report link once it is externally reachable; verify the Linux baseline configuration before publishing release claims. -->
+
+## Configuration## Configuration
 
 ```bash
 make menuconfig        # edit the configuration
@@ -342,7 +346,7 @@ Please report suspected vulnerabilities privately to the maintainers rather than
 - pKVM is feature-flag only; there is no defconfig or PR CI coverage.
 - CSV and LoongArch64 have no PR CI; crosvm and virtCCA have build checks only.
 - Container support is validated by a host-network `hello-world` smoke test; user namespaces and full OCI isolation are still in progress.
-- Performance and syscall-coverage numbers are not yet published; tables marked `TBD` are placeholders for the next measurement run.
+- Syscall-coverage numbers are not yet published; rows marked `TBD` are placeholders. The current performance table shows both leads and gaps versus Linux.
 - Architecture and platform maturity differs; see [Platform Support](#platform-support).
 
 ## Roadmap
@@ -354,7 +358,8 @@ Please report suspected vulnerabilities privately to the maintainers rather than
 - Bring RK3588 VOP2 display support into `main`.
 - Complete user-namespace and cgroup support for full OCI containers.
 - Track new Linux syscalls and ABI revisions.
-- Publish the performance report (UnixBench, schbench, fio, iperf3) with Linux baselines.
+- Close the storage/TCP throughput gaps shown by daily-test #140.
+- Publish a stable performance report with the Linux baseline configuration.
 - Publish the syscall-coverage list and the counting script.
 
 ## License
