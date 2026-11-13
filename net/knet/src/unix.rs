@@ -129,6 +129,14 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     fn shutdown(&self, _how: Shutdown) -> KResult {
         Ok(())
     }
+
+    /// Queue byte counts for `SIOCOUTQ`/`SIOCINQ`; transports without byte
+    /// queues report zero, like an idle socket on Linux.
+    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+        *outq = 0;
+        *inq = 0;
+        Ok(())
+    }
 }
 
 #[enum_dispatch(Configurable, UnixTransportOps)]
@@ -667,6 +675,10 @@ impl SocketOps for UnixDomainSocket {
 
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.transport.shutdown(how)
+    }
+
+    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+        self.transport.queue_lengths(outq, inq)
     }
 }
 

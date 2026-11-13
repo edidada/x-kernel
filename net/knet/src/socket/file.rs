@@ -171,6 +171,26 @@ impl FileOperations for SocketFileOps {
         }
         Ok(())
     }
+
+    fn ioctl(&self, file: &VfsFile, _cred: &Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
+        // Linux `sock_do_ioctl` routes these to `unix_ioctl`, which copies one
+        // int result to the caller. `SIOCINQ` shares `FIONREAD`'s number
+        // (include/uapi/asm-generic/ioctls.h). Everything else keeps the
+        // generic non-tty rejection, which is what an unimplemented socket
+        // ioctl folds to through `sock_ioctl`.
+        const SIOCOUTQ: u32 = 0x5411;
+        const SIOCINQ: u32 = 0x541B;
+        if cmd != SIOCOUTQ && cmd != SIOCINQ {
+            return Err(KError::NotATty);
+        }
+        let socket = Self::socket(file)?;
+        let mut outq = 0i32;
+        let mut inq = 0i32;
+        socket.queue_lengths(&mut outq, &mut inq)?;
+        let amount = if cmd == SIOCOUTQ { outq } else { inq };
+        osvm::write_vm_bytes(arg as *mut u8, &amount.to_ne_bytes())?;
+        Ok(0)
+    }
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/socket/file/tests.rs");

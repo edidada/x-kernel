@@ -594,6 +594,30 @@ impl UnixTransportOps for StreamTransport {
         }
         Ok(())
     }
+
+    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+        // Linux `unix_inq_len` counts the bytes queued on the receive side and
+        // `unix_outq_len` the sender's `sk_wmem_alloc`, which for this channel
+        // is the tx bytes the peer has not consumed yet. Each count is read
+        // under its producer's ordering lock, sequentially so the two guards
+        // never nest; an unconnected socket reports zeros like Linux does for
+        // an empty `sk_receive_queue`.
+        let channel = self.channel.lock();
+        let Some(chan) = channel.as_ref() else {
+            *outq = 0;
+            *inq = 0;
+            return Ok(());
+        };
+        {
+            let _tx_order = chan.peer_endpoint.tx_order.lock();
+            *inq = chan.rx.occupied_len() as i32;
+        }
+        {
+            let _tx_order = self.endpoint.tx_order.lock();
+            *outq = chan.tx.occupied_len() as i32;
+        }
+        Ok(())
+    }
 }
 
 fn finish_send_on_error(total: usize, error: KError) -> KResult<usize> {

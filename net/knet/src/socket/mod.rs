@@ -393,6 +393,18 @@ pub trait SocketOps: Configurable {
     /// Shutdown the socket, closing the connection.
     fn shutdown(&self, how: Shutdown) -> KResult;
 
+    /// Reports the socket queue byte counts served by `SIOCOUTQ`/`SIOCINQ`.
+    ///
+    /// Linux serves these from `unix_ioctl` (net/unix/af_unix.c):
+    /// `unix_outq_len` counts the bytes queued for the peer (the sender's
+    /// `sk_wmem_alloc`), `unix_inq_len` the bytes ready to be read. Transports
+    /// without byte queues report zero, like an idle socket.
+    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+        *outq = 0;
+        *inq = 0;
+        Ok(())
+    }
+
     /// Returns the `SO_TYPE` value reported by `getsockopt(SOL_SOCKET,
     /// SO_TYPE)`: the type the socket was created with, which runtime
     /// supervisors (containerd-shim, ttrpc) use to validate inherited
@@ -461,6 +473,10 @@ impl<T: SocketOps + ?Sized> SocketOps for KBox<T> {
 
     fn shutdown(&self, how: Shutdown) -> KResult {
         (**self).shutdown(how)
+    }
+
+    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+        (**self).queue_lengths(outq, inq)
     }
 }
 
