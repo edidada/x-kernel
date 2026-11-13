@@ -113,9 +113,15 @@ Five entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (the same aut
   `CAP_SYS_ADMIN`; the non-cloning form does not, matching Linux, where only the `detached` branch calls `may_mount()`.
   The descriptor is opened `O_PATH`, so it names the mount without granting read access to what it covers.
 - `mount_setattr`: the flag word admits only `AT_EMPTY_PATH | AT_RECURSIVE | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT`
-  (Linux rejects anything else), `usize` below `MOUNT_ATTR_SIZE_VER0` (32) is `InvalidInput`, and an `attr_set`/`attr_clr` bit
-  outside `MOUNT_SETATTR_VALID_FLAGS` is `InvalidInput` rather than a silently ignored request. The whole call requires
-  `CAP_SYS_ADMIN`, as `may_mount()` gates it in `SYSCALL_DEFINE5(mount_setattr)`.
+  (Linux rejects anything else); `usize` above `PAGE_SIZE_4K` is `E2BIG` and one below `MOUNT_ATTR_SIZE_VER0` (32) is
+  `InvalidInput`; bytes past the published struct must be zero (`E2BIG`), so a caller relying on a field this kernel does not
+  implement is refused instead of having its request truncated. An `attr_set`/`attr_clr` bit outside
+  `MOUNT_SETATTR_VALID_FLAGS` is `InvalidInput` rather than a silently ignored request.
+  `check_mount_attr_atime` applies the field's enum semantics: `MOUNT_ATTR__ATIME` must be all-or-nothing in `attr_clr`, an
+  atime value in `attr_set` requires the group in `attr_clr`, and only RELATIME/NOATIME/STRICTATIME are representable, so a
+  combination such as `NOATIME | STRICTATIME` is `InvalidInput` rather than being applied as relatime. `propagation` admits the
+  four `MS_*` propagation flags, at most one per call; a non-zero `userns_fd` is `EOPNOTSUPP` because idmapped mounts are not
+  implemented. The whole call requires `CAP_SYS_ADMIN`, as `may_mount()` gates it in `SYSCALL_DEFINE5(mount_setattr)`.
 
 ## Memory Safety Invariants
 
