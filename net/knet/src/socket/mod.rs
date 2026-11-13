@@ -507,6 +507,15 @@ impl Socket {
         }
     }
 
+    /// Whether this socket is an `AF_NETLINK` socket.
+    ///
+    /// `SOL_NETLINK` options are meaningful only on one; Linux's
+    /// `sock_setsockopt` answers EINVAL for an option a family does not
+    /// implement, and that decision precedes any privilege check.
+    pub fn is_netlink(&self) -> bool {
+        matches!(self, Self::Netlink(_))
+    }
+
     /// Whether `NETLINK_ADD_MEMBERSHIP` is admitted without CAP_NET_ADMIN.
     ///
     /// `netlink_setsockopt` gates both membership commands on

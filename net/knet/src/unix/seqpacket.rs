@@ -314,6 +314,17 @@ impl Configurable for SeqpacketTransport {
 }
 
 impl UnixTransportOps for SeqpacketTransport {
+    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+        // `unix_inq_len` sums the queued skbs for SOCK_SEQPACKET. This transport
+        // keeps its messages in an `async_channel::Receiver`, which has no peek,
+        // so the queued byte count is not readable without consuming. Reporting
+        // 0 is a conservative "nothing queued" that cannot make a client treat a
+        // working socket as broken; the same limitation applies to datagram.
+        *outq = 0;
+        *inq = 0;
+        Ok(())
+    }
+
     fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
         let bind_slot_handle = slot.seqpacket.clone();
         let mut bind = bind_slot_handle.lock();

@@ -419,9 +419,16 @@ pub fn sys_move_mount(
     // the original in place. Take the recorded location first so a failed
     // detach leaves the fd usable.
     let mut attached_location = mfd.attached_location.lock();
+    // A graft can be rejected (unregistered mountpoint, directory/non-directory
+    // mismatch). Detaching first would then have destroyed the source for a
+    // move that cannot happen, so the same checks run before anything changes.
+    if !namespace.can_attach_detached_mount(&mount, &target) {
+        *slot = Some(mount);
+        return Err(KError::InvalidInput);
+    }
     let previous_location = attached_location.take();
     if let Some(location) = previous_location.as_ref()
-        && let Err(error) = namespace.detach_tree(location)
+        && let Err(error) = namespace.detach_for_move(location)
     {
         *attached_location = previous_location;
         *slot = Some(mount);
@@ -430,8 +437,8 @@ pub fn sys_move_mount(
     if let Err(error) = namespace.attach_detached_mount(mount.clone(), &target) {
         // `attach_detached_mount` fails before installing, so restore both the
         // fd's mount slot and, when the source was detached, its old location.
-        // The subtree went with it, and `attach_detached_mount` re-registers a
-        // whole subtree, so re-attaching the root restores the shape.
+        // Only the edge to the old parent was removed, so re-grafting the root
+        // restores the tree with its subtree intact.
         if let Some(location) = previous_location {
             let _ = namespace.attach_detached_mount(mount.clone(), &location);
             *attached_location = Some(location);
@@ -493,7 +500,10 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
     })?;
     let (root, kept, open_path) = if is_clone {
         let namespace = kprocess::current_user_process().mnt_ns()?;
-        let (root, kept) = namespace.clone_mount_tree(&source)?;
+        // Linux's `__do_loopback` clones only the named mount unless the caller
+        // passed `AT_RECURSIVE`.
+        let (root, kept) =
+            namespace.clone_mount_tree_recursive(&source, flags & AT_RECURSIVE != 0)?;
         let open_path = root.root_path();
         (root, kept, open_path)
     } else {

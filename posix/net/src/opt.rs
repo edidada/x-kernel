@@ -592,6 +592,27 @@ fn set_ip_length_tolerant(
     Ok(Some(()))
 }
 
+/// Checks the family and the capability `NETLINK_ADD_MEMBERSHIP` needs.
+///
+/// Linux's `sock_setsockopt` answers EINVAL for an option a family does not
+/// implement, and that precedes any privilege check, so a non-netlink socket is
+/// refused as a wrong option rather than as a credentials failure. A netlink
+/// socket then goes through `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`:
+/// the protocol's table decides, or CAP_NET_ADMIN overrides. `NETLINK_USERSOCK`
+/// sets only `NL_CFG_F_NONROOT_SEND`, so its groups need the capability, and
+/// `ns_capable`'s failure is EPERM.
+fn check_group_membership_privilege(socket: &Arc<Socket>) -> KResult<()> {
+    if !socket.is_netlink() {
+        return Err(KError::InvalidInput);
+    }
+    if !socket.allows_unprivileged_group_subscribe()
+        && !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN)
+    {
+        return Err(KError::OperationNotPermitted);
+    }
+    Ok(())
+}
+
 /// Sets a socket option at a specified protocol level.
 ///
 /// # Errors
@@ -691,18 +712,7 @@ pub fn sys_setsockopt(
     if level == SOL_NETLINK
         && (optname == NETLINK_ADD_MEMBERSHIP || optname == NETLINK_DROP_MEMBERSHIP)
     {
-        // `netlink_setsockopt` gates both membership commands on
-        // `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`: the protocol table
-        // decides, or CAP_NET_ADMIN overrides. `NETLINK_ROUTE` sets that flag
-        // (unprivileged subscribers are normal) while `NETLINK_KOBJECT_UEVENT`
-        // does not, so joining a kobject-uevent group needs the capability.
-        // The socket-family check keeps a non-netlink socket's EINVAL.
-        if !socket.allows_unprivileged_group_subscribe()
-            && !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN)
-        {
-            // `netlink_allowed` fails through `ns_capable`, which is EPERM.
-            return Err(KError::OperationNotPermitted);
-        }
+        check_group_membership_privilege(&socket)?;
     }
     if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         if optlen == 0 {
