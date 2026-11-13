@@ -50,13 +50,12 @@ RUN for arch in amd64 arm64 riscv64; do \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=tools /usr/local/cargo/ /usr/local/cargo/
-COPY --from=tools /usr/local/rustup/ /usr/local/rustup/
+COPY --from=tools --chown=${CI_UID}:${CI_GID} /usr/local/rustup/ /usr/local/rustup/
 COPY --from=tools /usr/local/lib/dylint/drivers/ /usr/local/lib/dylint/drivers/
 COPY --from=tools /.cargo/config.toml /.cargo/config.toml
 RUN groupadd --gid "${CI_GID}" jenkins; \
     useradd --uid "${CI_UID}" --gid "${CI_GID}" --create-home --home-dir /home/jenkins --shell /bin/bash jenkins; \
-    install -d -o "${CI_UID}" -g "${CI_GID}" -m 0755 /xkernel-target /xkernel-cache /xkernel-cache/cargo /xkernel-cache/rootfs /usr/local/rustup/toolchains; \
-    chown -R "${CI_UID}:${CI_GID}" /usr/local/rustup
+    install -d -o "${CI_UID}" -g "${CI_GID}" -m 0755 /xkernel-target /xkernel-cache /xkernel-cache/cargo /xkernel-cache/rootfs /usr/local/rustup/toolchains
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/xkernel-cache/cargo \
