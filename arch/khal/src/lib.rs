@@ -94,6 +94,32 @@ pub mod context {
 }
 
 pub use kcpu::{instrs as asm, userspace as uspace};
+
+/// Userspace-visible CPU capability bits for `AT_HWCAP`, in the architecture's
+/// own encoding.
+///
+/// This is the value Linux publishes in the auxiliary vector, which user
+/// runtimes read instead of probing control registers: glibc's IFUNC
+/// resolvers, and LLVM's `getHostCPUFeatures` behind llvmpipe's JIT, select
+/// instruction paths from it. Publishing zero makes them believe the CPU has
+/// no optional features, and a JIT that then emits a feature-gated path faults.
+///
+/// The snapshot is the boot CPU's: every CPU in a running system must agree on
+/// these bits, and identification is published before user processes start.
+/// Architectures without such a vector report zero.
+pub fn cpu_hwcap() -> usize {
+    cpu_hwcap_impl()
+}
+
+#[cfg(target_arch = "aarch64")]
+fn cpu_hwcap_impl() -> usize {
+    kcpu::boot_cpu_info().map_or(0, |info| info.hwcap())
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn cpu_hwcap_impl() -> usize {
+    0
+}
 #[cfg(feature = "smp")]
 pub use kplat::boot::prepare_local_interrupts;
 pub use kplat::boot::{activate_local_interrupts, prepare_interrupts};

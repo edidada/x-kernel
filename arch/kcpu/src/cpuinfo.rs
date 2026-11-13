@@ -21,6 +21,16 @@ pub fn cpu_info(cpu_id: LogicalCpuId) -> Option<&'static CpuInfo> {
     lookup_cpu_info(&CPU_INFO, cpu_id)
 }
 
+/// Returns the boot CPU's identity and capability snapshot.
+///
+/// Callers that need the platform's capability set rather than one specific
+/// CPU's use this: logical CPU 0 is the boot CPU, and every CPU in a running
+/// system agrees on the bits such a caller publishes (for example the
+/// `AT_HWCAP` word given to user processes).
+pub fn boot_cpu_info() -> Option<&'static CpuInfo> {
+    cpu_info(LogicalCpuId::new(0))
+}
+
 fn lookup_cpu_info(slots: &[Once<CpuInfo>], cpu_id: LogicalCpuId) -> Option<&CpuInfo> {
     slots.get(cpu_id.as_usize())?.get()
 }
