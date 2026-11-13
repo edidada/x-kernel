@@ -130,7 +130,19 @@ impl Configurable for StreamTransport {
             return Ok(OptionHandled::Yes);
         }
         if let O::AcceptConn(listening) = opt {
-            **listening = self.listener.lock().is_some();
+            // Linux reports SO_ACCEPTCONN from `sk_state == TCP_LISTEN`
+            // (`sk_getsockopt`, net/core/sock.c), and only `unix_listen` moves
+            // a unix stream socket into TCP_LISTEN. `bind()` already installs
+            // the `ListenerQueue` here, so a bound-but-unlistened socket must
+            // still report false: every sd-bus AF_UNIX client binds an abstract
+            // description address before connecting (`bind_description`,
+            // bus-socket.c) and `bus_socket_start_auth` gates fd-passing
+            // negotiation on `sd_is_socket(..., listening=0)`.
+            **listening = self
+                .listener
+                .lock()
+                .as_ref()
+                .is_some_and(|listener| listener.is_listening());
             return Ok(OptionHandled::Yes);
         }
         if self.options.get_option_inner(opt)?.is_yes() {
