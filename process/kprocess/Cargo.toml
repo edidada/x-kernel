@@ -21,6 +21,7 @@ kaddr_layout.workspace = true
 karch.workspace = true
 kcpu_id_map.workspace = true
 kcred.workspace = true
+kbandwidth.workspace = true
 kcgroup.workspace = true
 kerrno.workspace = true
 khal.workspace = true
@@ -42,6 +43,7 @@ ktimer.workspace = true
 linux_sysno.workspace = true
 lazyinit.workspace = true
 intrusive-collections.workspace = true
+memacct.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 tee_task_iface = { workspace = true, optional = true }

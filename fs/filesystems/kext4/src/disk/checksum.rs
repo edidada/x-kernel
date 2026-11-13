@@ -4,14 +4,38 @@
 
 const CRC32C_POLYNOMIAL: u32 = 0x82f6_3b78;
 
+/// Reflected CRC32C lookup table.
+///
+/// Entry `i` is the register value after running byte `i` through all eight
+/// polynomial steps. The old bit-at-a-time loop did that work on every byte of
+/// every checksummed block; metadata updates checksum several 4 KiB blocks per
+/// syscall, which made the arithmetic the dominant cost of a create or unlink.
+const fn crc32c_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut index = 0;
+    while index < 256 {
+        let mut crc = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ CRC32C_POLYNOMIAL
+            } else {
+                crc >> 1
+            };
+            bit += 1;
+        }
+        table[index] = crc;
+        index += 1;
+    }
+    table
+}
+
+static CRC32C_TABLE: [u32; 256] = crc32c_table();
+
 /// Updates a Linux-style CRC32C value without applying a final complement.
 pub(crate) fn crc32c(mut crc: u32, bytes: &[u8]) -> u32 {
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (CRC32C_POLYNOMIAL & mask);
-        }
+    for &byte in bytes {
+        crc = (crc >> 8) ^ CRC32C_TABLE[((crc ^ u32::from(byte)) & 0xff) as usize];
     }
     crc
 }

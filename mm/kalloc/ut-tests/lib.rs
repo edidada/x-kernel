@@ -54,3 +54,28 @@ fn test_usages_allow_cross_cpu_free() {
         0
     );
 }
+
+#[def_test]
+fn test_remove_memory_requires_all_pages_free() {
+    use super::{PAGE_SIZE_4K, global_allocator, global_add_memory, global_remove_memory};
+    use super::UsageKind;
+
+    let page = global_allocator()
+        .alloc_pages(1, PAGE_SIZE_4K, UsageKind::Global)
+        .expect("buddy allocator has a free page");
+    assert!(
+        global_remove_memory(page, PAGE_SIZE_4K).is_err(),
+        "an allocated page must keep its memory block online"
+    );
+
+    global_allocator().dealloc_pages(page, 1, UsageKind::Global);
+    global_remove_memory(page, PAGE_SIZE_4K)
+        .expect("the calling CPU's page cache is flushed before the scan");
+    global_add_memory(page, PAGE_SIZE_4K).expect("re-adding a removed region restores its pages");
+
+    let reallocated = global_allocator()
+        .alloc_pages_at(page, 1, PAGE_SIZE_4K, UsageKind::Global)
+        .expect("the restored page is allocatable again");
+    assert_eq!(reallocated, page);
+    global_allocator().dealloc_pages(reallocated, 1, UsageKind::Global);
+}

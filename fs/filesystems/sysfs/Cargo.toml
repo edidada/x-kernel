@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+hotplug.workspace = true
 kalloc-types.workspace = true
 kdevice.workspace = true
 kdevice_uevent.workspace = true

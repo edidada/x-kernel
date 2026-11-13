@@ -192,15 +192,17 @@ tree update and its cache invalidation ordered against other device callbacks.
 - Uevent files use a command-file operation so one node supports readable
   properties and validated action replay.
 
-## DRM class entries
+## System device projection
 
-A DRM card is projected as `class/drm/cardN` (and `renderD*`) from the card's
-device node. The connector is projected next to it, as Linux does: a symlink
-`class/drm/cardN-<connector>` into the card's device directory plus a
-`cardN-<connector>/` directory carrying `status`, `dpms`, `modes`, `enabled`
-and `edid`. The attribute contents are the connector snapshot the DRM class
-device supplies when it is published (`DrmDeviceNodeMetadata`), so sysfs never
-reaches into the display driver itself: a device that stops reporting a
-connector stops has its entry removed with the node, and a card that has no
-connector metadata gets no connector entry.
+`/sys/devices/system/{cpu,memory}` is synthesized from `kdevice`'s system
+device registry. Directories exist only for present devices, so a removal
+tombstone makes the directory disappear on rebuild. Per-CPU `online` is
+writable except for CPU 0, whose file is read-only `1`; `present` and
+`possible` are read-only. Memory blocks expose `phys_index`, `state`,
+`online` and `block_size_bytes`. The global `cpu/{online,possible}` files use
+cpulist formatting and the global memory files use a hex block bitmap.
 
+System devices have no major/minor number and no `/dev` node. Attributes are a
+separate `TreeEntry::SystemAttribute` variant carrying the device ID, kind and
+permission, because ordinary attributes are hard-wired read-only. The tree is
+rebuilt after every registry event and changed paths are invalidated.

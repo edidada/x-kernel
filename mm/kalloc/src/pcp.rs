@@ -212,6 +212,16 @@ impl<const NR_PAGES: usize, const COUNT: usize> PerCpuPages<NR_PAGES, COUNT> {
         }
     }
 
+    /// Return every cached block to the buddy allocator.
+    ///
+    /// `drain` frees the supplied block plus up to `COUNT * 2/3` cached
+    /// blocks, so repeating it empties the cache without allocating.
+    fn flush(&mut self, palloc: &mut BuddyPageAllocator<PAGE_SIZE_4K>) {
+        while let Some(addr) = self.try_pop() {
+            self.drain(palloc, addr);
+        }
+    }
+
     /// Bulk-drain entries from the cache back to the buddy allocator.
     ///
     /// Collects the freed block plus up to `COUNT * 2/3` additional
@@ -422,6 +432,26 @@ pub(crate) fn fill_cache(
         }
         _ => unreachable!("fill_cache: num_pages={} not in 1..=4", num_pages),
     }
+}
+
+/// Return every block cached on the calling CPU to the buddy allocator.
+///
+/// Memory removal uses this so pages freed on this CPU are visible to the
+/// buddy allocator's free-page accounting instead of staying in the cache.
+///
+/// Must be called while holding the global buddy allocator lock (IRQs disabled).
+pub(crate) fn flush_all(
+    owner: &mut crate::AllocLocalOwner,
+    palloc: &mut BuddyPageAllocator<PAGE_SIZE_4K>,
+) {
+    let pin = owner.guard();
+    // SAFETY: owner pins this CPU with IRQs disabled and exclusively owns
+    // PCP_PAGESET throughout these cache operations.
+    let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+    cache.cache1.flush(palloc);
+    cache.cache2.flush(palloc);
+    cache.cache3.flush(palloc);
+    cache.cache4.flush(palloc);
 }
 
 /// Bulk-drain the cache for `num_pages`-size blocks to the buddy allocator.

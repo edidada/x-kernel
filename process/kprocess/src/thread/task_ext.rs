@@ -73,6 +73,19 @@ impl UserTaskRuntime for Thread {
         }
     }
 
+    fn memcg_id(&self) -> memacct::MemcgId {
+        self.cgroup().map_or(memacct::MemcgId::NONE, |cgroup| {
+            cgroup.effective_memcg().id()
+        })
+    }
+
+    fn cpu_bandwidth(&self) -> Option<alloc::sync::Arc<kbandwidth::Bandwidth>> {
+        // cgroup v2 `cpu.max` is non-hierarchical: a task bills its own
+        // cgroup's tracker, and the no-internal-process rule guarantees every
+        // task-bearing cgroup owns one once the controller is enabled.
+        self.cgroup().and_then(|cgroup| cgroup.cpu_bandwidth())
+    }
+
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }

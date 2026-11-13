@@ -280,7 +280,12 @@ fn do_new_mount(
     lookup_root: &Path,
     lookup_pwd: &Path,
 ) -> KResult<()> {
-    namespace.mount_new(mountpoint, mount_flags, context, lookup_root, lookup_pwd)?;
+    let super_block_owner = kprocess::current_cred().user_ns_arc().clone();
+    let mount = namespace.mount_new(mountpoint, mount_flags, context, lookup_root, lookup_pwd)?;
+    // Linux derives `s_user_ns` from the mount that created the superblock;
+    // `init_user_ns` keeps the first writer, so re-mounts of an already
+    // published superblock are no-ops, matching `sget` reuse semantics.
+    mount.super_block().init_user_ns(super_block_owner);
     Ok(())
 }
 

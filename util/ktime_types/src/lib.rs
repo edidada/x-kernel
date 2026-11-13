@@ -6,7 +6,8 @@
 //!
 //! [`Frequency`] represents a rate in canonical hertz, [`TimeSpan`] represents
 //! a non-negative length of time, [`Instant`] represents a point in a specific
-//! clock domain, and [`SystemTime`] represents a signed Unix timestamp.
+//! clock domain, and [`SystemTime`] represents a signed Unix timestamp. [`TimeSpec`] is a
+//! signed, normalized offset in the kernel `timespec` shape.
 //! [`TimestampLimits`] describes the precision and inclusive range a persistent
 //! format can represent. The distinct types prevent rates, durations,
 //! deadlines, and wall clock timestamps from being mixed accidentally.
@@ -19,6 +20,7 @@ mod frequency;
 mod instant;
 mod span;
 mod system_time;
+mod time_spec;
 mod timestamp;
 mod units;
 
@@ -30,6 +32,7 @@ pub use instant::{
 };
 pub use span::TimeSpan;
 pub use system_time::{SystemTime, SystemTimeError};
+pub use time_spec::TimeSpec;
 pub use timestamp::TimestampLimits;
 pub use units::{
     MICROS_PER_SEC, MILLIS_PER_SEC, NANOS_PER_MICROS, NANOS_PER_MILLIS, NANOS_PER_SEC,

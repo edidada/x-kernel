@@ -14,6 +14,7 @@ use core::mem::{self, MaybeUninit};
 
 use kerrno::{KError, KResult};
 use khal::uspace::UserContext;
+use kvfs::{OpenFlags, Permission};
 use linux_raw_sys::general::clone_args;
 
 use super::clone::{CloneFlags, CloneRequest};
@@ -117,6 +118,25 @@ pub(crate) fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KRe
         .set_child_tid(kargs.child_tid as usize)
         .set_tls(kargs.tls as usize)
         .set_pidfd(kargs.pidfd as usize);
+
+    if flags.contains(CloneFlags::INTO_CGROUP) {
+        if kargs.cgroup == 0 {
+            return Err(KError::BadFileDescriptor);
+        }
+        // The descriptor must name a cgroup v2 directory the caller may
+        // write to. Resolve it here, before a child exists, so every
+        // rejection path is a clean error return.
+        let file = kprocess::current_files().get_file(kargs.cgroup as i32)?;
+        if !file.flags().contains(OpenFlags::DIRECTORY) {
+            return Err(KError::BadFileDescriptor);
+        }
+        let cgroup = cgroup2fs::cgroup_from_file(&file).ok_or(KError::BadFileDescriptor)?;
+        file.inode()
+            .permission(Permission::MAY_WRITE, &kprocess::current_cred())?;
+        req.set_cgroup_target(cgroup);
+    } else if kargs.cgroup != 0 {
+        return Err(KError::InvalidInput);
+    }
 
     req.do_clone(uctx)
 }

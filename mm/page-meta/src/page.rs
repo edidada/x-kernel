@@ -4,7 +4,7 @@
 
 //! Resident page identities and the reference-state protocol used by page owners.
 
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 
 use strum::{IntoStaticStr, VariantArray};
 
@@ -45,9 +45,15 @@ pub struct PageMeta {
     references: AtomicUsize,
     head_offset_pages: AtomicU32,
     usage_kind: AtomicU8,
-    allocation_order: AtomicU8,
-    is_permanent: bool,
+    /// Allocation order in the low 7 bits; bit 7 is the permanent flag.
+    allocation_order_and_flags: AtomicU8,
+    /// Owning memory cgroup. 16 bits cap the id space, which is well above
+    /// any cgroup count a single guest exposes through `memacct`.
+    memcg: AtomicU16,
 }
+
+const ALLOCATION_ORDER_MASK: u8 = (1 << 7) - 1;
+const PERMANENT_FLAG: u8 = 1 << 7;
 
 impl PageMeta {
     pub(crate) const fn new() -> Self {
@@ -55,20 +61,60 @@ impl PageMeta {
             references: AtomicUsize::new(0),
             head_offset_pages: AtomicU32::new(0),
             usage_kind: AtomicU8::new(UsageKind::Global as u8),
-            allocation_order: AtomicU8::new(0),
-            is_permanent: false,
+            allocation_order_and_flags: AtomicU8::new(0),
+            memcg: AtomicU16::new(0),
         }
     }
 
     pub(crate) fn mark_permanent(&mut self) {
-        self.is_permanent = true;
+        self.allocation_order_and_flags
+            .fetch_or(PERMANENT_FLAG, Ordering::Relaxed);
     }
 
     /// Reports a permanent reservation installed before table publication.
     /// False does not establish that the page is free, including allocator-owned
     /// bitmap, heap or PCP pages whose ownership remains with that allocator.
     pub fn is_permanent(&self) -> bool {
-        self.is_permanent
+        self.allocation_order_and_flags.load(Ordering::Relaxed) & PERMANENT_FLAG != 0
+    }
+
+    /// Records the memory cgroup that owns this page's charge.
+    ///
+    /// The allocator's exclusive ownership of a fresh page serializes this
+    /// store against any concurrent lookup.
+    pub fn set_memcg(&self, id: u32) {
+        self.memcg.store(id as u16, Ordering::Release);
+    }
+
+    /// Returns the recorded memory cgroup, or zero when uncharged.
+    pub fn memcg(&self) -> u32 {
+        self.memcg.load(Ordering::Acquire) as u32
+    }
+
+    /// Returns the recorded allocation order.
+    pub fn allocation_order(&self) -> u8 {
+        self.allocation_order_and_flags.load(Ordering::Relaxed) & ALLOCATION_ORDER_MASK
+    }
+
+    /// Records the allocation order. Callers own exclusivity of the head page.
+    pub fn set_allocation_order(&self, order: u8) {
+        debug_assert!(order <= ALLOCATION_ORDER_MASK);
+        let flags = self.allocation_order_and_flags.load(Ordering::Relaxed) & PERMANENT_FLAG;
+        self.allocation_order_and_flags
+            .store(flags | order, Ordering::Relaxed);
+    }
+
+    /// Returns the allocation class recorded for this page incarnation.
+    pub fn usage_kind(&self) -> UsageKind {
+        UsageKind::VARIANTS[self.usage_kind.load(Ordering::Relaxed) as usize]
+    }
+
+    /// Claims the recorded memory cgroup for a release.
+    ///
+    /// The page's exclusive owner calls this exactly once before returning the
+    /// page to inventory, so the charge cannot be released twice.
+    pub fn take_memcg(&self) -> u32 {
+        self.memcg.swap(0, Ordering::AcqRel) as u32
     }
 }
 
@@ -159,10 +205,10 @@ impl PageMeta {
         // do not acquire ownership or form an atomic snapshot. The caller owns
         // exclusive unpublished backing, so no geometry writer can race the
         // Relaxed order check after inventory handoff.
-        !self.is_permanent
+        !self.is_permanent()
             && self.head_offset_pages.load(Ordering::Acquire) == 0
             && self.references.load(Ordering::Acquire) == 0
-            && self.allocation_order.load(Ordering::Relaxed) == 0
+            && self.allocation_order() == 0
     }
 
     /// Adds a hold at an allocation head without another control block.
@@ -247,7 +293,7 @@ impl PageMeta {
     /// Panics if the descriptor is not Retiring.
     unsafe fn finish_retirement(&self) -> UsageKind {
         assert_eq!(self.head_offset_pages.load(Ordering::Relaxed), 0);
-        assert_eq!(self.allocation_order.load(Ordering::Relaxed), 0);
+        assert_eq!(self.allocation_order(), 0);
         assert_eq!(self.references.load(Ordering::Relaxed), RETIRING);
         // claim_reference publishes a valid class before the first hold. The
         // retiring owner snapshots it before inventory can start another round.

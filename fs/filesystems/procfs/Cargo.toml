@@ -38,6 +38,7 @@ kdevice.workspace = true
 khal.workspace = true
 klockstat = { workspace = true, optional = true }
 klogger.workspace = true
+kidentity.workspace = true
 kprocess.workspace = true
 ktask.workspace = true
 ktty.workspace = true

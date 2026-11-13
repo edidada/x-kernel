@@ -205,6 +205,9 @@ impl Folio {
     /// Allocates a zeroed, non-uptodate page not yet associated with a mapping.
     pub fn new_zeroed(index: PageIndex) -> KResult<Self> {
         let page = alloc_zeroed_page_ref(UsageKind::PageCache).map_err(|_| KError::NoMemory)?;
+        if memacct::charge_frame(page.phys_addr(), PAGE_SIZE_4K).is_err() {
+            return Err(KError::NoMemory);
+        }
         Ok(Self {
             index,
             page,
@@ -368,6 +371,7 @@ impl Drop for Folio {
         }
         // Cache quota was returned when the mapping detached this identity.
         // This PageRef only keeps physical storage alive for remaining owners.
+        memacct::uncharge_frame(self.page.phys_addr(), PAGE_SIZE_4K);
     }
 }
 

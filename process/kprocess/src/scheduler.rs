@@ -47,6 +47,13 @@ pub fn migrate_process_cgroup_with(
     authorize(&source, target)?;
     kcgroup::TaskMembership::migrate_group(&memberships, target)?;
     *cgroup_target = Some(target.clone());
+    // Per-task controller samples follow the migration: `memcg_id` decides
+    // where new page faults charge, and the bandwidth tracker decides which
+    // `cpu.max` scheduler ticks bill. Both derive from the destination now.
+    for task in &tasks {
+        task.set_memcg_id(target.effective_memcg().id());
+        task.set_cpu_bandwidth(target.cpu_bandwidth());
+    }
     Ok(())
 }
 
