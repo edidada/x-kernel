@@ -831,6 +831,17 @@ fn build_tree(
                 TreeEntry::Symlink(relative_symlink(&source, &target)),
             );
         }
+        // logind opens /sys/class/tty/tty0/active to decide whether seat0 has
+        // VTs (seat_has_vts); without it CreateSession rejects VTNr. The fixed
+        // VT console is always VT 1 (ktty's VT_GETSTATE reports VT 1), so
+        // publish that alias as the active console.
+        if registration.class() == "tty" && registration.name() == "tty0" {
+            add_entry(
+                &mut tree,
+                format!("{leaf}/active"),
+                TreeEntry::CharacterAttribute(registration.clone(), append_line("tty1")),
+            );
+        }
     }
 
     for projected in nodes.values() {
@@ -908,12 +919,18 @@ fn build_tree(
                 ));
             }
             properties.push(("DRIVER".to_string(), node.driver_name().to_string()));
-            let path = format!("devices/{physical}/uevent");
+            // `DEVPATH` names the device directory, never the `uevent`
+            // attribute inside it; Linux's `kobject_uevent_env` reports
+            // `/devices/pci0000:00/0000:00:04.0`, and udev derives its database
+            // entry (`data/+pci:0000:00:04.0`) from that path. Publishing the
+            // attribute path makes udev look for a device called "uevent" and
+            // drop the event.
+            let device_path = format!("devices/{physical}");
             add_entry(
                 &mut tree,
-                path.clone(),
+                format!("{device_path}/uevent"),
                 TreeEntry::RawUevent {
-                    path,
+                    path: device_path,
                     subsystem: "pci".to_string(),
                     contents: render_uevent(&properties),
                     properties,
@@ -1009,6 +1026,12 @@ impl SimpleDirOps for SysfsDirectory {
         Ok(KBox::new(names.into_iter())?)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: the leaf builder is one match over tree entry kinds; \
+                  splitting the uevent write arms out would hide that the two command-file \
+                  closures share the same action-parsing rule"
+    )]
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let path = self.child_path(name);
         let entry = device_projection()
@@ -1057,18 +1080,27 @@ impl SimpleDirOps for SysfsDirectory {
                                 kdevice_uevent::uevent_file_contents(node, scope)
                             })
                             .map(Some),
-                        SimpleFileOperation::Write { data, .. } => projected
-                            .with_available(|node| -> VfsResult<()> {
-                                let action = core::str::from_utf8(data)
-                                    .map_err(|_| VfsError::InvalidInput)?
-                                    .trim_matches(['\0', '\n', '\r', ' ']);
-                                let action = UeventAction::try_from(action)
-                                    .map_err(|()| VfsError::InvalidInput)?;
-                                kdevice_uevent::publish(action, node, scope);
-                                Ok(())
-                            })
-                            .and_then(|result| result)
-                            .map(|()| None),
+                        SimpleFileOperation::Write { data, .. } => {
+                            projected
+                                .with_available(|node| -> VfsResult<()> {
+                                    // Linux `kobject_uevent_store` takes the action
+                                    // from the first token only: userspace may
+                                    // append extra `KEY=VALUE` pairs after it, and
+                                    // `udevadm trigger` sends "add <uuid>".
+                                    let text = core::str::from_utf8(data)
+                                        .map_err(|_| VfsError::InvalidInput)?;
+                                    let action = text
+                                        .split_ascii_whitespace()
+                                        .next()
+                                        .ok_or(VfsError::InvalidInput)?;
+                                    let action = UeventAction::try_from(action)
+                                        .map_err(|()| VfsError::InvalidInput)?;
+                                    kdevice_uevent::publish(action, node, scope);
+                                    Ok(())
+                                })
+                                .and_then(|result| result)
+                                .map(|()| None)
+                        }
                     }
                 });
                 lookup.file(
@@ -1090,9 +1122,14 @@ impl SimpleDirOps for SysfsDirectory {
                     match operation {
                         SimpleFileOperation::Read => Ok(Some(contents.clone())),
                         SimpleFileOperation::Write { data, .. } => {
-                            let action = core::str::from_utf8(data)
-                                .map_err(|_| VfsError::InvalidInput)?
-                                .trim_matches(['\0', '\n', '\r', ' ']);
+                            // Same first-token rule as the device-node uevent
+                            // attribute: extra `KEY=VALUE` words are allowed.
+                            let text =
+                                core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            let action = text
+                                .split_ascii_whitespace()
+                                .next()
+                                .ok_or(VfsError::InvalidInput)?;
                             let action = UeventAction::try_from(action)
                                 .map_err(|()| VfsError::InvalidInput)?;
                             kdevice_uevent::publish_raw(action, &path, &subsystem, &properties);
