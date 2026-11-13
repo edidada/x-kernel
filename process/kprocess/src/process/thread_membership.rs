@@ -44,6 +44,7 @@ impl ThreadMembership {
     }
 
     fn exit_task(&mut self, task: &KtaskRef, leader_cred: Option<Arc<Cred>>) -> bool {
+        ktask::forget_bandwidth_member(task);
         let did_exit = self
             .members
             .get(&task.as_thread().identity_token())
@@ -567,6 +568,20 @@ impl Process {
     /// Records the parent-death signal for this process.
     pub fn set_pdeath_signal(&self, signo: u32) {
         self.pdeath_signal.store(signo, Ordering::Relaxed);
+    }
+
+    /// The exec-time auxiliary vector as flattened `(type, value)` words,
+    /// trailing NULL last. Empty until the first exec commits it. Read by
+    /// `prctl(PR_GET_AUXV)` and `/proc/<pid>/auxv`.
+    pub fn saved_aux(&self) -> Vec<u64> {
+        self.saved_aux.lock().clone()
+    }
+
+    /// Replaces the exec-time auxiliary vector. Exec commits this right after
+    /// the new image is installed, so a concurrent reader observes either the
+    /// empty vector or the complete new one.
+    pub fn set_saved_aux(&self, saved_aux: Vec<u64>) {
+        *self.saved_aux.lock() = saved_aux;
     }
 
     /// The exit code of the [`Process`].

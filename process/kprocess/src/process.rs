@@ -10,7 +10,10 @@ mod runtime_access;
 mod thread_membership;
 mod tree;
 
-use alloc::sync::{Arc, Weak};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
@@ -57,10 +60,16 @@ pub struct Process {
     group_exit: SpinNoIrq<ThreadGroupExitState>,
     /// Process-wide `exec` serialization gate (Linux `cred_guard_mutex`).
     exec_gate: exec_gate::ExecGate,
+    /// Readiness source for a user namespace whose ID maps a process may be
+    /// waiting on before it first enters user space.
     lifecycle: ProcessLifecycleState,
     /// Signal delivered to the parent's `wait` when this process's parent dies
     /// first (`prctl(PR_SET_PDEATHSIG)`).
     pdeath_signal: AtomicU32,
+    /// Exec-time auxiliary vector, flattened as `(type, value)` words with the
+    /// trailing NULL entry last. Written once per exec, read by
+    /// `prctl(PR_GET_AUXV)` and `/proc/<pid>/auxv` (Linux `mm->saved_aux`).
+    saved_aux: SpinNoIrq<Vec<u64>>,
     /// Fast-path gate for periodic CPU-timer checks.
     ///
     /// True while any CPU-time-driven timer (ITIMER_VIRTUAL, ITIMER_PROF,
@@ -421,6 +430,7 @@ impl Process {
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             exec_gate: exec_gate::ExecGate::new(),
             pdeath_signal: AtomicU32::new(0),
+            saved_aux: SpinNoIrq::new(Vec::new()),
             cpu_timers_armed: AtomicBool::new(false),
             lifecycle: ProcessLifecycleState::new(),
             child_subreaper: AtomicBool::new(false),

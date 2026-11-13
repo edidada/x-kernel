@@ -4,7 +4,7 @@
 
 //! POSIX process credentials.
 
-mod caps;
+pub(crate) mod caps;
 mod group;
 mod model;
 mod securebits;

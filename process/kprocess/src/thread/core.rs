@@ -353,15 +353,21 @@ impl Thread {
         let files = self
             .files
             .fork(matches!(config.fd_table, crate::ForkFdTable::Shared))?;
+        let parent_cred = self.subjective_cred();
         fork_process_runtime(
             &self.process_runtime(),
             config,
-            |process_runtime, task_number| {
+            self.subjective_cred(),
+            |process_runtime, task_number, user_ns| {
+                let cred = match user_ns {
+                    Some(user_ns) => Arc::new(parent_cred.with_user_namespace(user_ns)),
+                    None => parent_cred,
+                };
                 let thread = Self::new_with_charge(
                     process_runtime.process().clone(),
                     process_runtime,
                     task_number.clone(),
-                    self.subjective_cred(),
+                    cred,
                     charge,
                     self.no_new_privileges(),
                     files,

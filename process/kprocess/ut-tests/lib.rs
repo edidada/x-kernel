@@ -1232,10 +1232,11 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
         .prepare_unshare(
             kns::NamespaceFlags::NEWUTS | kns::NamespaceFlags::NEWIPC,
             kns::UnshareContext {
-                privileged: true,
+                cred: initial_cred(),
                 fs_shared_with_others: false,
                 unshare_fs: false,
                 unshare_files: false,
+                current_cgroup: None,
             },
             &thread.process().fs_context().expect("fs context").lock(),
         )
@@ -1274,10 +1275,11 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
         .prepare_unshare(
             kns::NamespaceFlags::empty(),
             kns::UnshareContext {
-                privileged: false,
+                cred: Arc::new(Cred::new(1000, 1000)),
                 fs_shared_with_others: false,
                 unshare_fs: false,
                 unshare_files: true,
+                current_cgroup: None,
             },
             &thread.process().fs_context().expect("fs context").lock(),
         )
@@ -1571,7 +1573,8 @@ fn test_final_thread_preparation_failure_rolls_back_child_relation() {
             exit_signal: Some(ksignal::Signo::SIGCHLD),
             cgroup_target: None,
         },
-        |runtime, identity| {
+        parent_task.as_thread().real_cred().clone(),
+        |runtime: Arc<crate::process_runtime::ProcessRuntime>, identity, _user_ns| {
             observation = Some((
                 runtime.process().clone(),
                 Arc::downgrade(&runtime),
@@ -1715,6 +1718,9 @@ fn test_clone_fs_shares_the_filesystem_context_umask() {
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
             cgroup_target: None,
+        })
+        .inspect_err(|err| {
+            unittest::ktest_println!("CLONE_FS prepare error: {:?}", err);
         })
         .expect("CLONE_FS test child should prepare");
     let child_process = child.process().clone();
@@ -2299,6 +2305,32 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
     );
 
     wait_reap::assert_reap_zombie_process(&child);
+}
+
+#[def_test(serial)]
+fn test_zombie_keeps_namespaces_until_reap() {
+    let init = ensure_init();
+    let child = init.fork(581);
+    let task = publish_test_thread(&child, 581);
+    let is_last = process_exit::finish_thread_exit(&child, &task, 0);
+    assert!(is_last, "fixture child must have a single thread");
+
+    let autoreap = process_exit::complete_process_exit(&child);
+    assert!(!autoreap, "default SIGCHLD must leave a waitable child");
+
+    // Linux releases nsproxy in release_task(), not do_exit(), so an unreaped
+    // zombie still serves /proc/<pid>/ns/* lookups (runc/kata pin namespaces
+    // of an already-exited container init through those files).
+    child
+        .mnt_ns()
+        .expect("waitable zombie must keep its namespace owner");
+
+    wait_reap::assert_reap_zombie_process(&child);
+
+    assert!(
+        child.mnt_ns().is_err(),
+        "reaped process must release its namespace owner"
+    );
 }
 
 #[def_test(serial)]

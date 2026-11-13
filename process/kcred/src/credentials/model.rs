@@ -12,6 +12,7 @@ use super::{
     CAP_FS_MASK, CAP_LAST_CAP, CAP_SETGID, CAP_SETPCAP, CAP_SETUID, CAP_SYS_NICE, CAP_SYS_PTRACE,
     CapSet, CapSets, Gid, Uid, is_valid_gid, is_valid_uid, securebits::SecureBits,
 };
+use crate::{UserNamespace, initial_user_namespace};
 
 /// Credential mode used by Linux `PTRACE_MODE_READ_*` access checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +47,8 @@ pub struct Cred {
     cap_ambient: CapSet,
     /// Capabilities allowed in file capability sets installed by exec.
     cap_bounding: CapSet,
+    /// User namespace in which the IDs and capability checks are interpreted.
+    user_ns: Arc<UserNamespace>,
 }
 
 /// Returns the single-capability mask for `cap`.
@@ -58,8 +61,44 @@ fn cap_bit(cap: u32) -> KResult<CapSet> {
 
 impl Cred {
     /// Creates root credentials for the initial process.
+    ///
+    /// The result owns the full bounding, permitted, and effective sets in the
+    /// initial user namespace. The inheritable and ambient sets start empty,
+    /// matching a freshly booted Linux process.
     pub fn root() -> Self {
-        Self::new(0, 0)
+        Self::root_in_user_namespace(initial_user_namespace())
+    }
+
+    /// Creates root credentials interpreted in `user_ns`.
+    ///
+    /// All IDs are zero in `user_ns`, not in the initial namespace. The result
+    /// owns the full capability sets, which makes it the credential a task
+    /// receives immediately after creating a user namespace. This is a trusted
+    /// constructor: it neither maps the IDs nor grants the caller authority
+    /// over `user_ns`.
+    pub fn root_in_user_namespace(user_ns: Arc<UserNamespace>) -> Self {
+        let mut cred = Self::new_in_user_namespace(0, 0, user_ns);
+        cred.capabilities = CapSets::FULL_PRIVILEGED;
+        cred
+    }
+
+    /// Returns a copy whose capabilities are interpreted in `user_ns`.
+    ///
+    /// This is the credential transition performed by `set_cred_user_ns()`:
+    /// entering a user namespace resets every piece of capability state that
+    /// describes authority rather than identity. The permitted, effective and
+    /// bounding sets become full in the new namespace, while the inheritable
+    /// and ambient sets are cleared because their old values are only
+    /// meaningful in the previous namespace. Securebits return to their
+    /// defaults for the same reason. IDs are left untouched.
+    pub fn with_user_namespace(&self, user_ns: Arc<UserNamespace>) -> Self {
+        let mut cred = self.prepare();
+        cred.user_ns = user_ns;
+        cred.securebits = SecureBits::empty();
+        cred.capabilities = CapSets::new(CapSet::FULL, CapSet::FULL, CapSet::EMPTY);
+        cred.cap_ambient = CapSet::EMPTY;
+        cred.cap_bounding = CapSet::FULL;
+        cred
     }
 
     /// Creates credentials with all user IDs set to `uid` and all group IDs to `gid`.
@@ -69,6 +108,17 @@ impl Cred {
     /// must authorize these IDs before publishing the credential. Allocation
     /// of the shared group storage follows the allocator's failure policy.
     pub fn new(uid: Uid, gid: Gid) -> Self {
+        Self::new_in_user_namespace(uid, gid, initial_user_namespace())
+    }
+
+    /// Creates credentials with every user and group ID set to `uid` and `gid`
+    /// in `user_ns`.
+    ///
+    /// Capability sets follow the same rules as [`Self::new`]: a numeric-root
+    /// identity starts fully privileged inside `user_ns`. This trusted
+    /// constructor performs no authorization or ID mapping; the caller must
+    /// establish that the IDs are valid in `user_ns` before publishing.
+    pub fn new_in_user_namespace(uid: Uid, gid: Gid, user_ns: Arc<UserNamespace>) -> Self {
         Self {
             ruid: uid,
             euid: uid,
@@ -87,6 +137,7 @@ impl Cred {
             },
             cap_ambient: CapSet::EMPTY,
             cap_bounding: CapSet::FULL,
+            user_ns,
         }
     }
 
@@ -359,6 +410,55 @@ impl Cred {
     /// capability numbers above [`CAP_LAST_CAP`] are never reported as held.
     pub fn has_cap(&self, cap: u32) -> bool {
         self.capabilities.has_effective(cap)
+    }
+
+    /// Returns the user namespace this credential is interpreted in.
+    pub fn user_ns(&self) -> &UserNamespace {
+        &self.user_ns
+    }
+
+    /// Returns the shared handle to this credential's user namespace.
+    pub fn user_ns_arc(&self) -> &Arc<UserNamespace> {
+        &self.user_ns
+    }
+
+    /// Returns whether this credential holds `cap` over `target_ns`.
+    ///
+    /// This is Linux `cap_capable()`: walk from the target namespace up the
+    /// parent chain, granting authority through two implicit rules before
+    /// consulting the caller's effective set in its own namespace:
+    ///
+    /// 1. The owner (`euid`) of a user namespace has all capabilities over
+    ///    that namespace when acting from its direct parent.
+    /// 2. Authority never flows downward: a target at or below the caller's
+    ///    own namespace level is denied outright.
+    pub fn has_cap_in(&self, target_ns: &UserNamespace, cap: u32) -> bool {
+        let own_ns = self.user_ns();
+        let mut namespace = target_ns;
+        loop {
+            if core::ptr::eq(namespace, own_ns) {
+                return self.has_cap(cap);
+            }
+            // A target that is not a strict descendant of the caller's
+            // namespace cannot be administered from here.
+            if namespace.level() <= own_ns.level() {
+                return false;
+            }
+            // Rule 1: the creator of a user namespace owns all capabilities
+            // inside it when checking from the namespace's direct parent.
+            if let Some(parent) = namespace.parent()
+                && core::ptr::eq(&**parent, own_ns)
+                && namespace.owner_euid() == self.euid()
+            {
+                return true;
+            }
+            match namespace.parent() {
+                Some(parent) => namespace = parent,
+                // Walking past the initial namespace without meeting the
+                // caller's namespace means the caller is unrelated.
+                None => return false,
+            }
+        }
     }
 
     /// Applies Linux `capset(2)` transition rules and installs `new`.
