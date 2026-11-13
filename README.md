@@ -323,16 +323,10 @@ Please report suspected vulnerabilities privately to the maintainers rather than
 
 ## Known Limitations
 
-- Linux ABI coverage is a subset; unimplemented syscalls return `ENOSYS`.
-- `mlock`/`mlock2` currently return success without pinning pages; treat memory locking as not yet implemented.
-- ext4 and network coverage are partial relative to Linux, and dated public pass-rate reports are not yet published.
-- Desktop workloads (Chromium, niri, Xorg/Xwayland) are userspace components validated manually; PR CI covers the kernel-side build and unit tests; end-to-end desktop runs and the DRM ABI guest tests are manual.
-- RK3588 is a minimal UART-console boot target; VOP2 display is on a feature branch, not `main`.
-- pKVM is feature-flag only; there is no defconfig or PR CI coverage.
-- CSV and LoongArch64 have no PR CI; crosvm and virtCCA have build checks only.
-- Container support is validated by a host-network `hello-world` smoke test; user namespaces and full OCI isolation are still in progress.
-- Syscall-coverage numbers are not yet published. The current performance table shows both leads and gaps versus Linux; TCP throughput is the largest gap.
-- Architecture and platform maturity differs; see [Platform Support](#platform-support).
+- Linux ABI coverage is a subset; some syscalls, filesystem/network features, and memory-management paths remain incomplete. Dated public pass-rate reports are not yet published.
+- Platform maturity varies; CSV, RK3588, pKVM, LoongArch, crosvm, and virtCCA have limited or no PR CI, and some require manual or feature-flag setup.
+- Desktop and container workloads are validated manually; PR CI covers the kernel-side build and unit paths, not end-to-end desktop or OCI runs.
+- Performance is workload-dependent: compute, scheduler, and pagecache results are competitive; storage and TCP throughput still trail Linux.
 
 ## Roadmap
 

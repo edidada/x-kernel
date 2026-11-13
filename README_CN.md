@@ -323,16 +323,10 @@ X-Kernel 使用 Rust 的内存安全模型、带 `SAFETY:` 说明的显式 `unsa
 
 ## 已知限制
 
-- Linux ABI 覆盖是子集；未实现的系统调用返回 `ENOSYS`。
-- `mlock`/`mlock2` 目前返回成功但不会锁定页面；内存锁定应视为尚未实现。
-- 相对 Linux，ext4 和网络覆盖仍不完整；带日期的公开通过率报告尚未发布。
-- 桌面负载（Chromium、niri、Xorg/Xwayland）属于用户态组件，采用手动验证；PR CI 覆盖内核侧构建和单元测试；端到端桌面运行与 DRM ABI guest 测试均为手动验证。
-- RK3588 目前是最小 UART 控制台启动目标；VOP2 显示在特性分支，不在 `main`。
-- pKVM 仅有 feature flag；没有 defconfig，也没有 PR CI。
-- CSV 和 LoongArch64 没有 PR CI；crosvm 和 virtCCA 只有构建检查。
-- 容器支持目前由 host-network 的 `hello-world` smoke 验证；user namespace 和完整 OCI 隔离仍在推进。
-- syscall 覆盖数据尚未发布。当前性能表同时给出了领先项和差距，TCP 吞吐是最大差距。
-- 各架构和平台成熟度不同，详见[平台支持](#平台支持)。
+- Linux ABI 覆盖是子集；部分系统调用、文件系统/网络能力和内存管理路径仍不完整；带日期的公开通过率报告尚未发布。
+- 各平台成熟度不同；CSV、RK3588、pKVM、LoongArch、crosvm、virtCCA 的 PR CI 覆盖有限或没有，部分需要手动或 feature flag 配置。
+- 桌面和容器负载采用手动验证；PR CI 覆盖内核侧构建和单测，不包含端到端桌面或 OCI 运行。
+- 性能表现依赖 workload：计算、调度和 pagecache 有竞争力，存储和 TCP 吞吐仍落后 Linux。
 
 ## 路线图
 
