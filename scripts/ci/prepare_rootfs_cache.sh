@@ -10,7 +10,7 @@ fi
 [[ $# -gt 0 ]] || { echo "usage: $0 <arch> [<arch> ...]" >&2; exit 2; }
 export ROOTFS_CACHE_DIR="${ROOTFS_CACHE_DIR:-${repo_root}/.cache/rootfs}"
 export ROOTFS_VARIANT="${ROOTFS_VARIANT:-xkernel-glibc}"
-export ROOTFS_RELEASE_TAG="${ROOTFS_RELEASE_TAG:-latest}"
+export ROOTFS_RELEASE_TAG="${ROOTFS_RELEASE_TAG:-rootfs-v20261111}"
 [[ "$ROOTFS_VARIANT" == xkernel-glibc ]] || {
     echo "CI requires ROOTFS_VARIANT=xkernel-glibc" >&2; exit 2;
 }
