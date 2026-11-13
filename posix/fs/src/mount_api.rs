@@ -410,7 +410,7 @@ pub fn sys_move_mount(
     let mut attached_location = mfd.attached_location.lock();
     let previous_location = attached_location.take();
     if let Some(location) = previous_location.as_ref()
-        && let Err(error) = namespace.detach(location)
+        && let Err(error) = namespace.detach_tree(location)
     {
         *attached_location = previous_location;
         *slot = Some(mount);
@@ -419,6 +419,8 @@ pub fn sys_move_mount(
     if let Err(error) = namespace.attach_detached_mount(mount.clone(), &target) {
         // `attach_detached_mount` fails before installing, so restore both the
         // fd's mount slot and, when the source was detached, its old location.
+        // The subtree went with it, and `attach_detached_mount` re-registers a
+        // whole subtree, so re-attaching the root restores the shape.
         if let Some(location) = previous_location {
             let _ = namespace.attach_detached_mount(mount.clone(), &location);
             *attached_location = Some(location);
