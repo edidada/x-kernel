@@ -642,7 +642,10 @@ pub fn sys_mount_setattr(
     // implemented, so a non-zero descriptor is reported unsupported rather than
     // silently ignored.
     let propagation = UserConstPtr::<u64>::from(base + 16).read_vm()?;
-    let userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
+    // Read so the whole published struct is known to be accessible, the way
+    // `copy_struct_from_user` faults on an unreadable page even for a field it
+    // then ignores. Linux only consults the value when IDMAP is requested.
+    let _userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
     // `copy_struct_from_user` handles a larger structure by requiring the bytes
     // this kernel does not know to be zero: a newer caller's extension must not
     // be silently ignored, so a non-zero tail is `E2BIG` rather than success.
@@ -676,12 +679,10 @@ pub fn sys_mount_setattr(
         // that does not resolve, rather than claiming success.
         return Err(KError::BadFileDescriptor);
     }
-    if userns_fd != 0 {
-        // A descriptor without the attribute bit is meaningless in Linux's
-        // handler (it returns 0 when neither word names IDMAP), so the field
-        // must not be dropped silently.
-        return Err(KError::OperationNotSupported);
-    }
+    // `build_mount_idmapped` returns 0 without looking at `userns_fd` when
+    // neither attribute word names IDMAP, so a stray descriptor is ignored
+    // rather than refused: a caller reusing a struct must not be failed for a
+    // field the request does not use (`userns_fd` stays unread past this).
     let (set_flags, clr_flags) = mount_attr_set_clr(attr_set, attr_clr);
     let recursive = flags & AT_RECURSIVE != 0;
     // AT_EMPTY_PATH on an open_tree/fsmount fd operates on that mount directly
