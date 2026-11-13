@@ -29,6 +29,7 @@ ksync = { workspace = true }
 ktask = { workspace = true }
 log = { workspace = true }
 memaddr = { workspace = true }
+memacct = { workspace = true }
 unittest = { workspace = true }
 
 [lints]

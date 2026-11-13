@@ -138,7 +138,7 @@ impl PageMetaTable {
         for index in 0..num_pages {
             let meta = self.group_meta(first_pfn + index);
             debug_assert_eq!(meta.head_offset_pages.load(Ordering::Relaxed), 0);
-            debug_assert_eq!(meta.allocation_order.load(Ordering::Relaxed), 0);
+            debug_assert_eq!(meta.allocation_order(), 0);
             // SAFETY: the caller retains one original independent hold per page.
             let result = unsafe { meta.clone_reference() };
             if let Err(error) = result {
@@ -185,7 +185,7 @@ impl PageMetaTable {
             return Ok(head);
         }
         head.begin_reference()?;
-        head.allocation_order.store(order, Ordering::Relaxed);
+        head.set_allocation_order(order);
         head.usage_kind.store(kind as u8, Ordering::Relaxed);
         for index in 1..allocation.page_count() {
             let tail = self.group_meta(head_pfn + index);
@@ -232,7 +232,7 @@ impl PageMetaTable {
         {
             return Err(PageMetaError::InvalidState);
         }
-        let allocation = geometry(head_pfn, head.allocation_order.load(Ordering::Relaxed))?;
+        let allocation = geometry(head_pfn, head.allocation_order())?;
         if distance >= allocation.page_count() {
             return Err(PageMetaError::InvalidRange);
         }
@@ -254,7 +254,7 @@ impl PageMetaTable {
         let head = self.group_meta(head_pfn);
         assert_eq!(head.references.load(Ordering::Relaxed), RETIRING);
         assert_eq!(head.head_offset_pages.load(Ordering::Relaxed), 0);
-        let count = 1usize << head.allocation_order.load(Ordering::Relaxed);
+        let count = 1usize << head.allocation_order();
         for index in 1..count {
             let tail = self.group_meta(head_pfn + index);
             assert_eq!(tail.references.load(Ordering::Relaxed), 0);
@@ -262,7 +262,7 @@ impl PageMetaTable {
             // publication; a later incarnation cannot race these stores.
             tail.head_offset_pages.store(0, Ordering::Release);
         }
-        head.allocation_order.store(0, Ordering::Relaxed);
+        head.set_allocation_order(0);
         // SAFETY: this caller uniquely owns Retiring, and all group links/order
         // have been cleared while storage is still outside allocator inventory.
         unsafe { head.finish_retirement() }
@@ -305,7 +305,7 @@ impl PageMetaTable {
             // exposed until this whole operation returns to the unique caller.
             tail.head_offset_pages.store(0, Ordering::Release);
         }
-        head.allocation_order.store(0, Ordering::Relaxed);
+        head.set_allocation_order(0);
         head.references.store(1, Ordering::Release);
         Ok(allocation)
     }
