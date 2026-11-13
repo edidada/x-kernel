@@ -295,4 +295,4 @@ Licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTIC
 
 ## Acknowledgements
 
-X-Kernel is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS) and [ArceOS](https://github.com/arceos-org/arceos). The Starry Test Harness provides the shared user-space regression framework.
+X-Kernel is inspired by [StarryOS](https://github.com/Starry-OS/StarryOS) and [ArceOS](https://github.com/arceos-org/arceos).

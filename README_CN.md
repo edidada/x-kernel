@@ -295,4 +295,4 @@ X-Kernel 使用 Rust 的内存安全模型、带 `SAFETY:` 说明的显式 `unsa
 
 ## 致谢
 
-X-Kernel 受 [StarryOS](https://github.com/Starry-OS/StarryOS) 和 [ArceOS](https://github.com/arceos-org/arceos) 启发。Starry Test Harness 提供了共享的用户态回归框架。
+X-Kernel 受 [StarryOS](https://github.com/Starry-OS/StarryOS) 和 [ArceOS](https://github.com/arceos-org/arceos) 启发。
