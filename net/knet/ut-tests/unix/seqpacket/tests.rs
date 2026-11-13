@@ -455,3 +455,49 @@ fn read_shutdown_drains_queued_records_and_rejects_peer_sends() {
         Err(KError::BrokenPipe)
     );
 }
+
+/// `SO_ACCEPTCONN` reports whether the socket reached `TCP_LISTEN`.
+///
+/// `unix_listen` accepts `SOCK_SEQPACKET`, so `sk_getsockopt` answers from
+/// `sk_state` here too. The transport delegates to the shared general options,
+/// and that handler answers `AcceptConn` with a constant `false` *and* reports
+/// the option handled, so a seqpacket socket must answer before delegating; the
+/// regression this pins made a listening seqpacket socket report 0.
+#[def_test]
+fn accept_conn_follows_the_listener_state() {
+    use super::{Listener, ListenerState};
+
+    let transport = SeqpacketTransport::new();
+    let mut listening = false;
+    transport
+        .get_option(GetSocketOption::AcceptConn(&mut listening))
+        .expect("AcceptConn is a get-only option");
+    assert!(!listening, "a fresh socket is not listening");
+
+    // Installing a listener in the `Listening` state is what `listen()` leaves
+    // behind; nothing else changes the answer.
+    let (_sender, pending) = async_channel::unbounded();
+    *transport.listener.lock() = Some(Listener {
+        pending,
+        poll: Arc::new(PollSet::new()),
+        state: Arc::new(Mutex::new(ListenerState::Listening)),
+    });
+    let mut listening = false;
+    transport
+        .get_option(GetSocketOption::AcceptConn(&mut listening))
+        .expect("AcceptConn is a get-only option");
+    assert!(listening, "a listening seqpacket socket reports SO_ACCEPTCONN");
+
+    // A listener whose accept side was shut down is no longer listening, which
+    // is what `unix_listen`'s state machine reports too.
+    *transport.listener.lock() = Some(Listener {
+        pending: async_channel::unbounded().1,
+        poll: Arc::new(PollSet::new()),
+        state: Arc::new(Mutex::new(ListenerState::AcceptShutdown)),
+    });
+    let mut listening = true;
+    transport
+        .get_option(GetSocketOption::AcceptConn(&mut listening))
+        .expect("AcceptConn is a get-only option");
+    assert!(!listening, "a shut-down listener is not accepting");
+}
