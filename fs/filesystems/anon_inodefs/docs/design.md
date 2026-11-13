@@ -50,9 +50,11 @@ parallel operation owner.
 anonymous files. Initialization allocates VFS objects and acquires sleepable locks, so it must not be called in interrupt context or while holding a
 spinlock.
 
-`get_file()` may be called from ordinary task context. It needs to allocate a dentry/file, so it must not be called in interrupt
-context. The interface does not read the current task in reverse; the caller
+`get_file()` and `get_socket_file()` may be called from ordinary task context. Both need to allocate a dentry/file, so neither
+may be called in interrupt context. Neither interface reads the current task in reverse; the caller
 explicitly passes in an open credential snapshot, so kernel threads and tests can use a controlled credential.
+They differ only in the shared inode they bind — untyped for `get_file()`, socket-typed for `get_socket_file()` — and in
+nothing about context or locking.
 
 ## State Machine
 

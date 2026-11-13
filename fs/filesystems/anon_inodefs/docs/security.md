@@ -22,8 +22,9 @@ This crate does not access user pointers, MMIO/PIO, DMA, device input, firmware,
 
 ## Memory Safety Invariants
 
-- `AnonInodeFs::global()` may return only after `Once` has completely published the mount and the singleton inode.
-- All ordinary anonymous files must reference the same singleton inode; no parallel inode identity is created.
+- `AnonInodeFs::global()` may return only after `Once` has completely published the mount and both shared inodes.
+- All ordinary anonymous files must reference the same untyped shared inode, and all sockets the socket-typed one; no parallel
+  inode identity is created for either kind.
 - File private data is held by an `Arc` and must satisfy `Any + Send + Sync + 'static`.
 - Dentry operations are inherited from the superblock's static default table and must not be replaced once the dentry is bound.
 - The dynamic name reads only the dentry's own stable name snapshot.

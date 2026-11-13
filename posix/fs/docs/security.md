@@ -94,8 +94,10 @@ and check that a short buffer is not written, that normal output does not go pas
 
 ### New mount API input validation
 
-The new mount API (`mount_api.rs`) validates every user-controlled branch before touching namespace state,
-and all six entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (same authority as legacy `mount(2)`):
+The new mount API (`mount_api.rs`) validates every user-controlled branch before touching namespace state.
+Five entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (the same authority as legacy `mount(2)`);
+`open_tree` requires it only on its cloning branch, because Linux calls `may_mount()` only for `detached`
+(see that entry below). The legacy `mount` entry is described in its own row above:
 
 - `fsopen`: `flags & !FSOPEN_CLOEXEC != 0` → `InvalidInput`; the fs type name is bounded by `PATH_MAX` and must be
   registered (`kvfs::get_filesystem_type`), otherwise `NoSuchDevice`. The fs-context fd is an `anon_inodefs` anonymous inode.

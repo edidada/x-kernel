@@ -462,11 +462,21 @@ This matches Linux's observable behavior after acquiring a controlling
 terminal, so a shell started afterwards obtains a valid foreground PGID
 through `TIOCGPGRP`.
 
-Known limitation: Linux's privileged cross-session forced acquisition
-(`TIOCSCTTY` with `arg == 1`) is not implemented; that request returns
-`EPERM`, and other non-zero `arg` values return `EINVAL` (see the Known
-Limitations section of `docs/security.md`). If any step fails, the newly installed
-session/terminal state is rolled back. A per-TTY association-transaction
+`arg == 1` is Linux's privileged cross-session forced acquisition, which
+greetd needs to take a VT that a getty already owns. `steal_for` serves it:
+the caller must still be its session's leader (`sid == pid`) and hold
+`CAP_SYS_ADMIN`, and it installs the new session before releasing the old one's
+claim. Ordering matters because the acquisition has fallible steps — the
+session may already name a different terminal (`EBUSY`), or the foreground
+update may fail — and a steal that aborted after tearing down the previous
+owner would leave the VT with no session and no foreground group at all. If any
+step fails, everything this call installed is rolled back. Any other non-zero
+`arg` returns `EINVAL`.
+
+Both `bind_to` and `steal_for` run under the same per-TTY
+association-transaction lock, so a bind, an unbind and a steal on one TTY
+cannot interleave, and an older transaction cannot undo a newer successful
+binding. A per-TTY association-transaction
 lock serializes bind, unbind, and rollback, preventing an older
 transaction from undoing a newer successful binding on the same TTY.
 
