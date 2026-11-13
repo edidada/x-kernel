@@ -183,7 +183,11 @@ pub(crate) fn new_dma_buf_file(buf: &Arc<DmaBuf>, cred: &Arc<Cred>) -> VfsResult
         buf.name(),
         Arc::new(DmaBufFileOps),
         state,
-        FMode::READ | FMode::WRITE,
+        // `dma_buf_getfile` hands out a regular file, so `lseek` works: Mesa
+        // sizes an imported buffer with `lseek(SEEK_END)` before mapping it,
+        // and `VfsFile::llseek` refuses the syscall with ESPIPE when the open
+        // mode lacks the flag, before this file's `llseek` op is ever reached.
+        FMode::READ | FMode::WRITE | FMode::LSEEK,
         OpenFlags::READ_WRITE,
         cred.clone(),
     )?;
