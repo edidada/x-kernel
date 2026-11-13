@@ -26,7 +26,7 @@ pub(crate) const VSOCK_RX_BUFFER_SIZE: usize = 256 * 1024;
 const VSOCK_ACCEPT_QUEUE_SIZE: usize = 128; // accept queue size
 
 /// connection states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectionState {
     Idle,
     Listening,

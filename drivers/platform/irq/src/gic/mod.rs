@@ -131,7 +131,7 @@ pub const fn edge_irq_desc(hwirq: usize) -> kirq::IrqDesc {
     kirq::gic_edge_irq_desc(hwirq)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GicVersion {
     V2,
     V3,
@@ -146,7 +146,7 @@ impl fmt::Display for GicVersion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicMmioRegion {
     pub paddr: PhysAddr,
     pub size: usize,
@@ -162,7 +162,7 @@ pub const MAX_GICR_REGIONS: usize = 8;
 /// redistributor stride. The current arm-gic-driver backend walks one
 /// contiguous frame array, so [`init`] accepts this description only when the
 /// regions are contiguous and the stride is the architectural default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicRedistributorConfig {
     /// Regions in firmware order; only the first `count` entries are used.
     pub regions: [Option<GicMmioRegion>; MAX_GICR_REGIONS],
@@ -182,7 +182,7 @@ impl GicRedistributorConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicConfig {
     pub version: GicVersion,
     pub gicd: GicMmioRegion,
@@ -302,7 +302,7 @@ pub fn active_version() -> GicVersion {
 }
 
 /// Failure to initialize the GIC or one CPU's interface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GicInitError {
     /// A GICv2 configuration describes a redistributor.
     UnexpectedRedistributor,

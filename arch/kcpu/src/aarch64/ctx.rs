@@ -15,7 +15,7 @@ use memaddr::VirtAddr;
 
 /// Saved registers when a trap (exception) occurs.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct ExceptionContext {
     /// General-purpose registers (X0..X30).
     pub x: [u64; 31],

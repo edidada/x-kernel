@@ -277,8 +277,8 @@ fn decode_robust_pointer(pointer: *mut RobustList) -> (*mut RobustList, bool) {
 ///
 /// Layout matches the Linux robust-futex ABI: TID in the low bits, plus
 /// `FUTEX_OWNER_DIED` / `FUTEX_WAITERS` in the high bits.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RobustFutexWord(u32);
 
 impl RobustFutexWord {

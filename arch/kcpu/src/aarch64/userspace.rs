@@ -40,7 +40,7 @@ extern "C" fn kcpu_prepare_enter_user_irq() {
 
 /// Context to enter user space.
 #[repr(C, align(16))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct UserContext {
     tf: ExceptionContext,
     /// Stack Pointer (SP_EL0).
@@ -59,8 +59,8 @@ pub struct UserContext {
 }
 
 /// User-space state saved outside the ABI `mcontext_t` signal payload.
-#[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct UserRestorableContext {
     tpidr: u64,
 }
@@ -286,7 +286,7 @@ impl UserContext {
 impl_user_context_deref!(ExceptionContext, tf);
 
 /// Information about an exception that occurred in user space.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExceptionInfo {
     /// Exception Syndrome Register
     pub esr: LocalRegisterCopy<u64, ESR_EL1::Register>,

@@ -53,7 +53,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum WaitPid {
     /// Wait for any child process
     Any,

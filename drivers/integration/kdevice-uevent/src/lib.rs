@@ -30,7 +30,7 @@ const UEVENT_GROUP: u32 = 1;
 static INITIALIZATION: Once<()> = Once::new();
 
 /// Device object whose properties and path are represented by one event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UeventScope {
     /// The character device leaf, such as `event0` or `card0`.
     Device,
@@ -41,7 +41,7 @@ pub enum UeventScope {
 }
 
 /// Valid Linux kobject event action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UeventAction {
     /// Object creation.
     Add,
@@ -77,7 +77,7 @@ impl UeventAction {
 }
 
 /// The input does not name a supported uevent action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidUeventAction;
 
 impl TryFrom<&str> for UeventAction {

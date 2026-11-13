@@ -12,12 +12,12 @@ use linux_raw_sys::general::{kernel_sigaction, kernel_sigset_t, sigevent, siginf
 use crate::{UserRead, UserWrite};
 
 /// A raw `sigset_t` carrier used at the syscall boundary.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, UserRead, UserWrite)]
 #[repr(transparent)]
 #[expect(
     non_camel_case_types,
     reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
 )]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, UserRead, UserWrite)]
 pub struct k_sigset(
     /// Raw signal bits; bit zero represents signal 1.
     pub u64,
@@ -72,12 +72,12 @@ unsafe impl UserWrite for k_sigaction {}
 /// The union payload may have members smaller than the whole record. Kernel
 /// output must originate from `ksignal::SignalInfo`, whose constructor zeroes
 /// the complete `siginfo_t` before setting individual members.
-#[derive(Clone, UserRead)]
 #[repr(transparent)]
 #[expect(
     non_camel_case_types,
     reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
 )]
+#[derive(Clone, UserRead)]
 pub struct k_siginfo(
     /// Raw Linux signal-information record, including its tagged union payload.
     siginfo_t,
@@ -148,8 +148,8 @@ pub type k_sigevent = sigevent;
 unsafe impl UserRead for k_sigevent {}
 
 /// A raw `sigaltstack` carrier used at the syscall boundary.
-#[derive(Clone, Copy, UserRead, UserWrite)]
 #[repr(C)]
+#[derive(Clone, Copy, UserRead, UserWrite)]
 pub struct k_sigaltstack {
     /// User virtual address of the alternate stack base.
     pub sp: usize,

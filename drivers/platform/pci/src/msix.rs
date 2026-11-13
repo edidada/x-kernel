@@ -65,7 +65,7 @@ impl core::fmt::Display for MsixLayoutError {
 }
 
 /// Parsed MSI-X capability information for a PCI device.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MsixCapability {
     /// Offset of the MSI-X capability in PCI config space.
     pub cap_offset: u16,

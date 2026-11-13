@@ -167,7 +167,7 @@ impl TimerSigValue {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum PosixTimerClock {
     Realtime,
     Monotonic,

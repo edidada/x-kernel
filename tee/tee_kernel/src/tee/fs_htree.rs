@@ -150,7 +150,7 @@ impl Debug for TeeFsHtreeNodeImage {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TeeFsHtreeType {
     Head,
     Node,
@@ -160,7 +160,7 @@ pub(super) enum TeeFsHtreeType {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct TeeFsHtreeData {
     pub head: TeeFsHtreeImage,
     pub fek: [u8; TEE_FS_HTREE_FEK_SIZE],
@@ -1410,7 +1410,7 @@ pub(super) fn get_node(
 }
 
 /// Counter pair that does not select a committed htree header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CounterIndexError {
     InvalidCounterPair,
 }

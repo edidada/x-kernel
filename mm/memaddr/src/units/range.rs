@@ -7,10 +7,10 @@ use core::{fmt, ops::Range};
 use crate::{MemoryAddr, PhysAddr, VirtAddr};
 
 /// A range conversion failed because the end address precedes the start.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidAddrRange;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AddrRange<A: MemoryAddr> {
     pub start: A,
     pub end: A,

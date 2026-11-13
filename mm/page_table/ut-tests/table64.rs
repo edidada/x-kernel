@@ -21,8 +21,8 @@ use crate::{
     PteReplaceError, TlbFlushResult,
 };
 
-#[derive(Clone, Copy)]
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 pub(super) struct TestEntry(usize);
 
 impl PageTableEntry for TestEntry {

@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 /// An input name did not match a syscall in the selected table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnknownSyscallName;
 macro_rules! syscall_enum {
     (

@@ -22,7 +22,7 @@ static DT_BACKEND: LazyInit<DtBackend<'static>> = LazyInit::new();
 static ROOT: LazyInit<FwNode<'static>> = LazyInit::new();
 
 /// Failure to publish the firmware root node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FwNodeInitError {
     /// The device tree has no root node.
     MissingDtRoot,

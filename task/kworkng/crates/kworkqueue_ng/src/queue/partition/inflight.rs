@@ -16,7 +16,7 @@ struct ColorCount {
     observers: CompletionObservers,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InFlightAddError {
     CountOverflow,
 }

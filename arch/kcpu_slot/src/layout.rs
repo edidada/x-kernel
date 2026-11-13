@@ -65,8 +65,8 @@ impl fmt::Display for CpuInitError {
 // register-addressed path is instantiated. `.cpu_slot.template` owns VMA 0
 // after the migration removed the old `.percpu` section.
 #[cfg(target_arch = "x86_64")]
-#[used]
 #[unsafe(link_section = ".cpu_slot.template")]
+#[used]
 pub(crate) static CPU_SLOT_SELF_PTR: usize = 0;
 
 #[cfg(not(test))]

@@ -14,8 +14,8 @@ use kerrno::{KError, KResult};
 /// It is only avaliable on x86_64, and is not convenient
 /// to generate automatically via c_to_rust binding.
 #[cfg(target_arch = "x86_64")]
-#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive)]
 #[repr(i32)]
+#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive)]
 enum ArchPrctlCode {
     /// Set the GS segment base
     SetGs    = 0x1001,

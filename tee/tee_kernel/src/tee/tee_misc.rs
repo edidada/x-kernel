@@ -12,7 +12,7 @@ pub(super) const fn tee_b2hs_hsbuf_size(x: usize) -> usize {
 
 /// Invalid input or output capacity while converting TEE hexadecimal buffers.
 #[cfg(unittest)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TeeHexError {
     /// The output buffer cannot hold the encoded data and terminator.
     ShortBuffer,

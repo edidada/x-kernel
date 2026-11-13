@@ -785,7 +785,7 @@ pub(super) trait TeeFsDirfileOperations {
 }
 
 /// Implementation of TeeFsDirfileOperations for REE file system
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReeDirfOps;
 
 impl TeeFsDirfileOperations for ReeDirfOps {

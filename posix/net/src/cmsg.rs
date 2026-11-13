@@ -241,7 +241,7 @@ fn read_cmsghdr(bytes: &[u8]) -> cmsghdr {
 /// IP and other families use `sock_cmsg_send`, which has different handling.
 /// Keeping the family explicit lets the parser reject `SCM_RIGHTS` on netlink
 /// while still accepting `SCM_CREDENTIALS` there.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum CmsgFamily {
     Unix,
     Netlink,

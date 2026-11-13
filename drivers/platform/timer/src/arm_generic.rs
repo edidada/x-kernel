@@ -56,8 +56,8 @@ static NANOS_TO_CNTPCT_RATIO: Once<Ratio> = Once::new();
 // countdown value. Values above i32::MAX therefore describe an expired timer.
 const MAX_TIMER_INTERVAL_TICKS: u64 = i32::MAX as u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimerMode {
     Physical = 0,
     Virtual  = 1,
@@ -106,7 +106,7 @@ impl TimerMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerConfig {
     pub irq: usize,
     pub frequency: Option<Frequency>,

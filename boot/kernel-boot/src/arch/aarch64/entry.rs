@@ -47,8 +47,8 @@ static mut AARCH64_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::DeviceTree)
 #[unsafe(link_section = ".data")]
 static mut SECONDARY_BOOT_CONTEXT: SecondaryBootContext = SecondaryBootContext::new();
 
-#[derive(Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SecondaryBootContext {
     target_raw_cpu_id: usize,
     stack_top_paddr: usize,

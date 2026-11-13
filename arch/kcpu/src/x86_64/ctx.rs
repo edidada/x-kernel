@@ -18,7 +18,7 @@ use super::xstate::ExtendedState;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExceptionContext {
     /// General-purpose register rax.
     pub rax: u64,
@@ -261,7 +261,7 @@ struct ContextSwitchFrame {
 ///
 /// See <https://www.felixcloutier.com/x86/fxsave> for more details.
 #[repr(C, align(16))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FxStateBlock {
     /// FPU control word.
     pub fpu_ctrl: u16,

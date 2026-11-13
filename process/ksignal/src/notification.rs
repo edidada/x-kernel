@@ -14,7 +14,7 @@ use kspin::{SpinNoIrq, static_lock};
 use crate::{SignalDequeueAction, SignalInfo, Signo};
 
 /// Why a timer notification was not installed in a pending queue.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimerSignalRejection {
     /// Rearm or retirement invalidated this reservation's generation.
     Invalidated,
