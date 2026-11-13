@@ -604,8 +604,18 @@ impl SocketOps for TcpSocket {
         // listening state is refused. `recv_queue()`/`send_queue()` remain
         // readable in those states, so no state check beyond listening is
         // needed here.
-        let (received, queued) =
-            self.with_smol_socket(|socket| (socket.recv_queue(), socket.send_queue()));
+        //
+        // An ioctl can arrive after the transport was torn down (the caller
+        // still holds the descriptor while the peer-close path removed the
+        // smoltcp socket), and smoltcp's accessors panic for a dead handle.
+        // A missing socket reports an idle connection instead.
+        let Some((received, queued)) = SOCKET_SET.try_with_socket_mut(self.handle, |socket| {
+            (socket.recv_queue(), socket.send_queue())
+        }) else {
+            *outq = 0;
+            *inq = 0;
+            return Ok(());
+        };
         let to_i32 = |bytes: usize| i32::try_from(bytes).unwrap_or(i32::MAX);
         *inq = to_i32(received);
         *outq = to_i32(queued);
