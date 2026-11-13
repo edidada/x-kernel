@@ -76,6 +76,18 @@ impl NetlinkSocket {
         self.inner.protocol == NETLINK_KOBJECT_UEVENT
     }
 
+    /// Whether `NETLINK_ADD_MEMBERSHIP` is admitted without CAP_NET_ADMIN.
+    ///
+    /// `netlink_setsockopt` gates the membership commands on
+    /// `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`, which is a per-protocol
+    /// table flag: `NETLINK_ROUTE` and `NETLINK_KOBJECT_UEVENT` set it, and
+    /// `NETLINK_USERSOCK` sets only `NL_CFG_F_NONROOT_SEND`. This reuses the
+    /// table's own `allows_unprivileged_receive` so the two policies cannot
+    /// drift.
+    pub fn allows_unprivileged_group_subscribe(&self) -> bool {
+        super::port::allows_unprivileged_receive(self.inner.protocol)
+    }
+
     fn local_addr_inner(&self) -> KResult<NetlinkAddr> {
         Ok(self.inner.local_addr.read().unwrap_or_default())
     }

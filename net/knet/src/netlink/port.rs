@@ -193,6 +193,15 @@ pub(super) fn allows_unprivileged_send(protocol: i32) -> bool {
     group_policy(protocol).is_some_and(|policy| policy.allows_unprivileged_send)
 }
 
+/// Returns whether an unprivileged socket may join a multicast group.
+///
+/// Linux gates this on `NL_CFG_F_NONROOT_RECV`. `NETLINK_ROUTE` and
+/// `NETLINK_KOBJECT_UEVENT` set it; `NETLINK_USERSOCK` sets only
+/// `NL_CFG_F_NONROOT_SEND`, so its groups need `CAP_NET_ADMIN`.
+pub(super) fn allows_unprivileged_receive(protocol: i32) -> bool {
+    group_policy(protocol).is_some_and(|policy| policy.allows_unprivileged_receive)
+}
+
 /// Binds `socket` to `requested`, allocating a port ID when an unbound socket
 /// leaves `requested.pid` zero.
 ///

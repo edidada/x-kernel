@@ -573,7 +573,18 @@ fn set_ip_length_tolerant(
             socket.set_option(SetSocketOption::IpRecvTos(&enabled))?;
         }
         linux_raw_sys::net::IP_MULTICAST_TTL => {
-            let ttl = u32::try_from(value).map_err(|_| KError::InvalidInput)?;
+            // `do_ip_setsockopt`: a stream socket cannot take it, `-1` means
+            // "use 1", and anything else outside 0..=255 is EINVAL. Treating
+            // the value as an unsigned byte would have accepted 256 and
+            // rejected -1, which is the common "reset" value.
+            if socket.socket_type() == linux_raw_sys::net::SOCK_STREAM as i32 {
+                return Err(KError::InvalidInput);
+            }
+            let ttl = if value == -1 { 1 } else { value };
+            if !(0..=255).contains(&ttl) {
+                return Err(KError::InvalidInput);
+            }
+            let ttl = ttl as u32;
             socket.set_option(SetSocketOption::IpMulticastTtl(&ttl))?;
         }
         _ => unreachable!(),

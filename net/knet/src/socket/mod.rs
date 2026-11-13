@@ -520,7 +520,13 @@ impl Socket {
     /// silently grant subscription. A non-netlink socket answers `false`; its
     /// own option dispatcher rejects the command before privilege matters.
     pub fn allows_unprivileged_group_subscribe(&self) -> bool {
-        matches!(self, Self::Netlink(_))
+        match self {
+            // Linux's `NL_CFG_F_NONROOT_RECV` is a per-protocol table flag;
+            // the netlink layer owns that table and answers from it, so the
+            // policy lives in one place.
+            Self::Netlink(socket) => socket.allows_unprivileged_group_subscribe(),
+            _ => false,
+        }
     }
 
     /// Connects using the credential active at the syscall boundary.

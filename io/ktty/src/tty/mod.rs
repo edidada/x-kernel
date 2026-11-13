@@ -390,36 +390,48 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
             return Err(KError::OperationNotPermitted);
         }
         let terminal: Arc<dyn ControllingTerminal> = self.clone();
-        // Bind this session first, while the previous owner is still intact: a
-        // steal that cannot complete must leave the terminal exactly as it was.
-        // Both failure modes below are decided before anything is torn down.
-        let installed = self.terminal.job_control.ensure_session(&session)?;
+        // A steal *replaces* the current owner. `ensure_session` refuses with
+        // EBUSY when a different session already owns the terminal, which is
+        // exactly the case this path exists for, so the previous owner is
+        // released first and restored if the rest of the acquisition fails.
+        //
+        // The alternative -- verifying the new occupant before releasing the
+        // old one -- cannot work: the two claims are mutually exclusive by
+        // construction, so the new one always sees the old one as an
+        // occupant. What must be preserved instead is that a *failed* steal
+        // never leaves the terminal with no session at all.
+        let previous = self.terminal.job_control.session();
+        let restored_previous = previous.clone();
+        if let Some(previous) = previous.as_ref()
+            && !Arc::ptr_eq(previous, &session)
+        {
+            previous.unset_terminal(&terminal);
+            self.terminal.job_control.clear_session_if_matches(previous);
+        }
+        // Undo everything this call installs and put the previous owner back,
+        // so a rejected steal is a no-op rather than a terminal with neither.
+        let restore = || {
+            session.unset_terminal(&terminal);
+            self.terminal.job_control.clear_session_if_matches(&session);
+            if let Some(previous) = restored_previous.as_ref() {
+                let _ = self.terminal.job_control.ensure_session(previous);
+                let _ = previous.set_terminal(&terminal);
+            }
+        };
+        if let Err(err) = self.terminal.job_control.ensure_session(&session) {
+            restore();
+            return Err(err);
+        }
         match session.set_terminal(&terminal) {
             SetTerminalResult::Installed | SetTerminalResult::AlreadySetToSame => {}
             SetTerminalResult::Occupied => {
-                if installed {
-                    self.terminal.job_control.clear_session_if_matches(&session);
-                }
+                restore();
                 return Err(KError::ResourceBusy);
             }
         }
         if let Err(err) = self.terminal.job_control.set_foreground(&pg) {
-            session.unset_terminal(&terminal);
-            if installed {
-                self.terminal.job_control.clear_session_if_matches(&session);
-            }
+            restore();
             return Err(err);
-        }
-        // The new session owns the terminal now, so the old one's claim is safe
-        // to drop. Doing this last keeps a rejected steal from stranding the VT
-        // with no session at all.
-        if let Some(previous) = self.terminal.job_control.session()
-            && !Arc::ptr_eq(&previous, &session)
-        {
-            previous.unset_terminal(&terminal);
-            self.terminal
-                .job_control
-                .clear_session_if_matches(&previous);
         }
         Ok(())
     }
