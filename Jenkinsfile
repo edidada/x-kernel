@@ -23,7 +23,7 @@ pipeline {
         string(name: 'DEFAULT_BRANCH', defaultValue: 'main')
         string(name: 'LIBUTEE_REPO', defaultValue: 'https://gitee.com/openkylin/rust-libutee')
         string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
-        string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
+        string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'ci/pre-glibc-20261113')
         booleanParam(name: 'ENABLE_DOC_CHECK', defaultValue: false, description: 'Run Rust documentation generation check')
         booleanParam(
             name: 'ENABLE_COVERAGE',
