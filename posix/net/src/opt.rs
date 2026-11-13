@@ -605,6 +605,21 @@ pub fn sys_setsockopt(
         socket.set_option(SetSocketOption::NetlinkCapAck(&enabled))?;
         return Ok(0);
     }
+    if level == SOL_NETLINK
+        && (optname == NETLINK_ADD_MEMBERSHIP || optname == NETLINK_DROP_MEMBERSHIP)
+    {
+        // `netlink_setsockopt` gates both membership commands on
+        // `netlink_allowed(sock, NL_CFG_F_NONROOT_RECV)`: the protocol table
+        // decides, or CAP_NET_ADMIN overrides. `NETLINK_ROUTE` sets that flag
+        // (unprivileged subscribers are normal) while `NETLINK_KOBJECT_UEVENT`
+        // does not, so joining a kobject-uevent group needs the capability.
+        // The socket-family check keeps a non-netlink socket's EINVAL.
+        if !socket.allows_unprivileged_group_subscribe()
+            && !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN)
+        {
+            return Err(KError::PermissionDenied);
+        }
+    }
     if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         if optlen == 0 {
             socket.set_option(SetSocketOption::BindToDevice(&None))?;

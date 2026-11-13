@@ -10,7 +10,7 @@
 //! network configuration lock, and dumps live snapshots.
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kerrno::LinuxError;
 use ksync::{Mutex, RwLock};
@@ -245,6 +245,14 @@ pub(super) struct NetlinkSocketInner {
     /// way Linux keeps it in `sk_type`.
     pub(super) socket_type: NetlinkSocketType,
     pub(super) local_addr: RwLock<Option<NetlinkAddr>>,
+    /// Multicast groups this socket subscribed to, one bit per zero-based
+    /// group (`nlk->groups`).
+    ///
+    /// Kept apart from `local_addr` because `NETLINK_ADD_MEMBERSHIP` is valid
+    /// before `bind()`: Linux only allocates the bitmap there
+    /// (`netlink_realloc_groups`), it does not require a port id. Storing the
+    /// subscription on the bound address discarded it for an unbound socket.
+    pub(super) groups: AtomicU32,
     /// The peer stored by `connect()`.
     ///
     /// `Some(NetlinkAddr { pid: 0, groups: 0 })` is a connected socket whose

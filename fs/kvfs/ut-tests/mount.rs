@@ -1839,17 +1839,30 @@ fn test_clone_mount_tree_reproduces_a_stacked_mountpoint() {
     let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
 
     // Two mounts stacked on one mountpoint: Linux keeps the upper one visible
-    // and chains the lower one through `mnt->mnt_mountpoint`/overmount links.
-    let lower = namespace.attach(&mountpoint, &lower_fs).unwrap();
-    let upper = namespace.attach(&mountpoint, &upper_fs).unwrap();
+    // and chains the lower one through its overmount link. Each gets a distinct
+    // devname because every mock reports the same filesystem name, so the
+    // devname is the only thing that tells the layers apart in an assertion.
+    let lower = namespace
+        .attach_with_flags_and_devname(&mountpoint, &lower_fs, MountFlags::empty(), Some("lower"))
+        .unwrap();
+    let upper = namespace
+        .attach_with_flags_and_devname(&mountpoint, &upper_fs, MountFlags::empty(), Some("upper"))
+        .unwrap();
     let visible = lookup_no_follow(&root, "mnt").unwrap();
     assert!(Arc::ptr_eq(visible.mount(), &upper));
     assert!(!Arc::ptr_eq(&lower, &upper));
+    assert_eq!(visible.mount().devname(), Some("upper"));
+    let source_lower = visible.mount().covered_mount().unwrap();
+    assert_eq!(
+        source_lower.devname(),
+        Some("lower"),
+        "the source stack is upper over lower"
+    );
 
-    // `open_tree(OPEN_TREE_CLONE)` must clone the stack, not just the top: a
-    // clone that dropped the displaced mount would show a single layer where
-    // the source has two, so an unmount of the clone's top would reveal
-    // something the source never had.
+    // `open_tree(OPEN_TREE_CLONE)` must reproduce that stack, top over bottom.
+    // A clone that dropped the displaced mount, or installed the layers in the
+    // wrong order, shows a different visible devname or a different layer
+    // underneath.
     let (cloned_root, kept) = namespace.clone_mount_tree(&root).unwrap();
     let cloned_mountpoint = lookup_no_follow(&cloned_root.root_path(), "mnt").unwrap();
     let cloned_visible = cloned_mountpoint.mount();
@@ -1857,14 +1870,39 @@ fn test_clone_mount_tree_reproduces_a_stacked_mountpoint() {
         !Arc::ptr_eq(cloned_visible, &upper),
         "the clone must not alias the source's mount"
     );
-    assert_eq!(cloned_visible.filesystem_name(), upper.filesystem_name());
-
-    // The layer under the cloned top is the cloned lower mount, so the whole
-    // stack survived the clone and is kept alive by the returned handles.
-    let covered = cloned_visible.covered_mount().expect("the lower layer survives");
-    assert_eq!(covered.filesystem_name(), lower.filesystem_name());
+    assert_eq!(
+        cloned_visible.devname(),
+        Some("upper"),
+        "the clone's visible layer is the top of the source stack"
+    );
+    let covered = cloned_visible
+        .covered_mount()
+        .expect("the lower layer survives the clone");
+    assert_eq!(
+        covered.devname(),
+        Some("lower"),
+        "the layer under the clone's top is the source stack's bottom"
+    );
     assert!(
-        kept.iter().any(|mount| Arc::ptr_eq(mount, &covered)),
-        "the displaced layer is part of the kept set"
+        !Arc::ptr_eq(&covered, cloned_visible),
+        "the stack has two distinct layers, not one mount covering itself"
+    );
+    assert!(
+        kept.iter().any(|mount| Arc::ptr_eq(mount, cloned_visible))
+            && kept.iter().any(|mount| Arc::ptr_eq(mount, &covered)),
+        "both cloned layers are handles the caller keeps alive"
+    );
+    assert!(
+        !Arc::ptr_eq(&covered, &lower),
+        "the clone copies the layers instead of sharing the source's"
+    );
+
+    // The source stack is untouched.
+    let source_visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(source_visible.mount(), &upper));
+    let source_lower = source_visible.mount().covered_mount().unwrap();
+    assert!(
+        Arc::ptr_eq(&source_lower, &lower),
+        "the source still covers its own lower mount"
     );
 }

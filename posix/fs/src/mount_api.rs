@@ -18,9 +18,9 @@ use anon_inodefs::AnonInodeFs;
 use kerrno::{KError, KResult};
 use ksync::Mutex;
 use kvfs::{
-    FMode, FileOperations, Filename, FsContext, LookupFlags, LookupIntent, Mount, MountFlags,
-    OpenFlags, SuperBlock, SuperBlockFlags, VfsFile, VfsInode, VfsResult, dentry_open,
-    path::PATH_MAX,
+    FMode, FileOperations, Filename, FsContext, LookupFlags, LookupIntent, MntNamespace, Mount,
+    MountFlags, OpenFlags, Path, SuperBlock, SuperBlockFlags, VfsFile, VfsInode, VfsResult,
+    dentry_open, path::PATH_MAX,
 };
 use linux_raw_sys::general::{
     AT_EMPTY_PATH, AT_RECURSIVE, FSMOUNT_CLOEXEC, FSOPEN_CLOEXEC, MOUNT_ATTR_NODEV,
@@ -123,6 +123,15 @@ struct FsContextFd {
 struct MountFd {
     mount: Mutex<Option<Arc<Mount>>>,
     _kept: Vec<Arc<Mount>>,
+    /// Where this mount is attached, when the fd names a live mount rather
+    /// than a detached one.
+    ///
+    /// `fsmount` and `open_tree(OPEN_TREE_CLONE)` hand out detached mounts
+    /// (`None`); a non-cloning `open_tree` names a mount that is still in the
+    /// namespace, and `move_mount` must take it out of `attached_location`
+    /// before grafting it somewhere else, as `do_move_mount` does. Without this
+    /// the same mount would end up visible at two paths.
+    attached_location: Mutex<Option<Path>>,
 }
 
 struct MountApiFops;
@@ -325,6 +334,7 @@ pub fn sys_fsmount(fd: c_int, flags: u32, attr_flags: u32) -> KResult<isize> {
     file.set_private_data(Arc::new(MountFd {
         mount: Mutex::new(Some(mount)),
         _kept: Vec::new(),
+        attached_location: Mutex::new(None),
     }));
     kprocess::current_files()
         .add_file(file, flags & FSMOUNT_CLOEXEC != 0)
@@ -392,9 +402,27 @@ pub fn sys_move_mount(
     // interleave with the rollback (CG-015: one critical section).
     let mut slot = mfd.mount.lock();
     let mount = slot.take().ok_or(KError::InvalidInput)?;
-    // attach_detached_mount only fails before installing (registration / directory
-    // checks), so on error restore the mount instead of permanently spending the fd.
+    // A non-cloning `open_tree` fd names a mount that is still attached. Linux's
+    // `do_move_mount` detaches the source before grafting it, so the mount is
+    // never visible at two paths; skipping this grafted a second copy and left
+    // the original in place. Take the recorded location first so a failed
+    // detach leaves the fd usable.
+    let mut attached_location = mfd.attached_location.lock();
+    let previous_location = attached_location.take();
+    if let Some(location) = previous_location.as_ref()
+        && let Err(error) = namespace.detach(location)
+    {
+        *attached_location = previous_location;
+        *slot = Some(mount);
+        return Err(error);
+    }
     if let Err(error) = namespace.attach_detached_mount(mount.clone(), &target) {
+        // `attach_detached_mount` fails before installing, so restore both the
+        // fd's mount slot and, when the source was detached, its old location.
+        if let Some(location) = previous_location {
+            let _ = namespace.attach_detached_mount(mount.clone(), &location);
+            *attached_location = Some(location);
+        }
         *slot = Some(mount);
         return Err(error);
     }
@@ -467,9 +495,16 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
     // `dentry_open(&path, O_PATH, ...)`: the descriptor names the mount without
     // granting read access to whatever it covers, which is why `open_tree`
     // works on a directory it may not read.
-    let file = dentry_open(open_path, OpenFlags::PATH.bits(), cred)?;
+    let file = dentry_open(open_path.clone(), OpenFlags::PATH.bits(), cred)?;
     file.set_private_data(Arc::new(MountFd {
         mount: Mutex::new(Some(root)),
+        // A clone is detached; a non-cloning fd names the live mount at the
+        // resolved path, which `move_mount` has to detach first.
+        attached_location: Mutex::new(if is_clone {
+            None
+        } else {
+            Some(open_path.clone())
+        }),
         _kept: kept,
     }));
     kprocess::current_files()
@@ -506,6 +541,31 @@ fn mount_attr_set_clr(attr_set: u64, attr_clr: u64) -> (MountFlags, MountFlags) 
         clr |= MountFlags::NODIRATIME;
     }
     (set, clr)
+}
+
+/// Applies `mount_setattr`'s `propagation` field to `target`.
+///
+/// Only one of the four flags can be set per call (`build_mount_kattr` rejects
+/// a combination), and KVFS models no shared propagation groups, so each of
+/// these is a validated idempotent operation. A request with no propagation
+/// flag changes nothing.
+fn apply_mount_propagation(
+    namespace: &MntNamespace,
+    target: &Path,
+    propagation: u64,
+) -> KResult<()> {
+    use linux_raw_sys::general::{MS_PRIVATE, MS_SHARED, MS_SLAVE, MS_UNBINDABLE};
+    let propagation = propagation as u32;
+    if propagation & MS_SHARED != 0 {
+        namespace.make_mount_shared(target)?;
+    } else if propagation & MS_PRIVATE != 0 {
+        namespace.make_mount_private(target)?;
+    } else if propagation & MS_SLAVE != 0 {
+        namespace.make_mount_slave(target)?;
+    } else if propagation & MS_UNBINDABLE != 0 {
+        namespace.make_mount_unbindable(target)?;
+    }
+    Ok(())
 }
 
 /// Changes mount attributes (`mount_setattr(2)`).
@@ -553,6 +613,13 @@ pub fn sys_mount_setattr(
     let base = attr.as_ptr() as usize;
     let attr_set = UserConstPtr::<u64>::from(base).read_vm()?;
     let attr_clr = UserConstPtr::<u64>::from(base + 8).read_vm()?;
+    // `struct mount_attr` carries two more fields. `propagation` is honoured
+    // through the four `MntNamespace` propagation entry points; `userns_fd` is
+    // only meaningful with `MOUNT_ATTR_IDMAP` and idmapped mounts are not
+    // implemented, so a non-zero descriptor is reported unsupported rather than
+    // silently ignored.
+    let propagation = UserConstPtr::<u64>::from(base + 16).read_vm()?;
+    let userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
     // `copy_struct_from_user` handles a larger structure by requiring the bytes
     // this kernel does not know to be zero: a newer caller's extension must not
     // be silently ignored, so a non-zero tail is `E2BIG` rather than success.
@@ -562,6 +629,22 @@ pub fn sys_mount_setattr(
     check_mount_attr_bits(attr_set)?;
     check_mount_attr_bits(attr_clr)?;
     check_mount_attr_atime(attr_set, attr_clr)?;
+    // `build_mount_kattr`: only the four propagation flags are defined, and at
+    // most one may be requested.
+    const PROPAGATION_FLAGS: u64 = linux_raw_sys::general::MS_SHARED as u64
+        | linux_raw_sys::general::MS_PRIVATE as u64
+        | linux_raw_sys::general::MS_SLAVE as u64
+        | linux_raw_sys::general::MS_UNBINDABLE as u64;
+    if propagation & !PROPAGATION_FLAGS != 0 || (propagation & PROPAGATION_FLAGS).count_ones() > 1 {
+        return Err(KError::InvalidInput);
+    }
+    if userns_fd != 0 {
+        // Idmapped mounts are not implemented; `MOUNT_ATTR_IDMAP` is rejected
+        // by `check_mount_attr_bits` only for the attribute word, so a caller
+        // that passes the descriptor without the bit is refused here instead of
+        // having the field dropped.
+        return Err(KError::OperationNotSupported);
+    }
     let (set_flags, clr_flags) = mount_attr_set_clr(attr_set, attr_clr);
     let recursive = flags & AT_RECURSIVE != 0;
     // AT_EMPTY_PATH on an open_tree/fsmount fd operates on that mount directly
@@ -574,6 +657,12 @@ pub fn sys_mount_setattr(
         let mount = mfd.mount.lock().clone().ok_or(KError::InvalidInput)?;
         let namespace = kprocess::current_user_process().mnt_ns()?;
         namespace.set_mount_attributes_on(&mount, set_flags, clr_flags, recursive)?;
+        // Propagation is applied through the mount's own root path: the fd
+        // names the mount, and these entry points validate that path is a
+        // registered mount root, which a mount fd's root is by construction.
+        if propagation != 0 {
+            apply_mount_propagation(&namespace, &mount.root_path(), propagation)?;
+        }
         return Ok(0);
     }
     let filename = Filename::new(path.as_str());
@@ -588,6 +677,9 @@ pub fn sys_mount_setattr(
     })?;
     let namespace = kprocess::current_user_process().mnt_ns()?;
     namespace.set_mount_attributes(&target, set_flags, clr_flags, recursive)?;
+    if propagation != 0 {
+        apply_mount_propagation(&namespace, &target, propagation)?;
+    }
     Ok(0)
 }
 

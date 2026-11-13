@@ -310,11 +310,17 @@ pub(super) fn publish(
         // therefore either wins and suppresses this packet, or waits until the
         // packet is queued, never removing the group between the check and the
         // push.
+        // The subscription mask lives on the socket, not on the bound address:
+        // `NETLINK_ADD_MEMBERSHIP` is valid before `bind()` allocates a port,
+        // and an unbound subscriber must still receive its groups.
+        if socket.groups.load(Ordering::Relaxed) & mask == 0 {
+            continue;
+        }
         let addr_guard = socket.local_addr.read();
         let Some(local_addr) = *addr_guard else {
             continue;
         };
-        if exclude_pid == Some(local_addr.pid) || local_addr.groups & mask == 0 {
+        if exclude_pid == Some(local_addr.pid) {
             continue;
         }
         let packet = NetlinkPacket {

@@ -533,12 +533,11 @@ impl MntNamespace {
         let mut kept = vec![new_root.clone()];
         let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
         clone_map.insert(source.mount().mount_id(), new_root.clone());
-        for child in source
-            .mount()
-            .collect_subtree_under(&source.dentry)?
-            .iter()
-            .skip(1)
-        {
+        let subtree = source.mount().collect_subtree_under(&source.dentry)?;
+        // Clone every collected mount first, so a child can find the clone of its
+        // parent regardless of the order `collect_subtree_under` produced them.
+        let mut ordered: Vec<(Arc<Mount>, Path)> = Vec::new();
+        for child in subtree.iter().skip(1) {
             let location = child.location().ok_or(VfsError::InvalidInput)?;
             let new_parent = clone_map
                 .get(&location.mount().mount_id())
@@ -546,18 +545,23 @@ impl MntNamespace {
             let new_location = Path::new(new_parent.clone(), location.dentry.clone());
             let new_child = Arc::new(Mount::clone_mnt(&child.root_path()));
             *new_child.mnt_location.lock() = Some(new_location.clone());
-            // A stacked mountpoint holds the whole chain in its `covers` links,
-            // so a displaced mount must be recorded there rather than dropped:
-            // `collect_subtree_under` yields every layer, and the clone has to
-            // reproduce the stack it saw.
+            clone_map.insert(child.mount_id(), new_child.clone());
+            ordered.push((new_child.clone(), new_location));
+            kept.push(new_child);
+        }
+        // Install bottom-up. `collect_subtree_under` yields a mountpoint's stack
+        // top first and each covered layer after it, while `install_child_mount`
+        // replaces whatever already sits at the mountpoint and returns it. In
+        // collection order the bottom layer would end up on top, so walk
+        // backwards: the deepest layer installs first and every higher layer
+        // records the clone it now covers, reproducing the stack.
+        for (new_child, new_location) in ordered.into_iter().rev() {
             if let Some(covered) = new_location
                 .mnt
                 .install_child_mount(&new_location.dentry, &new_child)
             {
                 *new_child.covers.lock() = Some(covered);
             }
-            clone_map.insert(child.mount_id(), new_child.clone());
-            kept.push(new_child);
         }
         Ok((new_root, kept))
     }

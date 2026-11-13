@@ -55,6 +55,7 @@ impl NetlinkSocket {
                 protocol,
                 socket_type,
                 local_addr: ksync::RwLock::new(None),
+                groups: core::sync::atomic::AtomicU32::new(0),
                 remote_addr: ksync::RwLock::new(None),
                 send_lock: ksync::Mutex::new(()),
                 rx_queue: ksync::Mutex::new(NetlinkRxQueue::new(super::NETLINK_RX_QUEUE_LIMIT)),
@@ -442,6 +443,10 @@ impl NetlinkSocket {
         let _send_guard = self.inner.send_lock.lock();
         let current = *self.inner.local_addr.read();
         let bound = port::bind(&self.inner, requested, current, can_net_admin)?;
+        // `nl_groups` in `bind()` goes into the same `nlk->groups` bitmap that
+        // `NETLINK_ADD_MEMBERSHIP` modifies, so a later subscribe/unsubscribe
+        // composes with it rather than replacing it.
+        self.inner.groups.store(bound.groups, Ordering::Relaxed);
         *self.inner.local_addr.write() = Some(bound);
         self.inner.poll_rx.wake();
         Ok(())
@@ -501,12 +506,7 @@ impl Configurable for NetlinkSocket {
         if let GetSocketOption::NetlinkMemberships(groups) = opt {
             // `netlink_getsockopt(NETLINK_LIST_MEMBERSHIPS)` copies the
             // socket's `nlk->groups` bitmap, one bit per zero-based group.
-            **groups = self
-                .inner
-                .local_addr
-                .read()
-                .as_ref()
-                .map_or(0, |addr| addr.groups);
+            **groups = self.inner.groups.load(Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
         if let GetSocketOption::Error(error) = opt {
@@ -548,18 +548,18 @@ impl Configurable for NetlinkSocket {
             if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
                 return Err(KError::InvalidInput);
             }
-            if let Some(addr) = self.inner.local_addr.write().as_mut() {
-                addr.groups |= 1u32 << (*group - 1);
-            }
+            self.inner
+                .groups
+                .fetch_or(1u32 << (*group - 1), Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
         if let SetSocketOption::NetlinkDropMembership(group) = opt {
             if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
                 return Err(KError::InvalidInput);
             }
-            if let Some(addr) = self.inner.local_addr.write().as_mut() {
-                addr.groups &= !(1u32 << (*group - 1));
-            }
+            self.inner
+                .groups
+                .fetch_and(!(1u32 << (*group - 1)), Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
         self.inner.general.set_option_inner(opt)
