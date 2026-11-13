@@ -6,7 +6,10 @@
 `klazy::Once`. Missing slots return `None` without initialization or waiting;
 readers perform no register access or firmware parsing. CPU-local detection runs
 before scheduling, while RISC-V firmware publication may identify unstarted APs.
-No reset/hotplug lifetime or global migration-safe feature intersection is claimed.
+No reset/hotplug lifetime is claimed. The migration-safe intersection is the
+one `system_hwcap()` folds from the identified CPUs; it is recomputed on each
+call rather than maintained as state, so a CPU that comes online later is
+included the next time the word is published.
 
 AArch64/LoongArch register reads use the existing architecture dependency's safe
 read interfaces; this adds no local unsafe code. Numeric identity fields cannot

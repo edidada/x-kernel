@@ -70,8 +70,9 @@ per-architecture formatter and spelling table. Keep hardware filtering in kcpu
 and Linux field names in procfs. Update both crates' design/security documents.
 
 `cpu_info()` returns per-CPU diagnostic snapshots. `CpuInfo::hwcap()` converts
-one CPU's *usable* set into the Linux `AT_HWCAP` encoding, and
-`system_hwcap()` folds the identified CPUs into the intersection that exec
+one CPU's *usable* set into the Linux `AT_HWCAP` encoding, `for_each_cpu_info()`
+iterates the published snapshots as the public building block for system-wide
+queries, and `system_hwcap()` folds that iteration into the intersection exec
 publishes as `AT_HWCAP`. The intersection is required because the scheduler may
 migrate a process to any online core after exec, and a frozen auxiliary-vector
 word cannot be revised; Linux reaches the same answer from its sanitised

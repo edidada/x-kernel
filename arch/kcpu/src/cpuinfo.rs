@@ -23,11 +23,21 @@ pub fn cpu_info(cpu_id: LogicalCpuId) -> Option<&'static CpuInfo> {
 
 /// Returns the calling CPU's identity and capability snapshot.
 ///
-/// Unlike [`system_cpu_info`] this describes the core it runs on, so callers
+/// Unlike `system_hwcap` this describes the core it runs on, so callers
 /// must not cache it across a migration when the answer feeds instruction
 /// selection. It is still useful for diagnostics that report a specific core.
 ///
-/// Returns `None` before this CPU's identification is published.
+/// # Execution context
+///
+/// - **Any context that has a current CPU area**, including IRQ handlers; reads
+///   the running CPU's per-CPU slot and takes no lock, allocation or task
+///   reference.
+/// - **Pinned to the calling CPU for the duration of the call.** The answer is
+///   the core executing this function; a caller that migrates afterwards must
+///   ask again rather than reuse the reference for per-core decisions.
+/// - **Returns `None` before this CPU's trap initialization publishes its
+///   snapshot.** Callers must handle that rather than assume identification has
+///   happened.
 pub fn current_cpu_info() -> Option<&'static CpuInfo> {
     let cpu_id = kcpu_slot::current_area()?.cpu();
     cpu_info(cpu_id)
@@ -62,15 +72,24 @@ pub fn for_each_cpu_info(mut visit: impl FnMut(&CpuInfo)) {
 /// has been identified yet.
 #[cfg(target_arch = "aarch64")]
 pub fn system_hwcap() -> usize {
-    let mut intersection: Option<usize> = None;
-    for_each_cpu_info(|cpu| {
-        let hwcap = cpu.hwcap();
-        intersection = Some(match intersection {
-            Some(current) => current & hwcap,
-            None => hwcap,
-        });
-    });
-    intersection.unwrap_or(0)
+    intersect_hwcap(CPU_INFO.iter().filter_map(Once::get).map(CpuInfo::hwcap))
+}
+
+/// Folds per-CPU capability words into the one every CPU advertises.
+///
+/// Split out so the fold is testable without publishing global CPU state. An
+/// empty input has no CPU to agree with, so it yields zero — the same claim as
+/// an unidentified system.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn intersect_hwcap(words: impl Iterator<Item = usize>) -> usize {
+    words
+        .fold(None, |acc: Option<usize>, word| {
+            Some(match acc {
+                Some(current) => current & word,
+                None => word,
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn lookup_cpu_info(slots: &[Once<CpuInfo>], cpu_id: LogicalCpuId) -> Option<&CpuInfo> {

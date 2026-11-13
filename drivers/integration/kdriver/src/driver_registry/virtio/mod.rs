@@ -788,10 +788,11 @@ pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistr
     not(any(feature = "virtio-gpu", feature = "virtio-input")),
     expect(
         dead_code,
-        reason = "CG-021-no-panic-on-reachable-failure: probe-time INTx masking is shared by \
-                  every device kind that installs its interrupt owner late; a virtio \
-                  configuration may enable neither kind (virtcca), so the definition stays and is \
-                  expected to be unused there"
+        reason = "CG-024-lint-exceptions: dead_code: probe-time INTx masking is shared by every \
+                  device kind that installs its interrupt owner late; a virtio configuration may \
+                  enable neither virtio-gpu nor virtio-input (virtcca does), leaving the helper \
+                  unused. It is used as soon as either kind is enabled, which is every \
+                  configuration that has a display or input device"
     )
 )]
 pub(super) fn set_pci_intx_disabled(

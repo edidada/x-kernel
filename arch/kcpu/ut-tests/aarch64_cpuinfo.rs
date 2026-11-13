@@ -68,23 +68,27 @@ fn hwcap_uses_linux_bit_positions() {
 
 /// The published word must be safe on every core a task may migrate to.
 ///
-/// Two CPUs with different usable sets intersect: the shared bits survive and
-/// the asymmetric ones drop, so a task that migrates to the weaker core never
-/// executes an instruction the frozen `AT_HWCAP` advertised but that core
-/// lacks.
+/// Calls the same fold `system_hwcap` uses: a test that re-implemented the
+/// intersection would pass for any implementation of the real one.
 #[def_test]
 fn system_hwcap_intersects_the_online_cpus() {
     let isar0 = (2 << 4) | (1 << 8) | (2 << 12) | (1 << 16) | (2 << 20);
     let strong = CpuInfo::from_registers(0x413f_d034, 0, isar0, true);
     // Same crypto/atomics, but no preserved FP/SIMD context.
     let weak = CpuInfo::from_registers(0x413f_d034, 0, isar0, false);
-    let both = (1 << 7) | (1 << 8);
+    let shared = (1 << 7) | (1 << 8);
+    let fold = |words: &[usize]| crate::intersect_hwcap(words.iter().copied());
 
-    // Mirrors `kcpu::system_hwcap`'s fold over published CPUs.
-    let intersect = |left: usize, right: usize| left & right;
-
-    assert_eq!(intersect(strong.hwcap(), weak.hwcap()), both);
-    assert_eq!(intersect(weak.hwcap(), strong.hwcap()), both);
-    assert_eq!(intersect(strong.hwcap(), strong.hwcap()), strong.hwcap());
-    assert_ne!(intersect(strong.hwcap(), weak.hwcap()), strong.hwcap());
+    // Both cores online: only what both advertise survives.
+    assert_eq!(fold(&[strong.hwcap(), weak.hwcap()]), shared);
+    assert_eq!(fold(&[weak.hwcap(), strong.hwcap()]), shared);
+    // A single online core publishes its own word unchanged.
+    assert_eq!(fold(&[strong.hwcap()]), strong.hwcap());
+    // No identified CPU yet: claim nothing.
+    assert_eq!(fold(&[]), 0);
+    // The asymmetric bit must actually be dropped, not merely differ.
+    assert_eq!(
+        strong.hwcap() & !shared,
+        (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6)
+    );
 }
