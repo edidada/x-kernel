@@ -137,10 +137,26 @@ fn symlink_targets_are_relative_to_the_link_parent() {
 
 #[def_test]
 fn platform_devices_expose_a_modalias_uevent() {
+    // An input node, not a DRM one: class indices are allocated per kind, and a
+    // DRM node here would take `card0`, making the DRM test's node `card1` and
+    // failing its `card0-Virtual-1` assertion depending on run order. The
+    // platform-uevent projection is the same for every kind.
     let node = kdevice::register_device_node(
         kdevice::DeviceId::new(9003),
-        kdevice::DeviceNodeClass::Drm(drm_metadata()),
-        String::from("virtio-gpu-mmio"),
+        kdevice::DeviceNodeClass::Input(kdevice::InputDeviceNodeMetadata::new(
+            String::from("test-input"),
+            String::from("test"),
+            String::from("test"),
+            kdevice::InputDeviceNodeId {
+                bus_type: 0x19,
+                vendor: 1,
+                product: 2,
+                version: 3,
+            },
+            alloc::vec![],
+            BTreeMap::new(),
+        )),
+        String::from("virtio-input-mmio"),
         String::from("test"),
         kdevice::DeviceLocation::Mmio {
             base: 0xa003e00,
@@ -171,6 +187,9 @@ fn platform_devices_expose_a_modalias_uevent() {
         text.contains("DRIVER=test\n"),
         "the uevent must name the bound driver, got {text:?}"
     );
+
+    // Release the node so a later test's `build_tree` does not see it.
+    kdevice::unregister_device_node(node.core_id()).expect("test node unregisters");
 }
 
 #[def_test]
