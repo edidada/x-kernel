@@ -1929,6 +1929,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hotplug"
+version = "0.3.0-dev"
+dependencies = [
+ "alloc-engine",
+ "kaddr_layout",
+ "kalloc",
+ "kcpu_id_map",
+ "kdevice",
+ "kerrno",
+ "khal",
+ "kspin",
+ "lazyinit",
+ "log",
+ "macros",
+ "memspace",
+ "unittest",
+]
+
+[[package]]
 name = "hwrng"
 version = "0.3.0-dev"
 dependencies = [
@@ -2324,6 +2343,7 @@ dependencies = [
  "bitflags 2.13.2",
  "kerrno",
  "klazy",
+ "kspin",
  "unittest",
 ]
 
@@ -2334,6 +2354,7 @@ dependencies = [
  "driver-os-api",
  "driver_base",
  "fwnode",
+ "kerrno",
  "kmutex",
  "kspin",
  "lazyinit",
@@ -2690,6 +2711,7 @@ dependencies = [
 name = "kidentity"
 version = "0.3.0-dev"
 dependencies = [
+ "kcred",
  "kerrno",
  "lazyinit",
  "unittest",
@@ -2952,7 +2974,9 @@ dependencies = [
  "kerrno",
  "kidentity",
  "klazy",
+ "kspin",
  "ksync",
+ "ktime_types",
  "kvfs",
  "linux-raw-sys",
  "unittest",
@@ -4784,6 +4808,7 @@ dependencies = [
  "kdevice",
  "kfd_objects",
  "khal",
+ "kidentity",
  "klockstat",
  "klogger",
  "kns",
@@ -5614,6 +5639,7 @@ dependencies = [
 name = "sysfs"
 version = "0.3.0-dev"
 dependencies = [
+ "hotplug",
  "kalloc-types",
  "kdevice",
  "kdevice-uevent",

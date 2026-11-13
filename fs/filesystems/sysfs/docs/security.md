@@ -140,3 +140,11 @@ payloads, or user credentials.
 - Add path-resolution tests when introducing a deeper canonical layout.
 - Keep all new driver-provided uevent values behind the shared uevent
   formatter's control-character sanitization.
+
+## Hotplug attributes
+
+Writable `cpuN/online` and `memoryN/online` attributes are `0644` and require
+`CAP_SYS_ADMIN` at write time. Read-only `present`, `possible`, `phys_index`,
+`state`, `block_size_bytes`, and CPU 0's `online` remain `0444`; making a sibling
+writable does not relax them. Writes accept exactly `0` or `1`; all policy and
+hardware validation is delegated to the hotplug state machine.

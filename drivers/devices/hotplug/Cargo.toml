@@ -1,0 +1,25 @@
+[package]
+name = "hotplug"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CPU and memory hotplug policy for X-Kernel"
+
+[dependencies]
+alloc-engine.workspace = true
+kaddr_layout.workspace = true
+kalloc.workspace = true
+kcpu_id_map.workspace = true
+kdevice.workspace = true
+kerrno.workspace = true
+khal.workspace = true
+kspin.workspace = true
+lazyinit.workspace = true
+log.workspace = true
+macros.workspace = true
+memspace.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

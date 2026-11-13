@@ -304,3 +304,60 @@ fn tty0_projects_the_active_console_alias() {
         "logind opens the alias through /sys/class"
     );
 }
+
+#[def_test]
+fn system_projection_follows_present_devices_and_permissions() {
+    let cpu0 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 0),
+        is_present: true,
+        is_online: true,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let cpu1 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 1),
+        is_present: true,
+        is_online: false,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let memory3 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Memory, 3),
+        is_present: true,
+        is_online: true,
+        is_going_offline: false,
+        physical_start_bytes: 3 * 128 * 1024 * 1024,
+        size_bytes: 128 * 1024 * 1024,
+    };
+    let tree = build_tree_with_systems(&BTreeMap::new(), &[], &[cpu0, cpu1, memory3]);
+
+    for path in [
+        "devices/system/cpu",
+        "devices/system/memory",
+        "devices/system/cpu/cpu0/online",
+        "devices/system/cpu/cpu1/online",
+        "devices/system/cpu/cpu1/present",
+        "devices/system/cpu/cpu1/possible",
+        "devices/system/memory/memory3/phys_index",
+        "devices/system/memory/memory3/state",
+        "devices/system/memory/memory3/online",
+        "devices/system/memory/memory3/block_size_bytes",
+    ] {
+        assert!(tree.contains_key(path), "missing {path}");
+    }
+    let permission = |path: &str| match &tree[path] {
+        TreeEntry::SystemAttribute { permission, .. } => permission.bits(),
+        _ => panic!("{path} is not a system attribute"),
+    };
+    assert_eq!(permission("devices/system/cpu/cpu0/online"), 0o444);
+    assert_eq!(permission("devices/system/cpu/cpu1/online"), 0o644);
+    assert_eq!(permission("devices/system/cpu/cpu1/present"), 0o444);
+    assert_eq!(permission("devices/system/memory/memory3/state"), 0o444);
+    assert_eq!(permission("devices/system/memory/memory3/online"), 0o644);
+
+    let after_removal = build_tree_with_systems(&BTreeMap::new(), &[], &[cpu0]);
+    assert!(!after_removal.contains_key("devices/system/cpu/cpu1/online"));
+    assert!(!after_removal.contains_key("devices/system/memory/memory3/online"));
+}
