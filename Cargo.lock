@@ -3132,6 +3132,7 @@ dependencies = [
  "kaddr_layout",
  "kalloc-types",
  "karch",
+ "kbandwidth",
  "kcgroup",
  "kcpu_id_map",
  "kcred",
@@ -3495,6 +3496,7 @@ dependencies = [
  "ktimer-core",
  "lazyinit",
  "log",
+ "memacct",
  "memaddr",
  "unittest",
 ]

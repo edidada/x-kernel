@@ -46,6 +46,16 @@ pub fn migrate_process_cgroup_with(
         .ok_or(KError::NoSuchProcess)?;
     authorize(&source, target)?;
     kcgroup::TaskMembership::migrate_group(&memberships, target)?;
+    let memcg = target
+        .memory_controller()
+        .ok()
+        .map(|controller| controller.memcg().id())
+        .unwrap_or(memacct::MemcgId::NONE);
+    let bandwidth = target.cpu_bandwidth();
+    for task in &tasks {
+        task.set_memcg_id(memcg);
+        task.set_cpu_bandwidth(bandwidth.clone());
+    }
     *cgroup_target = Some(target.clone());
     Ok(())
 }

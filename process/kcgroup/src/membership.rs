@@ -103,11 +103,12 @@ impl TaskCharge {
                 cgroup.is_active(),
                 "committing a task charge to inactive cgroup"
             );
-            assert_eq!(
-                charges.len(),
-                cgroup.controller_lineage().len(),
-                "incomplete task charge"
-            );
+            if charges.len() != cgroup.controller_lineage().len() {
+                // A concurrent subtree_control transition changed the
+                // lineage after the reservation. Fail the commit without
+                // panicking; Drop releases the reserved controller charges.
+                return Err(KError::from(LinuxError::EAGAIN));
+            }
             let mut member_tasks = cgroup.member_tasks.lock();
             if !member_tasks.insert(token) {
                 return Err(KError::from(LinuxError::EEXIST));

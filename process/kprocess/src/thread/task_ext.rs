@@ -4,6 +4,7 @@
 
 use alloc::sync::Arc;
 
+use kbandwidth::Bandwidth;
 use kcpu_id_map::LogicalCpuId;
 use ktask::{TaskInner, UserTaskRuntime};
 
@@ -39,6 +40,17 @@ impl UserTaskRuntime for Thread {
 
     fn identity_token(&self) -> kidentity::TaskIdentityToken {
         Thread::identity_token(self)
+    }
+
+    fn memcg_id(&self) -> memacct::MemcgId {
+        self.cgroup()
+            .and_then(|cgroup| cgroup.memory_controller().ok())
+            .map(|controller| controller.memcg().id())
+            .unwrap_or(memacct::MemcgId::NONE)
+    }
+
+    fn cpu_bandwidth(&self) -> Option<Arc<Bandwidth>> {
+        self.cgroup().and_then(|cgroup| cgroup.cpu_bandwidth())
     }
 
     fn on_enter(&self) {

@@ -133,8 +133,9 @@ counts; repeated detach is harmless. `CgroupOperationGuard::drop` releases its
 reservation. Checked decrement prevents wrap; underflow triggers a debug
 assertion and otherwise leaves the counter unchanged.
 
-There are no cpu, memory, or io controllers, authorization engine, or full
-namespace clone syscall implementation here. Cpuset NUMA-node masks are
+The `cpu`, `cpuset`, `memory`, and `pids` controllers are implemented; `io` is
+not. Filesystem authorization and the full namespace clone syscall live outside
+this crate. Cpuset NUMA-node masks are
 validated and propagated but do not constrain the allocator's NUMA policy. Namespace IDs and reservation increments
 have no explicit wrap protection. Recursive subtree counts and linear lineage
 walks are not depth-bounded by this crate.

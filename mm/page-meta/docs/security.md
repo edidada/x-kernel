@@ -82,7 +82,7 @@ explicit compounds publish their first head hold only after membership setup. A 
 prevents admission. Ordinary error paths do not claim a prefix. The immutable
 published directory and caller-owned backing establish descriptor lifetime.
 
-Tail membership uses a checked u32 PFN distance. reference_allocation requires a
+Tail membership uses a checked u16 page distance. reference_allocation requires a
 live hold from the same allocation incarnation, resolves a head with a positive
 count, and checks the member fits its order. A live hold excludes retirement and
 exclusive split, making geometry stable. Safe lookup, global_table and

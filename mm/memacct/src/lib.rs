@@ -604,8 +604,13 @@ fn uncharge_bytes_class(node: &Arc<Memcg>, bytes: u64, class: ChargeClass) {
     }
     // Reclaim outside CHARGE_LOCK: `charge_frame` takes TREE before
     // CHARGE_LOCK, so taking TREE while holding CHARGE_LOCK would invert the
-    // lock order.
-    try_remove_dead(node);
+    // lock order. A dead ancestor may only be held by subtree usage, so walk
+    // the parent chain after the leaf uncharge.
+    let mut current = Some(node.clone());
+    while let Some(candidate) = current {
+        try_remove_dead(&candidate);
+        current = candidate.parent().cloned();
+    }
 }
 
 /// Charges `bytes` held by `paddr` to the current memory cgroup.

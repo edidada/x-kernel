@@ -116,11 +116,17 @@ pub(crate) fn apply_cpuset_affinity(cgroup: &Arc<Cgroup>) -> VfsResult<()> {
 
 /// Applies `cgroup`'s effective masks to one process after migration.
 pub(crate) fn apply_cpuset_affinity_to_process(cgroup: &Arc<Cgroup>, pid: Pid) -> VfsResult<()> {
-    apply_to_process(
-        pid,
-        kernel_cpu_mask(cgroup.cpuset_effective_cpus()?),
-        kernel_node_mask(cgroup.cpuset_effective_mems()?),
-    )
+    // A target cgroup may have no active cpuset controller. In that case the
+    // migration must not fail after membership has already been committed;
+    // the task inherits the ancestor's existing affinity until cpuset is
+    // enabled later.
+    let Ok(cpus) = cgroup.cpuset_effective_cpus() else {
+        return Ok(());
+    };
+    let Ok(mems) = cgroup.cpuset_effective_mems() else {
+        return Ok(());
+    };
+    apply_to_process(pid, kernel_cpu_mask(cpus), kernel_node_mask(mems))
 }
 
 fn apply_cpuset_affinity_to_subtree(cgroup: &Arc<Cgroup>) -> VfsResult<()> {
