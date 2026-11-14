@@ -419,34 +419,31 @@ pub fn sys_move_mount(
     // the original in place. Take the recorded location first so a failed
     // detach leaves the fd usable.
     let mut attached_location = mfd.attached_location.lock();
-    // A graft can be rejected (unregistered mountpoint, directory/non-directory
-    // mismatch). Detaching first would then have destroyed the source for a
-    // move that cannot happen, so the same checks run before anything changes.
-    if let Err(error) = namespace.check_detached_mount_graft(&mount, &target) {
-        *slot = Some(mount);
-        return Err(error);
-    }
     let previous_location = attached_location.take();
-    if let Some(location) = previous_location.as_ref()
-        && let Err(error) = namespace.detach_for_move(location)
-    {
-        *attached_location = previous_location;
-        *slot = Some(mount);
-        return Err(error);
-    }
-    if let Err(error) = namespace.attach_detached_mount(mount.clone(), &target) {
-        // `attach_detached_mount` fails before installing, so restore both the
-        // fd's mount slot and, when the source was detached, its old location.
-        // Only the edge to the old parent was removed, so re-grafting the root
-        // restores the tree with its subtree intact.
-        if let Some(location) = previous_location {
-            let _ = namespace.attach_detached_mount(mount.clone(), &location);
-            *attached_location = Some(location);
+    // A live mount is detached and re-grafted in one namespace critical section:
+    // validating, detaching and grafting under separate locks let two concurrent
+    // moves each pass their own cycle check and then place one mount inside the
+    // other, which leaves a parent-chain cycle that makes every walk from the
+    // root spin. The method also re-validates the source edge under that lock and
+    // changes nothing when it rejects the move, so no rollback is needed.
+    let result = match previous_location.as_ref() {
+        Some(location) => namespace
+            .move_detached_mount(mount.clone(), location, &target)
+            .map(|_| ()),
+        None => namespace
+            .attach_detached_mount(mount.clone(), &target)
+            .map(|_| ()),
+    };
+    match result {
+        Ok(()) => Ok(0),
+        Err(error) => {
+            if let Some(location) = previous_location {
+                *attached_location = Some(location);
+            }
+            *slot = Some(mount);
+            Err(error)
         }
-        *slot = Some(mount);
-        return Err(error);
     }
-    Ok(0)
 }
 
 /// Clones the mount subtree at a path into a detached mount fd (`open_tree(2)`).

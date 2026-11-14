@@ -339,6 +339,43 @@ impl MntNamespace {
         Ok(())
     }
 
+    /// Moves an attached mount to `mountpoint` under one registry lock.
+    ///
+    /// `move_mount` has three steps that must not interleave: reject a move that
+    /// would cycle the parent chain, detach the source from its old parent, and
+    /// graft it at the destination. Checking them in one call under one
+    /// acquisition is what makes the cycle check sound — two concurrent moves
+    /// could otherwise each pass their own check and then place one mount inside
+    /// the other, leaving a cycle that makes every walk from the root spin.
+    ///
+    /// `source` is the mount's current location. On success the mount is
+    /// attached at `mountpoint` with its own subtree intact; on any error
+    /// nothing has changed.
+    pub fn move_detached_mount(
+        &self,
+        mount: Arc<Mount>,
+        source: &Path,
+        mountpoint: &Path,
+    ) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        Self::registered_mount_at(&mounts, source)?;
+        if mountpoint.mount().is_in_subtree_of(&mount) {
+            return Err(VfsError::FilesystemLoop);
+        }
+        if mount.root_path().dentry().as_dir().is_ok() != mountpoint.dentry().as_dir().is_ok() {
+            return Err(VfsError::NotADirectory);
+        }
+        // Re-validate the source edge under the lock before touching it: the
+        // stack may have changed since the caller resolved the path.
+        source.detach_only()?;
+        let mount = mountpoint.graft_tree_arc(mount)?;
+        for m in mount.collect_subtree() {
+            mounts.insert(m.mount_id(), m.clone());
+        }
+        Ok(mount)
+    }
+
     pub fn attach_detached_mount(
         &self,
         mount: Arc<Mount>,
