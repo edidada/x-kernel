@@ -11,9 +11,9 @@ use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 
 use super::{
-    NETLINK_GROUP_COUNT, NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLM_F_ACK, NLM_F_REQUEST,
-    NLMSG_HDR_LEN, NLMSG_MIN_TYPE, NetlinkAddr, NetlinkPacket, NetlinkRxQueue, NetlinkSocketInner,
-    UEVENT_SEQNUM, port,
+    NETLINK_AUDIT, NETLINK_GROUP_COUNT, NETLINK_KOBJECT_UEVENT, NETLINK_ROUTE, NLM_F_ACK,
+    NLM_F_REQUEST, NLMSG_HDR_LEN, NLMSG_MIN_TYPE, NetlinkAddr, NetlinkPacket, NetlinkRxQueue,
+    NetlinkSocketInner, UEVENT_SEQNUM, port,
     rtnetlink::{
         build_ack_response, build_error_response_with_cap, handle_rtnetlink_request_with_cred,
     },
@@ -339,6 +339,14 @@ impl NetlinkSocket {
                 options.sender_credentials.as_ref(),
             );
             self.push_responses(responses);
+        } else if self.inner.protocol == NETLINK_AUDIT {
+            // This kernel has no audit subsystem. `audit_receive_msg` answers a
+            // message type it does not implement with EINVAL, so an emitter
+            // learns the request was rejected and stops waiting. Reporting
+            // success here instead would leave a caller that set NLM_F_ACK
+            // blocked forever, and ECONNREFUSED (the generic no-kernel-socket
+            // answer) reads as "retry later" where EINVAL says "not supported".
+            return Err(LinuxError::EINVAL.into());
         } else {
             // Linux always ends `netlink_sendmsg` with a unicast to the
             // destination port, including port 0. Protocols without a kernel
