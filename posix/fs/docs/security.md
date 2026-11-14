@@ -47,7 +47,7 @@ kfd resources / kvfs / device and pipe implementations
 |------|----------|----------|
 | User path strings | `openat`, `linkat`, `statx`, `mount`, `move_mount` | Null pointers, strings not NUL-terminated, over-long strings, path traversal, symbolic link loops |
 | mount data byte page | `mount(..., data)` | Bad pointers, crossing into unreadable pages, binary content, and malicious or unknown options interpreted by the specific filesystem |
-| New mount API inputs | `fsopen`, `fsconfig`, `fsmount`, `move_mount`, `open_tree`, `mount_setattr` | Unregistered fs type, unknown commands/flags/`MOUNT_ATTR_*` bits, missing superblock, non-empty `from_path`, undersized `mount_attr`, unprivileged caller (all require `CAP_SYS_ADMIN`) |
+| New mount API inputs | `fsopen`, `fsconfig`, `fsmount`, `move_mount`, `open_tree`, `mount_setattr` | Unregistered fs type, unknown commands/flags/`MOUNT_ATTR_*` bits, missing superblock, non-empty `from_path`, undersized `mount_attr`, unprivileged caller (`CAP_SYS_ADMIN` for all but the non-cloning `open_tree`) |
 | User read/write buffers | `read`, `write`, `readlinkat`, `getdents64`, `statfs` | Bad addresses, short buffers, cross-page access failures, malformed kernel information written back |
 | xattr names and values | `set/get/list/remove*xattr` | Missing NUL terminator, over-long name/value/list, non-UTF-8 suffix, short output buffers, namespace privilege violations |
 | User iovec | `readv`, `writev`, `preadv2`, `pwritev2` | Too many iovecs, range overflow, wrong read/write direction |

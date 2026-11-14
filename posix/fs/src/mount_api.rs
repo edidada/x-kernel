@@ -707,16 +707,18 @@ pub fn sys_mount_setattr(
     if flags & 0x100 != 0 {
         lookup = LookupFlags::no_follow();
     }
-    // `AT_EMPTY_PATH` with a non-mount fd still names that fd's own path, which
-    // Linux resolves by passing `LOOKUP_EMPTY` to `user_path_at`. Without this
-    // the empty path fell through to a pathname lookup and answered ENOENT.
-    if flags & AT_EMPTY_PATH != 0 {
-        lookup |= LookupFlags::EMPTY_PATH;
+    // An empty `AT_EMPTY_PATH` that did not name a mount fd still names that
+    // descriptor's own path. Linux's `path_init` skips the `d_can_lookup` test
+    // (no pathname to walk) and `do_mount_setattr` then answers EINVAL because
+    // the dentry is not a mount root, so a non-directory descriptor is refused
+    // here instead of by the lookup. The global `with_fs_at` keeps its
+    // directory requirement for every other `*at` syscall.
+    if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
+        let file = kprocess::current_files().get_file(dfd)?;
+        if file.path().dentry().as_dir().is_err() {
+            return Err(KError::InvalidInput);
+        }
     }
-    // `Stat` rather than `Open`: `mount_setattr` re-attributes a mount and never
-    // opens the target, and `Open` rejects a non-directory, which returned
-    // ENOTDIR for `AT_EMPTY_PATH` on an fd naming a file. Linux's `user_path_at`
-    // performs no such check.
     let target = with_fs_at(dfd, &filename, |fs| {
         filename.lookup_at(fs.root(), fs.pwd(), LookupIntent::Stat, lookup, &cred)
     })?;
