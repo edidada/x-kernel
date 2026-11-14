@@ -94,6 +94,19 @@ synchronizes buddy bitmap reservations nor detects raw-protocol double frees.
 A permanent flag of false does not mean the page can be allocated or released.
 
 
+## Memory-cgroup attribution
+
+Each `PageMeta` stores the 32-bit memory-cgroup id and the allocation
+`UsageKind` for the current page incarnation. The accounting layer writes both
+only after the page's complete range is known to have resident metadata and the
+hierarchical charge has succeeded. `take_memcg` transfers the id to the
+releasing owner exactly once.
+
+Tail offsets are 16-bit page distances. Compound admission rejects an
+allocation whose page count would not encode in 16 bits, so a valid descriptor
+cannot silently alias another page. The full 32-bit cgroup id is retained; no
+id is truncated or reused.
+
 ## Allocation references and head/tail geometry
 
 Each descriptor identifies one physical 4 KiB page. An independent page has

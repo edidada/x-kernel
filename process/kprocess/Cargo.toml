@@ -22,6 +22,7 @@ karch.workspace = true
 kcpu_id_map.workspace = true
 kcred.workspace = true
 kcgroup.workspace = true
+memacct.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 ktime_types.workspace = true

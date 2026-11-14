@@ -19,6 +19,7 @@
 //! taking a remote scheduler lock; `ksched` only sees the already-chosen queue.
 
 #[cfg(feature = "smp")]
+pub(crate) mod bandwidth;
 mod idle_pull;
 #[cfg(feature = "smp")]
 mod migrate;

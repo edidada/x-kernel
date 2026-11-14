@@ -509,6 +509,7 @@ pub(crate) static INIT_PROC: LazyInit<Arc<Process>> = LazyInit::new();
 ///
 /// Panics when no initial process has been constructed.
 pub fn init_proc() -> Arc<Process> {
+    let _ = memacct::install_current_memcg_provider(crate::current_memcg);
     #[expect(
         clippy::unwrap_used,
         reason = "CG-021-no-panic-on-reachable-failure: init_proc requires the initial process to \

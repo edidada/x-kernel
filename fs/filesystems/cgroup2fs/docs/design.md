@@ -1,4 +1,4 @@
-# cgroup2fs — Design Document
+# cgroup2fs — 设计文档
 
 ## Fallible superblock preparation
 
@@ -16,12 +16,12 @@ reservation, not a held hierarchy mutex: its transaction guard is released
 before return. Child-name and inode-registry snapshot locks are also released
 before iterator allocation; the iterator owns names rather than any guard.
 
-## Positioning
+## 定位
 
-`cgroup2fs` is the Linux cgroup v2 filesystem ABI adapter. The hierarchy, controller state and task
-membership are held by `kcgroup`; process lookup and stable task identity validation are held by `kprocess`.
-This crate translates VFS operations into owner API calls and owns the per-mount VFS node registry; the registry
-only stores inode identity/metadata and does not duplicate hierarchy or membership state.
+`cgroup2fs` 是 Linux cgroup v2 文件系统 ABI 适配器。层级、controller 状态和 task
+membership 由 `kcgroup` 持有；进程查找和稳定 task identity 校验由 `kprocess` 持有。
+本 crate 把 VFS 操作翻译成 owner API，并拥有每个 mount 的 VFS node registry；registry
+只保存 inode identity/metadata，不复制 hierarchy 或 membership 状态。
 
 ## Cross-crate interface
 
@@ -33,38 +33,27 @@ only stores inode identity/metadata and does not duplicate hierarchy or membersh
   `state::CgroupFsState::cgroup_of(inode)` (per-mount registry lookup) ->
   `Arc<Cgroup>`. Descriptors outside this filesystem return `None` (mapped to
   `EBADF` by the caller).
-- `cgroup_clone_target(&VfsFile) -> VfsResult<Arc<Cgroup>>` (`src/lib.rs`):
-  resolves and authorizes a `clone3(CLONE_INTO_CGROUP)` target directory.
-  Provider: cgroup2fs; consumer: `ksyscall` (clone3); call direction
-  `clone3(2)` -> `clone_cgroup_target` -> `cgroup_clone_target` ->
-  (mount view-root visibility check + target and common-ancestor
-  `cgroup.procs` `MAY_WRITE` against the caller's **current** credentials) ->
-  `Arc<Cgroup>`. Fallible result set: `EBADF` (not a cgroup2 directory),
-  `ENODEV` (removed target), `ENOENT` (endpoint outside the mount view),
-  `EXDEV` (cross-hierarchy), `EACCES` (delegation write denied). Unlike
-  `cgroup_from_file`, this performs authorization and returns a typed error
-  rather than `Option`; the fork path only ever sees the resolved
-  `Arc<Cgroup>`, never the user descriptor.
 
-## Scope
+## 范围
 
-Kernel unit tests are located in `ut-tests/lib.rs`, are mounted as the `tests` module by
-`unittest::path_mod_test!` in `src/lib.rs`, and are compiled under `cfg(unittest)`.
+内核单元测试位于 `ut-tests/lib.rs`，由 `src/lib.rs` 中的
+`unittest::path_mod_test!` 挂载为 `tests` 模块，在 `cfg(unittest)` 下编译。
 
 ```text
 src/
-├── lib.rs         # crate entry and public exports
-├── mount.rs       # filesystem type, FsContext, superblock
-├── state.rs       # per-mount stable directory/control-file inode registry
-├── dir.rs         # dynamic directory enumeration, lookup, mkdir, rmdir
-├── control.rs     # control file mode
-├── command.rs     # control command parsing in kernel buffers
-├── controller.rs  # controller registry and generic control files
-├── pids.rs        # pids controller file adaptation
-└── process.rs     # cgroup.procs display, authorization and process migration
+├── lib.rs         # crate 入口与公开导出
+├── mount.rs       # filesystem type、FsContext、superblock
+├── state.rs       # per-mount 稳定目录/控制文件 inode registry
+├── dir.rs         # 动态目录枚举、lookup、mkdir、rmdir
+├── control.rs     # 控制文件 mode
+├── command.rs     # 内核缓冲区中的控制命令解析
+├── controller.rs  # controller registry 与通用控制文件
+├── pids.rs        # pids controller 文件适配
+├── cpuset.rs      # cpuset 文件、cpulist 解析与 affinity 桥接
+└── process.rs     # cgroup.procs 展示、授权与进程迁移
 ```
 
-## Architecture
+## 架构
 
 ```text
 VFS
@@ -74,69 +63,96 @@ VFS
  └─ CgroupFsState ──────────> stable VFS inode identity
      └─ dir.rs
          ├─ process.rs ─────> kprocess cgroup facade
-         └─ controller.rs ──> pids.rs ─────> kcgroup
+         └─ controller.rs ──> pids.rs  ────> kcgroup
+                          └─ cpuset.rs ──> kcgroup / ktask affinity
 ```
 
-`state.rs` constructs the directory inode and the fixed control-file inodes once for each `Arc<Cgroup>`. Repeated lookups in `dir.rs`
-only create or reuse dentries pointing to these inodes. Controller file visibility is determined from the canonical cgroup state on each
-lookup/readdir. When adding a new controller, add the corresponding entries to the file declarations in state
-and to the adapter in `controller.rs`.
+`state.rs` 为每个 `Arc<Cgroup>` 一次性构造目录 inode 和固定控制文件 inode。`dir.rs`
+的重复 lookup 只建立或复用指向这些 inode 的 dentry。controller 文件可见性在每次
+lookup/readdir 时从 canonical cgroup 状态判断。新增 controller 时在 state 的文件声明
+和 `controller.rs` adapter 中增加对应项。
 
-## Calling Constraints / Execution Context
+`cgroup.controllers` 展示当前层的 available controller，`cgroup.subtree_control`
+展示已向子层开放的 controller；二者不表示当前层自身是否 live。只有 controller
+在当前 cgroup 上处于 active/live 状态时，对应的 controller 控制文件才存在。root
+的 cpuset 始终 live；child 的 cpuset 仅在其父层开启 cpuset subtree control 后
+live。pids 在 root 上仅 available，因此 root 不出现 pids 文件；向子层开放后才
+在子层 live。
 
-Ordinary user mounts and file operations require the current task to be a user process thread, and the scheduler, process
-registry, VFS and cgroup namespace to be initialized. `new_initial_cgroup2fs()` is used only for the `fs_boot`
-boot-time mount and does not require a current process. Paths use sleepable locks and must not be called from IRQ, softirq
-or contexts holding a spinlock. The input has already been copied into the kernel by the VFS; this crate does not access user pointers.
+## 调用约束 / 执行上下文
 
-## Algorithm Flow
+普通用户挂载和文件操作要求当前 task 是用户进程线程，并且 scheduler、process
+registry、VFS 和 cgroup namespace 已初始化。`new_initial_cgroup2fs()` 仅用于 `fs_boot`
+的启动期挂载，不要求 current process。路径使用 sleepable lock，不能在 IRQ、softirq
+或持有 spinlock 的上下文调用。输入已经由 VFS 复制到内核；本 crate 不访问用户指针。
 
-### Mounting
+## 算法流程
 
-An ordinary mount obtains the view root from the current process's `CgroupNamespace`. When `KFEAT_FS_CGROUP2=y`,
-`fs_boot` mounts the initial namespace hierarchy at `/sys/fs/cgroup` before any user process is created. Each
-superblock creates one `CgroupFsState` and first materializes the stable root inode.
+### 挂载
 
-### Control Files
+普通 mount 从当前进程的 `CgroupNamespace` 取得 view root。`KFEAT_FS_CGROUP2=y` 时，
+`fs_boot` 在用户进程创建前把 initial namespace hierarchy 挂到 `/sys/fs/cgroup`。每个
+superblock 创建一个 `CgroupFsState` 并首先物化稳定 root inode。
 
-`command.rs` rejects non-UTF-8 input, embedded NUL, empty `subtree_control` commands, and operations missing a `+`/`-` prefix.
-The controller registry resolves all names before mutation. All writable control files use the KVFS
-`CommandFile`: a single write is at most 4096 bytes and is handled as an independent command; the file offset and
-earlier writes do not take part in concatenation. `pids.max` accepts only `max` or a numeric value within the Linux PID domain.
+### 控制文件
 
-### Directories and Inode Identity
+`command.rs` 拒绝非 UTF-8、嵌入 NUL、空 `subtree_control` 命令和缺少 `+`/`-` 前缀的
+操作。controller registry 在 mutation 前解析所有名称。所有可写控制文件使用 KVFS
+`CommandFile`：一次 write 最多 4096 字节并作为独立命令处理，file offset 和此前写入
+不参与拼接。`pids.max` 只接受 `max` 或 Linux PID domain 内的数值。
+`pids.events` 只读并输出 `max <count>\n`，其中 count 仅统计因 `current >= pids.max`
+而被拒绝的新任务准入；迁移不计入。该计数随控制器启用从零开始，停用后重新启用会
+重置。
 
-`mkdir` uses the parent inode, the prepared mode and the credential passed in by the VFS, and initializes the owner through
-`inode_init_owner()`. `rmdir` uses the already-locked victim dentry, and deletes only after verifying that the
-inode it references is the same as the target cgroup inode in the registry. After a node is deleted, the registry keeps a tombstone
-inode until unmount; old fds continue to point to the old identity, and recreating the same name yields a new cgroup and a new inode.
+cpuset 控制文件采用 Linux cpulist 语法（如 `0-3,8,10-11`）。`cpuset.cpus` 和
+`cpuset.mems` 可写，读取的是本层请求值；空请求表示继承父层 effective mask。
+`cpuset.cpus.effective` 和 `cpuset.mems.effective` 只读，读取的是实际生效值。
+解析和层级校验由 adapter 与 `kcgroup` 分担：adapter 解析 cpulist，`kcgroup`
+检查 CPU/NUMA 索引是否存在、是否超出父层 effective mask、以及结果是否为空。
+成功写入 `cpuset.cpus` 后，adapter 对本层及全部后代按各层 effective mask 更新
+task affinity。
 
-### Process Display and Migration
+### 目录与 inode identity
 
-`process.rs` obtains deduplicated PIDs through `kprocess::cgroup_member_process_ids()`. The facade verifies the
-`Arc<PidHandle>` identity of the registry task and the membership, avoiding incorrect mapping caused by TID reuse.
+`mkdir` 使用 VFS 传入的 parent inode、准备后 mode 与 credential，通过
+`inode_init_owner()` 初始化 owner。`rmdir` 使用已加锁 victim dentry，并验证它引用的
+inode 与 registry 中目标 cgroup inode 相同后才删除。节点删除后 registry 保留 tombstone
+inode 到 unmount；旧 fd 继续指向旧 identity，同名重建会得到新 cgroup 和新 inode。
 
-When `cgroup.procs` is written, `kprocess` hands the stable source and destination to the adapter inside the process cgroup gate.
-The adapter verifies that both ends are located under the mount view root, finds the nearest common ancestor, and uses the
-credential saved when the fd was opened to check write permission on the common ancestor's `cgroup.procs` inode; only after this passes
-is the migration of the whole group committed.
+### 进程展示与迁移
 
-## Concurrency Model
+`process.rs` 通过 `kprocess::cgroup_member_process_ids()` 获取去重 PID。facade 验证
+registry task 与 membership 的 `Arc<PidHandle>` identity，避免 TID 重用错误映射。
 
-`CgroupFsState` protects the node registry with a mutex and uses `Weak<SimpleFs>` to avoid reference cycles. Each
-control-file operation first acquires the `kcgroup` operation guard: while the guard is alive, removal returns `EBUSY`, and
-after the node is deleted, new operations return `ENODEV`. Hierarchy transactions are serialized by `kcgroup`, and process publication and
-whole-group migration are serialized by `kprocess`. The directory dentry cache is kept disabled so that, after a controller is activated, a stale
-negative lookup does not hide newly visible files; each lookup still reuses the stable inode identity in the registry.
+写 `cgroup.procs` 时，`kprocess` 在 process cgroup gate 内把稳定 source、destination
+交给 adapter。adapter 验证两端均位于 mount view root 下，求最近共同祖先，并使用
+打开 fd 时保存的 credential 检查共同祖先 `cgroup.procs` inode 写权限；通过后才提交
+整组迁移。迁移成功后，adapter 立即把 destination 的 effective cpuset CPU mask 应用到
+被迁入进程，避免进程保留来源 cgroup 的 affinity。
 
-## Design Decisions
+空 effective CPU mask 可能是父层配置过程中的瞬态值。affinity 桥接跳过空 mask，
+不把“空集”解释为“全部 CPU”，也不会因此回滚已经成功的 mask 更新。
 
-- The per-mount registry belongs to the VFS adapter rather than to `Cgroup`, so that the core hierarchy does not depend on the filesystem.
-- hierarchy/controller mutation uses VFS directory/control-file DAC, without layering on a hidden
-  current-process administrator check.
-- `cgroup.procs` additionally performs the mount view and common-ancestor write permission checks, using the opener credential.
-- The boot mount explicitly selects the initial view and does not implicitly fall back when there is no current process.
+## 并发模型
 
-## Drop / Resource Release
+`CgroupFsState` 用 mutex 保护 node registry，并以 `Weak<SimpleFs>` 避免引用环。每个
+控制文件操作先取得 `kcgroup` operation guard：guard 存活期间 removal 返回 `EBUSY`，
+节点删除后新操作返回 `ENODEV`。层级事务由 `kcgroup` 序列化，进程 publication 与
+整组迁移由 `kprocess` 序列化。目录 dentry cache 保持关闭，避免 controller 激活后旧的
+negative lookup 隐藏新可见文件；每次 lookup 仍复用 registry 中的 stable inode identity。
 
-The registry holds the stable inode and cgroup node of each live cgroup; `rmdir` drops the entry via `remove_node`, and remaining entries are released with the superblock. Old fds keep their inode alive through their own `Arc`. Membership, controller charge and hierarchy lifetime remain managed by `kcgroup`.
+## 设计决策
+
+- per-mount registry 属于 VFS adapter，而不是 `Cgroup`，避免 core hierarchy 依赖文件系统。
+- hierarchy/controller mutation 使用 VFS directory/control-file DAC，不叠加隐藏的
+  current-process 管理员判断。
+- `cgroup.procs` 额外执行 mount view 与共同祖先写权限检查，使用 opener credential。
+- 启动挂载显式选择 initial view，不在缺少 current process 时隐式 fallback。
+- controller 文件按 live 状态动态可见，而不是为未激活 controller 暴露惰性文件。
+- cpuset 的层级校验留在 `kcgroup`，本 crate 只解析 ABI 并同步 scheduler affinity。
+
+## Drop / 资源释放
+
+registry 持有 stable inode 和 cgroup 节点直到 superblock 释放。tombstone 防止旧 fd
+identity 被同名重建复用；membership、controller charge 和 hierarchy 生命周期仍由
+`kcgroup` 管理。

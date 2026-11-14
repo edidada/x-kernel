@@ -60,3 +60,17 @@ pub fn current_cgroup() -> Option<Arc<Cgroup>> {
         .try_as_thread()
         .and_then(|thread| thread.cgroup())
 }
+
+/// Returns the memory cgroup that owns new page allocations by the current task.
+///
+/// Execution context (CG-039): reads only the current task's cgroup membership
+/// and clones the resulting `Arc`; it never sleeps and is safe in ordinary or
+/// IRQ context. A kernel task, a task without cgroup membership, or a cgroup
+/// without an enabled memory controller yields [`memacct::MemcgId::NONE`],
+/// which callers treat as "do not charge".
+pub fn current_memcg() -> memacct::MemcgId {
+    current_cgroup()
+        .and_then(|cgroup| cgroup.memory_controller().ok())
+        .map(|controller| controller.memcg().id())
+        .unwrap_or(memacct::MemcgId::NONE)
+}

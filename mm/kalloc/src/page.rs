@@ -302,6 +302,10 @@ fn release_unit(unit: AllocationInfo) {
     // SAFETY: the caller transfers one existing hold after all protected use.
     // The unit geometry was saved before decrementing its sole head counter.
     if unsafe { head.release_reference() } {
+        memacct::uncharge_frame(
+            PhysAddr::from(unit.head_pfn() * PAGE_SIZE_4K),
+            unit.page_count() * PAGE_SIZE_4K,
+        );
         // SAFETY: true selected the unique retiring holder; all links are cleared
         // before storage becomes reusable and no old metadata write follows.
         let kind = unsafe { metadata_table().finish_reference_retirement(unit.head_pfn()) };
@@ -421,6 +425,13 @@ fn allocate_range(
     };
     match result {
         Ok(page) => {
+            if memacct::charge_frame(paddr, num_pages * PAGE_SIZE_4K, kind).is_err() {
+                drop(page);
+                for index in num_pages..backing_pages {
+                    allocator.release_pages_to_inventory(va + index * PAGE_SIZE_4K, 1);
+                }
+                return Err(AllocError::NoMemory);
+            }
             let spare_pages = backing_pages - num_pages;
             if kind == UsageKind::RustHeap {
                 // Raw heap backing skips this charge; reference ranges do not.

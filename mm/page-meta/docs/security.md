@@ -133,3 +133,13 @@ changes one head count. Range length belongs to the external holder, not a share
 metadata field; raw consumers must transfer that length without reconstruction
 from the first descriptor. Isolated fixture tests force mid-range overflow without
 exposing a production count-setting API and restore all modeled holds afterward.
+
+## Memory-cgroup attribution invariants
+
+- The cgroup id is 32-bit and is never truncated.
+- The id and usage class are published only after a successful hierarchical
+  charge and complete metadata coverage.
+- `take_memcg` clears the id exactly once; a second release cannot underflow a
+  different group.
+- Tail offsets fit 16 bits; compound admission rejects larger encodings.
+
