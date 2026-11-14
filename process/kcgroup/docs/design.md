@@ -5,8 +5,8 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## Purpose and scope
 
-`kcgroup` owns the canonical cgroup v2 hierarchy, pids and cpuset controller
-accounting, and task membership. The implementation lives in `src/lib.rs`,
+`kcgroup` owns the canonical cgroup v2 hierarchy, cpu, cpuset, memory, and
+pids controller accounting, and task membership. The implementation lives in `src/lib.rs`,
 `src/hierarchy.rs`, `src/membership.rs`, `src/namespace.rs`, and
 `src/controller/`; its kernel tests are in `ut-tests/lib.rs`.
 `kprocess` integrates task publication, process-wide migration, and exit;

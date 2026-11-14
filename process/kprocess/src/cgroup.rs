@@ -61,12 +61,14 @@ pub fn current_cgroup() -> Option<Arc<Cgroup>> {
         .and_then(|thread| thread.cgroup())
 }
 
-/// Returns the memory cgroup cached on the current task.
+/// Returns the memory cgroup of the current task's cgroup membership.
 ///
-/// Execution context (CG-039): a single atomic load of the task's cached id;
-/// no cgroup lock, sleeping allocation, or page walk. The value is sampled at
-/// task construction and updated by cgroup migration, so it is safe from page
-/// allocation and IRQ context.
+/// The membership lock is an IRQ-safe spinlock, so this is safe from page
+/// allocation and interrupt context. The lookup is live: enabling `+memory`
+/// after a task joined a child cgroup is observed on the next charge.
 pub fn current_memcg() -> memacct::MemcgId {
-    ktask::current().memcg_id()
+    current_cgroup()
+        .and_then(|cgroup| cgroup.memory_controller().ok())
+        .map(|controller| controller.memcg().id())
+        .unwrap_or(memacct::MemcgId::NONE)
 }

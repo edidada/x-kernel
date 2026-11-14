@@ -18,7 +18,7 @@ use core::sync::atomic::Ordering;
 
 use kerrno::{KError, KResult, LinuxError};
 use kidentity::TaskIdentityToken;
-use ksync::RwLock;
+use kspin::SpinNoIrq;
 
 use crate::{
     Cgroup, Controller,
@@ -119,7 +119,7 @@ impl TaskCharge {
         charges.commit();
         Ok(TaskMembership {
             token,
-            cgroup: RwLock::new(Some(cgroup)),
+            cgroup: SpinNoIrq::new(Some(cgroup)),
         })
     }
 }
@@ -135,13 +135,13 @@ impl Drop for TaskCharge {
 /// Canonical cgroup membership owned by one task/thread.
 pub struct TaskMembership {
     token: TaskIdentityToken,
-    cgroup: RwLock<Option<Arc<Cgroup>>>,
+    cgroup: SpinNoIrq<Option<Arc<Cgroup>>>,
 }
 
 impl TaskMembership {
     /// Returns the current cgroup node.
     pub fn cgroup(&self) -> Option<Arc<Cgroup>> {
-        self.cgroup.read().clone()
+        self.cgroup.lock().clone()
     }
 
     /// Moves an existing task without applying `pids.max` to the target.
@@ -182,7 +182,7 @@ impl TaskMembership {
 
         let mut current = Vec::with_capacity(ordered.len());
         for membership in &ordered {
-            current.push(membership.cgroup.write());
+            current.push(membership.cgroup.lock());
         }
         let target_lineage = target.controller_lineage();
         // Validate every source before mutating any controller count. This
@@ -251,7 +251,7 @@ impl TaskMembership {
     pub fn reserve_child(&self) -> KResult<TaskCharge> {
         let cgroup = self
             .cgroup
-            .read()
+            .lock()
             .clone()
             .ok_or_else(|| KError::from(LinuxError::ESRCH))?;
         cgroup.reserve_task()
@@ -263,12 +263,12 @@ impl TaskMembership {
     }
 
     fn do_detach(&self) {
-        let cgroup_snapshot = self.cgroup.read().clone();
+        let cgroup_snapshot = self.cgroup.lock().clone();
         let Some(cgroup_snapshot) = cgroup_snapshot else {
             return;
         };
         let _transaction = cgroup_snapshot.hierarchy.transaction.lock();
-        let Some(cgroup) = self.cgroup.write().take() else {
+        let Some(cgroup) = self.cgroup.lock().take() else {
             return;
         };
         cgroup.member_tasks.lock().remove(&self.token);

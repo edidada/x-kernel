@@ -312,8 +312,8 @@ impl CpusetController {
 
     /// Recomputes the effective masks after an ancestor changed.
     pub fn refresh_effective(&self, parent_cpus: IndexMask, parent_mems: IndexMask) {
-        let cpus = self.cpus();
-        let mems = self.mems();
+        let cpus = self.cpus.read();
+        let mems = self.mems.read();
         let effective_cpus = if cpus.is_empty() {
             parent_cpus
         } else {

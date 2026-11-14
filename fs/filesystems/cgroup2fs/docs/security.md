@@ -79,7 +79,7 @@ PID namespace translation is not yet implemented, so namespace isolation must no
 ## Known Limitations
 
 - Non-zero `cgroup.procs` IDs are still resolved in the root PID namespace.
-- Only the `pids` controller exists.
+- Implemented controller surfaces are `pids`, `cpuset`, `cpu`, and `memory`; `io` is not implemented.
 - User namespace ID mapping, capabilities and LSM are not fully wired in; delegation currently relies on the inode
   owner/mode, the mount view and VFS DAC.
 

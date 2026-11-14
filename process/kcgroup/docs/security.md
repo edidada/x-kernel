@@ -56,7 +56,8 @@ Operation guards keep a node live, but do not freeze quota/delegation policy.
 | F-02 | Child mutation fails | Invalid name, missing node, duplicate name, busy node | `EINVAL`/`ENOENT`/`EEXIST`/`EBUSY` | Filesystem operation fails | 3 | Preserve original child and restore ACTIVE on busy removal. |
 | F-03 | Controller inaccessible | Node removed or controller absent/inactive | `ENODEV` or `ENOENT` | Controller operation rejected | 3 | Adapter reports error; no fabricated active state. |
 | F-04 | Cpuset request rejected | Empty effective mask, bad list, or mask outside parent/universe | `ENOSPC`, `EINVAL`, or `ENODEV` | Mask remains unchanged | 3 | Validate before storing; refresh only after a successful request. |
-| F-05 | Charge invariant fails | Incomplete commit, inactive commit, count underflow | Assertion or debug assertion | Kernel service may fail | 2 | Preserve exact reservation/accounting ownership; checked subtraction does not wrap. |
+| F-05 | Charge invariant fails | Incomplete commit caused by a concurrent subtree-control lineage change | `EAGAIN` | Commit rejected; reserved charges roll back | 2 | Recheck lineage at commit and return a recoverable error; Drop releases the reservation. |
+| F-05a | Charge invariant fails | Inactive commit or counter underflow | Assertion or debug assertion | Kernel service may fail | 2 | Preserve exact reservation/accounting ownership; checked subtraction does not wrap. |
 | F-06 | Hierarchy mismatch | Unrelated source/target or view root | `EXDEV` | No successful migration/path result | 3 | Validate before mutation or rendering. |
 | F-07 | Allocation exhaustion | Map/vector/node creation | Allocation cannot complete | Service unavailable | 2 | Global allocator policy; no local recoverable allocation path. |
 

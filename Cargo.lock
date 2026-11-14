@@ -2226,6 +2226,7 @@ dependencies = [
  "kerrno",
  "kidentity",
  "klazy",
+ "kspin",
  "ksync",
  "memacct",
  "unittest",
@@ -3496,7 +3497,6 @@ dependencies = [
  "ktimer-core",
  "lazyinit",
  "log",
- "memacct",
  "memaddr",
  "unittest",
 ]

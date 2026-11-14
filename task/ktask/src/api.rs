@@ -827,6 +827,31 @@ pub fn set_task_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
     }
 }
 
+/// Applies a userspace `sched_setaffinity` request without overwriting the
+/// cgroup `cpuset` bound.
+///
+/// The requested mask is intersected with the task's existing bound. Returns
+/// `false` for an empty request or an empty intersection; the task's masks are
+/// unchanged on failure. Kernel-internal pinning uses [`set_task_affinity`].
+pub fn set_task_requested_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
+    if cpumask.is_empty() {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    let old_mask = task.cpumask();
+    if !task.set_requested_cpus(cpumask) {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    {
+        crate::run_queue::enforce_affinity_placement(task, old_mask)
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        true
+    }
+}
+
 /// Applies the cgroup `cpuset` bound to a task and recomputes its effective
 /// affinity.
 ///

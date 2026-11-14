@@ -163,14 +163,6 @@ pub trait UserTaskRuntime: Send + Sync + Any {
         kidentity::TaskIdentityToken::unknown()
     }
 
-    /// Returns the memory cgroup charged for this task's page faults.
-    ///
-    /// The value is sampled once when the task is constructed and updated by
-    /// cgroup migration through the task API.
-    fn memcg_id(&self) -> memacct::MemcgId {
-        memacct::MemcgId::NONE
-    }
-
     /// Returns the cgroup CPU bandwidth tracker charged for this task's
     /// runtime ticks, sampled once at task construction. `None` leaves the
     /// task outside `cpu.max` accounting.
@@ -427,12 +419,6 @@ pub struct TaskInner {
 
     /// NUMA memory-node mask inherited from the cgroup `cpuset` controller.
     mems: SpinNoIrq<KCpuMask>,
-
-    /// Memory cgroup sampled when the task is constructed and updated by
-    /// cgroup migration. Read lock-free by the page-charge provider.
-    memcg: core::sync::atomic::AtomicU32,
-    /// cgroup CPU bandwidth tracker charged by scheduler ticks.
-    cpu_bandwidth: SpinNoIrq<Option<alloc::sync::Arc<kbandwidth::Bandwidth>>>,
 
     /// Used to indicate the CPU ID where the task is running or will run.
     cpu_id: AtomicU32,
@@ -710,39 +696,23 @@ impl TaskInner {
                 "a user task's identity must match its runtime number"
             );
         }
-        let memcg = user_runtime.memcg_id();
-        let cpu_bandwidth = user_runtime.cpu_bandwidth();
-        let task = Self::new_with_entry(
+        Self::new_with_entry(
             TaskEntry::Prepared(entry),
             name,
             kbuild_config::KERNEL_STACK_SIZE,
             TaskIdentity::User {
                 user_runtime: UserRuntimeSlot::ready(user_runtime),
             },
-        );
-        task.memcg.store(memcg.as_u32(), Ordering::Relaxed);
-        *task.cpu_bandwidth.lock() = cpu_bandwidth;
-        task
+        )
     }
 
-    /// Returns the memory cgroup charged for this task's new page faults.
-    pub fn memcg_id(&self) -> memacct::MemcgId {
-        memacct::MemcgId::from_raw(self.memcg.load(Ordering::Acquire))
-    }
-
-    /// Rebinds this task's page-charge owner after cgroup migration.
-    pub fn set_memcg_id(&self, id: memacct::MemcgId) {
-        self.memcg.store(id.as_u32(), Ordering::Release);
-    }
-
-    /// Returns the cgroup bandwidth tracker this task charges, if any.
+    /// Returns the live cgroup bandwidth tracker from this task's runtime.
+    ///
+    /// Reading through `UserTaskRuntime` observes a controller enabled after
+    /// task construction, so enabling `+cpu` does not require rebinding every
+    /// existing task.
     pub fn cpu_bandwidth(&self) -> Option<alloc::sync::Arc<kbandwidth::Bandwidth>> {
-        self.cpu_bandwidth.lock().clone()
-    }
-
-    /// Rebinds the cgroup bandwidth tracker after cgroup migration.
-    pub fn set_cpu_bandwidth(&self, bandwidth: Option<alloc::sync::Arc<kbandwidth::Bandwidth>>) {
-        *self.cpu_bandwidth.lock() = bandwidth;
+        self.user_runtime()?.cpu_bandwidth()
     }
 
     /// Returns the current task-number handle, if the task has one.
@@ -1175,8 +1145,6 @@ impl TaskInner {
             // By default, the task is allowed to run on all CPUs.
             affinity: SpinNoIrq::new(TaskAffinity::new(cpumask)),
             mems: SpinNoIrq::new(KCpuMask::one_shot(0)),
-            memcg: core::sync::atomic::AtomicU32::new(0),
-            cpu_bandwidth: SpinNoIrq::new(None),
             cpu_id: AtomicU32::new(0),
             #[cfg(feature = "smp")]
             on_cpu: AtomicBool::new(false),

@@ -42,13 +42,6 @@ impl UserTaskRuntime for Thread {
         Thread::identity_token(self)
     }
 
-    fn memcg_id(&self) -> memacct::MemcgId {
-        self.cgroup()
-            .and_then(|cgroup| cgroup.memory_controller().ok())
-            .map(|controller| controller.memcg().id())
-            .unwrap_or(memacct::MemcgId::NONE)
-    }
-
     fn cpu_bandwidth(&self) -> Option<Arc<Bandwidth>> {
         self.cgroup().and_then(|cgroup| cgroup.cpu_bandwidth())
     }
