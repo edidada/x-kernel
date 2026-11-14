@@ -128,6 +128,47 @@ bitflags::bitflags! {
 }
 
 impl MremapFlags {
+    fn install_anonymous_source(
+        aspace: &mut memspace::MmSpace,
+        source: &memspace::MremapSource,
+        start: VirtAddr,
+        len: usize,
+    ) -> KResult {
+        let runtime = VmRuntimeRef::new_anon_private(start, source.page_size());
+        aspace.map_with_max_flags(
+            start,
+            len,
+            source.flags(),
+            source.max_flags(),
+            false,
+            runtime,
+        )
+    }
+
+    fn validate_request(
+        addr: usize,
+        old_size: usize,
+        new_size: usize,
+        flags: u32,
+        new_addr: usize,
+    ) -> KResult<(Self, usize, usize)> {
+        if new_size == 0 {
+            return Err(KError::InvalidInput);
+        }
+
+        let mremap_flags = Self::from_raw(flags)?;
+        mremap_flags.validate_args(old_size, new_size)?;
+
+        if !addr.is_multiple_of(PageSize::Size4K as usize) {
+            return Err(KError::InvalidInput);
+        }
+        let old_size = align_up_4k(old_size);
+        let new_size = align_up_4k(new_size);
+
+        mremap_flags.validate_fixed_target(addr, old_size, new_addr, new_size)?;
+        Ok((mremap_flags, old_size, new_size))
+    }
+
     fn from_raw(bits: u32) -> KResult<Self> {
         Self::from_bits(bits).ok_or(KError::InvalidInput)
     }
@@ -710,20 +751,8 @@ pub fn sys_mremap(
 
     // --- 1. Parameter validation ---
 
-    if new_size == 0 {
-        return Err(KError::InvalidInput);
-    }
-
-    let mremap_flags = MremapFlags::from_raw(flags)?;
-    mremap_flags.validate_args(old_size, new_size)?;
-
-    if !addr.is_multiple_of(PageSize::Size4K as usize) {
-        return Err(KError::InvalidInput);
-    }
-    let old_size = align_up_4k(old_size);
-    let new_size = align_up_4k(new_size);
-
-    mremap_flags.validate_fixed_target(addr, old_size, new_addr, new_size)?;
+    let (mremap_flags, old_size, new_size) =
+        MremapFlags::validate_request(addr, old_size, new_size, flags, new_addr)?;
 
     let addr = VirtAddr::from(addr);
 
@@ -735,8 +764,6 @@ pub fn sys_mremap(
     aspace_ref.with_mapping_owner(|mut mapping| {
         let mut source = mapping.aspace_mut().resolve_mremap_source(addr, old_size)?;
         let vma_end = source.end();
-        let mapping_flags = source.flags();
-        let max_flags = source.max_flags();
         let page_size = source.page_size();
 
         // Linux checks growth before MREMAP_FIXED removes the destination.
@@ -762,14 +789,11 @@ pub fn sys_mremap(
                 !mremap_flags.keeps_source_mapping(),
             )?;
             if mremap_flags.keeps_source_mapping() {
-                let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-                mapping.aspace_mut().map_with_max_flags(
+                MremapFlags::install_anonymous_source(
+                    mapping.aspace_mut(),
+                    &source,
                     addr,
                     move_size,
-                    mapping_flags,
-                    max_flags,
-                    false,
-                    fresh_runtime,
                 )?;
             }
             return Ok(target_addr.as_usize() as _);
@@ -785,15 +809,7 @@ pub fn sys_mremap(
             mapping.relocate_mapping(&source, target_addr, new_size, false)?;
             // The old mapping's role was retired after the PTE transfer; install
             // fresh anonymous backing at the original address.
-            let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-            mapping.aspace_mut().map_with_max_flags(
-                addr,
-                old_size,
-                mapping_flags,
-                max_flags,
-                false,
-                fresh_runtime,
-            )?;
+            MremapFlags::install_anonymous_source(mapping.aspace_mut(), &source, addr, old_size)?;
             return Ok(target_addr.as_usize() as _);
         }
 
