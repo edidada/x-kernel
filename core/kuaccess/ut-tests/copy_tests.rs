@@ -324,6 +324,14 @@ fn user_copy_admission_wait_does_not_consume_materialization_budget() {
         MAX_USER_PAGE_FAULT_ATTEMPTS * 2 + 1
     );
     space.lock().unmap(start, PAGE_SIZE_4K).unwrap();
+    backing.faults.store(0, Ordering::Relaxed);
+    backing.install(&mut space.lock(), start, PAGE_SIZE_4K, flags);
+    assert_eq!(atomic_load_u32(start.as_usize()), Ok(0));
+    assert_eq!(
+        backing.faults.load(Ordering::Relaxed),
+        MAX_USER_PAGE_FAULT_ATTEMPTS * 2 + 1
+    );
+    space.lock().unmap(start, PAGE_SIZE_4K).unwrap();
 }
 
 #[def_test(user)]
@@ -362,6 +370,11 @@ fn user_nofault_copy_defers_backing_admission_until_prefault() {
     backing.install(&mut space.lock(), start, PAGE_SIZE_4K, flags);
     let mut vm = Vm::new();
     let copied = access_user_memory(|| {
+        assert_eq!(
+            atomic_load_u32_nofault(start.as_usize()),
+            Err(MemError::NoAccess)
+        );
+        assert!(curr.as_thread().is_accessing_user_memory());
         assert_eq!(
             atomic_cmpxchg_u32_nofault(start.as_usize(), 0, 1),
             Err(MemError::NoAccess)

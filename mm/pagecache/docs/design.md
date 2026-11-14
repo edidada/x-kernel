@@ -444,3 +444,16 @@ and copying of the existing prefix. Partial EOF reserves only its valid bytes.
 Geometric rounding preserves the previous Vec capacity bound across windows
 (at most 128 KiB for 31 data pages). Capacity is not prepared work and consumes
 no extra budget. There is no retained buffer pool, cached size or new field.
+
+### Owner preparation before dirty clearing
+
+All three writeback adapters borrow a folio preparation callback, replacing the
+EOF-only supplier. The owner may protect shared reverse mappings and returns live
+EOF while the folio is held, with no index lock retained. WouldBlock means a busy
+owner dependency: NONE skips without charging work; ALL releases the folio,
+submits pending batches and retries. This permits faults holding MM to finish
+without adding per-folio phases, generations or mapping state to pagecache.
+
+truncate_cached_folios enforces the EOF suffix directly, independently of an old
+size snapshot. The inode owner can safely repeat teardown after publishing EOF
+but failing a synchronous reverse-map/TLB round.

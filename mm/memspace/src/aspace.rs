@@ -184,7 +184,51 @@ impl InvalidateHandle {
         let Some(mut aspace) = aspace.try_lock() else {
             return Ok(false);
         };
-        aspace.apply_invalidate_request(request)?;
+        aspace.apply_invalidate_request(request, false)?;
+        Ok(true)
+    }
+
+    /// Completes file mapping revocation, including TLB retirement.
+    /// Callers must not hold MM. File fault/fork invalidate contention retries
+    /// outside MM, so waiting here under object invalidate exclusion is safe.
+    pub fn apply_sync(&self, request: &ObjectInvalidateRequest, even_cows: bool) -> KResult<()> {
+        let weak = self.aspace.as_ref().ok_or(KError::OperationNotSupported)?;
+        let Some(aspace) = weak.upgrade() else {
+            return Ok(());
+        };
+        aspace.lock().apply_invalidate_request(request, even_cows)
+    }
+
+    /// Retires private backing only after all views completed the same zap.
+    pub fn release_invalidated_pages(&self, request: &ObjectInvalidateRequest) -> KResult<()> {
+        let weak = self.aspace.as_ref().ok_or(KError::OperationNotSupported)?;
+        let Some(aspace) = weak.upgrade() else {
+            return Ok(());
+        };
+        let mm = aspace.lock();
+        for (range, _, runtime) in mm.matching_view_ranges(request) {
+            if let Some(VmRuntimeRef::FilePrivate(runtime)) = runtime {
+                runtime.release_invalidated_file_pages(range)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Tries reverse-mapping write protection without waiting for MM.
+    /// Completion includes TLB retirement; false retains the owner's dirty folio.
+    pub fn try_write_protect(
+        &self,
+        request: &ObjectInvalidateRequest,
+        paddr: u64,
+    ) -> KResult<bool> {
+        let weak = self.aspace.as_ref().ok_or(KError::OperationNotSupported)?;
+        let Some(aspace) = weak.upgrade() else {
+            return Ok(true);
+        };
+        let Some(mut aspace) = aspace.try_lock() else {
+            return Ok(false);
+        };
+        aspace.write_protect_request(request, paddr)?;
         Ok(true)
     }
 
@@ -352,14 +396,20 @@ impl MmSpace {
             let mut modify = self.pgtbl.modify();
             for vaddr in pages_in(range, page_size)? {
                 match modify.unmap(vaddr) {
-                    Ok(_) | Err(PagingError::NotMapped) => cleared_pages += 1,
+                    Ok(_) => cleared_pages += 1,
+                    Err(PagingError::NotMapped) => {
+                        modify
+                            .invalidate_translation(vaddr, page_size)
+                            .map_err(map_paging_err)?;
+                        cleared_pages += 1;
+                    }
                     Err(err) => {
                         first_error = Some(map_paging_err(err));
                         break;
                     }
                 }
             }
-            modify.finish();
+            modify.try_finish().map_err(|_| KError::ResourceBusy)?;
         }
 
         if let Some(runtime) = runtime {
@@ -374,18 +424,16 @@ impl MmSpace {
         first_error.map_or(Ok(()), Err)
     }
 
-    fn apply_invalidate_request(&mut self, request: &ObjectInvalidateRequest) -> KResult<()> {
+    fn matching_view_ranges(
+        &self,
+        request: &ObjectInvalidateRequest,
+    ) -> Vec<(VirtAddrRange, PageSize, Option<VmRuntimeRef>)> {
         let hit = request.hit();
-        if hit.vma_len() == 0 {
-            return Ok(());
-        }
         let range = VirtAddrRange::from_start_size(
             VirtAddr::from_usize(hit.vma_start() as usize),
             hit.vma_len(),
         );
-
-        let overlaps = self
-            .vmas
+        self.vmas
             .collect_overlapping(range)
             .into_iter()
             .filter_map(|vma| {
@@ -398,17 +446,67 @@ impl MmSpace {
                 }
                 Some((overlap, vma.backing().page_size(), vma.runtime().cloned()))
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    }
 
-        for (range, page_size, runtime) in overlaps {
-            self.zap_present_range(range, page_size, runtime.as_ref())?;
+    fn apply_invalidate_request(
+        &mut self,
+        request: &ObjectInvalidateRequest,
+        even_cows: bool,
+    ) -> KResult<()> {
+        for (range, page_size, runtime) in self.matching_view_ranges(request) {
+            if !even_cows
+                && matches!(request.object(), VmObjectId::File(_))
+                && let Some(VmRuntimeRef::FilePrivate(runtime)) = &runtime
+            {
+                let mut modify = self.pgtbl.modify();
+                runtime.invalidate_file(range, &mut modify)?;
+                modify.try_finish().map_err(|_| KError::ResourceBusy)?;
+            } else {
+                self.zap_present_range(range, page_size, runtime.as_ref())?;
+            }
         }
+        Ok(())
+    }
+
+    fn write_protect_request(
+        &mut self,
+        request: &ObjectInvalidateRequest,
+        paddr: u64,
+    ) -> KResult<()> {
+        let ranges = self.matching_view_ranges(request);
+        let mut modify = self.pgtbl.modify();
+        for (range, size, runtime) in ranges {
+            if !matches!(runtime, Some(VmRuntimeRef::FileShared(_))) {
+                continue;
+            }
+            for addr in pages_in(range, size)? {
+                match modify.query(addr) {
+                    Ok((pa, flags, _)) if pa.as_usize() as u64 == paddr => {
+                        // Reapply even an already-readonly leaf: a prior failed
+                        // shootdown may have left its old writable translation.
+                        modify
+                            .remap_raw(addr, pa, flags - MappingFlags::WRITE)
+                            .map_err(map_paging_err)?;
+                    }
+                    Ok(_) | Err(PagingError::NotMapped) => {
+                        // A failed earlier replacement or zap can retain an
+                        // old writable TLB entry even when this leaf changed.
+                        modify
+                            .invalidate_translation(addr, size)
+                            .map_err(map_paging_err)?;
+                    }
+                    Err(error) => return Err(map_paging_err(error)),
+                }
+            }
+        }
+        modify.try_finish().map_err(|_| KError::ResourceBusy)?;
         Ok(())
     }
 
     fn drain_pending_invalidations(&mut self) {
         while let Some((id, request)) = self.invalidate_sink.pop_front() {
-            if let Err(err) = self.apply_invalidate_request(&request) {
+            if let Err(err) = self.apply_invalidate_request(&request, false) {
                 warn!(
                     "Failed to apply invalidate request view={} at 0x{:x} (len={}): {err}",
                     request.hit().view().id().raw(),
@@ -423,7 +521,7 @@ impl MmSpace {
 
     pub fn submit_invalidate_locked(&mut self, request: ObjectInvalidateRequest) -> KResult<()> {
         let id = self.invalidate_sink.enqueue(request.clone());
-        match self.apply_invalidate_request(&request) {
+        match self.apply_invalidate_request(&request, false) {
             Ok(()) => {
                 let _ = self.invalidate_sink.remove(id);
                 Ok(())
@@ -982,6 +1080,16 @@ impl MmSpace {
         if addr != vma.start() {
             return Err(KError::InvalidInput);
         }
+        if old_size == 0
+            && matches!(
+                vma.backing().kind(),
+                VmBackingKind::AnonymousPrivate { .. } | VmBackingKind::FilePrivate { .. }
+            )
+        {
+            // Zero length is mapping duplication, not relocation. Private
+            // object slots cannot acquire a second alias through this path.
+            return Err(KError::InvalidInput);
+        }
         if addr.as_usize() + old_size > vma.end().as_usize() {
             return Err(KError::BadAddress);
         }
@@ -1165,6 +1273,22 @@ impl MmSpace {
     /// registrations; retained source PTEs and backing remain intact. Successful
     /// retirement removes only source metadata, not its transferred backing.
     pub fn relocate_mapping(
+        &mut self,
+        snapshot: &MremapSource,
+        new_start: VirtAddr,
+        new_size: usize,
+        replace_target: bool,
+        owner: &Arc<Mutex<MmSpace>>,
+    ) -> KResult {
+        let runtime = self
+            .runtime_for_vma(&snapshot.vma)
+            .ok_or(KError::BadAddress)?;
+        runtime.with_mapping_exclusion(&mut || {
+            self.relocate_mapping_locked(snapshot, new_start, new_size, replace_target, owner)
+        })
+    }
+
+    fn relocate_mapping_locked(
         &mut self,
         snapshot: &MremapSource,
         new_start: VirtAddr,
@@ -1717,7 +1841,17 @@ impl MmSpace {
             warn!("Backend fault path could not find area for {:?}", vaddr);
             return PageFaultOutcome::Unmapped;
         };
-        let result = runtime.handle_fault(ctx, vma.flags(), &mut self.pgtbl.modify());
+        let result = {
+            let mut modify = self.pgtbl.modify();
+            let result = runtime.handle_fault(ctx, vma.flags(), &mut modify);
+            let completed = modify.try_finish().map_err(|error| match error {
+                page_table::TlbFlushError::NotReady
+                | page_table::TlbFlushError::Deferred
+                | page_table::TlbFlushError::TimedOut => KError::WouldBlock,
+                page_table::TlbFlushError::UnsupportedScope => KError::OperationNotSupported,
+            });
+            result.and_then(|completion| completed.map(|_| completion))
+        };
         self.finish_file_backend_fault(vaddr, vma.flags(), result)
     }
 

@@ -10,7 +10,11 @@ use super::AddressSpace;
 use crate::{RwLockWriteGuard, VfsError, VfsResult};
 
 impl AddressSpace {
-    pub(crate) fn lock_invalidate_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+    /// Excludes file faults and cache publication during a backing mutation.
+    /// Providers settling a prior size change in write_begin call this before
+    /// acquiring their producer lock and before admitting a folio. The caller
+    /// holds inode-data serialization, must not hold MM, and may sleep.
+    pub fn lock_invalidate_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
         self.invalidate_lock.write()
     }
 
@@ -55,16 +59,20 @@ impl AddressSpace {
     }
 
     fn truncate_pagecache(&self, old_len: u64, len: u64) -> VfsResult<()> {
-        let invalid_start = (len < old_len).then(|| {
+        let invalid_start = (len <= old_len).then(|| {
             len.div_ceil(PAGE_SIZE_4K as u64)
                 .saturating_mul(PAGE_SIZE_4K as u64)
         });
         if let Some(start) = invalid_start {
-            self.invalidate_mappings_from(start);
+            self.invalidate_mappings_from(start)?;
         }
-        self.i_pages.resize_cached_folios(old_len, len)?;
+        if invalid_start.is_some() {
+            self.i_pages.truncate_cached_folios(len)?;
+        } else {
+            self.i_pages.resize_cached_folios(old_len, len)?;
+        }
         if let Some(start) = invalid_start {
-            self.invalidate_mappings_from(start);
+            self.invalidate_mappings_from(start)?;
         }
         Ok(())
     }

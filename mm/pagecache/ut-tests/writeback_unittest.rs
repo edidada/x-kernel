@@ -31,7 +31,7 @@ fn writeback_uses_owner_supplied_visible_length() {
     cache
         .write_cache_pages(
             &mut control,
-            &mut || Ok(eof.load(Ordering::Acquire)),
+            &mut |_| Ok(eof.load(Ordering::Acquire)),
             PAGE_SIZE_4K * 2,
             &mut |offset, data| {
                 writes.push((offset, data.len()));
@@ -65,7 +65,7 @@ fn failed_writeback_restores_dirty_state() {
         .with_nr_to_write(initial_budget);
 
     assert_eq!(
-        cache.writeback_until(&mut control, &mut || Ok(5), &mut |_, _, _| {
+        cache.writeback_until(&mut control, &mut |_| Ok(5), &mut |_, _, _| {
             Err(KError::InvalidInput)
         }),
         Err(KError::InvalidInput)
@@ -100,7 +100,7 @@ fn clean_folio_with_stale_dirty_tag_is_not_written() {
     cache
         .writeback_until(
             &mut control,
-            &mut || Ok(PAGE_SIZE_4K as u64),
+            &mut |_| Ok(PAGE_SIZE_4K as u64),
             &mut |_, _, _| {
                 writes += 1;
                 Ok(())
@@ -130,7 +130,7 @@ fn writeback_until_respects_dirty_index_and_page_budget() {
     cache
         .writeback_until(
             &mut control,
-            &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+            &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
             &mut |index, _data, valid_len| {
                 writes.push((index, valid_len));
                 Ok(())
@@ -166,7 +166,7 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
         cache
             .write_cache_pages(
                 &mut control,
-                &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+                &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
                 PAGE_SIZE_4K,
                 &mut |offset, data| {
                     write_offsets.push(offset);
@@ -217,7 +217,7 @@ fn batched_writeback_failure_restores_dirty_index() {
 
     let outcome = cache.write_cache_pages(
         &mut control,
-        &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+        &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
         PAGE_SIZE_4K * 2,
         &mut |_, _| {
             core::assert_eq!(
@@ -271,7 +271,7 @@ fn failed_writeback_does_not_redirty_detached_folio() {
 
     let outcome = cache.write_cache_pages(
         &mut control,
-        &mut || Ok(PAGE_SIZE_4K as u64),
+        &mut |_| Ok(PAGE_SIZE_4K as u64),
         PAGE_SIZE_4K,
         &mut |_, _| {
             // Model a detached in-flight reference directly: truncate now
@@ -308,33 +308,38 @@ fn range_wait_wakes_after_batch_writeback() {
         .with_nr_to_write(1);
 
     cache
-        .write_cache_pages(&mut control, &mut || Ok(3), PAGE_SIZE_4K, &mut |_, data| {
-            core::assert_eq!(
-                cache
-                    .state
-                    .lock()
-                    .writeback_marks
-                    .iter()
-                    .copied()
-                    .collect::<Vec<_>>(),
-                vec![0]
-            );
-            let waiting_cache = cache.clone();
-            let waiting_entered = entered.clone();
-            let waiting_finished = finished.clone();
-            let waiting_ready = ready.clone();
-            waiter = Some(ktask::spawn(move || {
-                waiting_entered.store(true, Ordering::Release);
-                waiting_ready.notify_all(false);
-                waiting_cache
-                    .wait_on_writeback_range(0..PAGE_SIZE_4K as u64)
-                    .unwrap();
-                waiting_finished.store(true, Ordering::Release);
-            }));
-            ready.wait_until(|| entered.load(Ordering::Acquire));
-            core::assert!(!finished.load(Ordering::Acquire));
-            Ok(data.len())
-        })
+        .write_cache_pages(
+            &mut control,
+            &mut |_| Ok(3),
+            PAGE_SIZE_4K,
+            &mut |_, data| {
+                core::assert_eq!(
+                    cache
+                        .state
+                        .lock()
+                        .writeback_marks
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    vec![0]
+                );
+                let waiting_cache = cache.clone();
+                let waiting_entered = entered.clone();
+                let waiting_finished = finished.clone();
+                let waiting_ready = ready.clone();
+                waiter = Some(ktask::spawn(move || {
+                    waiting_entered.store(true, Ordering::Release);
+                    waiting_ready.notify_all(false);
+                    waiting_cache
+                        .wait_on_writeback_range(0..PAGE_SIZE_4K as u64)
+                        .unwrap();
+                    waiting_finished.store(true, Ordering::Release);
+                }));
+                ready.wait_until(|| entered.load(Ordering::Acquire));
+                core::assert!(!finished.load(Ordering::Acquire));
+                Ok(data.len())
+            },
+        )
         .unwrap();
 
     assert_eq!(waiter.expect("writeback waiter").join(), 0);
@@ -357,7 +362,7 @@ fn batched_writeback_failure_cleans_only_complete_prefix_folios() {
 
     let outcome = cache.write_cache_pages(
         &mut control,
-        &mut || Ok((PAGE_SIZE_4K * 3) as u64),
+        &mut |_| Ok((PAGE_SIZE_4K * 3) as u64),
         PAGE_SIZE_4K * 3,
         &mut |_, _| Err((completed_bytes, KError::InvalidInput)),
     );
@@ -395,21 +400,26 @@ fn batched_writeback_preserves_concurrent_redirty() {
         .with_nr_to_write(initial_budget);
 
     cache
-        .write_cache_pages(&mut control, &mut || Ok(3), PAGE_SIZE_4K, &mut |_, data| {
-            dirty_indices_before_redirty = dirty_indices(cache_during_io);
-            state_during_io = Some(
-                cache_during_io
-                    .with_folio(0, |folio| {
-                        let folio = folio.expect("folio under writeback");
-                        (folio.is_dirty(), folio.is_under_writeback())
-                    })
-                    .unwrap(),
-            );
-            first_snapshot.extend_from_slice(&data[..3]);
-            write_cached(cache_during_io, 0, b"new").map_err(|error| (0, error))?;
-            dirty_indices_after_redirty = dirty_indices(cache_during_io);
-            Ok(data.len())
-        })
+        .write_cache_pages(
+            &mut control,
+            &mut |_| Ok(3),
+            PAGE_SIZE_4K,
+            &mut |_, data| {
+                dirty_indices_before_redirty = dirty_indices(cache_during_io);
+                state_during_io = Some(
+                    cache_during_io
+                        .with_folio(0, |folio| {
+                            let folio = folio.expect("folio under writeback");
+                            (folio.is_dirty(), folio.is_under_writeback())
+                        })
+                        .unwrap(),
+                );
+                first_snapshot.extend_from_slice(&data[..3]);
+                write_cached(cache_during_io, 0, b"new").map_err(|error| (0, error))?;
+                dirty_indices_after_redirty = dirty_indices(cache_during_io);
+                Ok(data.len())
+            },
+        )
         .unwrap();
 
     assert!(dirty_indices_before_redirty.is_empty());
@@ -432,9 +442,12 @@ fn batched_writeback_preserves_concurrent_redirty() {
     assert!(!observed.2);
 
     cache
-        .write_cache_pages(&mut control, &mut || Ok(3), PAGE_SIZE_4K, &mut |_, data| {
-            Ok(data.len())
-        })
+        .write_cache_pages(
+            &mut control,
+            &mut |_| Ok(3),
+            PAGE_SIZE_4K,
+            &mut |_, data| Ok(data.len()),
+        )
         .unwrap();
     assert!(dirty_indices(&cache).is_empty());
     let final_state = cache
@@ -465,7 +478,7 @@ fn writeback_scans_sparse_windows_without_pinning_the_whole_range() {
     cache
         .writeback_until(
             &mut control,
-            &mut || Ok((count * 2 * PAGE_SIZE_4K) as u64),
+            &mut |_| Ok((count * 2 * PAGE_SIZE_4K) as u64),
             &mut |index, _, _| {
                 if index == 0 {
                     // Only the mapping and this test retain the distant page.
@@ -499,7 +512,7 @@ fn batched_writeback_bounds_submissions_and_completes_eof_tail() {
 
     let outcome = cache.write_cache_pages(
         &mut control,
-        &mut || Ok(visible_len as u64),
+        &mut |_| Ok(visible_len as u64),
         usize::MAX,
         &mut |offset, data| {
             writes.push((offset, data.len()));
@@ -534,7 +547,7 @@ fn batched_writeback_budget_stops_inside_second_window() {
 
     let outcome = cache.write_cache_pages(
         &mut control,
-        &mut || Ok((count * PAGE_SIZE_4K) as u64),
+        &mut |_| Ok((count * PAGE_SIZE_4K) as u64),
         usize::MAX,
         &mut |_, data| {
             lengths.push(data.len());
@@ -564,7 +577,7 @@ fn second_batch_error_finishes_prefix_and_leaves_unvisited_pages_dirty() {
 
     let outcome = cache.write_cache_pages(
         &mut control,
-        &mut || Ok((count * PAGE_SIZE_4K) as u64),
+        &mut |_| Ok((count * PAGE_SIZE_4K) as u64),
         usize::MAX,
         &mut |offset, data| {
             if offset == 0 {
@@ -601,7 +614,7 @@ fn redirty_in_previous_window_is_left_for_the_next_pass() {
     let eof = core::sync::atomic::AtomicU64::new((count * PAGE_SIZE_4K) as u64);
     let outcome = cache.write_cache_pages(
         &mut control,
-        &mut || Ok(eof.load(Ordering::Acquire)),
+        &mut |_| Ok(eof.load(Ordering::Acquire)),
         usize::MAX,
         &mut |_, data| {
             write_cached(&cache, 0, b"new").map_err(|error| (0, error))?;
@@ -631,7 +644,7 @@ fn busy_candidates_do_not_count_as_declines_and_failed_attempts_consume_budget()
     control.account_skipped(7);
     let result = cache.writeback_until(
         &mut control,
-        &mut || Ok((PAGE_SIZE_4K * 3) as u64),
+        &mut |_| Ok((PAGE_SIZE_4K * 3) as u64),
         &mut |index, _, _| {
             if index == 2 {
                 Err(KError::InvalidInput)
@@ -661,7 +674,7 @@ fn batch_prefix_validation_preserves_progress_and_finishes_all_folios() {
 
         let result = cache.write_cache_pages(
             &mut control,
-            &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+            &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
             PAGE_SIZE_4K * 2,
             &mut |_, _| Ok(prefix),
         );
@@ -706,7 +719,7 @@ fn submitted_snapshot_outlives_scan_and_preserves_redirty_and_failed_tail() {
     cache
         .submit_cache_pages(
             &mut control,
-            &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+            &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
             PAGE_SIZE_4K * 2,
             &mut |_, batch| {
                 pending.push(batch);
@@ -742,7 +755,7 @@ fn rejected_submission_redirties_its_batch_without_ending_prior_io() {
             &mut crate::WritebackControl::all()
                 .with_sync_mode(crate::WritebackSyncMode::None)
                 .with_nr_to_write(2),
-            &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+            &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
             PAGE_SIZE_4K,
             &mut |_, batch| {
                 if pending.is_none() {
@@ -776,7 +789,7 @@ fn completion_borrows_index_until_last_writeback_finishes() {
                 .unwrap()
                 .with_sync_mode(crate::WritebackSyncMode::None)
                 .with_nr_to_write(1),
-            &mut || Ok(8),
+            &mut |_| Ok(8),
             PAGE_SIZE_4K,
             &mut |_, batch| {
                 pending = Some(batch);
@@ -810,7 +823,7 @@ fn writeback_completion_finishes_without_acquiring_the_content_lock() {
                     .unwrap()
                     .with_sync_mode(crate::WritebackSyncMode::None)
                     .with_nr_to_write(1),
-                &mut || Ok(8),
+                &mut |_| Ok(8),
                 PAGE_SIZE_4K,
                 &mut |_, batch| {
                     pending = Some(batch);
@@ -855,7 +868,7 @@ fn owned_completion_retains_mapping_owner_until_finish_or_drop() {
                     .unwrap()
                     .with_sync_mode(crate::WritebackSyncMode::None)
                     .with_nr_to_write(1),
-                &mut || Ok(8),
+                &mut |_| Ok(8),
                 PAGE_SIZE_4K,
                 &mut |_, batch| {
                     let (_, completion) = batch.into_parts();
@@ -928,7 +941,7 @@ fn integrity_scan_submits_pending_batches_before_folio_or_writeback_waits() {
             cache
                 .submit_cache_pages(
                     &mut crate::WritebackControl::range(PAGE_SIZE_4K as u64, PAGE_SIZE_4K).unwrap(),
-                    &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+                    &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
                     PAGE_SIZE_4K,
                     &mut |_, batch| {
                         pending = Some(batch);
@@ -949,7 +962,7 @@ fn integrity_scan_submits_pending_batches_before_folio_or_writeback_waits() {
             writing
                 .write_cache_pages(
                     &mut crate::WritebackControl::all().with_nr_to_write(1),
-                    &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+                    &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
                     PAGE_SIZE_4K * 2,
                     &mut |offset, data| {
                         offsets.push(offset);

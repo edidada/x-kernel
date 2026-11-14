@@ -728,3 +728,10 @@ steps are not enclosed in a transient admission retry.
 The captured image stays live across file persistence, while memspace drops its
 mutex for the runtime hook and repeats VMA lookup after each synchronous range.
 No process-binding lock or new sync request state spans that wait.
+
+### File fork admission
+
+A private file runtime can return WouldBlock when truncate owns invalidate
+exclusion. Fork releases its parent MM guard before retrying clone and revalidates
+the whole VMA set on the next attempt. Partial clone cleanup follows the existing
+try_clone failure path; no new process state or retry counter is retained.

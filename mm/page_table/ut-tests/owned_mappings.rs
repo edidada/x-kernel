@@ -969,13 +969,27 @@ fn synchronous_permission_revocation_reports_failure_without_a_retired_hold() {
     fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
     assert_eq!(edit.try_finish(), Err(TlbFlushError::TimedOut));
     fixture.0.assert_drops(0, 0);
-    assert!(edit.try_finish().unwrap().had_pending());
+    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
+    drop(edit);
+    let mut edit = table.modify();
     assert_eq!(
         edit.query_entry(VirtAddr::from(0)).unwrap().flags(),
         PagingFlags::READ
     );
+    // A retry gets a fresh guard, while the already-published leaf is unchanged.
+    edit.invalidate_translation(VirtAddr::from(0), PageSize::Size4K)
+        .unwrap();
+    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
+    assert_eq!(edit.try_finish(), Err(TlbFlushError::TimedOut));
+    assert!(edit.try_finish().unwrap().had_pending());
     fixture.0.withdraw(0);
     edit.unmap(VirtAddr::from(0)).unwrap();
+    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
+    assert_eq!(edit.try_finish(), Err(TlbFlushError::TimedOut));
+    assert!(edit.query(VirtAddr::from(0)).is_err());
+    fixture.0.assert_drops(0, 0);
+    edit.invalidate_translation(VirtAddr::from(0), PageSize::Size4K)
+        .unwrap();
     edit.try_finish().unwrap();
     fixture.0.assert_drops(0, 1);
 }

@@ -16,6 +16,7 @@ kvfs = { workspace = true }
 khal = { workspace = true }
 klogger = { workspace = true }
 kprocess = { workspace = true }
+ktask = { workspace = true }
 linux-raw-sys = { workspace = true }
 memaddr = { workspace = true }
 memfs = { workspace = true }

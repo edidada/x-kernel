@@ -541,7 +541,12 @@ pub fn unmap_private_object_range(
     pgtbl
         .unmap_sparse_region(range.start, range.size(), size)
         .map_err(super::map_paging_err)?;
-    pgtbl.finish();
+    for addr in super::pages_in(range, size)? {
+        pgtbl
+            .invalidate_translation(addr, size)
+            .map_err(super::map_paging_err)?;
+    }
+    pgtbl.try_finish().map_err(|_| KError::ResourceBusy)?;
     release_private_object_pages(detached.finalize_release());
     Ok(())
 }

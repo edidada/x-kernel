@@ -927,3 +927,26 @@ workers require no producer mutex. No new rejection field or coordination lock
 is added. Buffered write_end cannot reacquire the copied folio or wait for
 writeback while it publishes accepted size. Completion remains independent of
 the inode data lock retained by writer rollback.
+
+## Truncate revocation retry
+
+A synchronous mapping/TLB error leaves backing blocks allocated and the durable
+orphan obligation intact. A subsequent set_len consumes an existing linked
+orphan even when visible size and i_disksize already equal the requested EOF.
+Cache and mapped-view revocation must complete before delayed reservations,
+preallocations and extent cleanup; the existing orphan location is authoritative,
+with no extra pending-truncate field.
+
+Last writable file release uses nonblocking producer admission for optional
+preallocation discard. VMA retirement can drop that file under MM while truncate
+holds producer exclusion and needs MM for revocation. A busy close keeps existing
+reservations/preallocations owned; settlement or mandatory eviction reclaims them.
+Admitted cleanup still drains I/O before freeing mappings. No cleanup flag, worker
+or queue is added.
+
+A linked orphan from an incomplete shrink is settled at its committed disk EOF
+before a later set-length target is prepared, including growth. This prevents
+old cache pages, preallocation or initialized extents from being re-exposed.
+Buffered write admission and fallocate also settle this existing orphan before
+reserving or publishing new data; write_begin takes invalidate exclusion before
+the producer lock, outside MM and before the folio is admitted.

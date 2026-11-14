@@ -21,6 +21,45 @@ impl MmSpaceInvalidate {
 }
 
 impl MappingViewNotifier for MmSpaceInvalidate {
+    fn invalidate_sync(
+        &self,
+        work: &ObjectInvalidateWork,
+        hit: &ObjectViewHit,
+        even_cows: bool,
+    ) -> kerrno::KResult<()> {
+        let aligned = hit
+            .aligned_object_suffix(PageSize::Size4K as u64)
+            .filter(|aligned| aligned.object_start() == hit.object_start())
+            .ok_or(kerrno::KError::InvalidInput)?;
+        let request = work
+            .request_for_subhit(hit, &aligned)
+            .ok_or(kerrno::KError::InvalidInput)?;
+        self.handle.apply_sync(&request, even_cows)
+    }
+
+    fn release_invalidated_pages(
+        &self,
+        work: &ObjectInvalidateWork,
+        hit: &ObjectViewHit,
+    ) -> kerrno::KResult<()> {
+        let request = work
+            .request_for_hit(hit)
+            .ok_or(kerrno::KError::InvalidInput)?;
+        self.handle.release_invalidated_pages(&request)
+    }
+
+    fn try_write_protect(
+        &self,
+        work: &ObjectInvalidateWork,
+        hit: &ObjectViewHit,
+        paddr: u64,
+    ) -> kerrno::KResult<bool> {
+        let request = work
+            .request_for_hit(hit)
+            .ok_or(kerrno::KError::InvalidInput)?;
+        self.handle.try_write_protect(&request, paddr)
+    }
+
     fn try_invalidate(
         &self,
         work: &ObjectInvalidateWork,

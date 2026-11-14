@@ -158,7 +158,7 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
 
             let result = writing_cache.write_cache_pages(
                 &mut control,
-                &mut || Ok((PAGE_SIZE_4K * 2) as u64),
+                &mut |_| Ok((PAGE_SIZE_4K * 2) as u64),
                 PAGE_SIZE_4K,
                 &mut |_, _| {
                     writing_started.store(true, Ordering::Release);
@@ -288,7 +288,7 @@ fn growth_during_batch_writeback_keeps_new_bytes_dirty() {
     cache
         .write_cache_pages(
             &mut control,
-            &mut || Ok(old_len),
+            &mut |_| Ok(old_len),
             PAGE_SIZE_4K,
             &mut |_, data| {
                 // Growth must finish while this batch still owns writeback. Its

@@ -181,10 +181,11 @@ sys_mmap
 2. `AddressSpace` emits mapped-view invalidation, truncates its private cache
    storage, then emits a second invalidation for a private COW race.
 3. The registered view notifier calls `MmSpaceInvalidate`.
-4. `MmSpaceInvalidate` submits an `ObjectInvalidateRequest` through
-   `InvalidateHandle`.
-5. `MmSpace` drains the request and asks the matching runtime to unmap present
-   PTEs while preserving VMA metadata.
+4. `MmSpaceInvalidate` applies the request synchronously through
+   `InvalidateHandle::apply_sync`, preserving VMA metadata.
+5. Every intersecting view must complete PTE removal and `try_finish` TLB
+   retirement before the work releases any private retained COW backing.
+   The second unmap/cache round enforces the same completion boundary.
 
 ### `msync`
 
@@ -224,9 +225,9 @@ Not supported by the current filemap runtime:
 - shared-file readahead, adaptive/asynchronous readahead and fault-around;
 - hole-punch/collapse-range;
 - DAX, THP, reclaim, swap, memcg, NUMA;
-- dirty-PTE harvesting and write-protection rearming after writeback (Issue G).
-  Range-fsync dispatch alone does not make repeated stores through an already
-  writable PTE visible to the folio dirty index.
+- hardware-dirty harvesting for mappings that bypass shared write notification.
+  Supported shared file leaves always dirty the folio before granting WRITE;
+  writeback protects those leaves before clearing the master dirty bit.
 
 ## File-page object and mapping references
 
@@ -268,9 +269,9 @@ PTE, its content token can be released; the page table retires the physical
 reference independently. VMA splits and moves preserve object offsets, and
 partial cleanup affects only the selected pages. No access permissions means
 no leaf, token or populated count; restoring access acquires a valid mapping
-reference again. The global TLB return contract and inherited synchronous
-permission/EOF completion semantics remain separate work; this change adds no
-retry, recovery state or fail-stop policy.
+reference again. File revocation requires the page-table synchronous completion
+contract; automatic physical-reference retirement alone is not permission or
+EOF completion.
 
 ### Bounded private-fault prefetch
 
@@ -308,3 +309,36 @@ new-map policy, so FUTURE_WRITE permits inherited writable VMAs while blocking
 new ones. Source offsets and view lengths follow the actual VMA range; expansion
 extends the existing reverse-mapping registration. The source adapter no longer
 keeps a duplicate immutable length. Write faults still check current inode policy.
+
+### File fault, revocation and writeback handoff
+
+File faults attempt invalidate shared admission before any cache, retained-COW
+or PTE lookup. Contention returns Retry; the task-context resolver releases MM,
+waits on existing admission resources, then repeats VMA/EOF/policy checks.
+Private faults check live inode EOF even when an anonymous COW page is retained.
+A loader's file_end is a segment limit, not another inode-size authority; only
+its following BSS is exempt. Reverse views include the partial last file page.
+
+Private fork and complete file PTE relocation use the same nonblocking admission.
+Their task callers release MM before retrying. A relocated view and its PTEs
+cannot cross truncate's reverse-view snapshot under invalidate exclusion.
+
+Writeback calls the mapping owner while holding each dirty folio. The owner
+walks existing shared views and checks object offset, current VMA kind and the
+exact physical page before protecting a leaf. Each MM attempt is nonblocking:
+contention releases the folio before ALL retries, allowing an MM-held fault
+waiting for that folio to finish. NONE retains the dirty candidate for a later
+pass. Existing batches are submitted before waiting. Successful protection
+includes TLB completion; only then can the cache clear dirty and take data.
+Subsequent stores fault through page_mkwrite and redirty under the same folio.
+Private COW leaves are never write-protected as shared file data.
+
+Truncate synchronously removes private COW PTEs as well as cache leaves. Only
+after all views complete revocation does a separate retirement walk drop
+retained anonymous slots, preventing stale content after shrink/regrow and
+release while an alias remains accessible. Ordinary cache invalidation preserves
+private anonymous copies. No new registry, EOF field, generation or lock is used.
+
+The task slow-path wait also yields after invalidate/data admission. This gives
+transient TLB completion failures a scheduling boundary outside MM with IRQs
+enabled, before the resolver looks up the VMA and retries publication.

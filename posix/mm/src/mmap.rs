@@ -761,96 +761,117 @@ pub fn sys_mremap(
     let process = current_user_process();
     let address_space_limit = process.resources()?.rlimit(RLIMIT_AS)?.current;
     let aspace_ref = process.address_space()?;
-    aspace_ref.with_mapping_owner(|mut mapping| {
-        let mut source = mapping.aspace_mut().resolve_mremap_source(addr, old_size)?;
-        let vma_end = source.end();
-        let page_size = source.page_size();
+    loop {
+        let result = aspace_ref.with_mapping_owner(|mut mapping| {
+            let mut source = mapping.aspace_mut().resolve_mremap_source(addr, old_size)?;
+            let vma_end = source.end();
+            let page_size = source.page_size();
 
-        // Linux checks growth before MREMAP_FIXED removes the destination.
-        MremapFlags::check_growth_limit(mapping.aspace(), old_size, new_size, address_space_limit)?;
-
-        // --- 3. Dispatch ---
-
-        // FIXED path: move to new_addr (handles both shrink and grow)
-        if mremap_flags.is_fixed() {
-            let move_size = old_size.min(new_size);
-            let target_addr = VirtAddr::from(new_addr);
-            if mremap_flags.keeps_source_mapping() {
-                // Linux unmaps the fixed destination before charging the
-                // retained source for MREMAP_DONTUNMAP, even on admission failure.
-                mapping.aspace_mut().unmap(target_addr, new_size)?;
-                source = mapping.aspace().resolve_mremap_source(addr, old_size)?;
-                check_address_space_limit(mapping.aspace(), new_size, None, address_space_limit)?;
-            }
-            mapping.relocate_mapping(
-                &source,
-                target_addr,
+            // Linux checks growth before MREMAP_FIXED removes the destination.
+            MremapFlags::check_growth_limit(
+                mapping.aspace(),
+                old_size,
                 new_size,
-                !mremap_flags.keeps_source_mapping(),
+                address_space_limit,
             )?;
+
+            // --- 3. Dispatch ---
+
+            // FIXED path: move to new_addr (handles both shrink and grow)
+            if mremap_flags.is_fixed() {
+                let move_size = old_size.min(new_size);
+                let target_addr = VirtAddr::from(new_addr);
+                if mremap_flags.keeps_source_mapping() {
+                    // Linux unmaps the fixed destination before charging the
+                    // retained source for MREMAP_DONTUNMAP, even on admission failure.
+                    mapping.aspace_mut().unmap(target_addr, new_size)?;
+                    source = mapping.aspace().resolve_mremap_source(addr, old_size)?;
+                    check_address_space_limit(
+                        mapping.aspace(),
+                        new_size,
+                        None,
+                        address_space_limit,
+                    )?;
+                }
+                mapping.relocate_mapping(
+                    &source,
+                    target_addr,
+                    new_size,
+                    !mremap_flags.keeps_source_mapping(),
+                )?;
+                if mremap_flags.keeps_source_mapping() {
+                    MremapFlags::install_anonymous_source(
+                        mapping.aspace_mut(),
+                        &source,
+                        addr,
+                        move_size,
+                    )?;
+                }
+                return Ok(target_addr.as_usize() as _);
+            }
+
+            // DONTUNMAP path: move, leave old as fresh anonymous
             if mremap_flags.keeps_source_mapping() {
+                check_address_space_limit(mapping.aspace(), new_size, None, address_space_limit)?;
+                let target_addr = mapping
+                    .aspace_mut()
+                    .find_relocation_target(addr, new_size, page_size)?;
+
+                mapping.relocate_mapping(&source, target_addr, new_size, false)?;
+                // The old mapping's role was retired after the PTE transfer; install
+                // fresh anonymous backing at the original address.
                 MremapFlags::install_anonymous_source(
                     mapping.aspace_mut(),
                     &source,
                     addr,
-                    move_size,
+                    old_size,
                 )?;
+                return Ok(target_addr.as_usize() as _);
             }
-            return Ok(target_addr.as_usize() as _);
-        }
 
-        // DONTUNMAP path: move, leave old as fresh anonymous
-        if mremap_flags.keeps_source_mapping() {
-            check_address_space_limit(mapping.aspace(), new_size, None, address_space_limit)?;
+            // No-op: same size, no FIXED, no DONTUNMAP
+            if new_size == old_size {
+                return Ok(addr.as_usize() as _);
+            }
+
+            // Shrink (no FIXED, no DONTUNMAP)
+            if new_size < old_size {
+                mapping
+                    .aspace_mut()
+                    .unmap(addr + new_size, old_size - new_size)?;
+                return Ok(addr.as_usize() as _);
+            }
+
+            // --- 4. Grow (new_size > old_size, no FIXED, no DONTUNMAP) ---
+
+            // Can only grow in place if old_size covers the entire VMA
+            let can_grow_in_place = addr.as_usize() + old_size == vma_end.as_usize();
+
+            if can_grow_in_place {
+                match mapping.aspace_mut().extend_area(addr, new_size - old_size) {
+                    Ok(()) => return Ok(addr.as_usize() as _),
+                    Err(e) => debug!("in-place grow failed ({e:?}), falling back to move"),
+                }
+            }
+
+            // In-place grow failed or not possible — fall back to move if MAYMOVE
+            if !mremap_flags.may_move() {
+                return Err(KError::NoMemory);
+            }
+
             let target_addr = mapping
                 .aspace_mut()
                 .find_relocation_target(addr, new_size, page_size)?;
 
             mapping.relocate_mapping(&source, target_addr, new_size, false)?;
-            // The old mapping's role was retired after the PTE transfer; install
-            // fresh anonymous backing at the original address.
-            MremapFlags::install_anonymous_source(mapping.aspace_mut(), &source, addr, old_size)?;
-            return Ok(target_addr.as_usize() as _);
+
+            Ok(target_addr.as_usize() as _)
+        });
+        match result {
+            Err(KError::WouldBlock) => ktask::yield_now(),
+            result => return result,
         }
-
-        // No-op: same size, no FIXED, no DONTUNMAP
-        if new_size == old_size {
-            return Ok(addr.as_usize() as _);
-        }
-
-        // Shrink (no FIXED, no DONTUNMAP)
-        if new_size < old_size {
-            mapping
-                .aspace_mut()
-                .unmap(addr + new_size, old_size - new_size)?;
-            return Ok(addr.as_usize() as _);
-        }
-
-        // --- 4. Grow (new_size > old_size, no FIXED, no DONTUNMAP) ---
-
-        // Can only grow in place if old_size covers the entire VMA
-        let can_grow_in_place = addr.as_usize() + old_size == vma_end.as_usize();
-
-        if can_grow_in_place {
-            match mapping.aspace_mut().extend_area(addr, new_size - old_size) {
-                Ok(()) => return Ok(addr.as_usize() as _),
-                Err(e) => debug!("in-place grow failed ({e:?}), falling back to move"),
-            }
-        }
-
-        // In-place grow failed or not possible — fall back to move if MAYMOVE
-        if !mremap_flags.may_move() {
-            return Err(KError::NoMemory);
-        }
-
-        let target_addr = mapping
-            .aspace_mut()
-            .find_relocation_target(addr, new_size, page_size)?;
-
-        mapping.relocate_mapping(&source, target_addr, new_size, false)?;
-
-        Ok(target_addr.as_usize() as _)
-    })
+    }
 }
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> KResult<isize> {

@@ -449,3 +449,13 @@ steps are not enclosed in a transient admission retry.
 Shared-mapping sync retains the captured `MmUserHandle` and must enter without
 MM/provider locks from sleepable task context. File persistence runs outside the
 MM mutex; process exit/exec cannot retarget or tear down that captured MM user.
+
+## Fork versus file invalidation
+
+Fork never waits on file invalidate admission while retaining parent MM.
+WouldBlock unwinds the partial child and releases MM before retry, allowing
+synchronous file revocation to progress. Other clone failures propagate.
+
+LiveAddressSpace::try_lock exposes the existing MM mutex's nonblocking admission
+for exception recovery; it adds no state or weaker lifetime capability. A busy
+MM must be handled by the existing task-context fault resolver after fixup.

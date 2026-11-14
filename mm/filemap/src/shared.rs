@@ -316,6 +316,11 @@ impl FileSharedRuntime {
                         KResult::Ok(())
                     })?;
                 } else if page_flags.contains(ctx.access_flags()) {
+                    // A retried fault may see the PTE published before a failed
+                    // shootdown; its fresh page-table guard has no pending work.
+                    pgtbl
+                        .invalidate_translation(addr, self.page_size())
+                        .map_err(map_paging_err)?;
                     populated = 1;
                 }
             }
@@ -329,26 +334,24 @@ impl FileSharedRuntime {
                 })?;
             }
             Err(PagingError::NotMapped) => {
-                address_space.with_invalidate_read(|| {
-                    address_space.with_folio_or_create(pn, |folio| {
-                        let reference = folio.try_clone_mapping_ref()?;
-                        let read_flags = flags - MappingFlags::WRITE;
-                        let has_access =
-                            read_flags.intersects(MappingFlags::READ | MappingFlags::EXECUTE);
-                        pgtbl
-                            .map(
-                                addr,
-                                reference,
-                                if has_access {
-                                    read_flags
-                                } else {
-                                    MappingFlags::empty()
-                                },
-                            )
-                            .map_err(map_paging_err)?;
-                        populated = usize::from(has_access);
-                        Ok(())
-                    })
+                address_space.with_folio_or_create(pn, |folio| {
+                    let reference = folio.try_clone_mapping_ref()?;
+                    let read_flags = flags - MappingFlags::WRITE;
+                    let has_access =
+                        read_flags.intersects(MappingFlags::READ | MappingFlags::EXECUTE);
+                    pgtbl
+                        .map(
+                            addr,
+                            reference,
+                            if has_access {
+                                read_flags
+                            } else {
+                                MappingFlags::empty()
+                            },
+                        )
+                        .map_err(map_paging_err)?;
+                    populated = usize::from(has_access);
+                    Ok(())
                 })?;
             }
             Err(_) => return Err(KError::BadAddress),
@@ -359,6 +362,13 @@ impl FileSharedRuntime {
 }
 
 impl VmRuntimeOps for FileSharedRuntime {
+    fn with_mapping_exclusion(&self, operation: &mut dyn FnMut() -> KResult) -> KResult {
+        self.0
+            .source
+            .address_space()
+            .try_with_invalidate_read(operation)
+    }
+
     fn backing_info(&self) -> VmBackingInfo {
         self.backing_info_impl()
     }
@@ -406,11 +416,19 @@ impl VmRuntimeOps for FileSharedRuntime {
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
     ) -> FaultCompletionResult {
-        self.handle_fault_impl(ctx, flags, pgtbl)
+        self.0
+            .source
+            .address_space()
+            .try_with_invalidate_read(|| self.handle_fault_impl(ctx, flags, pgtbl))
     }
 
     fn wait_for_fault(&self) -> KResult<()> {
         self.0.source.file().wait_for_shared_mapping_write();
+        self.0
+            .source
+            .address_space()
+            .with_invalidate_read(|| Ok(()))?;
+        ktask::yield_now();
         Ok(())
     }
 

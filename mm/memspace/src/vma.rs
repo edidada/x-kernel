@@ -80,6 +80,21 @@ pub trait VmRuntimeOps: Send + Sync {
     ) -> KResult<bool> {
         Ok(false)
     }
+    /// Serializes PTE relocation and reverse-view registration with file
+    /// truncation. MM callers must retry WouldBlock after releasing MM.
+    /// File providers must supply their exclusion contract explicitly.
+    fn with_mapping_exclusion(&self, _operation: &mut dyn FnMut() -> KResult) -> KResult {
+        Err(kerrno::KError::OperationNotSupported)
+    }
+    /// Revokes cached file leaves while preserving anonymous private COW pages.
+    fn invalidate_file(&self, _range: VirtAddrRange, _pgtbl: &mut PageTableMut) -> KResult {
+        Err(kerrno::KError::OperationNotSupported)
+    }
+    /// Drops retained private pages after all file views completed PTE/TLB zap.
+    /// The backing owner excludes new file faults and fork publication.
+    fn release_invalidated_file_pages(&self, _range: VirtAddrRange) -> KResult {
+        Err(kerrno::KError::OperationNotSupported)
+    }
     /// Synchronizes a shared file mapping's byte range with datasync semantics.
     ///
     /// MM has validated the mapping and translated its range under serialization.
@@ -89,6 +104,9 @@ pub trait VmRuntimeOps: Send + Sync {
     fn msync(&self, _file_range: Range<u64>) -> KResult {
         Ok(())
     }
+    /// Resolves a fault and queues all invalidation needed by its publication.
+    /// A retry that finds an already-accessible PTE must invalidate it explicitly:
+    /// the previous attempt may have failed its shootdown and lost its guard.
     fn handle_fault(
         &self,
         ctx: FaultContext,
@@ -383,6 +401,15 @@ impl VmRuntimeRef {
             Self::AnonPrivate(inner) => VmRuntimeOps::handle_fault(inner, ctx, flags, pgtbl),
             Self::FileShared(inner) => inner.handle_fault(ctx, flags, pgtbl),
             Self::FilePrivate(inner) => inner.handle_fault(ctx, flags, pgtbl),
+        }
+    }
+
+    pub(crate) fn with_mapping_exclusion(&self, operation: &mut dyn FnMut() -> KResult) -> KResult {
+        match self {
+            Self::FileShared(runtime) | Self::FilePrivate(runtime) => {
+                runtime.with_mapping_exclusion(operation)
+            }
+            _ => operation(),
         }
     }
 

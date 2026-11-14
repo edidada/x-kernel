@@ -105,9 +105,9 @@ fn test_check_access_rejects_far_above_user_space() {
 }
 
 #[def_test]
-fn fault_outcome_mapping_keeps_retry_inside_copy_window() {
+fn fault_outcome_mapping_returns_admission_retry_to_the_slow_path() {
     assert!(fault_outcome_to_trap_result(PageFaultOutcome::Resolved));
-    assert!(fault_outcome_to_trap_result(PageFaultOutcome::Retry));
+    assert!(!fault_outcome_to_trap_result(PageFaultOutcome::Retry));
     assert!(fault_outcome_to_trap_result(
         PageFaultOutcome::CowConflictRetry
     ));

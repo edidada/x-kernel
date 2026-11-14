@@ -237,8 +237,8 @@ fn futex_backing_preserves_shared_object_offset_after_vma_trim() {
 fn private_fork_after_vma_split_keeps_child_cow_object_offset() {
     let start = VirtAddr::from_usize(0x60_0000);
     let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
-    let mut parent = MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8)
-        .expect("allocate parent address space");
+    let mut parent =
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8).expect("allocate parent address space");
     parent
         .map(
             start,
@@ -249,22 +249,22 @@ fn private_fork_after_vma_split_keeps_child_cow_object_offset() {
         )
         .expect("map private range");
     let second_page = start + PAGE_SIZE_4K;
-    assert!(parent
-        .handle_page_fault(second_page, PageFaultFlags::WRITE)
-        .is_resolved());
+    assert!(
+        parent
+            .handle_page_fault(second_page, PageFaultFlags::WRITE)
+            .is_resolved()
+    );
     parent
-        .protect(
-            start,
-            PAGE_SIZE_4K,
-            MappingFlags::USER | MappingFlags::READ,
-        )
+        .protect(start, PAGE_SIZE_4K, MappingFlags::USER | MappingFlags::READ)
         .expect("split first VMA page");
 
     let child = parent.try_clone().expect("fork split private mapping");
-    assert!(child
-        .lock()
-        .handle_page_fault(second_page, PageFaultFlags::WRITE)
-        .is_resolved());
+    assert!(
+        child
+            .lock()
+            .handle_page_fault(second_page, PageFaultFlags::WRITE)
+            .is_resolved()
+    );
 }
 
 #[def_test]
@@ -696,13 +696,21 @@ fn sparse_move_preserves_holes_and_physical_identities() {
     }
     let first = aspace.pgtbl.query(src).unwrap();
     let last = aspace.pgtbl.query(src + last_offset).unwrap();
-    aspace.move_pages(src, dst, PAGE_SIZE_4K * 8, PageSize::Size4K).unwrap();
+    aspace
+        .move_pages(src, dst, PAGE_SIZE_4K * 8, PageSize::Size4K)
+        .unwrap();
     assert_eq!(aspace.pgtbl.query(dst).unwrap(), first);
     assert_eq!(aspace.pgtbl.query(dst + last_offset).unwrap(), last);
     for offset in [0, PAGE_SIZE_4K, last_offset] {
-        assert!(matches!(aspace.pgtbl.query(src + offset), Err(PagingError::NotMapped)));
+        assert!(matches!(
+            aspace.pgtbl.query(src + offset),
+            Err(PagingError::NotMapped)
+        ));
     }
-    assert!(matches!(aspace.pgtbl.query(dst + PAGE_SIZE_4K), Err(PagingError::NotMapped)));
+    assert!(matches!(
+        aspace.pgtbl.query(dst + PAGE_SIZE_4K),
+        Err(PagingError::NotMapped)
+    ));
 }
 
 #[def_test]
@@ -726,7 +734,10 @@ fn sparse_move_conflict_rolls_back_only_prepared_destinations() {
     assert_eq!(aspace.pgtbl.query(src + last_offset).unwrap(), last);
     assert_eq!(aspace.pgtbl.query(dst + last_offset).unwrap(), conflict);
     for address in [src + PAGE_SIZE_4K, dst, dst + PAGE_SIZE_4K] {
-        assert!(matches!(aspace.pgtbl.query(address), Err(PagingError::NotMapped)));
+        assert!(matches!(
+            aspace.pgtbl.query(address),
+            Err(PagingError::NotMapped)
+        ));
     }
 }
 
@@ -746,9 +757,17 @@ fn move_pages_keeps_managed_storage_after_source_retirement() {
     edit.try_finish().unwrap();
     drop(edit);
 
-    aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K).unwrap();
-    assert!(matches!(aspace.pgtbl.query(src), Err(PagingError::NotMapped)));
-    assert!(matches!(aspace.pgtbl.query(dst + PAGE_SIZE_4K), Err(PagingError::NotMapped)));
+    aspace
+        .move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K)
+        .unwrap();
+    assert!(matches!(
+        aspace.pgtbl.query(src),
+        Err(PagingError::NotMapped)
+    ));
+    assert!(matches!(
+        aspace.pgtbl.query(dst + PAGE_SIZE_4K),
+        Err(PagingError::NotMapped)
+    ));
     assert_eq!(aspace.pgtbl.query(dst).unwrap().0, paddr);
     assert_eq!(
         global_allocator().usages().get(UsageKind::PageCache),
@@ -757,9 +776,15 @@ fn move_pages_keeps_managed_storage_after_source_retirement() {
     );
     let mut edit = aspace.pgtbl.modify();
     edit.unmap(dst).unwrap();
-    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before + PAGE_SIZE_4K);
+    assert_eq!(
+        global_allocator().usages().get(UsageKind::PageCache),
+        before + PAGE_SIZE_4K
+    );
     edit.try_finish().unwrap();
-    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
+    assert_eq!(
+        global_allocator().usages().get(UsageKind::PageCache),
+        before
+    );
 }
 
 #[def_test(serial)]
@@ -773,7 +798,12 @@ fn move_pages_conflict_retires_managed_destinations_without_consuming_sources() 
     let offset = PAGE_SIZE_4K * 2;
     let mut edit = aspace.pgtbl.modify();
     for address in [src, src + offset, dst + offset] {
-        edit.map(address, alloc_page_ref(UsageKind::PageCache).unwrap(), MappingFlags::READ).unwrap();
+        edit.map(
+            address,
+            alloc_page_ref(UsageKind::PageCache).unwrap(),
+            MappingFlags::READ,
+        )
+        .unwrap();
     }
     edit.try_finish().unwrap();
     drop(edit);
@@ -788,8 +818,14 @@ fn move_pages_conflict_retires_managed_destinations_without_consuming_sources() 
     assert_eq!(aspace.pgtbl.query_entry(src).unwrap(), first);
     assert_eq!(aspace.pgtbl.query_entry(src + offset).unwrap(), last);
     assert_eq!(aspace.pgtbl.query_entry(dst + offset).unwrap(), conflict);
-    assert!(matches!(aspace.pgtbl.query(dst), Err(PagingError::NotMapped)));
-    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before + PAGE_SIZE_4K * 3);
+    assert!(matches!(
+        aspace.pgtbl.query(dst),
+        Err(PagingError::NotMapped)
+    ));
+    assert_eq!(
+        global_allocator().usages().get(UsageKind::PageCache),
+        before + PAGE_SIZE_4K * 3
+    );
     let mut edit = aspace.pgtbl.modify();
     // If rollback consumed a source hold or leaked the prepared alias, final
     // retirement would either underflow or leave an allocated page behind.
@@ -797,7 +833,10 @@ fn move_pages_conflict_retires_managed_destinations_without_consuming_sources() 
         edit.unmap(address).unwrap();
     }
     edit.try_finish().unwrap();
-    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
+    assert_eq!(
+        global_allocator().usages().get(UsageKind::PageCache),
+        before
+    );
 }
 
 #[def_test]
@@ -850,6 +889,10 @@ fn relocated_private_mapping_keeps_object_contents_after_source_metadata_drop() 
         .expect("populate source page");
     mm.write(start, b"abc").expect("seed source contents");
 
+    assert!(matches!(
+        mm.resolve_mremap_source(start, 0),
+        Err(kerrno::KError::InvalidInput)
+    ));
     let source = mm
         .resolve_mremap_source(start, len)
         .expect("resolve relocation source");
@@ -882,28 +925,47 @@ fn relocated_shared_mapping_preserves_frames_and_refaults_at_destination() {
     let mut mm = aspace.lock();
     map_shared(&mut mm, start.as_usize(), len, flags);
     mm.write(start, &[0x48]).expect("seed first shared page");
-    mm.write(start + PAGE_SIZE_4K, &[0x79]).expect("seed second shared page");
+    mm.write(start + PAGE_SIZE_4K, &[0x79])
+        .expect("seed second shared page");
     let frames = [
         mm.page_table().query(start).unwrap().0,
         mm.page_table().query(start + PAGE_SIZE_4K).unwrap().0,
     ];
-    let source = mm.resolve_mremap_source(start, len).expect("shared source snapshot");
+    let source = mm
+        .resolve_mremap_source(start, len)
+        .expect("shared source snapshot");
     mm.relocate_mapping(&source, target, len, false, &aspace)
         .expect("relocate eagerly populated shared runtime");
     assert!(mm.find_vma(start).is_none());
     for (page, frame) in frames.iter().enumerate() {
         assert!(mm.page_table().query(start + page * PAGE_SIZE_4K).is_err());
-        assert_eq!(mm.page_table().query(target + page * PAGE_SIZE_4K).unwrap().0, *frame);
+        assert_eq!(
+            mm.page_table()
+                .query(target + page * PAGE_SIZE_4K)
+                .unwrap()
+                .0,
+            *frame
+        );
     }
-    mm.invalidate_present(target, len).expect("drop destination shared PTEs");
-    mm.populate_area(target, len, flags).expect("refault relocated shared pages");
+    mm.invalidate_present(target, len)
+        .expect("drop destination shared PTEs");
+    mm.populate_area(target, len, flags)
+        .expect("refault relocated shared pages");
     for (page, expected) in [0x48, 0x79].into_iter().enumerate() {
         let mut byte = [0];
-        mm.read(target + page * PAGE_SIZE_4K, &mut byte).expect("read relocated shared payload");
+        mm.read(target + page * PAGE_SIZE_4K, &mut byte)
+            .expect("read relocated shared payload");
         assert_eq!(byte, [expected]);
-        assert_eq!(mm.page_table().query(target + page * PAGE_SIZE_4K).unwrap().0, frames[page]);
+        assert_eq!(
+            mm.page_table()
+                .query(target + page * PAGE_SIZE_4K)
+                .unwrap()
+                .0,
+            frames[page]
+        );
     }
-    mm.unmap(target, len).expect("cleanup relocated shared mapping");
+    mm.unmap(target, len)
+        .expect("cleanup relocated shared mapping");
 }
 
 #[def_test]
@@ -919,7 +981,9 @@ fn shared_relocation_rejects_growth_before_destination_publication() {
     map_shared(&mut mm, start.as_usize(), PAGE_SIZE_4K, flags);
     mm.write(start, &[0x53]).expect("seed shared source");
     let frame = mm.page_table().query(start).unwrap().0;
-    let source = mm.resolve_mremap_source(start, PAGE_SIZE_4K).expect("shared source snapshot");
+    let source = mm
+        .resolve_mremap_source(start, PAGE_SIZE_4K)
+        .expect("shared source snapshot");
     assert_eq!(
         mm.relocate_mapping(&source, target, PAGE_SIZE_4K * 3, false, &aspace),
         Err(KError::InvalidInput),
@@ -928,9 +992,11 @@ fn shared_relocation_rejects_growth_before_destination_publication() {
     assert!(mm.find_vma(target).is_none());
     assert_eq!(mm.page_table().query(start).unwrap().0, frame);
     let mut byte = [0];
-    mm.read(start, &mut byte).expect("rejected growth must preserve source");
+    mm.read(start, &mut byte)
+        .expect("rejected growth must preserve source");
     assert_eq!(byte, [0x53]);
-    mm.unmap(start, PAGE_SIZE_4K).expect("cleanup rejected shared growth");
+    mm.unmap(start, PAGE_SIZE_4K)
+        .expect("cleanup rejected shared growth");
 }
 
 #[def_test]

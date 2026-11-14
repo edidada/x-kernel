@@ -1027,6 +1027,15 @@ impl Ext4Inode {
         guard
     }
 
+    /// Admits optional close-time cleanup without waiting for a producer.
+    /// Last file release may run under MM, while a producer needs that MM for
+    /// revocation. Busy maintenance stays owned until settlement or eviction.
+    pub(crate) fn try_lock_writeback(&self) -> Option<sync::MutexGuard<'_, ()>> {
+        let guard = self.writeback_lock.try_lock()?;
+        self.writeback_io.drain();
+        Some(guard)
+    }
+
     /// Serializes mapping preparation and publication, without waiting for I/O.
     pub(crate) fn lock_writeback_submission(&self) -> sync::MutexGuard<'_, ()> {
         sync::mutex_lock(&self.writeback_lock)
@@ -1352,6 +1361,14 @@ impl Ext4Inode {
         self.with_state(|state| {
             regular_file_extent_mutation_supported(self.kind, self.flags(), has_huge_file)?;
             Ok(state.has_initialized_overwrite(start.get(), count, block_size, self.size()))
+        })
+    }
+
+    /// Returns the committed EOF of an unfinished linked-file shrink.
+    /// One state observation distinguishes truncate recovery from an unlinked inode.
+    pub(crate) fn pending_shrink_size(&self) -> Option<u64> {
+        self.with_state(|state| {
+            (state.metadata.links_count != 0 && state.orphan.is_some()).then_some(state.disk_size())
         })
     }
 

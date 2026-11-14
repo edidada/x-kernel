@@ -262,3 +262,17 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## File revocation ordering
+
+File synchronous callbacks distinguish a queued request, removed PTE and confirmed
+TLB completion. Only the final boundary permits private backing release. File
+fault/fork/relocation admission is nonblocking while MM is held, so a truncate
+owner may wait for MM without creating an invalidate/MM cycle. Cache writeback
+uses try-MM protection while holding a folio and drops that folio on contention.
+Raw private anonymous unmap finalizes detached slots only after try_finish;
+failed completion rolls them back into the existing owner.
+
+Transient file-fault TLB failures are retries, not backing-address SIGBUS. A
+retry must flush the fault address even if its PTE already matches; otherwise
+an empty new page-table guard could certify an earlier incomplete publication.

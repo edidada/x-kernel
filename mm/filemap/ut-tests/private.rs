@@ -207,7 +207,8 @@ fn file_private_fork_madvise_then_write_fault_preserves_file_source_and_splits_a
 
     {
         let mut pgtbl = child_pt.modify();
-        let fault = FaultContext::new(start, PageFaultFlags::WRITE);
+        let fault =
+            FaultContext::new(start, PageFaultFlags::WRITE).with_backing(Some(0), Some(0), Some(0));
         let completion = VmRuntimeOps::handle_fault(&*child, fault, flags, &mut pgtbl)
             .expect("child write fault");
         assert_eq!(
@@ -308,6 +309,10 @@ fn private_refault_rechecks_i_size_before_reusing_retained_cow_page() {
     file.truncate(0).expect("truncate file to zero");
     {
         let mut pgtbl = page_table.modify();
+        assert!(
+            VmRuntimeOps::handle_fault(&runtime, fault, flags, &mut pgtbl).is_err(),
+            "a present retained COW leaf cannot bypass current EOF"
+        );
         let (_, _, page_size) = pgtbl.unmap(fault_addr).expect("remove racing private PTE");
         assert_eq!(page_size, PageSize::Size4K);
         pgtbl.finish();
@@ -412,30 +417,51 @@ fn truncate_zero_releases_file_pins_without_another_fault() {
     let (runtime, mm, file) = mapped_readonly_cache_pages("truncate-release-without-refault", 2);
     assert!(runtime.anon.page_at(0).is_none());
     assert!(runtime.anon.page_at(PAGE_SIZE_4K as u64).is_none());
+    assert!(
+        mm.lock()
+            .handle_page_fault(runtime.start, PageFaultFlags::WRITE)
+            .is_resolved()
+    );
+    assert!(runtime.anon.page_at(0).is_some());
     file.truncate(0).expect("truncate mapped file");
+    assert!(runtime.anon.page_at(0).is_none());
     // No page fault is issued after truncate: invalidation itself releases pins.
     assert!(runtime.file_pages.lock().is_empty());
+    file.truncate(runtime.len as u64).expect("regrow the file");
+    assert!(
+        mm.lock()
+            .handle_page_fault(runtime.start, PageFaultFlags::READ)
+            .is_resolved()
+    );
+    let pa = mm.lock().page_table().query(runtime.start).unwrap().0;
+    assert_frame_prefix(pa, 0, PAGE_SIZE_4K);
     mm.lock()
         .unmap(runtime.start, runtime.len)
         .expect("remove VMA");
 }
 
 #[def_test]
-fn deferred_truncate_retains_pin_until_mm_drains_pte_invalidation() {
-    let (runtime, mm, file) = mapped_readonly_cache_pages("deferred-truncate-pin", 1);
-    {
-        let guard = mm.lock();
-        file.truncate(0).expect("truncate while MM is busy");
-        assert!(runtime.file_pages.lock().contains_key(&0), "pending PTE must retain its pin");
-        drop(guard);
+fn truncate_waits_for_busy_mm_before_releasing_file_pages() {
+    let (runtime, mm, file) = mapped_readonly_cache_pages("synchronous-truncate-pin", 1);
+    let mut guard = mm.lock();
+    let truncating = file.clone();
+    let worker = ktask::spawn(move || truncating.truncate(0).unwrap());
+    while file.size() != 0 || worker.state() != ktask::TaskState::Blocked {
+        assert_ne!(worker.state(), ktask::TaskState::Exited);
+        ktask::yield_now();
     }
-    mm.lock()
-        .invalidate_present(runtime.start, runtime.len)
-        .expect("drain invalidation");
-    assert!(!runtime.file_pages.lock().contains_key(&0));
-    mm.lock()
-        .unmap(runtime.start, runtime.len)
-        .expect("remove VMA");
+    assert_eq!(
+        guard.handle_page_fault(runtime.start, PageFaultFlags::READ),
+        memspace::PageFaultOutcome::Retry
+    );
+    assert!(runtime.file_pages.lock().contains_key(&0));
+    assert_eq!(file.mapping().nrpages(), 1);
+    drop(guard);
+    assert_eq!(worker.join(), 0);
+    assert!(runtime.file_pages.lock().is_empty());
+    let mut guard = mm.lock();
+    assert!(guard.page_table().query(runtime.start).is_err());
+    guard.unmap(runtime.start, runtime.len).expect("remove VMA");
 }
 
 #[def_test]
@@ -491,18 +517,24 @@ fn file_private_cow_rejects_a_pte_from_a_different_folio() {
 
     {
         let mut pgtbl = page_table.modify();
-        let read_fault = FaultContext::new(start, PageFaultFlags::READ)
-            .with_backing(Some(0), Some(0), Some(0));
+        let read_fault =
+            FaultContext::new(start, PageFaultFlags::READ).with_backing(Some(0), Some(0), Some(0));
         VmRuntimeOps::handle_fault(&runtime, read_fault, flags, &mut pgtbl)
             .expect("map readonly file page");
 
         pgtbl.unmap(start).expect("replace file PTE for test");
         pgtbl.finish();
         pgtbl
-            .map_raw(start, wrong_frame, PageSize::Size4K, flags - MappingFlags::WRITE)
+            .map_raw(
+                start,
+                wrong_frame,
+                PageSize::Size4K,
+                flags - MappingFlags::WRITE,
+            )
             .expect("map unrelated frame");
 
-        let write_fault = FaultContext::new(start, PageFaultFlags::WRITE);
+        let write_fault =
+            FaultContext::new(start, PageFaultFlags::WRITE).with_backing(Some(0), Some(0), Some(0));
         assert!(
             VmRuntimeOps::handle_fault(&runtime, write_fault, flags, &mut pgtbl).is_err(),
             "a third-frame mismatch must fail instead of retrying without progress"
@@ -541,14 +573,29 @@ fn file_private_fork_failure_does_not_commit_anonymous_child_references() {
         let mut pgtbl = parent_pt.modify();
         for (addr, access, offset) in [
             (start, PageFaultFlags::WRITE, 0),
-            (start + PAGE_SIZE_4K, PageFaultFlags::READ, PAGE_SIZE_4K as u64),
+            (
+                start + PAGE_SIZE_4K,
+                PageFaultFlags::READ,
+                PAGE_SIZE_4K as u64,
+            ),
         ] {
-            let fault = FaultContext::new(addr, access)
-                .with_backing(Some(offset / PAGE_SIZE_4K as u64), Some(offset), Some(0));
-            runtime.handle_fault(fault, flags, &mut pgtbl).expect("populate mixed mapping");
+            let fault = FaultContext::new(addr, access).with_backing(
+                Some(offset / PAGE_SIZE_4K as u64),
+                Some(offset),
+                Some(0),
+            );
+            runtime
+                .handle_fault(fault, flags, &mut pgtbl)
+                .expect("populate mixed mapping");
         }
     }
-    assert!(runtime.anon.page_at(0).expect("owned first page").is_exclusive());
+    assert!(
+        runtime
+            .anon
+            .page_at(0)
+            .expect("owned first page")
+            .is_exclusive()
+    );
     let child_mm = Arc::new(ksync::Mutex::new(
         memspace::MmSpace::new_user_empty().expect("child mm"),
     ));
@@ -561,27 +608,46 @@ fn file_private_fork_failure_does_not_commit_anonymous_child_references() {
         let blocked_addr = start + blocked_page * PAGE_SIZE_4K;
         {
             let mut new_pgtbl = child_pt.modify();
-            new_pgtbl.map_raw(blocked_addr, collision, PageSize::Size4K, flags)
+            new_pgtbl
+                .map_raw(blocked_addr, collision, PageSize::Size4K, flags)
                 .expect("force a deterministic child mapping failure");
             let mut old_pgtbl = parent_pt.modify();
-            assert!(runtime.clone_for_fork(
-                range, flags, &mut old_pgtbl, &mut new_pgtbl,
-                memspace::ForkCloneTarget {
-                    new_mm_id: child_mm_id,
-                    new_aspace: &child_mm,
-                    invalidate: None,
-                },
-            ).is_err());
-            assert!(runtime.anon.page_at(0).expect("parent page remains").is_exclusive(),
-                "a failed fork must not leave a committed child frame reference");
+            assert!(
+                runtime
+                    .clone_for_fork(
+                        range,
+                        flags,
+                        &mut old_pgtbl,
+                        &mut new_pgtbl,
+                        memspace::ForkCloneTarget {
+                            new_mm_id: child_mm_id,
+                            new_aspace: &child_mm,
+                            invalidate: None,
+                        },
+                    )
+                    .is_err()
+            );
+            assert!(
+                runtime
+                    .anon
+                    .page_at(0)
+                    .expect("parent page remains")
+                    .is_exclusive(),
+                "a failed fork must not leave a committed child frame reference"
+            );
             let other_addr = start + (1 - blocked_page) * PAGE_SIZE_4K;
-            assert!(new_pgtbl.query(other_addr).is_err(), "rollback must remove child PTEs");
+            assert!(
+                new_pgtbl.query(other_addr).is_err(),
+                "rollback must remove child PTEs"
+            );
             new_pgtbl.unmap(blocked_addr).expect("remove collision");
             new_pgtbl.finish();
         }
         dealloc_frame(collision, PageSize::Size4K);
     }
-    runtime.unmap_impl(range, &mut parent_pt.modify()).expect("cleanup parent mapping");
+    runtime
+        .unmap_impl(range, &mut parent_pt.modify())
+        .expect("cleanup parent mapping");
 }
 
 fn mapping_after_failed_relocation(
@@ -799,13 +865,25 @@ fn failed_relocation_can_fork_source_before_any_refault() {
 #[def_test]
 fn file_cow_uses_retained_allocation_without_reloading_evicted_cache_entry() {
     let (runtime, mm, file) = mapped_readonly_cache_pages("retained-file-cow", 1);
-    file.mapping().evict().expect("detach cache index while mapping retains its page");
+    file.mapping()
+        .evict()
+        .expect("detach cache index while mapping retains its page");
     assert_eq!(file.mapping().nrpages(), 0);
-    assert!(mm.lock().handle_page_fault(runtime.start, PageFaultFlags::WRITE).is_resolved());
-    assert_eq!(file.mapping().nrpages(), 0, "COW must not reload the file index");
+    assert!(
+        mm.lock()
+            .handle_page_fault(runtime.start, PageFaultFlags::WRITE)
+            .is_resolved()
+    );
+    assert_eq!(
+        file.mapping().nrpages(),
+        0,
+        "COW must not reload the file index"
+    );
     let page = runtime.anon.page_at(0).expect("owned COW allocation");
     assert_frame_prefix(page.phys_addr(), 0x65, PAGE_SIZE_4K);
-    mm.lock().unmap(runtime.start, runtime.len).expect("cleanup COW mapping");
+    mm.lock()
+        .unmap(runtime.start, runtime.len)
+        .expect("cleanup COW mapping");
 }
 
 #[def_test]
@@ -816,15 +894,28 @@ fn partial_unmap_keeps_other_file_pages_and_fork_pins_alive() {
         .unmap(runtime.start, PAGE_SIZE_4K)
         .expect("unmap parent first page");
     assert!(!runtime.file_pages.lock().contains_key(&0));
-    assert!(runtime.file_pages.lock().contains_key(&(PAGE_SIZE_4K as u64)));
+    assert!(
+        runtime
+            .file_pages
+            .lock()
+            .contains_key(&(PAGE_SIZE_4K as u64))
+    );
     let mut child_byte = [0];
-    child.lock().read(runtime.start, &mut child_byte).expect("child retains first file page");
+    child
+        .lock()
+        .read(runtime.start, &mut child_byte)
+        .expect("child retains first file page");
     assert_eq!(child_byte, [0x65]);
     child
         .lock()
         .unmap(runtime.start, runtime.len)
         .expect("unmap child pages");
-    assert!(runtime.file_pages.lock().contains_key(&(PAGE_SIZE_4K as u64)));
+    assert!(
+        runtime
+            .file_pages
+            .lock()
+            .contains_key(&(PAGE_SIZE_4K as u64))
+    );
     file.truncate(0).expect("truncate remaining parent view");
     assert!(runtime.file_pages.lock().is_empty());
     mm.lock()
@@ -839,7 +930,12 @@ fn madvise_releases_only_selected_readonly_file_pins() {
         .madvise_dontneed(runtime.start, PAGE_SIZE_4K)
         .expect("discard first page");
     assert!(!runtime.file_pages.lock().contains_key(&0));
-    assert!(runtime.file_pages.lock().contains_key(&(PAGE_SIZE_4K as u64)));
+    assert!(
+        runtime
+            .file_pages
+            .lock()
+            .contains_key(&(PAGE_SIZE_4K as u64))
+    );
     assert!(runtime.anon.page_at(0).is_none());
     assert!(
         mm.lock()
@@ -869,12 +965,18 @@ fn sparse_unmap_cleanup_releases_only_tokens_for_missing_ptes() {
         // pending invalidation and retains only the still-present leaf's token.
         pgtbl.unmap(runtime.start).expect("clear first file PTE");
         runtime.release_unmapped_file_pages(range, &mut pgtbl);
-        assert!(!pgtbl.finish().had_pending(), "cleanup must finish the pending invalidation");
+        assert!(
+            !pgtbl.finish().had_pending(),
+            "cleanup must finish the pending invalidation"
+        );
         assert!(matches!(
             pgtbl.query(runtime.start),
             Err(khal::paging::PagingError::NotMapped)
         ));
-        assert_eq!(pgtbl.query(second).expect("retained second PTE"), second_pte);
+        assert_eq!(
+            pgtbl.query(second).expect("retained second PTE"),
+            second_pte
+        );
         let pages = runtime.file_pages.lock();
         assert_eq!(pages.len(), 1);
         assert!(!pages.contains_key(&0));
@@ -931,7 +1033,8 @@ fn invalidate_present_releases_private_file_token_before_read_refault() {
 
 #[def_test]
 fn invalidate_present_then_write_and_clear_keep_one_private_page_owner() {
-    let (runtime, mm, _file) = mapped_readonly_cache_pages("private-file-invalidate-write-clear", 1);
+    let (runtime, mm, _file) =
+        mapped_readonly_cache_pages("private-file-invalidate-write-clear", 1);
     mm.lock()
         .invalidate_present(runtime.start, runtime.len)
         .expect("clear private-file PTE before direct write");
@@ -944,7 +1047,13 @@ fn invalidate_present_then_write_and_clear_keep_one_private_page_owner() {
         "write after invalidation must publish only an anonymous owner"
     );
     assert!(runtime.file_pages.lock().is_empty());
-    assert!(runtime.anon.page_at(0).expect("private write page").is_exclusive());
+    assert!(
+        runtime
+            .anon
+            .page_at(0)
+            .expect("private write page")
+            .is_exclusive()
+    );
     mm.lock().clear();
     assert!(mm.lock().find_vma(runtime.start).is_none());
     assert!(mm.lock().page_table().query(runtime.start).is_err());
@@ -996,31 +1105,61 @@ fn mprotect_none_releases_file_pin_before_read_access_is_restored() {
 #[def_test]
 fn write_only_protect_uses_actual_pte_flags_for_private_file_ownership() {
     for (name, user_flag) in [
-        ("write-only-private-file-owner-kernel", MappingFlags::empty()),
+        (
+            "write-only-private-file-owner-kernel",
+            MappingFlags::empty(),
+        ),
         ("write-only-private-file-owner-user", MappingFlags::USER),
     ] {
         let (runtime, mm, _file) = mapped_readonly_cache_pages(name, 2);
         let mut guard = mm.lock();
-        guard.protect(runtime.start, runtime.len, user_flag | MappingFlags::WRITE)
+        guard
+            .protect(runtime.start, runtime.len, user_flag | MappingFlags::WRITE)
             .expect("protect file mapping for write-only access");
         if user_flag.is_empty() {
-            assert!(runtime.file_pages.lock().is_empty(),
-                "removing COW WRITE leaves empty PTE flags and must retire file tokens");
+            assert!(
+                runtime.file_pages.lock().is_empty(),
+                "removing COW WRITE leaves empty PTE flags and must retire file tokens"
+            );
             assert!(guard.page_table().query(runtime.start).is_err());
         } else {
-            assert_eq!(runtime.file_pages.lock().len(), 2,
-                "USER-only PTEs remain present and must keep their file tokens");
+            assert_eq!(
+                runtime.file_pages.lock().len(),
+                2,
+                "USER-only PTEs remain present and must keep their file tokens"
+            );
             assert!(guard.page_table().query(runtime.start).is_ok());
         }
-        guard.protect(runtime.start, PAGE_SIZE_4K, MappingFlags::USER | MappingFlags::READ)
+        guard
+            .protect(
+                runtime.start,
+                PAGE_SIZE_4K,
+                MappingFlags::USER | MappingFlags::READ,
+            )
             .expect("restore read access to first page");
-        assert!(guard.handle_page_fault(runtime.start, PageFaultFlags::READ).is_resolved());
+        assert!(
+            guard
+                .handle_page_fault(runtime.start, PageFaultFlags::READ)
+                .is_resolved()
+        );
         assert!(runtime.file_pages.lock().contains_key(&0));
         assert!(runtime.anon.page_at(0).is_none());
         let writable = runtime.start + PAGE_SIZE_4K;
-        assert!(guard.handle_page_fault(writable, PageFaultFlags::WRITE).is_resolved());
-        assert!(!runtime.file_pages.lock().contains_key(&(PAGE_SIZE_4K as u64)));
-        let page = runtime.anon.page_at(PAGE_SIZE_4K as u64).expect("single write owner");
+        assert!(
+            guard
+                .handle_page_fault(writable, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        assert!(
+            !runtime
+                .file_pages
+                .lock()
+                .contains_key(&(PAGE_SIZE_4K as u64))
+        );
+        let page = runtime
+            .anon
+            .page_at(PAGE_SIZE_4K as u64)
+            .expect("single write owner");
         assert!(page.is_exclusive());
         assert_frame_prefix(page.phys_addr(), 0x65, PAGE_SIZE_4K);
         guard.clear();
@@ -1046,23 +1185,51 @@ fn failed_protect_retires_tokens_for_the_already_cleared_prefix() {
         invalidate: guard.invalidate_handle(&mm),
     });
     let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
-    let next_vma = VmArea::new(next, PAGE_SIZE_4K, flags - MappingFlags::WRITE, flags,
-        next_runtime.backing_info(), 0, Some(memspace::FileMappingInfo {
+    let next_vma = VmArea::new(
+        next,
+        PAGE_SIZE_4K,
+        flags - MappingFlags::WRITE,
+        flags,
+        next_runtime.backing_info(),
+        0,
+        Some(memspace::FileMappingInfo {
             offset: 0,
             inode: file.inode().inode(),
             path: None,
-        }));
-    guard.map_runtime_vma(next_vma, false, next_runtime).expect("install rejecting second VMA");
-    assert_eq!(guard.protect(runtime.start, PAGE_SIZE_4K * 2, MappingFlags::WRITE),
-        Err(kerrno::KError::PermissionDenied), "readonly shared file rejects write upgrade");
+        }),
+    );
+    guard
+        .map_runtime_vma(next_vma, false, next_runtime)
+        .expect("install rejecting second VMA");
+    assert_eq!(
+        guard.protect(runtime.start, PAGE_SIZE_4K * 2, MappingFlags::WRITE),
+        Err(kerrno::KError::PermissionDenied),
+        "readonly shared file rejects write upgrade"
+    );
     assert!(guard.page_table().query(runtime.start).is_err());
-    assert!(runtime.file_pages.lock().is_empty(),
-        "first VMA's cleared PTE must release its token before the later VMA rejects protection");
-    assert!(guard.handle_page_fault(runtime.start, PageFaultFlags::READ).is_resolved());
+    assert!(
+        runtime.file_pages.lock().is_empty(),
+        "first VMA's cleared PTE must release its token before the later VMA rejects protection"
+    );
+    assert!(
+        guard
+            .handle_page_fault(runtime.start, PageFaultFlags::READ)
+            .is_resolved()
+    );
     assert!(runtime.file_pages.lock().contains_key(&0));
-    assert!(guard.handle_page_fault(runtime.start, PageFaultFlags::WRITE).is_resolved());
+    assert!(
+        guard
+            .handle_page_fault(runtime.start, PageFaultFlags::WRITE)
+            .is_resolved()
+    );
     assert!(runtime.file_pages.lock().is_empty());
-    assert!(runtime.anon.page_at(0).expect("private write after failed protect").is_exclusive());
+    assert!(
+        runtime
+            .anon
+            .page_at(0)
+            .expect("private write after failed protect")
+            .is_exclusive()
+    );
     guard.clear();
 }
 
@@ -1088,8 +1255,7 @@ fn relocated_file_mapping_releases_pins_at_destination_without_refault() {
     );
     file.truncate(0).expect("truncate moved mapping");
     assert_eq!(
-        mm.lock()
-            .handle_page_fault(target, PageFaultFlags::READ),
+        mm.lock().handle_page_fault(target, PageFaultFlags::READ),
         memspace::PageFaultOutcome::BusError,
         "truncate must invalidate and reject refault through the destination runtime"
     );
@@ -1105,14 +1271,7 @@ fn relocated_file_mapping_can_shrink_and_retains_only_destination_pins() {
     let source_range = VirtAddrRange::from_start_size(runtime.start, runtime.len);
     let target_range = VirtAddrRange::from_start_size(target, PAGE_SIZE_4K);
     let relocated = runtime
-        .rebuilt_runtime(
-            source_range,
-            target_range,
-            None,
-            None,
-            None,
-            false,
-        )
+        .rebuilt_runtime(source_range, target_range, None, None, None, false)
         .expect("rebuild shrunken destination runtime");
     assert_eq!(relocated.file_pages.lock().len(), 1);
     assert!(relocated.file_pages.lock().contains_key(&0));
@@ -1146,7 +1305,11 @@ fn split_private_file_mapping_mremap_preserves_page_offsets_and_pins() {
     let target = runtime.start + 0x30_000;
 
     mm.lock()
-        .protect(runtime.start, PAGE_SIZE_4K, MappingFlags::USER | MappingFlags::READ)
+        .protect(
+            runtime.start,
+            PAGE_SIZE_4K,
+            MappingFlags::USER | MappingFlags::READ,
+        )
         .expect("split mapping by protecting the first page");
     assert!(runtime.file_pages.lock().contains_key(&0));
     assert!(
@@ -1181,10 +1344,7 @@ fn split_private_file_mapping_mremap_preserves_page_offsets_and_pins() {
         "retired source runtime should release only the moved page pin"
     );
     assert!(
-        runtime
-            .anon
-            .page_at(PAGE_SIZE_4K as u64)
-            .is_some(),
+        runtime.anon.page_at(PAGE_SIZE_4K as u64).is_some(),
         "COW must use the second page's anonymous object offset"
     );
 
@@ -1229,11 +1389,11 @@ fn non_aligned_file_end_view_rounds_to_page_boundary() {
     )
     .expect("private file vma");
 
-    // The partial tail page is anonymous, so the file view must stop at the
-    // page boundary; a non-aligned end would make invalidation construct a
-    // page-unaligned zap range and fail with InvalidInput.
+    // The partial last file page may already be anonymous after COW. Its
+    // reverse view still covers that whole page so truncate can revoke it;
+    // the following loader BSS is the only excluded suffix.
     assert_eq!(
         file.mapping().registered_object_ranges(),
-        vec![(0, PAGE_SIZE_4K as u64)]
+        vec![(0, (2 * PAGE_SIZE_4K) as u64)]
     );
 }

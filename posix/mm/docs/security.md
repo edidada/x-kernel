@@ -160,3 +160,9 @@ destination unmapped. A denied brk leaves the break unchanged. Unlimited limits
 retain the normal fast path; finite-limit arithmetic is checked.
 This limit governs virtual address-space admission, not physical memory
 availability, and is not checked again when a page fault allocates backing.
+
+## Relocation restart
+
+A file invalidate conflict is a task-context restart with MM released, never a
+wait under MM. The file provider admits relocation before source PTE mutation;
+VMA lookup and limit checks are repeated after the restart.

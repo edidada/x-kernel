@@ -564,6 +564,42 @@ pub trait MappingViewNotifier: Send + Sync {
     /// Applies object-driven invalidate work to the registered VMA view.
     fn invalidate(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit);
 
+    /// Completes object-driven PTE removal, including private COW pages when
+    /// `even_cows` is true, before the backing owner can release its storage.
+    /// Implementations may wait for MM only if its faults retry invalidate
+    /// contention instead of waiting under MM serialization.
+    fn invalidate_sync(
+        &self,
+        _work: &ObjectInvalidateWork,
+        _hit: &ObjectViewHit,
+        _even_cows: bool,
+    ) -> kerrno::KResult<()> {
+        Err(kerrno::LinuxError::EOPNOTSUPP.into())
+    }
+
+    /// Releases private retained pages only after every hit in this work has
+    /// completed synchronous revocation. Shared aliases must all be inaccessible
+    /// before any backing object loses its final physical owner.
+    fn release_invalidated_pages(
+        &self,
+        _work: &ObjectInvalidateWork,
+        _hit: &ObjectViewHit,
+    ) -> kerrno::KResult<()> {
+        Ok(())
+    }
+
+    /// Write-protects shared PTEs for this physical page and completes TLBs.
+    /// Returns false without waiting if the target MM is busy. The owner keeps
+    /// its folio locked until every shared view has completed protection.
+    fn try_write_protect(
+        &self,
+        _work: &ObjectInvalidateWork,
+        _hit: &ObjectViewHit,
+        _paddr: u64,
+    ) -> kerrno::KResult<bool> {
+        Err(kerrno::LinuxError::EOPNOTSUPP.into())
+    }
+
     /// Attempts synchronous PTE removal and TLB invalidation without waiting
     /// for the target MM lock. Returns false while that lock is busy. Owners
     /// must retain backing pages until every affected view reports completion.

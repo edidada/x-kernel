@@ -254,3 +254,11 @@ must restore dirty/WRITEBACK synchronously under existing producer exclusion.
 Live EOF is borrowed owner metadata sampled under the folio lock; no second
 size or per-folio generation is stored. Partial EOF ends a payload so growth
 cannot concatenate bytes across a file-offset gap.
+
+## Reverse mapping preparation
+
+No cache index lock spans an owner callback or MM attempt. Dirty clearing follows
+successful owner preparation under the folio lock. A busy callback leaves dirty,
+TOWRITE and WRITEBACK unchanged; retry releases the folio and flushes pending
+owners before yielding. The cache never stores a second EOF or hardware-PTE dirty
+registry. Truncate's owner must revoke mappings before calling suffix teardown.

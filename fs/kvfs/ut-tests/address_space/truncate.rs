@@ -39,6 +39,16 @@ struct RecordingNotifier {
 }
 
 impl MappingViewNotifier for RecordingNotifier {
+    fn invalidate_sync(
+        &self,
+        work: &ObjectInvalidateWork,
+        hit: &ObjectViewHit,
+        _even_cows: bool,
+    ) -> VfsResult<()> {
+        self.invalidate(work, hit);
+        Ok(())
+    }
+
     fn invalidate(&self, _work: &ObjectInvalidateWork, _hit: &ObjectViewHit) {
         let size = self
             .address_space
@@ -482,7 +492,11 @@ fn invalidate_range_ignores_empty_and_inverted_ranges() {
         .filemap_add_folio(super::folio_from_bytes(0, b"kept"))
         .unwrap();
 
-    assert!(mapping.invalidate_range(PAGE_SIZE_4K as u64, PAGE_SIZE_4K as u64).unwrap());
+    assert!(
+        mapping
+            .invalidate_range(PAGE_SIZE_4K as u64, PAGE_SIZE_4K as u64)
+            .unwrap()
+    );
     assert!(mapping.invalidate_range(PAGE_SIZE_4K as u64, 0).unwrap());
     assert_eq!(mapping.nrpages(), 1);
 }

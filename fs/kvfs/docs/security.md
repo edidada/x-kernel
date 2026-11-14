@@ -957,3 +957,21 @@ those guards before lifecycle waits, while retaining writer data serialization.
 Writeback samples live EOF only after taking the same folio lock. Attempted
 work and filesystem declines share one pagecache-owned control; completion
 never retains it. This does not replace shared-PTE dirty rearming/invalidation.
+
+## File mapping completion
+
+Queued notifications cannot authorize file truncate or backing release.
+Synchronous callbacks propagate failure and complete every view's PTE/TLB
+revocation before the private retirement pass. No retained COW page survives a
+successful shrink merely because its PTE was removed. File faults and relocation
+use try-read admission under MM; their waits occur after releasing MM.
+Writeback protection is physically identity-checked and precedes dirty clearing.
+
+Final file release can run during MM-held VMA teardown. Filesystem release
+callbacks must not wait for producer exclusion whose holder needs that MM.
+Optional close maintenance keeps resources inode-owned when admission is busy;
+mandatory eviction retains its existing lifetime and I/O-drain obligations.
+
+A provider recovering an incomplete size change from write_begin must revoke
+old suffix mappings before admitting new data. `AddressSpace::lock_invalidate_exclusive` is
+exposed for this boundary; it requires inode-data serialization and no MM lock.

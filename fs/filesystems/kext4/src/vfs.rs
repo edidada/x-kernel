@@ -1222,30 +1222,38 @@ impl InodeOperations for Ext4Inode {
         if len > Ext4SuperOperations::max_file_size(ext4, &super_block, self) {
             return Err(VfsError::FileTooLarge);
         }
-        let (visible_size, disk_size) = self.sizes();
-        let is_visible_shrink = len < visible_size;
-        let is_disk_shrink = len < disk_size;
-        {
+        // A committed shrink must finish at its original EOF before a later
+        // size change can expose any of the old cached or allocated suffix.
+        let pending_size = self.pending_shrink_size().filter(|pending| *pending != len);
+        for len in pending_size.into_iter().chain(core::iter::once(len)) {
+            let (visible_size, disk_size) = self.sizes();
+            let is_visible_shrink = len < visible_size;
+            let is_disk_shrink = len < disk_size;
+            // A failed mapping/TLB round can leave the committed size and orphan
+            // entry intact. Resume that existing obligation even at the same EOF.
+            let has_pending_shrink = self.pending_shrink_size().is_some();
+            {
+                let mut state = ext4.write(&super_block);
+                state
+                    .prepare_regular_inode_truncate(self, len, current_ext4_timestamp(vfs_inode))
+                    .map_err(into_vfs_err)?
+            }
+            vfs_inode.truncate_setsize(len)?;
             let mut state = ext4.write(&super_block);
-            state
-                .prepare_regular_inode_truncate(self, len, current_ext4_timestamp(vfs_inode))
-                .map_err(into_vfs_err)?
-        }
-        vfs_inode.truncate_setsize(len)?;
-        let mut state = ext4.write(&super_block);
-        if is_visible_shrink {
-            let first_unneeded = first_logical_block_after_len(len, super_block.block_size());
-            state
-                .truncate_delalloc_range(self, LogicalBlock::new(first_unneeded))
-                .map_err(into_vfs_err)?;
-            // A space at or past the new EOF can never be written through
-            // again, so clip there; the prefix below it stays usable.
-            state.clip_preallocs_from_logical(self, first_unneeded);
-        }
-        if is_disk_shrink {
-            state
-                .finish_regular_inode_shrink(self, len)
-                .map_err(into_vfs_err)?;
+            if is_visible_shrink || has_pending_shrink {
+                let first_unneeded = first_logical_block_after_len(len, super_block.block_size());
+                state
+                    .truncate_delalloc_range(self, LogicalBlock::new(first_unneeded))
+                    .map_err(into_vfs_err)?;
+                // A space at or past the new EOF can never be written through
+                // again, so clip there; the prefix below it stays usable.
+                state.clip_preallocs_from_logical(self, first_unneeded);
+            }
+            if is_disk_shrink || has_pending_shrink {
+                state
+                    .finish_regular_inode_shrink(self, len)
+                    .map_err(into_vfs_err)?;
+            }
         }
         Ok(())
     }
@@ -1708,6 +1716,12 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         if inode.kind() != InodeKind::RegularFile {
             return Err(VfsError::InvalidInput);
         }
+        if let Some(pending_size) = inode.pending_shrink_size() {
+            // write_begin runs under inode data exclusion and before folio or
+            // invalidate-read admission. Preserve invalidate -> producer order.
+            let _invalidate = mapping.lock_invalidate_exclusive();
+            <Ext4Inode as InodeOperations>::set_len(inode, &vfs_inode, pending_size)?;
+        }
         let super_block = vfs_inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
         let block_size = super_block.block_size();
@@ -1845,7 +1859,9 @@ impl FileOperations for Ext4Inode {
         if inode.write_count() != 1 {
             return Ok(());
         }
-        let _writeback_guard = self.lock_writeback();
+        let Some(_writeback_guard) = self.try_lock_writeback() else {
+            return Ok(());
+        };
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
         let mut state = ext4.write(&super_block);
@@ -1912,6 +1928,10 @@ impl FileOperations for Ext4Inode {
         let ext4 = ext4_private(&super_block)?;
         if end > Ext4SuperOperations::max_file_size(ext4, &super_block, self) {
             return Err(VfsError::FileTooLarge);
+        }
+        if let Some(pending_size) = self.pending_shrink_size() {
+            // VFS already owns data and invalidate exclusion for fallocate.
+            <Self as InodeOperations>::set_len(self, vfs_inode, pending_size)?;
         }
         let timestamp = current_ext4_timestamp(vfs_inode);
         let mut committed_end = 0u64;

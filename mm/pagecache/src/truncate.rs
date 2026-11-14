@@ -38,6 +38,14 @@ impl MappingPages {
             return Ok(());
         }
 
+        self.truncate_cached_folios(len)
+    }
+
+    /// Enforces EOF without depending on a previous size snapshot.
+    /// The owner excludes new population beyond EOF. Repeating this operation
+    /// after a failed mapping revocation completes the same truncation safely.
+    pub fn truncate_cached_folios(&self, len: u64) -> KResult<()> {
+        let wait = CompletionWait::prepare()?;
         let first_truncated = len.div_ceil(PAGE_SIZE_4K as u64);
         self.remove_ready_folios_from(first_truncated, None);
         let tail_off = (len % PAGE_SIZE_4K as u64) as usize;

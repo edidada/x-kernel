@@ -88,3 +88,11 @@ are gone, false means the target MM is busy, and errors prohibit page release.
 The default rejects this contract: deferred `invalidate` alone cannot prove
 completion. Object owners reuse the same work/hit coordinates and registered
 views; no second invalidation registry or completion-state table is introduced.
+
+## Synchronous file view operations
+
+MappingViewNotifier separates notification from invalidate_sync completion,
+post-revocation private retirement and nonblocking shared write protection.
+The file owner revokes every hit before invoking release_invalidated_pages on
+any hit. even_cows is an invocation argument matching truncate policy, not stored
+object state. Existing work/hit identities and offset validation are reused.

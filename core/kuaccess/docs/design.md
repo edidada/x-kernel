@@ -38,7 +38,7 @@ syscall / runtime
 - `access_user_memory()` requires the current task to resolve to a thread.
 - User-string loads access user addresses, so they may sleep and resolve page faults.
 - Ordinary `osvm` copy entry points require a sleepable thread context and do not disable IRQs themselves. A page fault returns through the exception-table fixup, then the calling task fills the page back in. Filling a file page may wait for block I/O.
-- The trap handler for atomic user access depends on the current thread's `accessing_user_memory` flag and takes over page faults only inside that window.
+- The scoped raw-access trap adapter depends on the current thread's `accessing_user_memory` flag. Faultable atomic operations use task-context resolution instead of this window.
 
 ## Algorithms
 
@@ -54,9 +54,9 @@ syscall / runtime
 ### User atomic access
 
 1. Check 4-byte alignment and the user address range.
-2. Faultable loads use the `access_user_memory()` window. Compare-exchange uses the nofault primitive and, after a fault, resolves the write in task context before retrying.
-3. Load uses a naturally aligned read-only 32-bit load. The nofault compare-exchange exclusive/atomic sequence runs under `IrqSave`.
-4. Success returns the observed value or `(exchanged, observed)`. A fault maps to `MemError::NoAccess`.
+2. Both raw atomic primitives suppress an outer raw-access window under `IrqSave` and use the assembly exception-table fixup. The short guard ends before any waiting.
+3. Faultable loads use the existing `copy_user_pages` progress loop: a failed atomic load enters the live MM task resolver, waits for admission with MM released, rechecks the VMA and repeats the load. Compare-exchange similarly resolves a failed nofault store in task context before retrying.
+4. Success returns the observed value or `(exchanged, observed)`. Nofault variants immediately return `NoAccess` on a fault, including inside an outer access window. Fault-resolving variants return an error only when resolution fails or the existing copy progress bound is exhausted.
 
 These primitives give futex and robust-list paths a TOCTOU-free read or update of a user futex word. A read-only load does not require a writable mapping and does not trigger COW.
 
@@ -81,7 +81,7 @@ These primitives give futex and robust-list paths a TOCTOU-free read or update o
 
 ## Regression tests
 
-`ut-tests/copy_tests.rs` uses an on-demand mapping backend that requires `PreparedTaskWait`. It checks that ordinary-copy fault handling runs in the sleepable task context outside the exception, and covers cross-page reads, a first-touch write fault, read-only protection, and revoking a mapping. The staged write-fault test spans multiple pages and exceeds the per-page recovery budget, checking that the copy is complete after repeated faults on the same page. The no-progress tests cover a bounded exit when the backend keeps reporting success or a COW retry, and an immediate failure on an explicit `NoProgress`. The tests do not depend on real disk or IRQ timing.
+`ut-tests/copy_tests.rs` uses an on-demand mapping backend that requires `PreparedTaskWait`. It checks that ordinary-copy fault handling runs in the sleepable task context outside the exception, and covers cross-page reads, a first-touch write fault, read-only protection, and revoking a mapping. The staged write-fault test spans multiple pages and exceeds the per-page recovery budget, checking that the copy is complete after repeated faults on the same page. The no-progress tests cover a bounded exit when the backend keeps reporting success or a COW retry, and an immediate failure on an explicit `NoProgress`. The admission test also repeats a faultable atomic load through more than 16 provider waits, while the outer-window nofault test verifies that an atomic load does not enter the provider. The tests do not depend on real disk or IRQ timing.
 
 
 ### Locked copies and prefaulting
@@ -99,3 +99,14 @@ waits for admission outside MM and retains its materialization progress bound.
 Prefaulting never writes a probe value into the user's buffer and does not pin
 the mapping. The caller must release source folio and backing-provider locks
 before invoking it, then retry through the nofault copy operation.
+
+### File-fault admission retry
+
+The raw exception adapter reports admission `Retry` as unhandled so nofault
+assembly reaches its fixup. The existing task-context resolver then waits with
+MM released and rechecks the VMA. This also covers file invalidate contention;
+an exception retry cannot itself make progress on a blocked truncate owner.
+
+The raw adapter also uses try-MM admission. A lock holder may be awaiting this
+CPU's TLB acknowledgement, so an IRQ-masked exception must reach the nofault
+fixup instead of sleeping on that MM. The active MM capability survives fixup.

@@ -199,6 +199,15 @@ fn last_writable_close_releases_prealloc_spaces() {
     });
     assert_eq!(prealloc_count(&inode), 1);
 
+    {
+        let _producer = inode.lock_writeback_submission();
+        <Ext4Inode as FileOperations>::release(&inode, &vfs_inode, &file).unwrap();
+        assert_eq!(
+            prealloc_count(&inode),
+            1,
+            "busy maintenance must retain its resources"
+        );
+    }
     <Ext4Inode as FileOperations>::release(&inode, &vfs_inode, &file).unwrap();
 
     assert_eq!(prealloc_count(&inode), 0);
@@ -209,41 +218,97 @@ fn last_writable_close_releases_prealloc_spaces() {
 
 #[def_test]
 fn shrink_truncate_clips_spaces_past_the_new_eof() {
-    let (mut filesystem, _storage) =
-        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-    let private = allocate_checkpointed_regular_inode(&mut filesystem);
-    private.set_size(3 * TEST_BLOCK_SIZE as u64);
-    install_test_internal_journal(&mut filesystem, 8103);
-    let (super_block, file) = writable_mount(filesystem, private);
-    let vfs_inode = file.inode().clone();
-    let inode = vfs_inode.downcast::<Ext4Inode>().unwrap();
-    drop(file);
+    for (is_retry, is_grow, is_write) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        let (mut filesystem, _storage) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let private = allocate_checkpointed_regular_inode(&mut filesystem);
+        private.set_size(3 * TEST_BLOCK_SIZE as u64);
+        install_test_internal_journal(&mut filesystem, 8103);
+        let (super_block, file) = writable_mount(filesystem, private);
+        let vfs_inode = file.inode().clone();
+        let inode = vfs_inode.downcast::<Ext4Inode>().unwrap();
+        let mapping = file.mapping().clone();
+        drop(file);
 
-    // [0, 5) straddles the new one-block EOF; [6, 8) lies wholly beyond it.
-    with_state(&super_block, |state| {
-        insert_prealloc_space(state, &inode, 0, 6, 5, 0);
-        insert_prealloc_space(state, &inode, 6, 16, 2, 0);
-    });
+        // [0, 5) straddles the new one-block EOF; [6, 8) lies wholly beyond it.
+        with_state(&super_block, |state| {
+            insert_prealloc_space(state, &inode, 0, 6, 5, 0);
+            insert_prealloc_space(state, &inode, 6, 16, 2, 0);
+        });
 
-    <Ext4Inode as InodeOperations>::set_len(&inode, &vfs_inode, TEST_BLOCK_SIZE as u64).unwrap();
+        if is_retry {
+            // Stop at the durable-orphan/publication boundary, as when revocation
+            // reports an error before backing cleanup. Repeating set_len must
+            // consume the orphan instead of relying on a changed size comparison.
+            {
+                let private = ext4_private(&super_block).unwrap();
+                let mut state = private.write(&super_block);
+                let time = crate::Ext4Timestamp::new(1, 0);
+                state
+                    .prepare_regular_inode_truncate(&inode, 3 * TEST_BLOCK_SIZE as u64, time)
+                    .unwrap();
+                state
+                    .prepare_regular_inode_truncate(&inode, TEST_BLOCK_SIZE as u64, time)
+                    .unwrap();
+            }
+            vfs_inode.set_size(TEST_BLOCK_SIZE as u64);
+            assert_eq!(inode.size(), TEST_BLOCK_SIZE as u64);
+            assert!(inode.orphan_location().is_some());
+        }
+        if is_grow || is_write {
+            mapping
+                .with_folio_or_create(2, |folio| {
+                    folio.data().fill(0x7c);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let target_size = if is_grow { 3 } else { 1 } * TEST_BLOCK_SIZE as u64;
+        let _data = vfs_inode.lock_data();
+        if is_write {
+            let pos = 2 * TEST_BLOCK_SIZE as u64;
+            EXT4_ADDRESS_SPACE_OPERATIONS
+                .write_begin(&mapping, WriteBeginRequest::new(pos, 1))
+                .unwrap();
+            EXT4_ADDRESS_SPACE_OPERATIONS
+                .write_end(&mapping, WriteEndRequest::new(pos, 1, 0))
+                .unwrap();
+        } else {
+            let _invalidate = mapping.lock_invalidate_exclusive();
+            <Ext4Inode as InodeOperations>::set_len(&inode, &vfs_inode, target_size).unwrap();
+        }
+        assert_eq!(inode.size(), target_size);
+        if is_grow || is_write {
+            assert!(
+                mapping.with_folio(2, |folio| folio.is_none()).unwrap(),
+                "new mutation must first discard the failed shrink's old cached suffix"
+            );
+        }
+        assert!(inode.orphan_location().is_none());
 
-    // The prefix below the new EOF stays usable; the straddler's tail and the
-    // whole far space die.
-    assert_eq!(prealloc_count(&inode), 1);
-    let kept = inode
-        .prealloc_map()
-        .update(|preallocs| preallocs.get(&LogicalBlock::new(0)).copied())
-        .unwrap();
-    assert_eq!(kept.phys_len, BlockCount::new(1));
-    assert_eq!(kept.phys_start, FilesystemBlock::new(6));
-    with_state(&super_block, |state| {
-        assert_eq!(prealloc_twin_count(state), 1);
-        let twin_len = lock(&state.allocator)
-            .preallocs_by_group
-            .get(&(BlockGroupNumber::new(0), FilesystemBlock::new(6)))
-            .map(|twin| twin.phys_len);
-        assert_eq!(twin_len, Some(BlockCount::new(1)));
-    });
+        // The prefix below the new EOF stays usable; the straddler's tail and the
+        // whole far space die.
+        assert_eq!(prealloc_count(&inode), 1);
+        let kept = inode
+            .prealloc_map()
+            .update(|preallocs| preallocs.get(&LogicalBlock::new(0)).copied())
+            .unwrap();
+        assert_eq!(kept.phys_len, BlockCount::new(1));
+        assert_eq!(kept.phys_start, FilesystemBlock::new(6));
+        with_state(&super_block, |state| {
+            assert_eq!(prealloc_twin_count(state), 1);
+            let twin_len = lock(&state.allocator)
+                .preallocs_by_group
+                .get(&(BlockGroupNumber::new(0), FilesystemBlock::new(6)))
+                .map(|twin| twin.phys_len);
+            assert_eq!(twin_len, Some(BlockCount::new(1)));
+        });
+    }
 }
 
 #[def_test]

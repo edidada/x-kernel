@@ -83,8 +83,10 @@ to `posix/mm`.
 - `MS_SYNC` forwards the translated half-open file range to filesystem
   datasync; filesystem metadata/journal/flush failures propagate to the caller.
   Filesystems may conservatively persist more metadata or remote data.
-- Dirty-PTE harvesting and write-protection rearming after writeback remain
-  Issue G: later stores through an already writable PTE may not redirty a folio.
+- Supported shared mappings use write notification: writeback revokes WRITE
+  and completes TLB retirement before clearing dirty. A subsequent store must
+  fault and dirty again. Arbitrary writable leaves bypassing this admission
+  contract are unsupported.
 - `MS_INVALIDATE` and locked-page `EBUSY` semantics are not implemented.
 - Linux-style refusal to add `F_SEAL_WRITE` while writable shared mappings are
   already active is implemented through KFS shmem writable-shared-page
@@ -166,3 +168,17 @@ keeps a duplicate immutable length. Write faults still check current inode polic
 The `msync` runtime hook runs without the MM mutex and takes an already checked
 file byte range. Its owned runtime retains the source open file even if its VMA
 is concurrently removed. It must not recover coordinates from live VMA state.
+
+## Synchronous file reverse mappings
+
+MM-held file operations never wait for invalidate admission. Reverse writeback
+never blocks on MM while retaining a folio. These two rules break the MM/folio/
+invalidate cycle without another lock. Every synchronous revocation consumes
+try_finish success; a failed TLB operation is an error, never completed work.
+Missing-PTE retries explicitly invalidate old translations, and an already
+readonly shared leaf is protected/flushed again before dirty clearing.
+
+All aliases in a truncate work item lose their PTEs and TLB access before any
+private object slot is released. EOF and accepted bytes remain inode-owned;
+private retained state and loader segment limits cannot authorize past-EOF file
+access. Publication, fork and relocation obey the same invalidate exclusion.

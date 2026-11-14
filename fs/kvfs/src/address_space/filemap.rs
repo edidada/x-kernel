@@ -29,8 +29,8 @@ impl AddressSpace {
     /// held. Pages starting at or beyond EOF are rejected before allocation or
     /// admission. The callback must validate its exact byte range and publish the read-only
     /// PTE together with its file-mapping reference before returning. Truncate
-    /// submits mapping invalidation before detaching the cache entry, but that
-    /// submission may be deferred while an MM is busy. Managed publication gives
+    /// completes mapping invalidation before detaching the cache entry.
+    /// MM-held file operations must use try-read admission. Managed publication gives
     /// the PTE an independent physical reference; its retirement belongs to the
     /// page table. A retained pin provides stable content identity, without a
     /// TLB-completion prerequisite for releasing its own reference.
@@ -478,6 +478,18 @@ impl AddressSpace {
         }
 
         Ok(written)
+    }
+
+    /// Attempts a mapping operation without waiting for invalidate exclusion.
+    ///
+    /// File faults and fork call this while holding MM serialization. A busy
+    /// mapping returns WouldBlock so the caller can release MM before waiting.
+    pub fn try_with_invalidate_read<R>(&self, f: impl FnOnce() -> KResult<R>) -> KResult<R> {
+        let _guard = self
+            .invalidate_lock
+            .try_read()
+            .ok_or(VfsError::WouldBlock)?;
+        f()
     }
 
     /// Runs a mapping operation while excluding truncate and cache invalidation.

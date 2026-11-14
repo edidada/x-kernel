@@ -618,3 +618,10 @@ publication and set_flags. The VMA still enforces requested software access
 policy. Direct PTE-bit regression checks cover base/huge leaves, USER-only and
 read-only to writable protection updates, and managed-bit preservation. These
 encoding fixtures do not claim to execute accesses through an active user table.
+
+## Missing-leaf retry
+
+NotMapped does not certify that earlier cached translations are gone. Synchronous
+callers explicitly invalidate translations and require try_finish before reporting
+completion or releasing raw backing. The existing managed retirement keeps its
+independent physical holds; no new retry ownership state is introduced.

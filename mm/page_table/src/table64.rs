@@ -1462,6 +1462,20 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         receipt
     }
 
+    /// Invalidates a translation even when its PTE has already been removed.
+    /// Synchronous unmap retries must also retire stale cached translations;
+    /// observing NotMapped alone is not evidence of a completed shootdown.
+    ///
+    /// # Errors
+    /// Returns InvalidAddress for an invalid virtual address.
+    pub fn invalidate_translation(&mut self, vaddr: M::VirtAddr, size: PageSize) -> PtResult {
+        if !M::vaddr_is_valid(vaddr.into()) {
+            return Err(PtError::InvalidAddress);
+        }
+        self.flush_leaf(vaddr, size);
+        Ok(())
+    }
+
     /// Completes pending invalidation before allowing a synchronous operation
     /// to proceed. Success is a completion boundary, including automatic drains
     /// already performed by this guard; failure retains a full retry and all

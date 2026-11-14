@@ -713,3 +713,11 @@ Sv39 and Sv48 reserve W=1,R=0, so both new_page and set_flags must use this
 normalization, including first write-only file faults and later mprotect updates.
 This changes the hardware leaf only; VMA permission policy remains with memspace.
 The managed software bit is preserved independently during protection changes.
+
+### Synchronous invalidation retries
+
+invalidate_translation schedules invalidation independently of a present PTE.
+File reverse-map retries use it after NotMapped, because an earlier failed
+shootdown may have removed a leaf without revoking cached access. Permission
+revocation and raw backing release require try_finish success. An unchanged
+readonly leaf may also need a new flush after an unconfirmed protection round.

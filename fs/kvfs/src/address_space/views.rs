@@ -166,14 +166,47 @@ impl AddressSpace {
         Some((work, notifiers))
     }
 
-    pub(super) fn invalidate_mappings_from(&self, object_start: u64) {
+    pub(super) fn invalidate_mappings_from(&self, object_start: u64) -> crate::VfsResult<()> {
         if let Some((work, notifiers)) = self.invalidation_work_range(object_start, None) {
+            for (hit, notifier) in work.hits().iter().zip(&notifiers) {
+                let notifier = notifier
+                    .as_ref()
+                    .ok_or(crate::VfsError::OperationNotSupported)?;
+                notifier.invalidate_sync(&work, hit, true)?;
+            }
+            // A private object can back more than one view. Retire its retained
+            // COW pages only after every old PTE and required TLB is gone.
+            for (hit, notifier) in work.hits().iter().zip(&notifiers) {
+                notifier
+                    .as_ref()
+                    .ok_or(crate::VfsError::OperationNotSupported)?
+                    .release_invalidated_pages(&work, hit)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Called under the folio lock before clearing DIRTY, like folio_mkclean.
+    // Existing shared write faults dirty before granting WRITE, so no parallel
+    // hardware-dirty registry is required. A busy MM never waits under the folio.
+    pub(super) fn try_write_protect_folio(&self, index: u64, paddr: u64) -> crate::VfsResult<()> {
+        let page = memaddr::PAGE_SIZE_4K as u64;
+        let start = index
+            .checked_mul(page)
+            .ok_or(crate::VfsError::InvalidInput)?;
+        let end = start.saturating_add(page);
+        if let Some((work, notifiers)) = self.invalidation_work_range(start, Some(end)) {
             for (hit, notifier) in work.hits().iter().zip(notifiers) {
-                if let Some(notifier) = notifier {
-                    notifier.invalidate(&work, hit);
+                if hit.view().kind() != vmobj::MappingViewKind::Shared {
+                    continue;
+                }
+                let notifier = notifier.ok_or(crate::VfsError::OperationNotSupported)?;
+                if !notifier.try_write_protect(&work, hit, paddr)? {
+                    return Err(crate::VfsError::WouldBlock);
                 }
             }
         }
+        Ok(())
     }
 
     /// Unmaps every registered view intersecting the byte range starting at

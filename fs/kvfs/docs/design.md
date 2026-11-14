@@ -1397,9 +1397,8 @@ offsets at/beyond EOF and overflowing indices under the same lock, without
 allocation or quota charge. The callback still validates its exact byte range;
 its failure retains a valid initialized resident page and its cache quota for
 ordinary reuse. Detachment later returns quota regardless of retained physical
-references. Truncate submits
-invalidation before detaching cache entries, but a busy
-MM may queue that submission. Managed file PTEs retain independent physical
+references. Truncate completes every affected MM's PTE removal and TLB
+retirement before detaching cache entries. Managed file PTEs retain independent physical
 references through page-table retirement. Content tokens retain the stable
 object for COW and can release their own references without waiting for TLB.
 
@@ -1683,7 +1682,7 @@ precedence are shared; failed data remains cached for retry.
 and superblock data sync use this data-completion boundary. They do not themselves
 commit a journal or flush a device. Filesystem durability belongs to the file
 fsync or superblock sync hook. Scan accounting and TOWRITE selection are owned by
-pagecache; repeated dirtying through writable PTEs remains dependent on G.
+pagecache; shared-PTE protection before dirty clearing captures repeated writes.
 
 ### Buffered acceptance and live writeback EOF
 
@@ -1743,3 +1742,34 @@ in `kvfs` and will be wired into `read_iter`/`write_iter` in a later change.
 
 No call site uses the engine yet. `O_DIRECT` still falls back to buffered I/O,
 and `FMode::CAN_ODIRECT` remains an informational open-time flag.
+
+### Synchronous truncate and mapped writeback
+
+Truncate keeps its existing exclusive invalidate admission and two unmap rounds,
+but requires actual PTE/TLB completion for each view. Each round revokes all
+views before retiring retained private COW slots; only then may cache/backing
+storage be released. Repeating truncation at an already published EOF still
+enforces cache and mapping teardown after a failed earlier round.
+
+The writeback owner hook is invoked with the dirty folio locked and without the
+cache index lock. It protects existing shared PTEs for that exact page, then
+returns live inode EOF. MM contention is WouldBlock: ALL drops the folio and
+flushes pending work before retrying, NONE leaves it dirty. Deferred completion
+has no part in reverse-map protection or invocation accounting.
+
+Filesystem write_begin may call `AddressSpace::lock_invalidate_exclusive` to
+settle an earlier size mutation. Generic writes invoke it under inode data
+serialization, before acquiring invalidate read or a folio; providers keep
+invalidate exclusion before their producer lock and must not reenter MM-held waits.
+
+### Nonblocking invalidate read admission
+
+`AddressSpace::try_with_invalidate_read` is KVFS's public provider entry used by
+filemap fault, private fork and file relocation. These callers hold the owning
+MM serialization while validating or publishing PTE/VMA state. KVFS attempts
+its existing invalidate read lock and executes the callback only when admitted;
+a busy writer returns WouldBlock without executing it. The caller releases MM
+before waiting, then repeats VMA lookup, permission and EOF checks. This is
+proactive fault/fork admission, distinct from writeback's reactive try-MM check
+under a folio. The primitive itself can serve callbacks without MM; any callback
+mutating PTE/VMA state must supply MM serialization and may not wait for a writer.

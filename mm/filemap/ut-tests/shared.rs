@@ -597,6 +597,43 @@ fn write_only_shared_first_fault(after_protect: bool) {
         Err(khal::paging::PagingError::InvalidAddress),
         "the writable file leaf must retain its managed hold"
     );
+    drop(pgtbl);
+    drop(guard);
+    for value in [0x91u8, 0xa2] {
+        assert!(
+            user.resolve_page_fault(start, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        let (current, access, _) = mm.lock().page_table().query(start).unwrap();
+        assert_eq!(current, paddr);
+        assert!(access.contains(MappingFlags::WRITE));
+        // SAFETY: the present managed PTE and resident cache retain this frame;
+        // no other task accesses this test-owned mapping. This models a CPU
+        // store after write-fault admission, without calling dirty_folio again.
+        unsafe {
+            khal::mem::p2v(current).as_mut_ptr().write(value);
+        }
+        file.mapping()
+            .with_invalidate_read(|| {
+                file.mapping().writeback_cached_ranges(
+                    &mut kvfs::WritebackControl::all(),
+                    PAGE_SIZE_4K,
+                    |_, bytes| {
+                        assert_eq!(bytes[0], value);
+                        Ok(bytes.len())
+                    },
+                )
+            })
+            .unwrap();
+        let (current, access, _) = mm.lock().page_table().query(start).unwrap();
+        assert_eq!(current, paddr, "writeback must retain the existing leaf");
+        assert!(!access.contains(MappingFlags::WRITE));
+        file.mapping()
+            .with_folio(0, |folio| {
+                assert!(!folio.unwrap().is_dirty());
+            })
+            .unwrap();
+    }
 }
 
 #[def_test]

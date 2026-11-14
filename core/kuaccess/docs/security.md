@@ -28,7 +28,9 @@
 - `fault_in_user_writeable()` uses the live MM's task-context resolver and does not modify the user word. Admission waits run outside the MM mutex and repeat mapping checks. The caller must be allowed to sleep and must not hold a non-sleepable lock. `Resolved` and retry-class outcomes return success; the caller repeats its store after a retry-class outcome. `OutOfMemory` returns `ENOMEM`. Permission denial, an unmapped address, and every other failure return `NoAccess` immediately. This path must not bypass a read-only mapping.
 - `handle_page_fault()` handles a fault only while the current thread has explicitly entered the user-memory access window.
 - An ordinary copy must not wait for block-device completion on the exception path with IRQs disabled. The caller must be allowed to sleep and must not hold a non-sleepable lock. The requirement is not met by relaxing block-driver context checks.
-- `kuaccess` must preserve the typed outcome classification of `MmSpace::handle_page_fault()`. Only `Resolved` and retry-class outcomes may become a handled trap. Unmapped, permission denied, bus error, OOM, no-progress, and generic failure must become a user-copy or atomic-user failure, not another retry.
+- `kuaccess` must preserve the typed outcome classification of `MmSpace::handle_page_fault()`. Only `Resolved` and COW-conflict outcomes may become a handled trap. Admission
+  `Retry` returns to the assembly fixup: its task-context caller must release
+  MM and wait, rather than repeatedly faulting with IRQs disabled. Unmapped, permission denied, bus error, OOM, no-progress, and generic failure must become a user-copy or atomic-user failure, not another retry.
 - An ordinary copy may fault the same page again after `Resolved`, so staged mapping and write-permission preparation can finish. Completed/COW attempts for one page share a budget of 16. Admission retries wait on the backing provider's existing locks outside the MM mutex and do not consume this budget. An explicit `NoProgress` fails immediately. If the budget is exhausted and the copy still cannot finish, the result is `NoAccess`. A partially initialized buffer must not be reported as a complete success. Reads and writes use `READ` and `WRITE` fault permissions respectively and must not bypass a read-only mapping.
 - String helpers interpret bytes as UTF-8 only after the complete byte stream has been read successfully.
 
@@ -73,3 +75,13 @@ nested callers from accidentally resolving a fault under a source folio lock.
 Prefaulting is separate, checks both VMA policy and PTE permissions, and must run
 outside backing-provider locks. A successful preparation grants no lasting
 accessibility guarantee; later copies remain exception protected.
+
+The raw adapter also uses try-MM admission. A lock holder may be awaiting this
+CPU's TLB acknowledgement, so an IRQ-masked exception must reach the nofault
+fixup instead of sleeping on that MM. The active MM capability survives fixup.
+
+Fault-resolving atomic loads use the same task-context page-copy resolver as
+ordinary user copies. An assembly fixup is followed by live-MM admission wait
+and VMA revalidation; it is not immediately converted to EFAULT. Both atomic
+primitives share IRQ-protected suppression of an outer raw-access window, so
+the nofault variants cannot enter a sleepable backing provider under a lock.

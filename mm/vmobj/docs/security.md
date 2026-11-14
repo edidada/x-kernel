@@ -41,3 +41,10 @@ Live backing-page release requires synchronous notifier success for every
 carried view hit. A queued notification is insufficient. Providers that cannot
 prove completed PTE/TLB revocation reject `try_invalidate`; busy targets retain
 backing ownership while callers release fault-exclusion locks before retrying.
+
+## File retirement boundary
+
+A notification or false nonblocking result cannot authorize file backing release.
+Synchronous revocation must establish PTE and TLB completion for every affected
+view before private retained slots are released. Write protection checks the
+specific physical page and cannot treat an unrelated replacement as cleaned.

@@ -341,7 +341,10 @@ pub trait FileOperations: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Releases this open file description.
+    /// Releases the last reference to this open file description.
+    /// VMA teardown may invoke this under MM serialization. Do not wait for
+    /// a producer lock whose holder can need that MM for mapping revocation;
+    /// optional maintenance can leave resources with the inode for eviction.
     fn release(&self, _inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
         Ok(())
     }

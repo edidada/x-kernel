@@ -377,13 +377,14 @@ impl MappingPages {
         Ok((start, end))
     }
 
-    // The filesystem supplies live EOF; the cache never owns another size.
-    // Flush unsent WRITEBACK owners before a lock or I/O wait can depend on them.
+    // The owner prepares shared mappings and supplies live EOF; the cache
+    // owns neither PTE state nor another size. Unsent WRITEBACK owners must
+    // reach the backend before a blocking dependency can need their completion.
     fn prepare_writeback_candidate<'a>(
         &self,
         candidate: &'a Arc<Folio>,
         mode: WritebackSyncMode,
-        live_eof: &mut impl FnMut() -> KResult<u64>,
+        prepare_folio: &mut impl FnMut(&mut FolioGuard<'_>) -> KResult<u64>,
         wait: &CompletionWait,
         mut flush_before_wait: impl FnMut() -> KResult<()>,
     ) -> KResult<Option<(FolioGuard<'a>, usize)>> {
@@ -401,9 +402,6 @@ impl MappingPages {
             let page_start = index
                 .checked_mul(PAGE_SIZE_4K as u64)
                 .ok_or(KError::InvalidInput)?;
-            let valid_len = live_eof()?
-                .saturating_sub(page_start)
-                .min(PAGE_SIZE_4K as u64) as usize;
             let mut state = self.state.lock();
             if !state.is_current(index, candidate) {
                 return Ok(None);
@@ -422,7 +420,24 @@ impl MappingPages {
                 candidate.wait_writeback(wait);
                 continue;
             }
-            if valid_len == 0 {
+            drop(state);
+            let eof = match prepare_folio(&mut folio) {
+                Err(KError::WouldBlock) => {
+                    // Reverse mapping never waits for MM while retaining this
+                    // folio: a fault holding MM may be waiting for its content.
+                    drop(folio);
+                    if mode == WritebackSyncMode::None {
+                        return Ok(None);
+                    }
+                    flush_before_wait()?;
+                    ktask::yield_now();
+                    continue;
+                }
+                result => result?,
+            };
+            let valid_len = eof.saturating_sub(page_start).min(PAGE_SIZE_4K as u64) as usize;
+            let mut state = self.state.lock();
+            if !state.is_current(index, candidate) || valid_len == 0 {
                 return Ok(None);
             }
             folio.clear_dirty();
@@ -436,15 +451,18 @@ impl MappingPages {
 
     /// Writes selected folios through a synchronous, folio-locked callback.
     ///
-    /// The live EOF supplier reads owner metadata without acquiring a folio or
-    /// index lock. All adapters charge attempted pages, including failures.
+    /// The owner callback runs with the folio locked and no index lock. It
+    /// prepares shared mappings and returns live EOF without reacquiring this
+    /// folio. WouldBlock retains dirty and retries outside the folio for ALL;
+    /// NONE skips that candidate. All adapters charge attempted pages, including
+    /// failures handed to the filesystem.
     /// NONE stops on budget exhaustion or error; ALL completes the finite
     /// selected set and returns its first error. Existing writeback is skipped
     /// by NONE and waited/revalidated by ALL. Requires sleepable task context.
     pub fn writeback_until(
         &self,
         control: &mut WritebackControl,
-        live_eof: &mut impl FnMut() -> KResult<u64>,
+        prepare_folio: &mut impl FnMut(&mut FolioGuard<'_>) -> KResult<u64>,
         write_folio: &mut impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
     ) -> KResult<()> {
         if control.nr_to_write() == 0 {
@@ -467,7 +485,9 @@ impl MappingPages {
                     break 'scan;
                 }
                 let result =
-                    self.prepare_writeback_candidate(candidate, mode, live_eof, &wait, || Ok(()));
+                    self.prepare_writeback_candidate(candidate, mode, prepare_folio, &wait, || {
+                        Ok(())
+                    });
                 let (mut folio, valid_len) = match result {
                     Ok(Some(prepared)) => prepared,
                     Ok(None) => continue,
@@ -501,11 +521,11 @@ impl MappingPages {
     pub fn write_cache_pages(
         &self,
         control: &mut WritebackControl,
-        live_eof: &mut impl FnMut() -> KResult<u64>,
+        prepare_folio: &mut impl FnMut(&mut FolioGuard<'_>) -> KResult<u64>,
         max_bytes: usize,
         write_range: &mut impl FnMut(u64, &[u8]) -> WritebackRangeResult,
     ) -> KResult<()> {
-        self.submit_cache_pages(control, live_eof, max_bytes, &mut |_, batch| {
+        self.submit_cache_pages(control, prepare_folio, max_bytes, &mut |_, batch| {
             let result = write_range(batch.offset(), batch.data());
             let (_, completion) = batch.into_parts();
             let (prefix, error) = match result {
@@ -531,7 +551,7 @@ impl MappingPages {
     pub fn submit_cache_pages<'a>(
         &'a self,
         control: &mut WritebackControl,
-        live_eof: &mut impl FnMut() -> KResult<u64>,
+        prepare_folio: &mut impl FnMut(&mut FolioGuard<'_>) -> KResult<u64>,
         max_bytes: usize,
         submit: &mut impl FnMut(&mut WritebackControl, WritebackBatch<'a>) -> KResult<()>,
     ) -> KResult<()> {
@@ -573,7 +593,7 @@ impl MappingPages {
                     break 'scan;
                 }
                 let prepared =
-                    self.prepare_writeback_candidate(candidate, mode, live_eof, &wait, || {
+                    self.prepare_writeback_candidate(candidate, mode, prepare_folio, &wait, || {
                         if !can_continue_writeback(
                             mode,
                             batch.submit(control, submit),

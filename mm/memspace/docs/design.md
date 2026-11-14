@@ -448,3 +448,30 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+### File reverse-map completion
+
+File owners use apply_sync for truncate, including private COW leaves. Ordinary
+try_apply remains nonblocking and preserves private anonymous copies. The MM
+factors current VMA/object/offset validation into matching_view_ranges; a reverse
+snapshot never authorizes a replacement or relocated unrelated VMA.
+
+PTE revocation and protection use try_finish. On failure they report ResourceBusy
+and retain backing ownership; a retry explicitly flushes an already missing PTE
+or changed PTE, or reapplies protection to an already readonly leaf. The post-revocation callback
+retires private object slots only after every view in the owner's work completed.
+File relocation holds provider exclusion across view registration and PTE
+transfer. Invalidate contention is WouldBlock before mutation, and task callers
+retry with MM released. No new MM state or completion request table is added.
+
+The file fault adapter also requires try_finish before returning a resolved
+fault, so a permission or physical-page replacement is not reported as complete
+solely because an automatic guard flush was attempted.
+
+File runtime providers explicitly invalidate an already-accessible leaf on a
+repeated fault: an earlier failed shootdown may have published that leaf. Fresh
+mappings keep the paging backend publication path, without an extra shootdown.
+NotReady, Deferred and TimedOut return admission Retry, releasing MM before the
+file provider waits and yields in task context; VMA policy is rechecked on the
+next attempt. UnsupportedScope remains a provider error. No resolved outcome
+is reported until this attempt establishes TLB completion.

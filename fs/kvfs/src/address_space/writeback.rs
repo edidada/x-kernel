@@ -7,14 +7,19 @@
 use core::ops::Range;
 
 use pagecache::{
-    OwnedWritebackCompletion, PageIndex, WritebackBatch, WritebackCompletion, WritebackControl,
-    WritebackRangeResult,
+    FolioGuard, OwnedWritebackCompletion, PageIndex, WritebackBatch, WritebackCompletion,
+    WritebackControl, WritebackRangeResult,
 };
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
 
 impl AddressSpace {
+    fn prepare_folio_writeback(&self, folio: &mut FolioGuard<'_>) -> VfsResult<u64> {
+        self.try_write_protect_folio(folio.index(), folio.paddr().as_usize() as u64)?;
+        self.visible_len()
+    }
+
     /// Retains this address space until asynchronous folio completion finishes.
     /// The embedded page index keeps the same owner throughout writeback.
     ///
@@ -120,8 +125,11 @@ impl AddressSpace {
         control: &mut WritebackControl,
         mut write_folio_fn: impl FnMut(PageIndex, &[u8], usize) -> VfsResult<()>,
     ) -> VfsResult<()> {
-        self.i_pages
-            .writeback_until(control, &mut || self.visible_len(), &mut write_folio_fn)
+        self.i_pages.writeback_until(
+            control,
+            &mut |folio| self.prepare_folio_writeback(folio),
+            &mut write_folio_fn,
+        )
     }
 
     /// Transfers dirty snapshots to a filesystem submission owner.
@@ -145,8 +153,12 @@ impl AddressSpace {
         max_bytes: usize,
         mut submit: impl FnMut(&mut WritebackControl, WritebackBatch<'a>) -> VfsResult<()>,
     ) -> VfsResult<()> {
-        self.i_pages
-            .submit_cache_pages(control, &mut || self.visible_len(), max_bytes, &mut submit)
+        self.i_pages.submit_cache_pages(
+            control,
+            &mut |folio| self.prepare_folio_writeback(folio),
+            max_bytes,
+            &mut submit,
+        )
     }
 
     /// Writes cached dirty ranges through the supplied backing-store writer.
@@ -166,7 +178,7 @@ impl AddressSpace {
     ) -> VfsResult<()> {
         self.i_pages.write_cache_pages(
             control,
-            &mut || self.visible_len(),
+            &mut |folio| self.prepare_folio_writeback(folio),
             max_bytes,
             &mut write_range_fn,
         )

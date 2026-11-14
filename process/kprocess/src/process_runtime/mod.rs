@@ -708,8 +708,13 @@ fn prepare_fork_address_space(
     let mm_user = if matches!(mode, ForkAddressSpace::Shared) {
         parent_mm_user
     } else {
-        let mut aspace = parent_mm_user.address_space().lock();
-        let address_space = aspace.try_clone()?;
+        let address_space = loop {
+            let result = parent_mm_user.address_space().lock().try_clone();
+            match result {
+                Err(KError::WouldBlock) => ktask::yield_now(),
+                result => break result?,
+            }
+        };
         memspace::MmSpace::acquire_user(address_space).ok_or(KError::NoSuchProcess)?
     };
 

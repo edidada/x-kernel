@@ -58,6 +58,12 @@ impl LiveAddressSpace {
         self.mm_user.address_space().lock()
     }
 
+    /// Attempts MM serialization without waiting, for exception fixup paths.
+    /// A busy MM must return to task context before attempting fault recovery.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, MmSpace>> {
+        self.mm_user.address_space().try_lock()
+    }
+
     /// Synchronizes shared file mappings on the captured live MM.
     ///
     /// Requires sleepable task context without MM or provider locks. The active

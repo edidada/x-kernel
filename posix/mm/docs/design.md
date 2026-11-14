@@ -298,3 +298,10 @@ break, matching the Linux syscall ABI.
 The existing VMA tree supplies accounting for finite limits. Unlimited limits
 bypass the accounting walk. The syscall layer adds no counters or policy fields
 to the MM object and does not enforce an address-space limit at page-fault time.
+
+### File relocation admission
+
+mremap retries provider WouldBlock only after its mapping-owner guard has dropped.
+Each retry resolves the source and checks limits anew. File-backed relocation
+holds existing invalidate shared exclusion across reverse-view registration and
+PTE transfer, preventing a new virtual address escaping concurrent truncate.

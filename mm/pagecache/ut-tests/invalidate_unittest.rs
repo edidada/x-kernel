@@ -147,7 +147,7 @@ fn invalidate_waits_for_inflight_writeback_then_discards() {
     cache
         .writeback_until(
             &mut control,
-            &mut || Ok(PAGE_SIZE_4K as u64),
+            &mut |_| Ok(PAGE_SIZE_4K as u64),
             &mut |_, _, _| {
                 let waiting_cache = cache.clone();
                 let waiting_entered = entered.clone();
@@ -193,7 +193,7 @@ fn invalidate_leaves_a_replacement_installed_during_the_scan() {
     cache
         .writeback_until(
             &mut control,
-            &mut || Ok(PAGE_SIZE_4K as u64),
+            &mut |_| Ok(PAGE_SIZE_4K as u64),
             &mut |_, _, _| {
                 let waiting_cache = cache.clone();
                 waiter = Some(ktask::spawn(move || {

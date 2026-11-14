@@ -55,10 +55,6 @@ impl FilePrivateRuntime {
         self.anon_view.as_ref().map(AnonPrivateViewGuard::id)
     }
 
-    fn file_len(&self) -> u64 {
-        self.file_end.unwrap_or_else(|| self.file.size())
-    }
-
     fn alloc_new_frame(&self, zeroed: bool) -> KResult<PhysAddr> {
         alloc_frame(zeroed, self.size)
     }
@@ -212,9 +208,6 @@ impl FilePrivateRuntime {
                 // The invalidate read guard covers EOF validation, PTE publication
                 // and insertion of its file-owned reference.
                 let file_len = self.file.size();
-                if self.file_end.is_none() && file_start >= file_len {
-                    return Err(KError::BadAddress);
-                }
                 if page_end > file_len {
                     return Ok(false);
                 }
@@ -256,6 +249,7 @@ impl FilePrivateRuntime {
             })
     }
 
+    // The fault entry holds invalidate read admission and MM throughout COW.
     fn cow_file_page(
         &self,
         addr: VirtAddr,
@@ -268,96 +262,64 @@ impl FilePrivateRuntime {
         let Some(source) = self.file_pages.lock().get(&local_offset).cloned() else {
             return Ok(None);
         };
-        let file_offset = self
-            .file_start
-            .checked_add(local_offset)
-            .ok_or(KError::BadAddress)?;
-        self.file.mapping().with_invalidate_read(|| {
-            // COW publication, like first mapping, must exclude truncate.
-            if file_offset >= self.file.size() {
-                return Err(KError::BadAddress);
-            }
-            let expected = pgtbl
-                .query_entry(addr)
-                .map_err(memspace::backend::map_paging_err)?;
-            if expected.page_size() != self.size {
-                // `handle_fault` holds the address-space lock and has
-                // already verified this runtime's page size. A mismatch
-                // here therefore means a corrupt page-table entry, not a
-                // transient replacement; report it instead of retrying.
-                return Err(KError::BadAddress);
-            }
-            // The retained mapping owns the exact allocation visible through
-            // this PTE. Cache replacement must not trigger a new lookup, I/O,
-            // or resident-page quota admission before copying that allocation.
-            if !source.matches_paddr(expected.paddr()) {
-                // The address-space lock excludes concurrent PTE changes;
-                // invalidation that cannot take it is deferred. Thus a
-                // PTE belonging to a different pinned file-page version is a
-                // non-recoverable consistency violation, not a race that
-                // can make progress by retrying.
-                return Err(KError::BadAddress);
-            }
-            let prepared = self.anon.prepare_first_touch_page(anon_offset)?;
-            let frame = self.alloc_new_frame(false)?;
-            // SAFETY: file tokens are installed only for Size4K mappings, so
-            // frame is a fresh exclusive allocation of PAGE_SIZE_4K bytes.
-            // MaybeUninit accepts its contents; copying initializes the whole
-            // array under the source lock before any PTE exposes the frame.
-            let destination = unsafe {
-                &mut *p2v(frame)
-                    .as_mut_ptr()
-                    .cast::<[MaybeUninit<u8>; PAGE_SIZE_4K]>()
-            };
-            if let Err(error) = source.copy_to_uninit(destination) {
-                dealloc_frame(frame, self.size);
-                return Err(error);
-            }
-            if let Err(err) = prepared.commit_after(frame, self.size, || {
-                // SAFETY: frame is the exclusively allocated candidate, owned
-                // by this caller until commit_after publishes its anonymous slot.
-                // The old file PTE is managed; replacement retires its own hold.
-                unsafe { pgtbl.replace_managed_with_external_if_same(addr, expected, frame, flags) }
-                    .map(|_| ())
-            }) {
-                dealloc_frame(frame, self.size);
-                return match err {
-                    anon::AnonPrivatePageCommitError::Changed
-                    | anon::AnonPrivatePageCommitError::Commit(
-                        page_table::PteReplaceError::Changed { .. },
-                    ) => Ok(Some(PrivateCowResult::Retry)),
-                    anon::AnonPrivatePageCommitError::Commit(
-                        page_table::PteReplaceError::PageTable(err),
-                    ) => Err(memspace::backend::map_paging_err(err)),
-                };
-            }
-            pgtbl.finish();
-            let removed = self.file_pages.lock().remove(&local_offset);
-            drop(removed);
-            if flags.contains(MappingFlags::EXECUTE) {
-                karch::flush_icache_range(p2v(frame), self.size.into());
-            }
-            Ok(Some(PrivateCowResult::Resolved))
-        })
-    }
-
-    fn prepare_new_file_backed_page(
-        &self,
-        ctx: &FaultContext,
-        addr: VirtAddr,
-    ) -> KResult<(Option<u64>, Option<usize>)> {
-        let file_page_offset = ctx.page_file_offset(addr).ok_or(KError::BadAddress)?;
-        let page_data_offset = ctx.page_data_offset().ok_or(KError::BadAddress)?;
-
-        // Loader-created PT_LOAD mappings use `file_end: Some(...)` to
-        // describe a file-backed prefix followed by a valid anonymous
-        // zero-fill tail (`memsz > filesz`). Those tail pages must remain
-        // faultable instead of being rejected as EOF.
-        if self.file_end.is_none() && file_page_offset >= self.file_len() {
+        let expected = pgtbl
+            .query_entry(addr)
+            .map_err(memspace::backend::map_paging_err)?;
+        if expected.page_size() != self.size {
+            // `handle_fault` holds the address-space lock and has
+            // already verified this runtime's page size. A mismatch
+            // here therefore means a corrupt page-table entry, not a
+            // transient replacement; report it instead of retrying.
             return Err(KError::BadAddress);
         }
-
-        Ok((Some(file_page_offset), Some(page_data_offset)))
+        // The retained mapping owns the exact allocation visible through
+        // this PTE. Cache replacement must not trigger a new lookup, I/O,
+        // or resident-page quota admission before copying that allocation.
+        if !source.matches_paddr(expected.paddr()) {
+            // MM excludes concurrent PTE changes. A different pinned file-page
+            // version is a consistency violation that cannot progress by retrying.
+            return Err(KError::BadAddress);
+        }
+        let prepared = self.anon.prepare_first_touch_page(anon_offset)?;
+        let frame = self.alloc_new_frame(false)?;
+        // SAFETY: file tokens are installed only for Size4K mappings, so
+        // frame is a fresh exclusive allocation of PAGE_SIZE_4K bytes.
+        // MaybeUninit accepts its contents; copying initializes the whole
+        // array under the source lock before any PTE exposes the frame.
+        let destination = unsafe {
+            &mut *p2v(frame)
+                .as_mut_ptr()
+                .cast::<[MaybeUninit<u8>; PAGE_SIZE_4K]>()
+        };
+        if let Err(error) = source.copy_to_uninit(destination) {
+            dealloc_frame(frame, self.size);
+            return Err(error);
+        }
+        if let Err(err) = prepared.commit_after(frame, self.size, || {
+            // SAFETY: frame is the exclusively allocated candidate, owned
+            // by this caller until commit_after publishes its anonymous slot.
+            // The old file PTE is managed; replacement retires its own hold.
+            unsafe { pgtbl.replace_managed_with_external_if_same(addr, expected, frame, flags) }
+                .map(|_| ())
+        }) {
+            dealloc_frame(frame, self.size);
+            return match err {
+                anon::AnonPrivatePageCommitError::Changed
+                | anon::AnonPrivatePageCommitError::Commit(
+                    page_table::PteReplaceError::Changed { .. },
+                ) => Ok(Some(PrivateCowResult::Retry)),
+                anon::AnonPrivatePageCommitError::Commit(
+                    page_table::PteReplaceError::PageTable(err),
+                ) => Err(memspace::backend::map_paging_err(err)),
+            };
+        }
+        pgtbl.finish();
+        let removed = self.file_pages.lock().remove(&local_offset);
+        drop(removed);
+        if flags.contains(MappingFlags::EXECUTE) {
+            karch::flush_icache_range(p2v(frame), self.size.into());
+        }
+        Ok(Some(PrivateCowResult::Resolved))
     }
 
     fn handle_populated_fault(
@@ -389,6 +351,11 @@ impl FilePrivateRuntime {
             return Ok(FaultCompletion::from_populate((1, None)));
         }
         if page_flags.contains(ctx.access_flags()) {
+            // The previous fault can leave this leaf present after a failed
+            // shootdown. A fresh guard must explicitly finish that publication.
+            pgtbl
+                .invalidate_translation(addr, self.size)
+                .map_err(memspace::backend::map_paging_err)?;
             return Ok(FaultCompletion::from_populate((1, None)));
         }
         Ok(FaultCompletion::from_populate((0, None)))
@@ -402,10 +369,8 @@ impl FilePrivateRuntime {
         addr: VirtAddr,
         object_start: u64,
     ) -> FaultCompletionResult {
-        // Revalidate EOF before consulting retained private state. Truncate's
-        // second unmap removes a racing COW PTE, but the Rust anon object may
-        // still retain that page until a later reclaim pass.
-        let file_source = self.prepare_new_file_backed_page(ctx, addr)?;
+        let file_page_offset = ctx.page_file_offset(addr).ok_or(KError::BadAddress)?;
+        let page_data_offset = ctx.page_data_offset().ok_or(KError::BadAddress)?;
         let existing = map_existing_private_object_page(
             &self.anon,
             object_start,
@@ -419,17 +384,22 @@ impl FilePrivateRuntime {
             return Ok(FaultCompletion::cow_conflict_retry());
         }
         if !existing.is_resolved() {
-            let (file_page_offset, page_data_offset) = file_source;
             let reused = !ctx.access_flags().contains(MappingFlags::WRITE)
                 && self.try_map_readonly_file_page(
                     addr,
-                    file_page_offset.ok_or(KError::BadAddress)?,
-                    page_data_offset.ok_or(KError::BadAddress)?,
+                    file_page_offset,
+                    page_data_offset,
                     flags,
                     pgtbl,
                 )?;
             if !reused {
-                self.alloc_new_at(addr, file_page_offset, page_data_offset, flags, pgtbl)?;
+                self.alloc_new_at(
+                    addr,
+                    Some(file_page_offset),
+                    Some(page_data_offset),
+                    flags,
+                    pgtbl,
+                )?;
             }
         }
         Ok(FaultCompletion::from_populate((1, None)))
@@ -440,7 +410,7 @@ impl FilePrivateRuntime {
     ///
     /// - `file`: mapped executable or data file.
     /// - `file_start`: file byte offset where the view begins.
-    /// - `file_end`: exclusive file byte end; only whole pages are recorded.
+    /// - `file_end`: exclusive file byte end; the partial last page is included.
     /// - `context`: owning address-space identity and invalidate handle; `None`
     ///   skips registration.
     /// - `start`: VMA start address.
@@ -462,11 +432,9 @@ impl FilePrivateRuntime {
         let address_space = file.mapping();
         let page = PageSize::Size4K as u64;
         let object_start = file_start / page * page;
-        // Only whole pages inside `file_end` are directly cache-mapped
-        // (`try_map_readonly_file_page`); the partial tail page is COW or
-        // zero-filled and holds no cache reference, so the rmap view stops at
-        // the page boundary instead of reaching into that anonymous tail.
-        let file_end = file_end.map(|end| end - end % page);
+        // The last partial file page may already be anonymous after COW.
+        // Truncate must revoke it too; only the following loader BSS is exempt.
+        let file_end = file_end.map(|end| end.div_ceil(page).saturating_mul(page));
         let len = match file_end {
             Some(end) => end.saturating_sub(object_start).min(len as u64) as usize,
             None => len,
@@ -657,8 +625,50 @@ impl FilePrivateRuntime {
 }
 
 impl VmRuntimeOps for FilePrivateRuntime {
+    fn with_mapping_exclusion(&self, operation: &mut dyn FnMut() -> KResult) -> KResult {
+        self.file.mapping().try_with_invalidate_read(operation)
+    }
+
     fn private_anon_offset_for(&self, addr: VirtAddr) -> Option<u64> {
         self.anon_offset_for(addr).ok()
+    }
+
+    fn invalidate_file(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
+        let start = self.local_offset_for(range.start)?;
+        let end = start.saturating_add(range.size() as u64);
+        let pages = self
+            .file_pages
+            .lock()
+            .range(start..end)
+            .map(|(&offset, pin)| (offset, pin.clone()))
+            .collect::<alloc::vec::Vec<_>>();
+        for (offset, pin) in &pages {
+            let addr = self.start + *offset as usize;
+            match pgtbl.query(addr) {
+                Ok((pa, ..)) if pin.matches_paddr(pa) => {
+                    pgtbl
+                        .unmap(addr)
+                        .map_err(memspace::backend::map_paging_err)?;
+                }
+                Ok(_) => continue,
+                Err(PagingError::NotMapped) => {
+                    pgtbl
+                        .invalidate_translation(addr, self.size)
+                        .map_err(memspace::backend::map_paging_err)?;
+                }
+                Err(error) => return Err(memspace::backend::map_paging_err(error)),
+            }
+        }
+        pgtbl.try_finish().map_err(|_| KError::ResourceBusy)?;
+        self.release_file_pages(range);
+        Ok(())
+    }
+
+    fn release_invalidated_file_pages(&self, range: VirtAddrRange) -> KResult {
+        let start = self.anon_offset_for(range.start)?;
+        let detached = self.anon.detach_range(start, range.size());
+        memspace::backend::private::release_private_object_pages(detached.finalize_release());
+        Ok(())
     }
 
     fn on_invalidate_complete(&self, range: VirtAddrRange) {
@@ -711,7 +721,20 @@ impl VmRuntimeOps for FilePrivateRuntime {
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
     ) -> FaultCompletionResult {
-        self.handle_fault_impl(ctx, flags, pgtbl)
+        self.file.mapping().try_with_invalidate_read(|| {
+            let addr = ctx.address().align_down(self.page_size());
+            let offset = ctx.page_file_offset(addr).ok_or(KError::BadAddress)?;
+            if offset < self.file_end.unwrap_or(u64::MAX) && offset >= self.file.size() {
+                return Err(KError::BadAddress);
+            }
+            self.handle_fault_impl(ctx, flags, pgtbl)
+        })
+    }
+
+    fn wait_for_fault(&self) -> KResult<()> {
+        self.file.mapping().with_invalidate_read(|| Ok(()))?;
+        ktask::yield_now();
+        Ok(())
     }
 
     fn relocate_for_mremap(
@@ -746,7 +769,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
         let cow_flags = flags - MappingFlags::WRITE;
         let child = self.anon.fork_child();
         let object_start = self.anon_offset_for(range.start)?;
-        self.file.mapping().with_invalidate_read(|| {
+        self.file.mapping().try_with_invalidate_read(|| {
             let file_pages = Arc::new(Mutex::new(BTreeMap::new()));
             let pins = self.file_pages.lock();
             let local_start = self.local_offset_for(range.start)?;
