@@ -64,7 +64,7 @@ Published     -- get_file() ----------> Published
 Uninitialized -- global()/get_file() -> panic
 ```
 
-There is no runtime unload state. After `Once` is published, the mount and the singleton inode remain valid for the lifetime of the system.
+There is no runtime unload state. After `Once` is published, the mount and both shared inodes (the untyped one and the socket-typed one) remain valid for the lifetime of the system.
 
 ## Algorithm Flow
 

@@ -313,44 +313,6 @@ impl MntNamespace {
 
     /// Attaches a detached mount at `mountpoint` for the new mount API
     /// (`move_mount`). The caller must hold mount privilege.
-    /// Whether [`Self::attach_detached_mount`] would accept this graft.
-    ///
-    /// `move_mount` has to detach the source before grafting, and a failed
-    /// graft would then leave the source gone. Both rejection points are
-    /// decidable without changing anything, so a move can check them first and
-    /// keep the source attached when the graft must fail.
-    pub fn check_detached_mount_graft(
-        &self,
-        mount: &Arc<Mount>,
-        mountpoint: &Path,
-    ) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::require_mount(&mounts, mountpoint.mount())?;
-        // Moving a mount under itself would make the parent chain a cycle, and
-        // every walk from the root would then never terminate. `do_move_mount`
-        // walks the destination's ancestors and answers ELOOP when it reaches
-        // the mount being moved.
-        if mountpoint.mount().is_in_subtree_of(mount) {
-            return Err(VfsError::FilesystemLoop);
-        }
-        if mount.root_path().dentry().as_dir().is_ok() != mountpoint.dentry().as_dir().is_ok() {
-            return Err(VfsError::NotADirectory);
-        }
-        Ok(())
-    }
-
-    /// Moves an attached mount to `mountpoint` under one registry lock.
-    ///
-    /// `move_mount` has three steps that must not interleave: reject a move that
-    /// would cycle the parent chain, detach the source from its old parent, and
-    /// graft it at the destination. Checking them in one call under one
-    /// acquisition is what makes the cycle check sound — two concurrent moves
-    /// could otherwise each pass their own check and then place one mount inside
-    /// the other, leaving a cycle that makes every walk from the root spin.
-    ///
-    /// `source` is the mount's current location. On success the mount is
-    /// attached at `mountpoint` with its own subtree intact; on any error
-    /// nothing has changed.
     pub fn move_detached_mount(
         &self,
         mount: Arc<Mount>,
@@ -363,8 +325,10 @@ impl MntNamespace {
         if mountpoint.mount().is_in_subtree_of(&mount) {
             return Err(VfsError::FilesystemLoop);
         }
+        // `do_move_mount` compares `d_is_dir()` of both ends and answers EINVAL
+        // (not ENOTDIR) when they disagree.
         if mount.root_path().dentry().as_dir().is_ok() != mountpoint.dentry().as_dir().is_ok() {
-            return Err(VfsError::NotADirectory);
+            return Err(VfsError::InvalidInput);
         }
         // Re-validate the source edge under the lock before touching it: the
         // stack may have changed since the caller resolved the path.
@@ -798,18 +762,6 @@ impl MntNamespace {
     }
 
     /// Unmounts a visible mount tree from this namespace.
-    /// Detaches one mount from the namespace, moving its subtree with it.
-    ///
-    /// This is `move_mount`'s source detach: the mount's children stay attached
-    /// to it so a later graft re-installs the whole tree. The namespace
-    /// registration of the moved subtree is kept, because the mount is about to
-    /// be re-attached rather than destroyed.
-    pub fn detach_for_move(&self, path: &Path) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::registered_mount_at(&mounts, path)?;
-        path.detach_only()
-    }
-
     pub fn detach_tree(&self, path: &Path) -> VfsResult<()> {
         let mut mounts = self.mounts.lock();
         let root = Self::registered_mount_at(&mounts, path)?.clone();
