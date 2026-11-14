@@ -432,6 +432,11 @@ pub fn remove(id: MemcgId) {
     let Some(node) = get(id) else {
         return;
     };
+    // The root is the global accounting fallback for all kernel work; dropping
+    // a namespace or test hierarchy must never retire it.
+    if node.parent().is_none() {
+        return;
+    }
     {
         let _guard = CHARGE_LOCK.lock();
         node.dead.store(true, Ordering::Release);

@@ -19,7 +19,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use ksync::RwLock;
+use kspin::SpinNoIrq;
 use memacct::Memcg;
 
 pub(crate) mod cpu;
@@ -261,7 +261,7 @@ impl<T> ControllerState<T> {
 /// writes. `subtree_enabled` is meaningful for inactive slots too: it records
 /// that children created from now on must receive an active controller.
 pub struct ControllerSlot<T> {
-    state: RwLock<ControllerState<T>>,
+    state: SpinNoIrq<ControllerState<T>>,
     subtree_enabled: AtomicBool,
 }
 
@@ -269,14 +269,14 @@ impl<T> ControllerSlot<T> {
     /// Creates an inactive slot with delegation disabled.
     pub fn new() -> Self {
         Self {
-            state: RwLock::new(ControllerState::Inactive),
+            state: SpinNoIrq::new(ControllerState::Inactive),
             subtree_enabled: AtomicBool::new(false),
         }
     }
 
     /// Reports whether the slot holds live controller state.
     pub fn is_active(&self) -> bool {
-        self.state.read().is_active()
+        self.state.lock().is_active()
     }
 
     /// Returns a clone of the live state, if any.
@@ -284,17 +284,17 @@ impl<T> ControllerSlot<T> {
     where
         T: Clone,
     {
-        self.state.read().active().cloned()
+        self.state.lock().active().cloned()
     }
 
     /// Installs live state, replacing any previous state.
     pub fn activate(&self, value: T) {
-        *self.state.write() = ControllerState::Active(value);
+        *self.state.lock() = ControllerState::Active(value);
     }
 
     /// Removes and discards live state.
     pub fn deactivate(&self) {
-        *self.state.write() = ControllerState::Inactive;
+        *self.state.lock() = ControllerState::Inactive;
     }
 
     /// Reports whether this cgroup delegates the controller to its children.

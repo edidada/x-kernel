@@ -39,7 +39,7 @@ ID allocator, not an authorization token.
 
 Hierarchy mutations, reservations, migration, and detach use a hierarchy-wide
 sleepable `Mutex<()>`. Children and optional controller references use `RwLock`;
-membership maps use `Mutex`; each task's current cgroup uses `RwLock<Option<_>>`.
+membership maps use `Mutex`; each task's current cgroup uses `SpinNoIrq<Option<_>>` so page-charge lookup is safe from IRQ context; controller slots also use IRQ-safe spinlocks because the scheduler reads cpu bandwidth on every tick.
 Atomic controller values permit cheap snapshot reads. Lifecycle, reservations,
 and delegation bits are atomic; multi-node edits occur under the transaction.
 `set_pids_max` takes the hierarchy transaction, rejects removed nodes with

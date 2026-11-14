@@ -107,11 +107,13 @@ fn effective_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>, field: CpusetField) ->
 /// Applies `cgroup`'s effective CPU and memory-node masks to every process
 /// directly in it.
 pub(crate) fn apply_cpuset_affinity(cgroup: &Arc<Cgroup>) -> VfsResult<()> {
-    apply_to_members(
-        cgroup,
-        cgroup.cpuset_effective_cpus()?,
-        cgroup.cpuset_effective_mems()?,
-    )
+    let Ok(cpus) = cgroup.cpuset_effective_cpus() else {
+        return Ok(());
+    };
+    let Ok(mems) = cgroup.cpuset_effective_mems() else {
+        return Ok(());
+    };
+    apply_to_members(cgroup, cpus, mems)
 }
 
 /// Applies `cgroup`'s effective masks to one process after migration.
