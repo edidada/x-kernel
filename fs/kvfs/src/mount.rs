@@ -319,12 +319,24 @@ impl MntNamespace {
     /// graft would then leave the source gone. Both rejection points are
     /// decidable without changing anything, so a move can check them first and
     /// keep the source attached when the graft must fail.
-    pub fn can_attach_detached_mount(&self, mount: &Arc<Mount>, mountpoint: &Path) -> bool {
+    pub fn check_detached_mount_graft(
+        &self,
+        mount: &Arc<Mount>,
+        mountpoint: &Path,
+    ) -> VfsResult<()> {
         let mounts = self.mounts.lock();
-        if Self::require_mount(&mounts, mountpoint.mount()).is_err() {
-            return false;
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        // Moving a mount under itself would make the parent chain a cycle, and
+        // every walk from the root would then never terminate. `do_move_mount`
+        // walks the destination's ancestors and answers ELOOP when it reaches
+        // the mount being moved.
+        if mountpoint.mount().is_in_subtree_of(mount) {
+            return Err(VfsError::FilesystemLoop);
         }
-        mount.root_path().dentry().as_dir().is_ok() == mountpoint.dentry().as_dir().is_ok()
+        if mount.root_path().dentry().as_dir().is_ok() != mountpoint.dentry().as_dir().is_ok() {
+            return Err(VfsError::NotADirectory);
+        }
+        Ok(())
     }
 
     pub fn attach_detached_mount(
@@ -1121,6 +1133,22 @@ impl Mount {
 
     fn covered_mount(&self) -> Option<Arc<Self>> {
         self.covers.lock().clone()
+    }
+
+    /// Whether `self` is `root` or lies anywhere in its subtree.
+    ///
+    /// Walks parent links upward, so a mount that covers `root` or sits under
+    /// it answers true; a cycle in the parent chain cannot exist here because
+    /// this check is what prevents one from being created.
+    pub fn is_in_subtree_of(self: &Arc<Self>, root: &Arc<Self>) -> bool {
+        let mut current = Some(self.clone());
+        while let Some(mount) = current {
+            if Arc::ptr_eq(&mount, root) {
+                return true;
+            }
+            current = mount.location().map(|location| location.mount().clone());
+        }
+        false
     }
 
     fn collect_subtree(self: &Arc<Self>) -> Vec<Arc<Self>> {

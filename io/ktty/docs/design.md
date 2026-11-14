@@ -463,22 +463,25 @@ terminal, so a shell started afterwards obtains a valid foreground PGID
 through `TIOCGPGRP`.
 
 `arg == 1` is Linux's privileged cross-session forced acquisition, which
-greetd needs to take a VT that a getty already owns. `steal_for` serves it:
-the caller must still be its session's leader (`sid == pid`) and hold
-`CAP_SYS_ADMIN`, and it installs the new session before releasing the old one's
-claim. Ordering matters because the acquisition has fallible steps — the
-session may already name a different terminal (`EBUSY`), or the foreground
-update may fail — and a steal that aborted after tearing down the previous
-owner would leave the VT with no session and no foreground group at all. If any
-step fails, everything this call installed is rolled back. Any other non-zero
-`arg` returns `EINVAL`.
+greetd needs to take a VT that a getty already owns. `steal_for` serves it: the
+caller must still be its session's leader (`sid == pid`) and hold
+`CAP_SYS_ADMIN`.
+
+A steal *replaces* the current owner, so it cannot install the new claim while
+the old one is still there: the two are mutually exclusive and
+`ensure_session` would answer `EBUSY`, which is the very case this path exists
+for. The previous owner is therefore released first, and the whole acquisition
+is rolled back if a later step fails — the session may already name a different
+terminal (`EBUSY`), or the foreground update may fail. Rollback restores the
+previous session *and* its foreground group, because clearing a session also
+drops the terminal's foreground pointer; a partial restore would leave the VT
+owned but with no foreground group, which is the half-state this ordering
+prevents. Any other non-zero `arg` returns `EINVAL`.
 
 Both `bind_to` and `steal_for` run under the same per-TTY
 association-transaction lock, so a bind, an unbind and a steal on one TTY
 cannot interleave, and an older transaction cannot undo a newer successful
-binding. A per-TTY association-transaction
-lock serializes bind, unbind, and rollback, preventing an older
-transaction from undoing a newer successful binding on the same TTY.
+binding.
 
 `TIOCSPGRP` reads the target PGID from user space, resolves the target
 process group in the process table, and requires:

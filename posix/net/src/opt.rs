@@ -536,7 +536,10 @@ fn get_int_or_byte(val: UserConstPtr<u8>, len: socklen_t) -> KResult<i32> {
         let byte = val.read_vm().map_err(KError::from)?;
         Ok(i32::from(byte))
     } else {
-        Err(KError::InvalidInput)
+        // `do_ip_setsockopt` initialises `val = 0` and only overwrites it for a
+        // length of at least one byte, so a zero-length request means "disable"
+        // rather than EINVAL.
+        Ok(0)
     }
 }
 

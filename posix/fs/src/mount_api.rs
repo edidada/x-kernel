@@ -422,9 +422,9 @@ pub fn sys_move_mount(
     // A graft can be rejected (unregistered mountpoint, directory/non-directory
     // mismatch). Detaching first would then have destroyed the source for a
     // move that cannot happen, so the same checks run before anything changes.
-    if !namespace.can_attach_detached_mount(&mount, &target) {
+    if let Err(error) = namespace.check_detached_mount_graft(&mount, &target) {
         *slot = Some(mount);
-        return Err(KError::InvalidInput);
+        return Err(error);
     }
     let previous_location = attached_location.take();
     if let Some(location) = previous_location.as_ref()

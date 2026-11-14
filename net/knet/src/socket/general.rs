@@ -292,13 +292,16 @@ impl GeneralOptions {
 
     /// Applies `sock_setsockopt(SO_SNDBUF)` / `SO_SNDBUFFORCE`.
     ///
-    /// `clamp` is the modeled `net.core.wmem_max` for the unprivileged form and
+    /// `clamp_bytes` is the modeled `net.core.wmem_max` for the unprivileged form and
     /// `None` for the `CAP_NET_ADMIN` form, which skips only that clamp. Both
     /// then bound the hint so `val * 2` fits an `int`, double it, and apply
     /// `SOCK_MIN_SNDBUF`; `SO_SNDBUF` reports that stored value, which is why a
     /// client that sets N reads back 2N.
-    fn set_send_buffer(&self, size: usize, clamp: Option<usize>) {
-        let requested = clamp.unwrap_or(usize::MAX).min(size).min(BUFFER_HINT_MAX);
+    fn set_send_buffer(&self, hint_bytes: usize, clamp_bytes: Option<usize>) {
+        let requested = clamp_bytes
+            .unwrap_or(usize::MAX)
+            .min(hint_bytes)
+            .min(BUFFER_HINT_MAX);
         let effective = requested.saturating_mul(2).max(SNDBUF_MIN);
         self.send_buffer_bytes
             .store(effective as u64, Ordering::Relaxed);
@@ -308,8 +311,11 @@ impl GeneralOptions {
     ///
     /// Same rule as [`Self::set_send_buffer`] with `rmem_max` and
     /// `SOCK_MIN_RCVBUF` (`__sock_set_rcvbuf`).
-    fn set_receive_buffer(&self, size: usize, clamp: Option<usize>) {
-        let requested = clamp.unwrap_or(usize::MAX).min(size).min(BUFFER_HINT_MAX);
+    fn set_receive_buffer(&self, hint_bytes: usize, clamp_bytes: Option<usize>) {
+        let requested = clamp_bytes
+            .unwrap_or(usize::MAX)
+            .min(hint_bytes)
+            .min(BUFFER_HINT_MAX);
         let effective = requested.saturating_mul(2).max(RCVBUF_MIN);
         self.receive_buffer_bytes
             .store(effective as u64, Ordering::Relaxed);
