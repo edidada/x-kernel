@@ -623,6 +623,14 @@ fn apply_mount_propagation(
 /// `NsFd::User(initial_user_namespace())` and has no other user namespace, so
 /// every user-namespace descriptor is the one Linux refuses because "the initial
 /// idmapping cannot be used to create an idmapped mount".
+///
+/// # Execution context
+///
+/// Requires a current process thread: it resolves `userns_fd` in
+/// `current_files()`. It takes no sleepable lock and performs no allocation
+/// beyond the descriptor lookup, but it is only reached from
+/// [`sys_mount_setattr`], whose contract already excludes IRQ context and
+/// caller-held spinlocks or IRQ-disable guards.
 fn check_idmap_request(userns_fd: u64) -> KResult<()> {
     if userns_fd > i32::MAX as u64 {
         return Err(KError::InvalidInput);
