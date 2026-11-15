@@ -364,11 +364,20 @@ impl UnixTransportOps for SeqpacketTransport {
             .lock()
             .as_ref()
             .map_or(0, |(_, _, queued)| queued.load(Ordering::Relaxed));
-        let outq = self
-            .peer
-            .read()
-            .as_ref()
-            .map_or(0, |peer| peer.tx_bytes.load(Ordering::Relaxed));
+        let outq = self.peer.read().as_ref().map_or(0, |peer| {
+            // A closed channel means the receiving side is gone and the queued
+            // messages with it: Linux frees those skbs in `unix_release_sock`,
+            // which drops `sk_wmem_alloc` (what `unix_outq_len` reports) to 0.
+            // The counter is not cleared by whoever dropped the receiver -- a
+            // pending connection the listener never accepted has no transport
+            // to run `Drop` -- so the closed channel is what tells the sender
+            // its bytes can never be read.
+            if peer.tx.as_ref().is_some_and(|tx| tx.is_closed()) {
+                0
+            } else {
+                peer.tx_bytes.load(Ordering::Relaxed)
+            }
+        });
         Some(QueueLengths::from_bytes(outq, inq))
     }
 

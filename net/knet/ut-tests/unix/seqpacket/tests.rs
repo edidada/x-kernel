@@ -91,6 +91,39 @@ fn listener_accepts_a_queued_connection() {
     assert_eq!(&buf[..4], b"pong");
 }
 
+/// A client's `SIOCOUTQ` falls to 0 when the connection it queued data into is
+/// released before it is accepted.
+///
+/// Linux's `unix_release_sock` purges a listening socket's queued children,
+/// which frees the skbs and drops the sender's `sk_wmem_alloc`
+/// (`unix_outq_len`). No transport runs `Drop` for a pending connection the
+/// listener never accepted, so the closed channel is what has to show the
+/// sender that its bytes can never be read.
+#[def_test]
+fn released_pending_connection_clears_the_client_outq() {
+    let listener = SeqpacketTransport::new();
+    let entry = BindEntry::default();
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1, &test_peer_credentials()).unwrap();
+
+    let client = SeqpacketTransport::new();
+    client
+        .connect(
+            &entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &test_peer_credentials(),
+        )
+        .unwrap();
+    assert_eq!(client.send(&b"queued"[..], SendOptions::default()), Ok(6));
+    assert_eq!(client.queue_lengths().unwrap().outq, 6);
+
+    // Released without `accept`: the queued connection is discarded and those
+    // bytes can never be read.
+    drop(listener);
+    assert_eq!(client.queue_lengths().unwrap().outq, 0);
+}
+
 #[def_test]
 fn accept_would_block_without_a_connection() {
     let listener = SeqpacketTransport::new();
