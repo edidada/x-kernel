@@ -91,6 +91,30 @@ fn listener_accepts_a_queued_connection() {
     assert_eq!(&buf[..4], b"pong");
 }
 
+/// A receive shutdown does not release the sender's `SIOCOUTQ`.
+///
+/// `shutdown(SHUT_RD)` closes the receiving side but leaves the records queued
+/// before it readable, so the bytes the sender queued are still going to be
+/// read and the count must not drop to zero with the channel.
+#[def_test]
+fn peer_read_shutdown_keeps_the_queued_outq() {
+    let (sender, receiver) = SeqpacketTransport::new_pair(test_peer_credentials());
+    assert_eq!(sender.send(&b"hello"[..], SendOptions::default()), Ok(5));
+    assert_eq!(sender.queue_lengths().unwrap().outq, 5);
+
+    receiver.shutdown(Shutdown::Read).unwrap();
+    assert_eq!(
+        sender.queue_lengths().unwrap().outq,
+        5,
+        "the queued message is still readable"
+    );
+
+    let mut buf = [0u8; 8];
+    assert_eq!(receiver.recv(&mut buf[..], RecvOptions::default()), Ok(5));
+    assert_eq!(&buf[..5], b"hello");
+    assert_eq!(sender.queue_lengths().unwrap().outq, 0);
+}
+
 /// A client's `SIOCOUTQ` falls to 0 when the connection it queued data into is
 /// released before it is accepted.
 ///

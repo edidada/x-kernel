@@ -30,11 +30,25 @@ use crate::{
 
 /// One direction's receive side: the message queue, its poll set, and how many
 /// bytes it currently holds.
-type RxChannel = (
-    async_channel::Receiver<Datagram>,
-    Arc<PollSet>,
-    Arc<AtomicUsize>,
-);
+///
+/// Dropping it releases the direction: the queue goes away and the byte count
+/// the peer reads as `SIOCOUTQ` falls to zero with it, exactly as Linux's
+/// `unix_release_sock` purges the queued skbs and releases the sender's
+/// `sk_wmem_alloc`. A `shutdown(SHUT_RD)` only closes the receiver -- the
+/// records queued before it stay readable -- so this value, and the count it
+/// carries, stay alive until the direction is really released.
+struct RxChannel {
+    rx: async_channel::Receiver<Datagram>,
+    poll: Arc<PollSet>,
+    /// Bytes queued in `rx` and not read yet; the peer's `SIOCOUTQ`.
+    queued: Arc<AtomicUsize>,
+}
+
+impl Drop for RxChannel {
+    fn drop(&mut self) {
+        self.queued.store(0, Ordering::Relaxed);
+    }
+}
 
 /// Connections a listener may queue before `connect` starts failing.
 ///
@@ -48,16 +62,13 @@ const LISTEN_BACKLOG: usize = 128;
 /// queued, so `connect` returns without waiting for `accept`, exactly like
 /// Linux queues the connection and returns.
 struct Pending {
-    /// What the server reads.
-    to_server: async_channel::Receiver<Datagram>,
-    /// Bytes queued in `to_server` and not yet read.
-    to_server_bytes: Arc<AtomicUsize>,
+    /// What the server reads. Dropping it without an `accept` releases the
+    /// client's queued bytes, like the listener release that purges them.
+    to_server: RxChannel,
     /// What the server writes.
     from_server: async_channel::Sender<Datagram>,
     /// Bytes queued in `from_server` and not yet read.
     from_server_bytes: Arc<AtomicUsize>,
-    /// Poll set the server registers for readability of `to_server`.
-    server_poll: Arc<PollSet>,
     /// Poll set the client registers for readability of `from_server`.
     client_poll: Arc<PollSet>,
     client_addr: UnixAddr,
@@ -200,11 +211,7 @@ impl SeqpacketTransport {
         if self.options.pass_credentials() {
             accepted.set_option(SetSocketOption::PassCredentials(&true))?;
         }
-        *accepted.rx.lock() = Some((
-            pending.to_server,
-            pending.server_poll,
-            pending.to_server_bytes,
-        ));
+        *accepted.rx.lock() = Some(pending.to_server);
         *accepted.peer.write() = Some(PeerChannel {
             tx: Some(pending.from_server),
             tx_bytes: pending.from_server_bytes,
@@ -244,14 +251,22 @@ impl SeqpacketTransport {
         let bytes21 = Arc::new(AtomicUsize::new(0));
         let transport1 = Self::new();
         let transport2 = Self::new();
-        *transport1.rx.lock() = Some((rx1, poll1.clone(), bytes21.clone()));
+        *transport1.rx.lock() = Some(RxChannel {
+            rx: rx1,
+            poll: poll1.clone(),
+            queued: bytes21.clone(),
+        });
         *transport1.peer.write() = Some(PeerChannel {
             tx: Some(tx2),
             tx_bytes: bytes12.clone(),
             read_poll: poll2.clone(),
             peer_credentials: credentials.clone(),
         });
-        *transport2.rx.lock() = Some((rx2, poll2.clone(), bytes12.clone()));
+        *transport2.rx.lock() = Some(RxChannel {
+            rx: rx2,
+            poll: poll2.clone(),
+            queued: bytes12.clone(),
+        });
         *transport2.peer.write() = Some(PeerChannel {
             tx: Some(tx1),
             tx_bytes: bytes21,
@@ -363,21 +378,12 @@ impl UnixTransportOps for SeqpacketTransport {
             .rx
             .lock()
             .as_ref()
-            .map_or(0, |(_, _, queued)| queued.load(Ordering::Relaxed));
-        let outq = self.peer.read().as_ref().map_or(0, |peer| {
-            // A closed channel means the receiving side is gone and the queued
-            // messages with it: Linux frees those skbs in `unix_release_sock`,
-            // which drops `sk_wmem_alloc` (what `unix_outq_len` reports) to 0.
-            // The counter is not cleared by whoever dropped the receiver -- a
-            // pending connection the listener never accepted has no transport
-            // to run `Drop` -- so the closed channel is what tells the sender
-            // its bytes can never be read.
-            if peer.tx.as_ref().is_some_and(|tx| tx.is_closed()) {
-                0
-            } else {
-                peer.tx_bytes.load(Ordering::Relaxed)
-            }
-        });
+            .map_or(0, |rx| rx.queued.load(Ordering::Relaxed));
+        let outq = self
+            .peer
+            .read()
+            .as_ref()
+            .map_or(0, |peer| peer.tx_bytes.load(Ordering::Relaxed));
         Some(QueueLengths::from_bytes(outq, inq))
     }
 
@@ -454,11 +460,15 @@ impl UnixTransportOps for SeqpacketTransport {
         let from_server_bytes = Arc::new(AtomicUsize::new(0));
 
         let pending = Pending {
-            to_server: server_rx,
-            to_server_bytes: to_server_bytes.clone(),
+            to_server: RxChannel {
+                rx: server_rx,
+                // The client's peer record wakes this same poll when the server
+                // reads, so the two share it.
+                poll: server_poll.clone(),
+                queued: to_server_bytes.clone(),
+            },
             from_server,
             from_server_bytes: from_server_bytes.clone(),
-            server_poll: server_poll.clone(),
             client_poll: client_poll.clone(),
             client_addr,
             client_credentials,
@@ -480,7 +490,11 @@ impl UnixTransportOps for SeqpacketTransport {
         if shutdown.read {
             client_rx.close();
         }
-        *self.rx.lock() = Some((client_rx, client_poll, from_server_bytes));
+        *self.rx.lock() = Some(RxChannel {
+            rx: client_rx,
+            poll: client_poll,
+            queued: from_server_bytes,
+        });
         *peer = Some(PeerChannel {
             tx: (!shutdown.write).then_some(to_server),
             tx_bytes: to_server_bytes,
@@ -534,7 +548,7 @@ impl UnixTransportOps for SeqpacketTransport {
                 // issued before `connect` installed the receiver.
                 let is_read_shutdown = self.shutdown.lock().read;
                 let mut guard = self.rx.lock();
-                let Some((rx, _, queued)) = guard.as_mut() else {
+                let Some(rx) = guard.as_mut() else {
                     return Err(KError::NotConnected);
                 };
 
@@ -543,13 +557,13 @@ impl UnixTransportOps for SeqpacketTransport {
                     ancillary,
                     sender,
                     sender_credentials,
-                } = match rx.try_recv() {
+                } = match rx.rx.try_recv() {
                     Ok(packet) => packet,
                     Err(TryRecvError::Empty) if is_read_shutdown => return Ok(0),
                     Err(TryRecvError::Empty) => return Err(KError::WouldBlock),
                     Err(TryRecvError::Closed) => return Ok(0),
                 };
-                queued.fetch_sub(data.len(), Ordering::Relaxed);
+                rx.queued.fetch_sub(data.len(), Ordering::Relaxed);
                 let count = dst.write(&data)?;
 
                 if let Some(from) = options.from.as_mut() {
@@ -607,9 +621,9 @@ impl UnixTransportOps for SeqpacketTransport {
         }
 
         if how.has_read() {
-            let rx_poll = self.rx.lock().as_ref().map(|(rx, poll, _)| {
-                rx.close();
-                poll.clone()
+            let rx_poll = self.rx.lock().as_ref().map(|rx| {
+                rx.rx.close();
+                rx.poll.clone()
             });
             if let Some(poll) = rx_poll {
                 poll.wake();
@@ -634,10 +648,10 @@ impl Pollable for SeqpacketTransport {
             .as_ref()
             .is_none_or(|peer| peer.tx.as_ref().is_none_or(|tx| tx.is_closed()));
 
-        if let Some((rx, ..)) = self.rx.lock().as_ref() {
-            let is_read_shutdown = state.read || rx.is_closed();
+        if let Some(rx) = self.rx.lock().as_ref() {
+            let is_read_shutdown = state.read || rx.rx.is_closed();
             let is_write_shutdown = state.write || is_peer_rx_closed;
-            events.set(IoEvents::IN, !rx.is_empty() || is_read_shutdown);
+            events.set(IoEvents::IN, !rx.rx.is_empty() || is_read_shutdown);
             events.set(IoEvents::RDHUP, is_read_shutdown);
             // A half-close only ends one direction. `HUP` is reserved for a
             // socket whose read and write directions are both gone, matching
@@ -668,8 +682,8 @@ impl Pollable for SeqpacketTransport {
         if !events.intersects(IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP) {
             return Ok(());
         }
-        if let Some((_, poll, _)) = self.rx.lock().as_ref() {
-            context.register(poll)?;
+        if let Some(rx) = self.rx.lock().as_ref() {
+            context.register(&rx.poll)?;
         } else if let Some(listener) = self.listener.lock().as_ref() {
             context.register(&listener.poll)?;
         }
@@ -682,15 +696,9 @@ impl Drop for SeqpacketTransport {
         if let Some(slot) = self.bind_slot.lock().take() {
             *slot.lock() = None;
         }
-        // Releasing the receive side discards whatever the peer had not read
-        // yet. Linux's `unix_release_sock` purges the receive queue and the
-        // freed skbs drop the sender's `sk_wmem_alloc`, so the peer's
-        // `SIOCOUTQ` (`unix_outq_len`) falls to 0 with them; leaving the
-        // counter at its last value would report bytes that can never be read.
-        if let Some((rx, _, queued)) = self.rx.lock().take() {
-            rx.close();
-            queued.store(0, Ordering::Relaxed);
-        }
+        // `RxChannel::drop` releases the receive side and the byte count that
+        // the peer reports as `SIOCOUTQ`.
+        self.rx.lock().take();
         if let Some(peer) = self.peer.write().take() {
             peer.read_poll.wake();
         }
