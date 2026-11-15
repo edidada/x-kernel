@@ -28,6 +28,7 @@ use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
 use kidentity::TaskIdentityToken;
+use kspin::SpinNoIrq;
 use ksync::{Mutex, RwLock};
 use memacct::Memcg;
 
@@ -48,7 +49,7 @@ pub(crate) struct CgroupHierarchy {
     /// Serializes structural changes, deletions, and multi-controller charges.
     pub(crate) transaction: Mutex<()>,
     /// CPUs present on the machine; the root's `cpuset.cpus.effective`.
-    cpuset_universe: CpuMask,
+    cpuset_universe: SpinNoIrq<CpuMask>,
     /// NUMA nodes present on the machine; the root's `cpuset.mems.effective`.
     mems_universe: NodeMask,
 }
@@ -56,7 +57,11 @@ pub(crate) struct CgroupHierarchy {
 impl CgroupHierarchy {
     /// Returns the machine-wide CPU universe.
     pub(crate) fn cpuset_universe(&self) -> CpuMask {
-        self.cpuset_universe
+        *self.cpuset_universe.lock()
+    }
+
+    pub(crate) fn set_cpuset_universe(&self, cpus: CpuMask) {
+        *self.cpuset_universe.lock() = cpus;
     }
 
     /// Returns the machine-wide NUMA-node universe.
@@ -104,7 +109,7 @@ impl Cgroup {
     pub(crate) fn new_root_with_universe(cpus: CpuMask, mems: NodeMask) -> Arc<Self> {
         let hierarchy = Arc::new(CgroupHierarchy {
             transaction: Mutex::new(()),
-            cpuset_universe: cpus,
+            cpuset_universe: SpinNoIrq::new(cpus),
             mems_universe: mems,
         });
         let cpuset = Arc::new(CpusetController::new(cpus, mems));

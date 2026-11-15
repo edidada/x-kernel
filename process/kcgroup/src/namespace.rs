@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use kcred::UserNamespace;
 use klazy::Once;
 
-use crate::Cgroup;
+use crate::{Cgroup, CpuMask};
 
 /// Kernel-local identifier for a cgroup namespace.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -143,4 +143,27 @@ impl CgroupNamespace {
     pub fn root(&self) -> Arc<Cgroup> {
         self.root.clone()
     }
+}
+
+/// Expands the initial root cpuset universe once the runtime CPU map is ready.
+///
+/// The hierarchy root is created before secondary CPUs are discovered on some
+/// platforms, so its initial universe may contain only the boot CPU. Calling
+/// this after CPU discovery keeps `cpuset.cpus.effective` and root affinity
+/// consistent with the firmware-present CPU set.
+pub fn refresh_root_cpuset_universe() {
+    let root = CgroupNamespace::initial().root();
+    let count = kcpu_id_map::nr_cpus();
+    if count <= 1 {
+        return;
+    }
+    let mut mask = CpuMask::empty();
+    for cpu in 0..count {
+        mask.insert(cpu);
+    }
+    if mask == root.hierarchy.cpuset_universe() {
+        return;
+    }
+    root.hierarchy.set_cpuset_universe(mask);
+    let _ = root.set_cpuset_cpus(mask);
 }

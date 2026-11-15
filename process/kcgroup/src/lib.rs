@@ -54,7 +54,7 @@ pub use kbandwidth::{
     DEFAULT_PERIOD_US as DEFAULT_PERIOD, PERIOD_MAX_US, PERIOD_MIN_US, QUOTA_MIN_US,
 };
 pub use membership::{CgroupOperationGuard, TaskCharge, TaskMembership};
-pub use namespace::{CgroupNamespace, CgroupNamespaceId};
+pub use namespace::{CgroupNamespace, CgroupNamespaceId, refresh_root_cpuset_universe};
 
 #[cfg(unittest)]
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");
