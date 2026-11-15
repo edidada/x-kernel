@@ -368,14 +368,13 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         if !first.is_cgroup_parked() && is_eligible(first.fair().vruntime.get(tok), avg) {
             return Some(Self::deadline_key(first, tok));
         }
-        // Walk the eligible prefix and skip cgroup-throttled entities; a
-        // parked front entity must not hide later selectable work.
-        self.ready
-            .iter()
-            .filter(|task| !task.is_cgroup_parked())
-            .filter(|task| is_eligible(task.fair().vruntime.get(tok), avg))
-            .map(|task| Self::deadline_key(task, tok))
-            .min()
+        // Walk the deadline-ordered tree until the first eligible entity.
+        // Parked entities are skipped; do not filter the whole tree, which
+        // turns the common pick path into O(n).
+        self.ready.iter().find_map(|task| {
+            (!task.is_cgroup_parked() && is_eligible(task.fair().vruntime.get(tok), avg))
+                .then(|| Self::deadline_key(task, tok))
+        })
     }
 
     fn clear_buddy(&mut self) {
