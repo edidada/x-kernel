@@ -468,9 +468,11 @@ pub fn install_current_memcg_provider(provider: CurrentMemcgProvider) -> bool {
 /// Returns the provider-selected memory cgroup, or [`MemcgId::NONE`] before
 /// the process/cgroup layer has installed its provider.
 ///
-/// Execution context: the provider may inspect the current task and cgroup
-/// membership. It must not sleep; the default before installation is
-/// context-independent and returns [`MemcgId::NONE`].
+/// Execution context: this is callable from page-allocation and interrupt
+/// context. The installed provider may inspect the current task and cgroup
+/// membership, but must be IRQ-safe: no sleeping locks, allocation, blocking,
+/// or page faults. The default before installation is context-independent and
+/// returns [`MemcgId::NONE`].
 pub fn current_memcg() -> MemcgId {
     let provider = CURRENT_PROVIDER.load(Ordering::Acquire);
     if provider == 0 {

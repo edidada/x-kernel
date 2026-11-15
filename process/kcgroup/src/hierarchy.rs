@@ -677,6 +677,11 @@ impl Cgroup {
             {
                 *child.memory_node.lock() = Some(controller.memcg());
             }
+            if kind == ControllerKind::Cpu
+                && let Some(controller) = child.controllers.cpu()
+            {
+                crate::release_bandwidth(&controller.bandwidth());
+            }
             child.controllers.deactivate(kind);
         }
         // Disabling delegation only withdraws the controller from this cgroup's

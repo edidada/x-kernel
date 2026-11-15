@@ -94,7 +94,16 @@ pub(crate) fn subtree_control_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Ar
                     if !CONTROLLERS.iter().any(|controller| controller.kind == kind) {
                         return Err(VfsError::NotFound);
                     }
-                    resolved.push((kind, operation.is_enabled));
+                    // Linux applies duplicates last-token-wins. Dedup before
+                    // mutation so a disable/enable pair cannot tear down and
+                    // rebuild child controller state.
+                    if let Some(existing) =
+                        resolved.iter_mut().find(|(existing, _)| *existing == kind)
+                    {
+                        existing.1 = operation.is_enabled;
+                    } else {
+                        resolved.push((kind, operation.is_enabled));
+                    }
                 }
                 cgroup.set_subtree_controls(&resolved)?;
                 Ok(None)

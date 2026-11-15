@@ -860,12 +860,17 @@ pub fn set_task_requested_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
 /// mask unchanged when the intersection would be empty; cgroup writes turn
 /// that into `ENOSPC` instead of silently starving the task.
 pub fn set_task_cgroup_cpus(task: &KtaskRef, cpumask: KCpuMask) -> bool {
-    if cpumask.is_empty() || !task.set_cgroup_cpus(cpumask) {
+    if cpumask.is_empty() {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    let old_mask = task.cpumask();
+    if !task.set_cgroup_cpus(cpumask) {
         return false;
     }
     #[cfg(feature = "smp")]
     {
-        crate::run_queue::enforce_affinity_placement(task, task.cpumask())
+        crate::run_queue::enforce_affinity_placement(task, old_mask)
     }
     #[cfg(not(feature = "smp"))]
     {
@@ -1178,4 +1183,9 @@ pub fn check_mutex_deadlock() -> bool {
         }
     });
     ok
+}
+
+/// Releases scheduler state for a cpu controller's bandwidth tracker.
+pub fn release_bandwidth_tracker(tracker: &alloc::sync::Arc<kbandwidth::Bandwidth>) {
+    crate::run_queue::bandwidth::release_tracker(tracker);
 }

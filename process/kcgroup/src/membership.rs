@@ -180,10 +180,13 @@ impl TaskMembership {
         ordered.sort_unstable_by_key(|membership| membership.token);
         ordered.dedup_by_key(|membership| membership.token);
 
-        let mut current = Vec::with_capacity(ordered.len());
-        for membership in &ordered {
-            current.push(membership.cgroup.lock());
-        }
+        // Snapshot the source cgroups without holding the per-membership
+        // SpinNoIrq guards across controller-lineage allocation or the
+        // hierarchy/member Mutexes.
+        let current: Vec<Option<Arc<Cgroup>>> = ordered
+            .iter()
+            .map(|membership| membership.cgroup.lock().clone())
+            .collect();
         let target_lineage = target.controller_lineage();
         // Validate every source before mutating any controller count. This
         // keeps a mixed-hierarchy request atomic on its error path.
@@ -219,7 +222,7 @@ impl TaskMembership {
             }
         }
 
-        for (membership, source) in ordered.into_iter().zip(current.iter_mut()) {
+        for (membership, source) in ordered.into_iter().zip(current.iter()) {
             let Some(source_cgroup) = source.as_ref() else {
                 continue;
             };
@@ -237,7 +240,13 @@ impl TaskMembership {
             for controller in source_lineage[shared..].iter().rev() {
                 controller.migrate_out(1);
             }
-            **source = Some(target.clone());
+            let mut cgroup = membership.cgroup.lock();
+            if cgroup
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, source_cgroup))
+            {
+                *cgroup = Some(target.clone());
+            }
         }
         Ok(())
     }

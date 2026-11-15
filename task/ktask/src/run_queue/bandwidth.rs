@@ -186,3 +186,24 @@ pub(crate) fn forget_member(task: &KtaskRef) {
             .is_some_and(|known| !KtaskRef::ptr_eq(&known, task))
     });
 }
+
+/// Releases a tracker when its cpu controller is deactivated.
+///
+/// Resumes parked members before dropping the tracker; otherwise they would
+/// remain unselectable forever with no live tracker to close the window.
+pub(crate) fn release_tracker(tracker: &Arc<Bandwidth>) {
+    resume_group(tracker);
+    MEMBERS.lock().retain(|member| {
+        !member
+            .tracker
+            .upgrade()
+            .is_some_and(|known| Arc::ptr_eq(&known, tracker))
+    });
+    let mut tracked = TRACKED.lock();
+    tracked.retain(|entry| {
+        entry
+            .upgrade()
+            .is_some_and(|known| !Arc::ptr_eq(&known, tracker))
+    });
+    ACTIVE_TRACKERS.store(tracked.len(), Ordering::Release);
+}

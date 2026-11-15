@@ -68,7 +68,6 @@ pub fn current_cgroup() -> Option<Arc<Cgroup>> {
 /// after a task joined a child cgroup is observed on the next charge.
 pub fn current_memcg() -> memacct::MemcgId {
     current_cgroup()
-        .and_then(|cgroup| cgroup.memory_controller().ok())
-        .map(|controller| controller.memcg().id())
+        .map(|cgroup| cgroup.effective_memcg().id())
         .unwrap_or(memacct::MemcgId::NONE)
 }

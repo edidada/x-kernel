@@ -39,6 +39,30 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
+
+use kbandwidth::Bandwidth;
+use kspin::SpinNoIrq;
+
+/// Optional scheduler callback invoked before a cpu tracker is discarded.
+pub type BandwidthReleaseHook = fn(&Arc<Bandwidth>);
+
+static BANDWIDTH_RELEASE_HOOK: SpinNoIrq<Option<BandwidthReleaseHook>> = SpinNoIrq::new(None);
+
+/// Installs the scheduler's bandwidth-release callback once.
+pub fn install_bandwidth_release_hook(hook: BandwidthReleaseHook) {
+    let mut slot = BANDWIDTH_RELEASE_HOOK.lock();
+    if slot.is_none() {
+        *slot = Some(hook);
+    }
+}
+
+pub(crate) fn release_bandwidth(tracker: &Arc<Bandwidth>) {
+    if let Some(hook) = *BANDWIDTH_RELEASE_HOOK.lock() {
+        hook(tracker);
+    }
+}
+
 mod controller;
 mod hierarchy;
 mod membership;
