@@ -927,10 +927,14 @@ fn default_universe() -> (CpuMask, NodeMask) {
             found = true;
         }
     });
-    if !found {
-        // Before the architecture CPU map is initialized the boot CPU is still
-        // present; `nr_cpus` documents the same fallback.
-        cpus.insert(0);
+    if !found || cpus.iter().count() == 1 {
+        // The hierarchy root is created before secondary CPUs are discoverable
+        // on some platforms. Seed the possible-CPU universe so a boot-CPU-only
+        // root bound cannot pin every descendant to CPU0; the runtime refresh
+        // narrows it once the present map is published.
+        for cpu in 0..kbuild_config::NR_CPUS {
+            cpus.insert(cpu);
+        }
     }
     let mut mems = NodeMask::empty();
     // Only node 0 is represented until NUMA topology is published.
