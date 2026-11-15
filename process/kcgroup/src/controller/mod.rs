@@ -435,6 +435,8 @@ pub(crate) struct ControllerAnchor {
     pub mems: NodeMask,
     /// Parent's effective memory cgroup.
     pub memcg: Arc<Memcg>,
+    /// Existing accounting node when re-enabling a controller on this child.
+    pub memory_node: Option<Arc<Memcg>>,
 }
 
 /// Builds the initial live state for a controller on one child cgroup.
@@ -472,9 +474,10 @@ const CONTROLLERS: &[ControllerRegistration] = &[
     ControllerRegistration {
         kind: ControllerKind::Memory,
         activate: |anchor| {
-            ControllerInstance::Memory(Arc::new(MemoryController::new(memacct::create_child(
-                &anchor.memcg,
-            ))))
+            let memcg = anchor
+                .memory_node
+                .unwrap_or_else(|| memacct::create_child(&anchor.memcg));
+            ControllerInstance::Memory(Arc::new(MemoryController::new(memcg)))
         },
     },
 ];

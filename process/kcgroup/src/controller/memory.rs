@@ -31,12 +31,6 @@ impl MemoryController {
     }
 }
 
-impl Drop for MemoryController {
-    fn drop(&mut self) {
-        memacct::remove(self.memcg.id());
-    }
-}
-
 impl Controller for MemoryController {
     fn kind(&self) -> ControllerKind {
         ControllerKind::Memory

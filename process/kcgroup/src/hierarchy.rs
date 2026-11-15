@@ -84,6 +84,8 @@ pub struct Cgroup {
     pub(crate) lifecycle: AtomicU8,
     pub(crate) reservations: AtomicUsize,
     pub(crate) member_tasks: Mutex<BTreeSet<TaskIdentityToken>>,
+    /// Accounting node retained across memory-controller disable/enable.
+    pub(crate) memory_node: SpinNoIrq<Option<Arc<memacct::Memcg>>>,
 }
 
 impl Cgroup {
@@ -120,6 +122,7 @@ impl Cgroup {
             ControllerKind::Cpu,
             crate::controller::ControllerInstance::Cpu(Arc::new(CpuController::new())),
         );
+        let memory_node = controllers.memory().map(|controller| controller.memcg());
         Arc::new(Self {
             name: String::new(),
             hierarchy,
@@ -129,6 +132,7 @@ impl Cgroup {
             lifecycle: AtomicU8::new(ACTIVE),
             reservations: AtomicUsize::new(0),
             member_tasks: Mutex::new(BTreeSet::new()),
+            memory_node: SpinNoIrq::new(memory_node),
         })
     }
 
@@ -143,6 +147,7 @@ impl Cgroup {
             lifecycle: AtomicU8::new(ACTIVE),
             reservations: AtomicUsize::new(0),
             member_tasks: Mutex::new(BTreeSet::new()),
+            memory_node: SpinNoIrq::new(None),
         });
         parent.activate_delegated_controllers(&child);
         child
@@ -160,6 +165,7 @@ impl Cgroup {
             cpus: self.effective_cpus(),
             mems: self.effective_mems(),
             memcg: self.effective_memcg(),
+            memory_node: child.memory_node.lock().clone(),
         };
         for registration in registrations() {
             let kind = registration.kind();
@@ -167,6 +173,11 @@ impl Cgroup {
                 child
                     .controllers
                     .activate(kind, registration.activate(anchor.clone()));
+                if kind == ControllerKind::Memory
+                    && let Some(controller) = child.controllers.memory()
+                {
+                    *child.memory_node.lock() = Some(controller.memcg());
+                }
             }
         }
     }
@@ -292,6 +303,10 @@ impl Cgroup {
     }
 
     fn deactivate_controllers(&self) {
+        if let Some(controller) = self.controllers.memory() {
+            memacct::remove(controller.memcg().id());
+        }
+        *self.memory_node.lock() = None;
         for controller in self.controllers.controllers() {
             controller.deactivate();
         }
@@ -634,10 +649,16 @@ impl Cgroup {
                 cpus,
                 mems,
                 memcg: memcg.clone(),
+                memory_node: child.memory_node.lock().clone(),
             };
             child
                 .controllers
                 .activate(kind, registration.activate(anchor));
+            if kind == ControllerKind::Memory
+                && let Some(controller) = child.controllers.memory()
+            {
+                *child.memory_node.lock() = Some(controller.memcg());
+            }
         }
         Ok(())
     }
@@ -651,6 +672,11 @@ impl Cgroup {
             return Err(KError::from(LinuxError::EBUSY));
         }
         for child in &children {
+            if kind == ControllerKind::Memory
+                && let Some(controller) = child.controllers.memory()
+            {
+                *child.memory_node.lock() = Some(controller.memcg());
+            }
             child.controllers.deactivate(kind);
         }
         // Disabling delegation only withdraws the controller from this cgroup's
