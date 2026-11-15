@@ -117,7 +117,10 @@ Five entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (the same aut
   `InvalidInput`; bytes past the published struct must be zero (`E2BIG`), so a caller relying on a field this kernel does not
   implement is refused instead of having its request truncated. An `attr_set`/`attr_clr` bit outside
   `MOUNT_SETATTR_VALID_FLAGS` is `InvalidInput` rather than a silently ignored request.
-  `check_mount_attr_atime` applies the field's enum semantics: `MOUNT_ATTR__ATIME` must be all-or-nothing in `attr_clr`, an
+  `MOUNT_ATTR_IDMAP` follows `build_mount_idmapped` up to the point where it would succeed: clearing an idmap is
+  `InvalidInput`, a descriptor above `INT_MAX` is `InvalidInput`, and a descriptor that does not resolve is
+  `BadFileDescriptor`; only a request Linux would accept (a live user-namespace fd) answers `EOPNOTSUPP`, because
+  idmapped mounts are not implemented. `check_mount_attr_atime` applies the field's enum semantics: `MOUNT_ATTR__ATIME` must be all-or-nothing in `attr_clr`, an
   atime value in `attr_set` requires the group in `attr_clr`, and only RELATIME/NOATIME/STRICTATIME are representable, so a
   combination such as `NOATIME | STRICTATIME` is `InvalidInput` rather than being applied as relatime. `propagation` admits the
   four `MS_*` propagation flags, at most one per call; a non-zero `userns_fd` is `EOPNOTSUPP` because idmapped mounts are not

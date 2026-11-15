@@ -655,7 +655,7 @@ pub fn sys_mount_setattr(
     // Read so the whole published struct is known to be accessible, the way
     // `copy_struct_from_user` faults on an unreadable page even for a field it
     // then ignores. Linux only consults the value when IDMAP is requested.
-    let _userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
+    let userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
     // `copy_struct_from_user` handles a larger structure by requiring the bytes
     // this kernel does not know to be zero: a newer caller's extension must not
     // be silently ignored, so a non-zero tail is `E2BIG` rather than success.
@@ -688,13 +688,25 @@ pub fn sys_mount_setattr(
     // `userns_fd = 0` returned success for a request that changed nothing.
     const MOUNT_ATTR_IDMAP: u64 = 0x10_0000;
     if attr_clr & MOUNT_ATTR_IDMAP != 0 {
+        // "We currently do not support clearing an idmapped mount."
         return Err(KError::InvalidInput);
     }
     if attr_set & MOUNT_ATTR_IDMAP != 0 {
-        // Idmapped mounts are not implemented here at all, so no descriptor and
-        // no attribute word can be honoured. `EOPNOTSUPP` says that; `EBADF`
-        // (what Linux answers for a descriptor that does not resolve) would
-        // suggest the request itself is well-formed and only the fd is wrong.
+        // Linux's `build_mount_idmapped` chain, up to the point where it would
+        // succeed: the request can only be honoured by resolving `userns_fd` and
+        // building an idmapping, which this kernel does not implement. Every
+        // rejection before that point is reproduced exactly, so only a request
+        // Linux would accept diverges.
+        if userns_fd > i32::MAX as u64 {
+            return Err(KError::InvalidInput);
+        }
+        if userns_fd == 0
+            || kprocess::current_files()
+                .get_file(userns_fd as i32)
+                .is_err()
+        {
+            return Err(KError::BadFileDescriptor);
+        }
         return Err(KError::OperationNotSupported);
     }
     // `build_mount_idmapped` returns 0 without looking at `userns_fd` when
