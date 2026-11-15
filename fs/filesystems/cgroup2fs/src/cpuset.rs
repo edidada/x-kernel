@@ -62,17 +62,27 @@ impl CpusetField {
     }
 
     fn write(self, cgroup: &Arc<Cgroup>, text: &str) -> VfsResult<()> {
+        let old_cpus = cgroup.cpuset_cpus()?;
+        let old_mems = cgroup.cpuset_mems()?;
         match self {
             Self::Cpus => {
                 let mask = CpuMask::parse_list(text)?;
                 cgroup.set_cpuset_cpus(mask)?;
-                apply_cpuset_affinity_to_subtree(cgroup)?;
             }
             Self::Mems => {
                 let mask = NodeMask::parse_list(text)?;
                 cgroup.set_cpuset_mems(mask)?;
-                apply_cpuset_affinity_to_subtree(cgroup)?;
             }
+        }
+        if let Err(error) = apply_cpuset_affinity_to_subtree(cgroup) {
+            // Controller state and task masks are one transaction. Restore the
+            // requested masks and re-apply the old effective masks before
+            // reporting ENOSPC, so a failed write cannot leave a live mask that
+            // no task actually obeys.
+            let _ = cgroup.set_cpuset_cpus(old_cpus);
+            let _ = cgroup.set_cpuset_mems(old_mems);
+            let _ = apply_cpuset_affinity_to_subtree(cgroup);
+            return Err(error);
         }
         Ok(())
     }
@@ -107,25 +117,33 @@ fn effective_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>, field: CpusetField) ->
 /// Applies `cgroup`'s effective CPU and memory-node masks to every process
 /// directly in it.
 pub(crate) fn apply_cpuset_affinity(cgroup: &Arc<Cgroup>) -> VfsResult<()> {
-    let Ok(cpus) = cgroup.cpuset_effective_cpus() else {
-        return Ok(());
-    };
-    let Ok(mems) = cgroup.cpuset_effective_mems() else {
+    let Some((cpus, mems)) = effective_for_apply(cgroup) else {
         return Ok(());
     };
     apply_to_members(cgroup, cpus, mems)
 }
 
+/// Returns the closest controller-backed effective masks for a cgroup.
+///
+/// A cgroup created before its parent enabled `cpuset` has no controller of
+/// its own. Its tasks are still bounded by the nearest ancestor that does.
+fn effective_for_apply(cgroup: &Arc<Cgroup>) -> Option<(CpuMask, NodeMask)> {
+    let mut current = Some(cgroup.clone());
+    while let Some(node) = current {
+        if let (Ok(cpus), Ok(mems)) = (node.cpuset_effective_cpus(), node.cpuset_effective_mems()) {
+            return Some((cpus, mems));
+        }
+        current = node.parent();
+    }
+    None
+}
+
 /// Applies `cgroup`'s effective masks to one process after migration.
 pub(crate) fn apply_cpuset_affinity_to_process(cgroup: &Arc<Cgroup>, pid: Pid) -> VfsResult<()> {
-    // A target cgroup may have no active cpuset controller. In that case the
-    // migration must not fail after membership has already been committed;
-    // the task inherits the ancestor's existing affinity until cpuset is
-    // enabled later.
-    let Ok(cpus) = cgroup.cpuset_effective_cpus() else {
-        return Ok(());
-    };
-    let Ok(mems) = cgroup.cpuset_effective_mems() else {
+    // A target cgroup may have no active cpuset controller. Membership has
+    // already committed, so apply the nearest ancestor's effective masks
+    // instead of failing or leaving the task outside its inherited bound.
+    let Some((cpus, mems)) = effective_for_apply(cgroup) else {
         return Ok(());
     };
     apply_to_process(pid, kernel_cpu_mask(cpus), kernel_node_mask(mems))
