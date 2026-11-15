@@ -69,9 +69,9 @@ fn peak_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Arc<SimpleFile> {
             }
             SimpleFileOperation::Write { data, .. } => {
                 let _operation = cgroup.begin_operation()?;
-                if parse_bytes(command::parse_command(data)?)? != 0 {
-                    return Err(VfsError::InvalidInput);
-                }
+                // Linux accepts any numeric write and resets the peak to the
+                // current usage; the written value is not a new peak.
+                let _ = parse_bytes(command::parse_command(data)?)?;
                 cgroup.memory_controller()?.memcg().reset_peak();
                 Ok(None)
             }

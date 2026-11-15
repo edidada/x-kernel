@@ -53,10 +53,10 @@ impl CpuController {
     ///
     /// # Errors
     ///
-    /// Returns `EINVAL` outside the Linux `cpu.weight` range 1..=10000.
+    /// Returns `ERANGE` outside the Linux `cpu.weight` range 1..=10000.
     pub fn set_weight(&self, weight: u32) -> KResult<()> {
         if weight == 0 || weight > CPU_WEIGHT_MAX {
-            return Err(KError::from(LinuxError::EINVAL));
+            return Err(KError::from(LinuxError::ERANGE));
         }
         self.weight.store(weight as u64, Ordering::Release);
         Ok(())

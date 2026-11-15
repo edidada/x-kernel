@@ -89,13 +89,11 @@ pub(crate) fn subtree_control_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Ar
                     // cgroup v2 reports a controller that is absent from this
                     // cgroup as ENOENT, not EINVAL: the name is well formed,
                     // the requested capability is simply not there.
-                    let kind = ControllerKind::from_name(operation.name)
-                        .filter(|kind| {
-                            CONTROLLERS
-                                .iter()
-                                .any(|controller| controller.kind == *kind)
-                        })
-                        .ok_or(VfsError::NotFound)?;
+                    let kind =
+                        ControllerKind::from_name(operation.name).ok_or(VfsError::InvalidInput)?;
+                    if !CONTROLLERS.iter().any(|controller| controller.kind == kind) {
+                        return Err(VfsError::NotFound);
+                    }
                     resolved.push((kind, operation.is_enabled));
                 }
                 cgroup.set_subtree_controls(&resolved)?;

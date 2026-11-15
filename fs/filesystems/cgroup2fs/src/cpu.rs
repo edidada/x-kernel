@@ -21,6 +21,11 @@ pub(crate) fn files(
     fs: Arc<SimpleFs>,
     cgroup: Arc<Cgroup>,
 ) -> Vec<(&'static str, Arc<SimpleFile>)> {
+    // Linux marks cpu.max and cpu.weight CFTYPE_NOT_ON_ROOT; only cpu.stat is
+    // visible at the hierarchy root.
+    if cgroup.parent().is_none() {
+        return alloc::vec![("cpu.stat", stat_file(fs, cgroup))];
+    }
     alloc::vec![
         ("cpu.max", max_file(fs.clone(), cgroup.clone())),
         ("cpu.weight", weight_file(fs.clone(), cgroup.clone())),
