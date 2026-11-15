@@ -387,10 +387,24 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         let _association = self.terminal.association.lock();
         let pg = proc.group();
         let session = pg.session();
-        if session.sid() != proc.pid() {
+        // `tiocsctty`: a caller that already owns this terminal succeeds without
+        // changing anything.
+        let tty_session = self.terminal.job_control.session();
+        if tty_session
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, &session))
+        {
+            return Ok(());
+        }
+        // "The process must be a session leader and not have a controlling tty
+        // already."
+        if session.sid() != proc.pid() || session.terminal().is_some() {
             return Err(KError::OperationNotPermitted);
         }
-        if !kprocess::current_cred().has_sys_admin() {
+        // Stealing from a live session needs the capability; taking a terminal
+        // that no session owns does not, as in Linux where only the
+        // `tty->ctrl.session` branch checks `capable(CAP_SYS_ADMIN)`.
+        if tty_session.is_some() && !kprocess::current_cred().has_sys_admin() {
             return Err(KError::OperationNotPermitted);
         }
         let terminal: Arc<dyn ControllingTerminal> = self.clone();
