@@ -163,6 +163,14 @@ pub trait UserTaskRuntime: Send + Sync + Any {
         kidentity::TaskIdentityToken::unknown()
     }
 
+    /// Returns the cgroup `cpu.weight` for this task.
+    ///
+    /// Sampled at activation so tasks forked or moved into a cgroup inherit
+    /// its current weight instead of the scheduler default.
+    fn cpu_weight(&self) -> u32 {
+        100
+    }
+
     /// Returns the cgroup `cpuset` CPU bound for this task, if any.
     ///
     /// The bound is applied when the task is constructed so a child does not
@@ -728,6 +736,12 @@ impl TaskInner {
     /// existing task.
     pub fn cpu_bandwidth(&self) -> Option<alloc::sync::Arc<kbandwidth::Bandwidth>> {
         self.user_runtime()?.cpu_bandwidth()
+    }
+
+    /// Returns the cgroup CPU weight sampled from the task runtime.
+    pub fn cpu_weight(&self) -> u32 {
+        self.user_runtime()
+            .map_or(100, |runtime| runtime.cpu_weight())
     }
 
     /// Returns the current task-number handle, if the task has one.

@@ -46,6 +46,12 @@ impl UserTaskRuntime for Thread {
         self.cgroup().and_then(|cgroup| cgroup.cpu_bandwidth())
     }
 
+    fn cpu_weight(&self) -> u32 {
+        self.cgroup()
+            .and_then(|cgroup| cgroup.cpu_controller().ok())
+            .map_or(100, |controller| controller.weight())
+    }
+
     fn cgroup_cpus(&self) -> Option<ktask::KCpuMask> {
         let mut mask = ktask::KCpuMask::new();
         match self.cgroup() {
