@@ -4549,6 +4549,7 @@ dependencies = [
  "kio",
  "klazy",
  "klogger",
+ "kns",
  "kprocess",
  "kquota",
  "ksync",

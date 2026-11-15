@@ -27,8 +27,7 @@ use linux_raw_sys::general::{
     MOUNT_ATTR_NOEXEC, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NOSYMFOLLOW, MOUNT_ATTR_RDONLY,
     MOVE_MOUNT_F_EMPTY_PATH, O_DIRECTORY, O_RDONLY, OPEN_TREE_CLOEXEC, OPEN_TREE_CLONE,
 };
-use osvm::VirtPtr;
-use posix_types::UserConstPtr;
+use posix_types::{UserConstPtr, UserRead, UserWrite};
 
 use crate::{mount::require_mount_privilege, path::with_fs_at};
 
@@ -101,16 +100,31 @@ fn check_mount_attr_atime(attr_set: u64, attr_clr: u64) -> KResult<()> {
 /// extra bytes: a non-zero tail means the caller relies on a field this kernel
 /// does not implement, so it must fail (`E2BIG`) instead of having its request
 /// silently truncated to the fields that are known.
-fn check_mount_attr_tail(base: usize, size: usize) -> KResult<()> {
-    let tail_len = size.saturating_sub(MOUNT_ATTR_SIZE_VER0);
-    if tail_len == 0 {
+fn check_mount_attr_tail(attr: UserConstPtr<MountAttr>, size: usize) -> KResult<()> {
+    if size <= MOUNT_ATTR_SIZE_VER0 {
         return Ok(());
     }
-    let tail = UserConstPtr::<u8>::from(base + MOUNT_ATTR_SIZE_VER0).load_vm_vec(tail_len)?;
-    if tail.iter().any(|byte| *byte != 0) {
+    // The extension is variable length, so it is read through the same typed
+    // pointer viewed as bytes; `size` is already bounded by `PAGE_SIZE_4K`.
+    let bytes = attr.cast::<u8>().load_vm_vec(size)?;
+    if bytes[MOUNT_ATTR_SIZE_VER0..].iter().any(|byte| *byte != 0) {
         return Err(KError::ArgumentListTooLong);
     }
     Ok(())
+}
+
+/// `struct mount_attr` (`include/uapi/linux/mount.h`), version 0.
+///
+/// The syscall argument is read as this type rather than as three separate
+/// `__u64` loads at hand-computed offsets, so the ABI mapping is stated once and
+/// the boundary keeps a typed user pointer (CG-019).
+#[repr(C)]
+#[derive(Clone, Copy, Default, UserRead, UserWrite)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
 }
 
 /// Accumulated state of one fs-context fd between `fsopen` and `fsmount`.
@@ -596,6 +610,35 @@ fn apply_mount_propagation(
     Ok(())
 }
 
+/// Applies `build_mount_idmapped`'s decisions for an idmapped-mount request.
+///
+/// This kernel creates no idmapped mounts, so the function exists only to make
+/// the request fail exactly where Linux fails it: an oversized descriptor is
+/// `EINVAL`, `fdget` resolves whatever descriptor was named (descriptor 0
+/// included, when it is open) so only an unresolvable one is `EBADF`, and a file
+/// that is not a namespace file - or a namespace of another type - is `EINVAL`.
+///
+/// A user-namespace descriptor reaches Linux's init-userns and `ns_capable`
+/// tests, and both answer `EPERM`: this kernel exposes `/proc/<pid>/ns/user` as
+/// `NsFd::User(initial_user_namespace())` and has no other user namespace, so
+/// every user-namespace descriptor is the one Linux refuses because "the initial
+/// idmapping cannot be used to create an idmapped mount".
+fn check_idmap_request(userns_fd: u64) -> KResult<()> {
+    if userns_fd > i32::MAX as u64 {
+        return Err(KError::InvalidInput);
+    }
+    let file = kprocess::current_files()
+        .get_file(userns_fd as i32)
+        .map_err(|_| KError::BadFileDescriptor)?;
+    let Ok(namespace) = kns::NsFd::from_file(&file) else {
+        return Err(KError::InvalidInput);
+    };
+    match namespace.as_ref() {
+        kns::NsFd::User(_) => Err(KError::OperationNotPermitted),
+        _ => Err(KError::InvalidInput),
+    }
+}
+
 /// Changes mount attributes (`mount_setattr(2)`).
 ///
 /// # Execution context
@@ -645,23 +688,17 @@ pub fn sys_mount_setattr(
     require_mount_privilege(&cred)?;
     let path = path.load_string_with_max_len(PATH_MAX)?;
     debug!("sys_mount_setattr <= dfd: {dfd}, path: {path:?}, flags: {flags:#x}");
-    let base = attr.as_ptr() as usize;
-    let attr_set = UserConstPtr::<u64>::from(base).read_vm()?;
-    let attr_clr = UserConstPtr::<u64>::from(base + 8).read_vm()?;
-    // `struct mount_attr` carries two more fields. `propagation` is honoured
-    // through the four `MntNamespace` propagation entry points; `userns_fd` is
-    // only meaningful with `MOUNT_ATTR_IDMAP` and idmapped mounts are not
-    // implemented, so a non-zero descriptor is reported unsupported rather than
-    // silently ignored.
-    let propagation = UserConstPtr::<u64>::from(base + 16).read_vm()?;
-    // Read so the whole published struct is known to be accessible, the way
-    // `copy_struct_from_user` faults on an unreadable page even for a field it
-    // then ignores. Linux only consults the value when IDMAP is requested.
-    let userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
+    let attr = attr.cast::<MountAttr>();
+    let MountAttr {
+        attr_set,
+        attr_clr,
+        propagation,
+        userns_fd,
+    } = attr.read_vm()?;
     // `copy_struct_from_user` handles a larger structure by requiring the bytes
     // this kernel does not know to be zero: a newer caller's extension must not
     // be silently ignored, so a non-zero tail is `E2BIG` rather than success.
-    check_mount_attr_tail(base, size)?;
+    check_mount_attr_tail(attr, size)?;
     // `build_mount_kattr` rejects an attr bit the ABI does not define, so an
     // unknown bit is an error rather than a silent no-op.
     check_mount_attr_bits(attr_set)?;
@@ -694,22 +731,7 @@ pub fn sys_mount_setattr(
         return Err(KError::InvalidInput);
     }
     if attr_set & MOUNT_ATTR_IDMAP != 0 {
-        // `build_mount_idmapped` in full: an oversized descriptor is EINVAL,
-        // `fdget` resolves whatever descriptor was named (descriptor 0 included,
-        // when it is open) so only an unresolvable one is EBADF, and a file that
-        // is not a user-namespace file is EINVAL. No descriptor in this kernel
-        // names a user namespace, so every resolvable descriptor takes that last
-        // arm and the request is refused exactly where Linux refuses it.
-        if userns_fd > i32::MAX as u64 {
-            return Err(KError::InvalidInput);
-        }
-        if kprocess::current_files()
-            .get_file(userns_fd as i32)
-            .is_err()
-        {
-            return Err(KError::BadFileDescriptor);
-        }
-        return Err(KError::InvalidInput);
+        check_idmap_request(userns_fd)?;
     }
     // `build_mount_idmapped` returns 0 without looking at `userns_fd` when
     // neither attribute word names IDMAP, so a stray descriptor is ignored
