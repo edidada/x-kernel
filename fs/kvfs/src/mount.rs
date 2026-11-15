@@ -322,13 +322,18 @@ impl MntNamespace {
         let mut mounts = self.mounts.lock();
         Self::require_mount(&mounts, mountpoint.mount())?;
         Self::registered_mount_at(&mounts, source)?;
-        if mountpoint.mount().is_in_subtree_of(&mount) {
-            return Err(VfsError::FilesystemLoop);
-        }
-        // `do_move_mount` compares `d_is_dir()` of both ends and answers EINVAL
-        // (not ENOTDIR) when they disagree.
+        // `do_move_mount` compares `d_is_dir()` of both ends before it walks the
+        // destination's ancestors, and answers EINVAL (not ENOTDIR) when they
+        // disagree; the ELOOP ancestry walk comes later. Keeping that order means
+        // a mismatched target that also lies in the moved mount's subtree reports
+        // EINVAL, as Linux does, rather than ELOOP.
         if mount.root_path().dentry().as_dir().is_ok() != mountpoint.dentry().as_dir().is_ok() {
             return Err(VfsError::InvalidInput);
+        }
+        // Moving a mount under itself would make the parent chain a cycle, and
+        // every walk from the root would then never terminate.
+        if mountpoint.mount().is_in_subtree_of(&mount) {
+            return Err(VfsError::FilesystemLoop);
         }
         // Re-validate the source edge under the lock before touching it: the
         // stack may have changed since the caller resolved the path.

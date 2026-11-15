@@ -952,14 +952,19 @@ to the modeled `wmem_max`/`rmem_max` (4 MiB), double it, and floor it at
 which is what a client that sets N and reads back expects.
 
 `SIOCOUTQ` and `SIOCINQ`/`FIONREAD` are served by `SocketOps::queue_lengths`, a
-per-transport queue-depth query rather than a generic counter. Unix stream and
-seqpacket report their channel ring occupancy (Linux's `unix_outq_len`/
+per-transport queue-depth query rather than a generic counter. Unix stream
+reports its channel ring occupancy on both sides (Linux's `unix_outq_len`/
 `unix_inq_len`), and TCP reports its receive queue for `SIOCINQ` and its unsent
 transmit buffer for `SIOCOUTQ`; a listening TCP socket answers `EINVAL` like
-`tcp_ioctl`. Unix datagram has no peek operation in its channel, so both answer
-0 — a conservative "nothing queued" rather than a wrong byte count, and unlike
-the stream case it cannot make a client such as dbus-broker treat a working
-socket as broken. `SO_RCVBUF` clamps its hint to
+`tcp_ioctl`.
+
+Unix datagram and seqpacket answer 0 on both: those transports keep messages in
+an `async_channel::Receiver`, which has no peek, so the head message's length is
+not readable without consuming it. 0 is a conservative "nothing queued" rather
+than a wrong byte count, and unlike an `ENOTTY` it cannot make a client such as
+dbus-broker treat a working socket as broken. Reporting real queued bytes for
+them needs a peekable queue, which is a separate change to how datagrams are
+enqueued, dequeued and woken. `SO_RCVBUF` clamps its hint to
 `net.core.rmem_max` (4 MiB), doubles it, and applies the
 `SOCK_MIN_RCVBUF` floor of 2304; `getsockopt` reports the effective limit.
 Lowering the limit does not purge packets already queued. Admission adds the

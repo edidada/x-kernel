@@ -340,13 +340,14 @@ impl NetlinkSocket {
             );
             self.push_responses(responses);
         } else if self.inner.protocol == NETLINK_AUDIT {
-            // This kernel has no audit subsystem. `audit_receive_msg` answers a
-            // message type it does not implement with EINVAL, so an emitter
-            // learns the request was rejected and stops waiting. Reporting
-            // success here instead would leave a caller that set NLM_F_ACK
-            // blocked forever, and ECONNREFUSED (the generic no-kernel-socket
-            // answer) reads as "retry later" where EINVAL says "not supported".
-            return Err(LinuxError::EINVAL.into());
+            // This kernel has no audit subsystem, and Linux's `audit_receive` is
+            // void: the send succeeds and `audit_receive_msg`'s error travels
+            // back as an `NLMSG_ERROR` ack, emitted here through the same
+            // `build_error_response` path rtnetlink uses. Answering success
+            // without the ack is what stalls a caller that set `NLM_F_ACK`, so
+            // the ack is the part that must exist, not the errno.
+            let responses = self.push_audit_unsupported(&request);
+            self.push_responses(responses);
         } else {
             // Linux always ends `netlink_sendmsg` with a unicast to the
             // destination port, including port 0. Protocols without a kernel
@@ -364,6 +365,39 @@ impl NetlinkSocket {
     /// still succeeds and any mutation has already taken effect.  In
     /// particular there is no aggregate reservation that could turn a full
     /// reply queue into `ENOBUFS` before running the request.
+    /// Builds the `NLMSG_ERROR` replies a message to the (absent) audit
+    /// subsystem earns.
+    ///
+    /// Every message type is unimplemented, which is `EINVAL` in
+    /// `audit_receive_msg`, and an error ack is reported whether or not the
+    /// caller asked for one (`audit_receive`: "send an ack if the user asked for
+    /// one ... or if there was an error").
+    fn push_audit_unsupported(&self, request: &[u8]) -> Vec<NetlinkPacket> {
+        let mut responses = Vec::new();
+        let mut remaining = request;
+        while let Some(header) = NlMsgHeader::read(remaining) {
+            let message_len = header.len as usize;
+            if message_len < NLMSG_HDR_LEN || message_len > remaining.len() {
+                break;
+            }
+            responses.push(NetlinkPacket {
+                from: NetlinkAddr { pid: 0, groups: 0 },
+                data: build_error_response_with_cap(
+                    remaining,
+                    LinuxError::EINVAL,
+                    self.inner.cap_ack.load(Ordering::Relaxed),
+                ),
+                credentials: None,
+            });
+            let step = align(message_len).min(remaining.len());
+            if step == 0 {
+                break;
+            }
+            remaining = &remaining[step..];
+        }
+        responses
+    }
+
     fn push_responses(&self, responses: Vec<NetlinkPacket>) {
         let mut queue = self.inner.rx_queue.lock();
         let mut pushed_any = false;
