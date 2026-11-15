@@ -649,6 +649,12 @@ impl Configurable for NetlinkSocket {
             {
                 return Err(KError::OperationNotPermitted);
             }
+            // `netlink_setsockopt` runs under `netlink_table_grab`, the same
+            // table lock `netlink_bind` takes, because `bind` replaces the whole
+            // mask and the two must not interleave. `send_lock` is this
+            // socket's serialisation point and is the one `bind_inner` holds
+            // across that replacement.
+            let _membership_guard = self.inner.send_lock.lock();
             // The first subscription links the socket into the broadcast list
             // (`netlink_update_subscriptions` -> `sk_add_bind_node` on the
             // protocol's `mc_list`), which is independent of `bind()`: a socket
@@ -667,6 +673,9 @@ impl Configurable for NetlinkSocket {
             if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
                 return Err(KError::InvalidInput);
             }
+            // Same table lock as the add path: a concurrent rebind must not
+            // replace the mask between this clear and the list update.
+            let _membership_guard = self.inner.send_lock.lock();
             // The last subscription leaving unlinks the socket from the
             // broadcast list, as `netlink_update_subscriptions` does when the
             // subscription count reaches zero.

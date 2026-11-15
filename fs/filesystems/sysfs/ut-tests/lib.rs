@@ -280,3 +280,27 @@ fn uevent_action_is_the_first_space_separated_token() {
     assert_eq!(parse_uevent_action(b""), Err(VfsError::InvalidInput));
     assert_eq!(parse_uevent_action(b"\n"), Err(VfsError::InvalidInput));
 }
+
+/// logind's `seat_has_vts()` opens `/sys/class/tty/tty0/active`, so the alias
+/// must exist for the `tty`/`tty0` registration and carry the active console.
+#[def_test]
+fn tty0_projects_the_active_console_alias() {
+    init_device_projection();
+    let devices = kvfs::registered_character_devices();
+    let tty0 = devices
+        .iter()
+        .find(|registration| registration.class() == "tty" && registration.name() == "tty0")
+        .expect("the fixed VT console registers tty0");
+
+    let tree = build_tree(&BTreeMap::new(), core::slice::from_ref(tty0));
+    let path = "devices/virtual/tty/tty0/active";
+    let Some(TreeEntry::CharacterAttribute(identity, contents)) = tree.get(path) else {
+        panic!("tty0 must expose the `active` alias");
+    };
+    assert!(identity.same_registration(tty0));
+    assert_eq!(contents, b"tty1\n", "the fixed VT console is VT 1");
+    assert!(
+        tree.contains_key("class/tty/tty0"),
+        "logind opens the alias through /sys/class"
+    );
+}

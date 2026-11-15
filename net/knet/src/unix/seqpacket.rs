@@ -673,6 +673,15 @@ impl Drop for SeqpacketTransport {
         if let Some(slot) = self.bind_slot.lock().take() {
             *slot.lock() = None;
         }
+        // Releasing the receive side discards whatever the peer had not read
+        // yet. Linux's `unix_release_sock` purges the receive queue and the
+        // freed skbs drop the sender's `sk_wmem_alloc`, so the peer's
+        // `SIOCOUTQ` (`unix_outq_len`) falls to 0 with them; leaving the
+        // counter at its last value would report bytes that can never be read.
+        if let Some((rx, _, queued)) = self.rx.lock().take() {
+            rx.close();
+            queued.store(0, Ordering::Relaxed);
+        }
         if let Some(peer) = self.peer.write().take() {
             peer.read_poll.wake();
         }

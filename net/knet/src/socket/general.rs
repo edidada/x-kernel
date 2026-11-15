@@ -385,9 +385,6 @@ impl Configurable for GeneralOptions {
                 // listen override this. The shared default is "not listening".
                 **listening = false;
             }
-            O::ReceiveBufferForce(size) => {
-                **size = self.receive_buffer_bytes.load(Ordering::Relaxed) as usize;
-            }
             O::IpMulticastTtl(ttl) => {
                 **ttl = self.ip_multicast_ttl.load(Ordering::Relaxed) as u32;
             }
@@ -402,9 +399,6 @@ impl Configurable for GeneralOptions {
             }
             O::ReceiveBuffer(size) => {
                 **size = self.receive_buffer_bytes.load(Ordering::Relaxed) as usize;
-            }
-            O::SendBufferForce(size) => {
-                **size = self.send_buffer_bytes.load(Ordering::Relaxed) as usize;
             }
             O::BindToDevice(name) => {
                 let ifindex = self.bound_dev_if();
