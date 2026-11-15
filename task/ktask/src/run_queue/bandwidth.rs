@@ -63,10 +63,16 @@ pub(crate) fn account_current(
     register_tracker_once(&tracker);
     register_member(&tracker, current);
 
-    if tracker.charge(elapsed_ns / 1_000, now_ns) {
+    // Close an expired window before charging the new period. `charge()`
+    // rolls the period over, so polling afterwards would observe zero elapsed
+    // time and never resume members parked in the previous window.
+    if tracker.poll(now_ns) {
+        resume_group(&tracker);
+    }
+    let started_throttle = tracker.charge(elapsed_ns / 1_000, now_ns);
+    if started_throttle || tracker.is_throttled() {
         park_group(&tracker, now_ns);
     }
-    poll_trackers(now_ns);
     current.is_cgroup_parked()
 }
 
