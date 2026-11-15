@@ -492,9 +492,17 @@ pub fn sys_open_tree(dfd: c_int, path: UserConstPtr<c_char>, flags: u32) -> KRes
     if flags & AT_EMPTY_PATH != 0 {
         lookup |= LookupFlags::EMPTY_PATH;
     }
-    let source = with_fs_at(dfd, &filename, |fs| {
-        filename.lookup_at(fs.root(), fs.pwd(), LookupIntent::Open, lookup, &cred)
-    })?;
+    // An empty path with `AT_EMPTY_PATH` names the descriptor itself, so it is
+    // taken straight from the fd instead of being walked: `with_fs_at` refuses
+    // a non-directory descriptor with ENOTDIR before the walk, while Linux's
+    // `path_init` applies that test only when there is a pathname.
+    let source = if path.is_empty() && flags & AT_EMPTY_PATH != 0 && dfd != AT_FDCWD {
+        kprocess::current_files().get_file(dfd)?.path().clone()
+    } else {
+        with_fs_at(dfd, &filename, |fs| {
+            filename.lookup_at(fs.root(), fs.pwd(), LookupIntent::Open, lookup, &cred)
+        })?
+    };
     let (root, kept, open_path) = if is_clone {
         let namespace = kprocess::current_user_process().mnt_ns()?;
         // Linux's `__do_loopback` clones only the named mount unless the caller

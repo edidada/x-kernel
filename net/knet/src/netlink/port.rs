@@ -312,30 +312,27 @@ pub(super) fn publish(
     };
 
     for socket in recipients {
-        // The filter above is only a snapshot: `bind()` can replace the
-        // subscription mask after it is released.  Hold the address lock from
-        // the mask check through the enqueue; `bind_inner()` takes the write
-        // side before publishing the new mask.  A concurrent unsubscribe
-        // therefore either wins and suppresses this packet, or waits until the
-        // packet is queued, never removing the group between the check and the
-        // push.
-        // The subscription mask lives on the socket, not on the bound address:
-        // `NETLINK_ADD_MEMBERSHIP` is valid before `bind()` allocates a port,
-        // and an unbound subscriber must still receive its groups.
-        if socket.groups.load(Ordering::Relaxed) & mask == 0 {
-            continue;
-        }
+        // The registry snapshot above is not a decision: `bind()` can replace
+        // the subscription mask after it is released. Hold the address lock from
+        // the mask check through the enqueue; `bind_inner()` takes the write side
+        // before publishing the new mask, so a concurrent unsubscribe either
+        // wins and suppresses this packet or waits until it is queued, never
+        // removing the group between the check and the push.
+        let addr_guard = socket.local_addr.read();
         // A socket with no bound address receives nothing. Linux registers a
         // socket with the protocol's multicast list on `bind()`
-        // (`netlink_insert`), not on `NETLINK_ADD_MEMBERSHIP`, so a subscription
-        // taken before the socket has a port id has no recipient entry to
-        // deliver to; the subscription becomes effective when `bind()` inserts
-        // it. Delivering here instead handed unbound sockets messages they had
-        // no address to describe the sender of.
-        let addr_guard = socket.local_addr.read();
+        // (`netlink_insert`), not on `NETLINK_ADD_MEMBERSHIP`, and
+        // `netlink_update_listeners` walks `sk_for_each_bound`, so a socket that
+        // has never bound has no recipient entry. A subscription taken first is
+        // honoured once `bind()` inserts the socket.
         let Some(local_addr) = *addr_guard else {
             continue;
         };
+        // The mask is read under the same lock as the address, so the two cannot
+        // disagree about whether this socket is a recipient.
+        if socket.groups.load(Ordering::Relaxed) & mask == 0 {
+            continue;
+        }
         if exclude_pid == Some(local_addr.pid) {
             continue;
         }

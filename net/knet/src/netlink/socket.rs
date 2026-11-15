@@ -16,6 +16,7 @@ use super::{
     NetlinkSocketInner, UEVENT_SEQNUM, port,
     rtnetlink::{
         build_ack_response, build_error_response_with_cap, handle_rtnetlink_request_with_cred,
+        normalize_reply_ports,
     },
     wire::{NlMsgHeader, align},
 };
@@ -395,7 +396,14 @@ impl NetlinkSocket {
             }
             remaining = &remaining[step..];
         }
-        responses
+        // `netlink_ack` stamps the reply with the sender's port id
+        // (`NETLINK_CB(skb).portid`), not with the `nlmsg_pid` the sender wrote
+        // into its request, so a sender that left that field zero can still
+        // match the ack to its socket.
+        normalize_reply_ports(
+            responses,
+            self.local_addr_inner().map_or(0, |addr| addr.pid),
+        )
     }
 
     fn push_responses(&self, responses: Vec<NetlinkPacket>) {
