@@ -303,10 +303,13 @@ impl Cgroup {
     }
 
     fn deactivate_controllers(&self) {
-        if let Some(controller) = self.controllers.memory() {
+        let active = self.controllers.memory();
+        let retained = self.memory_node.lock().take();
+        if let Some(controller) = &active {
             memacct::remove(controller.memcg().id());
+        } else if let Some(node) = retained {
+            memacct::remove(node.id());
         }
-        *self.memory_node.lock() = None;
         for controller in self.controllers.controllers() {
             controller.deactivate();
         }
@@ -567,10 +570,21 @@ impl Cgroup {
         if !self.is_active() {
             return Err(KError::from(LinuxError::ENOENT));
         }
+        // Linux applies duplicate tokens last-token-wins. Dedup before any
+        // mutation so a disable/enable pair does not tear down child state.
+        let mut resolved: alloc::vec::Vec<(ControllerKind, bool)> =
+            alloc::vec::Vec::with_capacity(operations.len());
         for &(kind, enabled) in operations {
+            if let Some(existing) = resolved.iter_mut().find(|(known, _)| *known == kind) {
+                existing.1 = enabled;
+            } else {
+                resolved.push((kind, enabled));
+            }
+        }
+        for &(kind, enabled) in &resolved {
             self.validate_subtree_control(kind, enabled)?;
         }
-        for &(kind, enabled) in operations {
+        for &(kind, enabled) in &resolved {
             let _ = self.set_subtree_control_locked(kind, enabled)?;
         }
         Ok(())
@@ -763,6 +777,36 @@ impl Cgroup {
             .map(|controller| controller.bandwidth())
     }
 
+    /// Returns the nearest live cpu bandwidth tracker, including ancestors.
+    pub fn effective_cpu_bandwidth(&self) -> Option<alloc::sync::Arc<kbandwidth::Bandwidth>> {
+        if let Some(controller) = self.controllers.cpu() {
+            return Some(controller.bandwidth());
+        }
+        let mut current = self.parent();
+        while let Some(node) = current {
+            if let Some(controller) = node.controllers.cpu() {
+                return Some(controller.bandwidth());
+            }
+            current = node.parent();
+        }
+        None
+    }
+
+    /// Returns the nearest live cpu weight, including ancestors.
+    pub fn effective_cpu_weight(&self) -> u32 {
+        if let Some(controller) = self.controllers.cpu() {
+            return controller.weight();
+        }
+        let mut current = self.parent();
+        while let Some(node) = current {
+            if let Some(controller) = node.controllers.cpu() {
+                return controller.weight();
+            }
+            current = node.parent();
+        }
+        100
+    }
+
     /// Returns the cpu controller owned by this cgroup itself.
     ///
     /// # Errors
@@ -854,6 +898,13 @@ impl Cgroup {
     /// Returns `ENOENT` when this cgroup has no live cpuset controller.
     pub fn cpuset_mems(&self) -> KResult<NodeMask> {
         Ok(self.cpuset_controller()?.mems())
+    }
+
+    /// Restores effective cpuset masks captured before a transactional write.
+    pub fn restore_cpuset_effective(&self, cpus: CpuMask, mems: NodeMask) {
+        if let Ok(controller) = self.cpuset_controller() {
+            controller.restore_effective(cpus, mems);
+        }
     }
 
     /// Returns the effective NUMA-node mask for this cgroup.
@@ -1010,14 +1061,10 @@ fn default_universe() -> (CpuMask, NodeMask) {
             found = true;
         }
     });
-    if !found || cpus.iter().count() == 1 {
-        // The hierarchy root is created before secondary CPUs are discoverable
-        // on some platforms. Seed the possible-CPU universe so a boot-CPU-only
-        // root bound cannot pin every descendant to CPU0; the runtime refresh
-        // narrows it once the present map is published.
-        for cpu in 0..kbuild_config::NR_CPUS {
-            cpus.insert(cpu);
-        }
+    if !found {
+        // Before the CPU map exists only the boot CPU is known; the root
+        // universe is refreshed once the present map is published.
+        cpus.insert(0);
     }
     let mut mems = NodeMask::empty();
     // Only node 0 is represented until NUMA topology is published.

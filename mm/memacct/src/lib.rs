@@ -492,20 +492,6 @@ fn record_stats_locked(node: &Memcg, target: &Memcg, bytes: u64, class: ChargeCl
     node.subtree_stats.add(class, bytes);
 }
 
-fn release_subtree_stats_locked(node: &Memcg, bytes: u64, class: ChargeClass) {
-    node.subtree_stats.subtract(class, bytes);
-    if let Some(parent) = &node.parent {
-        release_subtree_stats_locked(parent, bytes, class);
-    }
-}
-
-fn release_stats_locked(node: &Memcg, target: &Memcg, bytes: u64, class: ChargeClass) {
-    if core::ptr::eq(node, target) {
-        node.stats.subtract(class, bytes);
-    }
-    release_subtree_stats_locked(node, bytes, class);
-}
-
 fn uncharge_locked(node: &Memcg, target: &Memcg, bytes: u64, class: ChargeClass) {
     if core::ptr::eq(node, target) {
         node.usage.fetch_sub(bytes, Ordering::AcqRel);
@@ -518,21 +504,26 @@ fn uncharge_locked(node: &Memcg, target: &Memcg, bytes: u64, class: ChargeClass)
     }
 }
 
-fn release_subtree_locked(node: &Memcg, bytes: u64) {
-    node.subtree_usage.fetch_sub(bytes, Ordering::AcqRel);
-    if let Some(parent) = &node.parent {
-        release_subtree_locked(parent, bytes);
+fn check_limits(node: &Arc<Memcg>, bytes: u64) -> Result<(), Arc<Memcg>> {
+    let max = node.max.load(Ordering::Acquire);
+    if max != UNLIMITED
+        && node
+            .subtree_usage
+            .load(Ordering::Acquire)
+            .saturating_add(bytes)
+            > max
+    {
+        return Err(node.clone());
     }
+    if let Some(parent) = &node.parent {
+        check_limits(parent, bytes)?;
+    }
+    Ok(())
 }
 
-fn charge_locked(
-    node: &Arc<Memcg>,
-    target: &Arc<Memcg>,
-    bytes: u64,
-    class: ChargeClass,
-) -> Result<(), MemcgId> {
+fn charge_locked(node: &Arc<Memcg>, target: &Arc<Memcg>, bytes: u64, class: ChargeClass) {
     if let Some(parent) = &node.parent {
-        charge_locked(parent, target, bytes, class)?;
+        charge_locked(parent, target, bytes, class);
     }
 
     let is_target = Arc::ptr_eq(node, target);
@@ -544,16 +535,6 @@ fn charge_locked(
     let previous_subtree = node.subtree_usage.fetch_add(bytes, Ordering::AcqRel);
     record_stats_locked(node, target, bytes, class);
     let charged_subtree = previous_subtree.saturating_add(bytes);
-    let max = node.max.load(Ordering::Acquire);
-    if max != UNLIMITED && charged_subtree > max {
-        if is_target {
-            node.usage.fetch_sub(bytes, Ordering::AcqRel);
-        }
-        release_subtree_locked(node, bytes);
-        release_stats_locked(node, target, bytes, class);
-        note_event_locked(node, EventKind::Max);
-        return Err(node.id);
-    }
 
     if let Some(previous) = previous {
         let charged = previous.saturating_add(bytes);
@@ -571,22 +552,22 @@ fn charge_locked(
     // `low`/`high` are thresholds for a future reclaim path. This kernel has
     // no reclaim implementation, so it does not manufacture reclaim-failure
     // events: those counters remain zero until reclaim exists.
-    Ok(())
 }
 
 fn charge_bytes_class(node: &Arc<Memcg>, bytes: u64, class: ChargeClass) -> KResult<()> {
     if bytes == 0 {
         return Ok(());
     }
-    let failed = {
+    {
         let _guard = CHARGE_LOCK.lock();
         if node.dead.load(Ordering::Acquire) {
             return Err(KError::InvalidInput);
         }
-        charge_locked(node, node, bytes, class).err()
-    };
-    if failed.is_some() {
-        return Err(KError::NoMemory);
+        if let Err(failed) = check_limits(node, bytes) {
+            note_event_locked(&failed, EventKind::Max);
+            return Err(KError::NoMemory);
+        }
+        charge_locked(node, node, bytes, class);
     }
     Ok(())
 }

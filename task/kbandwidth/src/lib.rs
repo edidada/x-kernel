@@ -44,6 +44,7 @@ pub struct Bandwidth {
     /// Cumulative charged runtime across periods, in microseconds.
     usage_us: AtomicU64,
     state: SpinNoIrq<State>,
+    closed: core::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -75,6 +76,7 @@ impl Bandwidth {
             throttled_usec: AtomicU64::new(0),
             usage_us: AtomicU64::new(0),
             state: SpinNoIrq::new(State::default()),
+            closed: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -125,6 +127,25 @@ impl Bandwidth {
     /// Returns the cumulative charged runtime, in microseconds.
     pub fn total_usage_us(&self) -> u64 {
         self.usage_us.load(Ordering::Acquire)
+    }
+
+    /// Marks the tracker closed after its controller is disabled.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Reopens a tracker after its quota changed while throttled.
+    pub fn reopen(&self) {
+        self.closed.store(false, Ordering::Release);
+        let mut state = self.state.lock();
+        state.throttled = false;
+        state.runtime_us = 0;
+        state.anchor_ns = 0;
+    }
+
+    /// Reports whether the tracker has been retired.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Reports whether members are currently throttled.

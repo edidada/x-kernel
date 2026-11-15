@@ -103,7 +103,7 @@ impl TaskCharge {
                 cgroup.is_active(),
                 "committing a task charge to inactive cgroup"
             );
-            if charges.len() != cgroup.controller_lineage().len() {
+            if !charges.matches_lineage(&cgroup.controller_lineage()) {
                 // A concurrent subtree_control transition changed the
                 // lineage after the reservation. Fail the commit without
                 // panicking; Drop releases the reserved controller charges.

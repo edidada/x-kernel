@@ -25,7 +25,7 @@ pub(crate) fn files(
     fs: Arc<SimpleFs>,
     cgroup: Arc<Cgroup>,
 ) -> Vec<(&'static str, Arc<SimpleFile>)> {
-    alloc::vec![
+    let mut files = alloc::vec![
         ("memory.current", current_file(fs.clone(), cgroup.clone())),
         ("memory.peak", peak_file(fs.clone(), cgroup.clone())),
         ("memory.max", max_file(fs.clone(), cgroup.clone())),
@@ -41,8 +41,18 @@ pub(crate) fn files(
             "memory.events.local",
             events_local_file(fs.clone(), cgroup.clone()),
         ),
-        ("memory.stat", stat_file(fs, cgroup)),
-    ]
+        ("memory.stat", stat_file(fs, cgroup.clone())),
+    ];
+    if cgroup.parent().is_none() {
+        // Linux does not expose writable memory knobs on the hierarchy root.
+        files.retain(|(name, _)| {
+            !matches!(
+                *name,
+                "memory.peak" | "memory.max" | "memory.high" | "memory.low" | "memory.swap.max"
+            )
+        });
+    }
+    files
 }
 
 fn current_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Arc<SimpleFile> {

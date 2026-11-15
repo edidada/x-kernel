@@ -168,6 +168,16 @@ impl ChargeSet {
         self.guards.is_empty()
     }
 
+    /// Reports whether this set still names the exact controller instances.
+    pub(crate) fn matches_lineage(&self, lineage: &[Arc<dyn Controller>]) -> bool {
+        self.guards.len() == lineage.len()
+            && self
+                .guards
+                .iter()
+                .zip(lineage)
+                .all(|(guard, controller)| Arc::ptr_eq(&guard.controller, controller))
+    }
+
     /// Commits every charge in the set.
     pub fn commit(self) {
         for guard in self.guards {

@@ -151,7 +151,7 @@ fn controller_files_appear_only_while_the_controller_is_live() {
     let state = fs.private::<crate::state::CgroupFsState>().unwrap();
     let root_node = state.node(root.clone()).unwrap();
 
-    assert!(root_node.file("cpuset.cpus").is_some());
+    assert!(root_node.file("cpuset.cpus").is_none());
     assert!(root_node.file("cpuset.cpus.effective").is_some());
     assert!(root_node.file("pids.current").is_none());
     assert!(root_node.file("pids.max").is_none());
@@ -191,7 +191,7 @@ fn memory_control_files_are_visible_only_while_the_controller_is_live() {
     let root_node = state.node(root.clone()).unwrap();
 
     assert!(root_node.file("memory.current").is_some());
-    assert!(root_node.file("memory.max").is_some());
+    assert!(root_node.file("memory.max").is_none());
 
     let child = root.create_child("memory-child").unwrap();
     let child_node = state.node(child.clone()).unwrap();

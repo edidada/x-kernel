@@ -24,6 +24,19 @@ pub(crate) fn files(
     fs: Arc<SimpleFs>,
     cgroup: Arc<Cgroup>,
 ) -> Vec<(&'static str, Arc<SimpleFile>)> {
+    if cgroup.parent().is_none() {
+        // The root universe is read-only; only effective masks are exposed.
+        return alloc::vec![
+            (
+                "cpuset.cpus.effective",
+                effective_file(fs.clone(), cgroup.clone(), CpusetField::Cpus),
+            ),
+            (
+                "cpuset.mems.effective",
+                effective_file(fs, cgroup, CpusetField::Mems),
+            ),
+        ];
+    }
     alloc::vec![
         (
             "cpuset.cpus",
@@ -64,6 +77,20 @@ impl CpusetField {
     fn write(self, cgroup: &Arc<Cgroup>, text: &str) -> VfsResult<()> {
         let old_cpus = cgroup.cpuset_cpus()?;
         let old_mems = cgroup.cpuset_mems()?;
+        let mut effective = Vec::new();
+        effective.push((
+            cgroup.clone(),
+            cgroup.cpuset_effective_cpus()?,
+            cgroup.cpuset_effective_mems()?,
+        ));
+        for descendant in cgroup.descendants() {
+            if let (Ok(cpus), Ok(mems)) = (
+                descendant.cpuset_effective_cpus(),
+                descendant.cpuset_effective_mems(),
+            ) {
+                effective.push((descendant, cpus, mems));
+            }
+        }
         match self {
             Self::Cpus => {
                 let mask = CpuMask::parse_list(text)?;
@@ -81,6 +108,9 @@ impl CpusetField {
             // no task actually obeys.
             let _ = cgroup.set_cpuset_cpus(old_cpus);
             let _ = cgroup.set_cpuset_mems(old_mems);
+            for (node, cpus, mems) in effective {
+                node.restore_cpuset_effective(cpus, mems);
+            }
             let _ = apply_cpuset_affinity_to_subtree(cgroup);
             return Err(error);
         }

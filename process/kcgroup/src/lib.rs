@@ -58,7 +58,10 @@ pub fn install_bandwidth_release_hook(hook: BandwidthReleaseHook) {
 }
 
 pub(crate) fn release_bandwidth(tracker: &Arc<Bandwidth>) {
-    if let Some(hook) = *BANDWIDTH_RELEASE_HOOK.lock() {
+    // Copy the function pointer out before calling it: CG-013 forbids holding
+    // the SpinNoIrq guard across scheduler code.
+    let hook = *BANDWIDTH_RELEASE_HOOK.lock();
+    if let Some(hook) = hook {
         hook(tracker);
     }
 }

@@ -68,6 +68,10 @@ pub(crate) fn account_current(
         poll_trackers(now_ns);
         return false;
     };
+    if tracker.is_closed() {
+        current.set_cgroup_parked(false);
+        return false;
+    }
     register_tracker_once(&tracker);
     register_member(&tracker, current);
 
@@ -99,6 +103,9 @@ pub(crate) fn poll_trackers(now_ns: u64) {
             resumed.push(tracker);
         }
     }
+    MEMBERS
+        .lock()
+        .retain(|member| member.task.upgrade().is_some() && member.tracker.strong_count() != 0);
     for tracker in &resumed {
         resume_group(tracker);
     }
@@ -192,6 +199,7 @@ pub(crate) fn forget_member(task: &KtaskRef) {
 /// Resumes parked members before dropping the tracker; otherwise they would
 /// remain unselectable forever with no live tracker to close the window.
 pub(crate) fn release_tracker(tracker: &Arc<Bandwidth>) {
+    tracker.close();
     resume_group(tracker);
     MEMBERS.lock().retain(|member| {
         !member

@@ -449,6 +449,7 @@ pub fn on_timer_fire() {
         }
     }
     let now_ns = khal::time::monotonic_time_nanos();
+    crate::run_queue::bandwidth::poll_trackers(now_ns);
     let cpu_id = khal::percpu::this_cpu_id();
     // Any local timer IRQ means this CPU is still taking interrupts. Watchdog
     // hardlockup must not wait for the 4s sample callback: a busy lone task

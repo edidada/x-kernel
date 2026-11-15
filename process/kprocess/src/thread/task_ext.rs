@@ -43,16 +43,17 @@ impl UserTaskRuntime for Thread {
     }
 
     fn cpu_bandwidth(&self) -> Option<Arc<Bandwidth>> {
-        self.cgroup().and_then(|cgroup| cgroup.cpu_bandwidth())
+        self.cgroup()
+            .and_then(|cgroup| cgroup.effective_cpu_bandwidth())
     }
 
     fn cpu_weight(&self) -> u32 {
         self.cgroup()
-            .and_then(|cgroup| cgroup.cpu_controller().ok())
-            .map_or(100, |controller| controller.weight())
+            .map_or(100, |cgroup| cgroup.effective_cpu_weight())
     }
 
     fn cgroup_cpus(&self) -> Option<ktask::KCpuMask> {
+        kcgroup::refresh_root_cpuset_universe();
         let mut mask = ktask::KCpuMask::new();
         match self.cgroup() {
             Some(cgroup) => {
@@ -63,7 +64,7 @@ impl UserTaskRuntime for Thread {
                 // that stale root universe; child cgroups keep their explicit
                 // narrow mask.
                 if cgroup.parent().is_none() && count == 1 && kcpu_id_map::nr_cpus() > 1 {
-                    for cpu in 0..kcpu_id_map::nr_cpus().max(kbuild_config::NR_CPUS) {
+                    for cpu in 0..kcpu_id_map::nr_cpus() {
                         mask.set(cpu, true);
                     }
                 } else {

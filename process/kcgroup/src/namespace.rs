@@ -153,8 +153,8 @@ impl CgroupNamespace {
 /// consistent with the firmware-present CPU set.
 pub fn refresh_root_cpuset_universe() {
     let root = CgroupNamespace::initial().root();
-    let count = kcpu_id_map::nr_cpus().max(kbuild_config::NR_CPUS);
-    if count <= 1 {
+    let count = kcpu_id_map::nr_cpus();
+    if count == 0 {
         return;
     }
     let mut mask = CpuMask::empty();

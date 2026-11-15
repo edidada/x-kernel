@@ -393,9 +393,9 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     }
 
     fn is_buddy_eligible(&self, avg: i64, tok: RqLocked) -> bool {
-        self.next_buddy
-            .as_ref()
-            .is_some_and(|buddy| is_eligible(buddy.fair().vruntime.get(tok), avg))
+        self.next_buddy.as_ref().is_some_and(|buddy| {
+            !buddy.is_cgroup_parked() && is_eligible(buddy.fair().vruntime.get(tok), avg)
+        })
     }
 
     fn entity_before(a: &SchedTask<T>, b: &SchedTask<T>, tok: RqLocked) -> bool {

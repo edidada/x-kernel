@@ -330,6 +330,12 @@ impl CpusetController {
         *current_mems = effective_mems;
     }
 
+    /// Restores a previously captured effective mask pair during rollback.
+    pub(crate) fn restore_effective(&self, cpus: IndexMask, mems: IndexMask) {
+        *self.effective_cpus.write() = cpus;
+        *self.effective_mems.write() = mems;
+    }
+
     /// Resets the controller to an inactive-equivalent state.
     pub fn clear(&self) {
         *self.cpus.write() = IndexMask::empty();
