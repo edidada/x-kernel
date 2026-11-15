@@ -387,12 +387,16 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
         let _association = self.terminal.association.lock();
         let pg = proc.group();
         let session = pg.session();
-        // `tiocsctty`: a caller that already owns this terminal succeeds without
-        // changing anything.
+        // `tiocsctty`: a caller that is its session's leader and whose session
+        // already owns this terminal succeeds without changing anything. The
+        // leader test is part of the condition, not an extra one - a mere
+        // member of the owning session must fall through to the `signal->tty`
+        // check below and be refused.
         let tty_session = self.terminal.job_control.session();
-        if tty_session
-            .as_ref()
-            .is_some_and(|owner| Arc::ptr_eq(owner, &session))
+        if session.sid() == proc.pid()
+            && tty_session
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &session))
         {
             return Ok(());
         }

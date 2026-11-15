@@ -279,9 +279,16 @@ reserved for foreground readers. Linux's full
 `SIGTTIN`/orphaned-process-group semantics are not implemented yet.
 
 `TIOCSCTTY` with `arg == 1` performs Linux's privileged cross-session forced
-acquisition. It is guarded by two checks before any state changes: the caller
-must be its session's leader (`session.sid() == pid`, else `EPERM`), and it must
-hold `CAP_SYS_ADMIN` (else `EPERM`). A steal replaces the current owner, so the
+acquisition. `tiocsctty`'s conditions are applied before any state changes:
+
+- a caller that is its session's leader *and* whose session already owns the
+  terminal succeeds without changing anything;
+- otherwise the caller must be its session's leader **and** have no controlling
+  terminal yet (the `signal->tty` test), else `EPERM`;
+- `CAP_SYS_ADMIN` is required only for taking the terminal away from a live
+  session; claiming one that no session owns needs no capability.
+
+A steal replaces the current owner, so the
 previous claim is released before the new one is installed - the two are mutually
 exclusive and `ensure_session` would otherwise answer `EBUSY`, which is the case
 this path exists for. Everything the call changes is rolled back on failure,

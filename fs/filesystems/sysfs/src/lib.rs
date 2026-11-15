@@ -1136,10 +1136,12 @@ impl SimpleDirOps for SysfsDirectory {
                     match operation {
                         SimpleFileOperation::Read => Ok(Some(contents.clone())),
                         SimpleFileOperation::Write { data, .. } => {
-                            // Same first-token rule as the device-node uevent
-                            // attribute: extra `KEY=VALUE` words are allowed.
-                            let text =
-                                core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            // Same first-token rule and the same one-terminator
+                            // allowance as the device-node uevent attribute:
+                            // extra `KEY=VALUE` words are allowed and a trailing
+                            // newline or NUL is dropped first.
+                            let text = core::str::from_utf8(strip_action_terminator(data))
+                                .map_err(|_| VfsError::InvalidInput)?;
                             let action = text
                                 .split_ascii_whitespace()
                                 .next()
