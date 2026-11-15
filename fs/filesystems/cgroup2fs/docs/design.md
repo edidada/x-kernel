@@ -152,4 +152,8 @@ values and projects the accounting/control state.
 
 `memory.max` and `cpu.max` are enforced by their owning subsystems, not by the
 filesystem adapter. A write validates the Linux domain before mutating state;
-a rejected write leaves the previous value in place.
+a rejected write leaves the previous value in place. `cpu.weight` is applied
+to existing members and sampled by new or migrated tasks. `cpuset.cpus`/`mems`
+writes roll back both controller masks and task affinity when member application
+fails; cgroups without their own cpuset controller apply the nearest ancestor's
+effective masks.

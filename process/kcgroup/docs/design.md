@@ -76,7 +76,10 @@ request inherits the parent's effective mask. A non-empty request must be a
 subset of the parent's effective mask and of the machine universe, otherwise
 the setter returns `EINVAL` or `ENODEV` respectively. A request that would make
 the effective mask empty returns `ENOSPC`. Request changes refresh effective
-masks through the whole subtree under the hierarchy transaction. Cpuset
+masks through the whole subtree under the hierarchy transaction. The filesystem
+adapter treats the controller write and task-affinity application as one
+transaction: an `ENOSPC` restores the old requested masks and reapplies the old
+effective masks. Cpuset
 delegation follows the same parent-ownership and no-internal-process rules as
 pids. The no-internal-process rule applies to direct members only, so a node
 may delegate while its descendants hold tasks. Enabling a controller for
