@@ -600,13 +600,15 @@ fn apply_mount_propagation(
 ///
 /// # Execution context
 ///
-/// Requires a current process thread: it checks the caller's credentials, reads
-/// its fd table (`AT_EMPTY_PATH`) and mount namespace. An IRQ handler, a
-/// softirq or a kernel task without a current process cannot call it. It may
-/// sleep while resolving the target path and applying attributes, so callers
-/// must hold no spinlock and no IRQ-disable or preempt-disable guard. The
-/// namespace registry lock is taken and released inside the call; a caller must
-/// not already hold it (nor the inode locks of the resolved path) on entry.
+/// Requires a current process thread. It reads three current-context resources:
+/// `current_cred()` for the privilege check, `current_files()` for the
+/// `AT_EMPTY_PATH` descriptor and `current_user_process()`'s mount namespace.
+/// An IRQ handler, a softirq or a kernel task without a current process cannot
+/// call it. It may sleep while resolving the target path and applying
+/// attributes, so callers must hold no spinlock and no IRQ-disable or
+/// preempt-disable guard. The namespace registry lock is taken and released
+/// inside the call; a caller must not already hold it (nor the inode locks of
+/// the resolved path) on entry.
 pub fn sys_mount_setattr(
     dfd: c_int,
     path: UserConstPtr<c_char>,
