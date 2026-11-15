@@ -3,8 +3,9 @@
 ## Positioning
 
 `posix-mm` implements the POSIX/Linux-style memory-management syscall entry points, including
-`mmap`, `mremap`, `brk`, `madvise`, `msync`, `mincore`, and
-`memfd_create`. It sits between the userspace ABI and the kernel `mm`/`fs` subsystems, and is responsible only for
+`mmap`, `mremap`, `brk`, `madvise`, `msync`, `mincore`, `memfd_create`, and the
+`mlockall`/`munlockall` pair (validated no-ops: the kernel has no swap, so every
+page is already resident). It sits between the userspace ABI and the kernel `mm`/`fs` subsystems, and is responsible only for
 argument validation, typed request construction, object assembly, and error-code translation.
 
 `posix-mm` does not own the VMA tree, page tables, the page cache, file objects, or anonymous objects.

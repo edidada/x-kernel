@@ -281,11 +281,14 @@ reserved for foreground readers. Linux's full
 `TIOCSCTTY` with `arg == 1` performs Linux's privileged cross-session forced
 acquisition. It is guarded by two checks before any state changes: the caller
 must be its session's leader (`session.sid() == pid`, else `EPERM`), and it must
-hold `CAP_SYS_ADMIN` (else `EPERM`). The new association is installed before the
-previous owner's claim is released, so a rejected or failed steal leaves the
-terminal exactly as it was rather than stranding it without a session; a session
-that already names a different terminal yields `EBUSY`. Other non-zero arguments
-return `EINVAL`.
+hold `CAP_SYS_ADMIN` (else `EPERM`). A steal replaces the current owner, so the
+previous claim is released before the new one is installed - the two are mutually
+exclusive and `ensure_session` would otherwise answer `EBUSY`, which is the case
+this path exists for. Everything the call changes is rolled back on failure,
+including the previous owner's foreground group (clearing a session drops it too),
+so a rejected steal leaves the terminal exactly as it was rather than stranding
+it without a session; a session that already names a different terminal yields
+`EBUSY`. Other non-zero arguments return `EINVAL`.
 
 This is the only `TIOCSCTTY` path that reassigns a terminal an existing getty
 holds, which is why it is capability-gated rather than merely
