@@ -23,7 +23,7 @@ use kvfs::{
     dentry_open, path::PATH_MAX,
 };
 use linux_raw_sys::general::{
-    AT_EMPTY_PATH, AT_RECURSIVE, FSMOUNT_CLOEXEC, FSOPEN_CLOEXEC, MOUNT_ATTR_NODEV,
+    AT_EMPTY_PATH, AT_FDCWD, AT_RECURSIVE, FSMOUNT_CLOEXEC, FSOPEN_CLOEXEC, MOUNT_ATTR_NODEV,
     MOUNT_ATTR_NOEXEC, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NOSYMFOLLOW, MOUNT_ATTR_RDONLY,
     MOVE_MOUNT_F_EMPTY_PATH, O_DIRECTORY, O_RDONLY, OPEN_TREE_CLOEXEC, OPEN_TREE_CLONE,
 };
@@ -707,16 +707,21 @@ pub fn sys_mount_setattr(
     if flags & 0x100 != 0 {
         lookup = LookupFlags::no_follow();
     }
-    // An empty `AT_EMPTY_PATH` that did not name a mount fd still names that
-    // descriptor's own path. Linux's `path_init` skips the `d_can_lookup` test
-    // (no pathname to walk) and `do_mount_setattr` then answers EINVAL because
-    // the dentry is not a mount root, so a non-directory descriptor is refused
-    // here instead of by the lookup. The global `with_fs_at` keeps its
-    // directory requirement for every other `*at` syscall.
-    if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
-        let file = kprocess::current_files().get_file(dfd)?;
-        if file.path().dentry().as_dir().is_err() {
-            return Err(KError::InvalidInput);
+    if flags & AT_EMPTY_PATH != 0 {
+        // An empty path names the descriptor itself (`LOOKUP_EMPTY` in Linux's
+        // `path_init`), so it must resolve to the fd's own path rather than be
+        // walked as a pathname.
+        lookup |= LookupFlags::EMPTY_PATH;
+        if path.is_empty() && dfd != AT_FDCWD {
+            // Linux applies the `d_can_lookup` test only when a pathname is
+            // walked; without one it reaches `do_mount_setattr`, which answers
+            // EINVAL for a descriptor that is not a mount root. `with_fs_at`
+            // below keeps its directory requirement for every other `*at`
+            // syscall, so a non-directory descriptor is refused here instead.
+            let file = kprocess::current_files().get_file(dfd)?;
+            if file.path().dentry().as_dir().is_err() {
+                return Err(KError::InvalidInput);
+            }
         }
     }
     let target = with_fs_at(dfd, &filename, |fs| {
