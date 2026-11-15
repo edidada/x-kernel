@@ -83,9 +83,7 @@ impl AnonInodeFs {
     where
         T: Any + Send + Sync + 'static,
     {
-        let open_flags =
-            open_flags & (OpenFlags::WRITE_ONLY | OpenFlags::READ_WRITE | OpenFlags::NONBLOCK);
-        let file = self.mount.alloc_file_pseudo(
+        let file = self.open_shared(
             self.singleton_inode.clone(),
             name,
             mode,
@@ -115,9 +113,7 @@ impl AnonInodeFs {
     where
         T: Any + Send + Sync + 'static,
     {
-        let open_flags =
-            open_flags & (OpenFlags::WRITE_ONLY | OpenFlags::READ_WRITE | OpenFlags::NONBLOCK);
-        let file = self.mount.alloc_file_pseudo(
+        let file = self.open_shared(
             self.socket_inode.clone(),
             name,
             mode,
@@ -127,6 +123,26 @@ impl AnonInodeFs {
         )?;
         file.set_private_data(private_data);
         Ok(file)
+    }
+
+    /// Opens `name` on one of the two shared inodes.
+    ///
+    /// Only the inode differs between the two entry points: every anonymous
+    /// file shares its inode with the others of its kind, so the access mode is
+    /// the per-descriptor part and the remaining open flags are dropped.
+    fn open_shared(
+        &self,
+        inode: Arc<VfsInode>,
+        name: &str,
+        mode: FMode,
+        open_flags: OpenFlags,
+        file_operations: Arc<dyn FileOperations>,
+        cred: Arc<Cred>,
+    ) -> VfsResult<Arc<VfsFile>> {
+        let open_flags =
+            open_flags & (OpenFlags::WRITE_ONLY | OpenFlags::READ_WRITE | OpenFlags::NONBLOCK);
+        self.mount
+            .alloc_file_pseudo(inode, name, mode, open_flags, file_operations, cred)
     }
 }
 

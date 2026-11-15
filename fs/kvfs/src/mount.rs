@@ -657,9 +657,7 @@ impl MntNamespace {
     /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
     /// mount registered in this namespace.
     pub fn make_mount_slave(&self, target: &Path) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::registered_mount_at(&mounts, target)?;
-        Ok(())
+        self.make_mount_private(target)
     }
 
     /// Makes the mount rooted at `target` shared.
@@ -675,9 +673,7 @@ impl MntNamespace {
     /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
     /// mount registered in this namespace.
     pub fn make_mount_shared(&self, target: &Path) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::registered_mount_at(&mounts, target)?;
-        Ok(())
+        self.make_mount_private(target)
     }
 
     /// Applies a propagation request to a mount that need not be registered.
@@ -711,9 +707,7 @@ impl MntNamespace {
     /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
     /// mount registered in this namespace.
     pub fn make_mount_unbindable(&self, target: &Path) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::registered_mount_at(&mounts, target)?;
-        Ok(())
+        self.make_mount_private(target)
     }
 
     fn registered_mount_at<'a>(
