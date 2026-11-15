@@ -920,9 +920,9 @@ socket cannot keep receiving or pin its numeric port ID.
 
 `bind` installs the requested 32-bit `nl_groups` mask. Bits the protocol does
 not implement are masked off instead of rejected, matching `netlink_bind`.
-`NETLINK_ROUTE` advertises 36 route groups, but only the first 32 fit in
-`nl_groups`; groups 33 through 36 require `NETLINK_ADD_MEMBERSHIP`, which this
-stack does not yet implement. `NETLINK_KOBJECT_UEVENT` exposes all 32 group bits,
+`NETLINK_ROUTE` advertises 36 route groups, but only the first 32 fit in the
+modeled 32-bit mask; groups 33 through 36 are unreachable here because
+`NETLINK_ADD_MEMBERSHIP` enforces the same 32-group bound. `NETLINK_KOBJECT_UEVENT` exposes all 32 group bits,
 mirroring Linux's `__netlink_kernel_create` minimum group count; kernel-originated
 uevents use group 1. `getsockname` reports the effective mask. Route notifications use group `g` with the bit
 `1 << (g - 1)`: link, neighbor, IPv4 address, and IPv4 route events map to
@@ -941,9 +941,12 @@ changed, so a rejected bind leaves the previous subscription untouched. POSIX
 `bind` passes the syscall credential through `Socket::bind_with_cred`;
 credential-free `SocketOps::bind` callers have no administrative authority.
 
-Kernel publishers deliver a message only to live, bound sockets whose mask
-contains the event group. Delivery snapshots the registry under its lock, then
-enqueues and wakes receivers after releasing it. Receive queues model Linux's
+Kernel publishers deliver a message only to live sockets whose mask contains
+the event group: bound sockets from the port registry plus unbound sockets that
+hold a subscription, which `NETLINK_ADD_MEMBERSHIP` links into a broadcast list
+of its own (Linux's `mc_list`). Delivery snapshots both under the registry lock
+and de-duplicates a socket that appears in both, then enqueues and wakes
+receivers after releasing it. Receive queues model Linux's
 default `sk_rcvbuf` of 212992 bytes. The general socket layer applies the same
 `sock_setsockopt` rule to every family: `SO_SNDBUF`/`SO_RCVBUF` clamp the hint
 to the modeled `wmem_max`/`rmem_max` (4 MiB), double it, and floor it at

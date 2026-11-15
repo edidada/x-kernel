@@ -12,7 +12,7 @@
 //! userspace multicast the same addressing and filtering rules.
 
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -36,21 +36,32 @@ static_lock! {
 
 struct PortTable {
     sockets: BTreeMap<(i32, u32), Weak<NetlinkSocketInner>>,
+    /// Sockets holding at least one group subscription, the equivalent of
+    /// Linux's per-protocol `mc_list` (`netlink_update_subscriptions` ->
+    /// `sk_add_bind_node`).
+    ///
+    /// This list is what makes an *unbound* subscriber reachable: the port map
+    /// above is keyed by the id `bind()` allocates, and `NETLINK_ADD_MEMBERSHIP`
+    /// is valid without one.
+    subscribers: Vec<Weak<NetlinkSocketInner>>,
 }
 
 impl PortTable {
     const fn new() -> Self {
         Self {
             sockets: BTreeMap::new(),
+            subscribers: Vec::new(),
         }
     }
 
     fn retain_live(&mut self) {
-        self.sockets.retain(|_, socket| {
+        let is_live = |socket: &Weak<NetlinkSocketInner>| {
             socket
                 .upgrade()
                 .is_some_and(|socket| !socket.closed.load(Ordering::Acquire))
-        });
+        };
+        self.sockets.retain(|_, socket| is_live(socket));
+        self.subscribers.retain(is_live);
     }
 
     /// Allocates an unused port ID for an unbound socket.
@@ -279,8 +290,40 @@ pub(super) fn bind(
     })
 }
 
-/// Delivers `data` to every live socket bound to `protocol` whose subscription
-/// mask contains `group`.
+/// Links a socket into the protocol's broadcast list.
+///
+/// Called when `NETLINK_ADD_MEMBERSHIP` takes the socket from no subscription
+/// to one, mirroring `netlink_update_subscriptions`' `sk_add_bind_node`. An
+/// unbound socket lives only here, which is why `publish` walks both this list
+/// and the port map.
+pub(super) fn subscribe(socket: &Arc<NetlinkSocketInner>) {
+    let mut ports = PORTS.lock();
+    ports.retain_live();
+    let ptr = Arc::as_ptr(socket);
+    if ports
+        .subscribers
+        .iter()
+        .filter_map(Weak::upgrade)
+        .any(|existing| Arc::as_ptr(&existing) == ptr)
+    {
+        return;
+    }
+    ports.subscribers.push(Arc::downgrade(socket));
+}
+
+/// Unlinks a socket whose last subscription was dropped.
+pub(super) fn unsubscribe(socket: &Arc<NetlinkSocketInner>) {
+    let mut ports = PORTS.lock();
+    let ptr = Arc::as_ptr(socket);
+    ports.subscribers.retain(|weak| match weak.upgrade() {
+        Some(existing) => Arc::as_ptr(&existing) != ptr,
+        None => false,
+    });
+}
+
+/// Delivers `data` to every live socket of `protocol` whose subscription mask
+/// contains `group`: bound sockets from the port map plus unbound subscribers
+/// from the broadcast list.
 ///
 /// Delivery is best effort: a full receive queue drops the packet without
 /// blocking the publisher, matching kernel netlink multicast.  Userspace
@@ -310,12 +353,18 @@ pub(super) fn publish(
     let recipients: Vec<_> = {
         let mut ports = PORTS.lock();
         ports.retain_live();
+        // A subscribed socket is in both tables once it binds, so the union is
+        // de-duplicated by identity; delivering twice would duplicate messages
+        // a bound subscriber expects once.
+        let mut seen = BTreeSet::new();
         ports
             .sockets
             .values()
+            .chain(ports.subscribers.iter())
             .filter_map(Weak::upgrade)
             .filter(|socket| socket.protocol == protocol)
             .filter(|socket| !exclude_socket.is_some_and(|exclude| Arc::ptr_eq(exclude, socket)))
+            .filter(|socket| seen.insert(Arc::as_ptr(socket) as usize))
             .collect()
     };
 

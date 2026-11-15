@@ -587,19 +587,44 @@ impl Configurable for NetlinkSocket {
     }
 
     fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
-        if let SetSocketOption::SendBuffer(size) = opt {
-            // Linux clamps the user hint to `net.core.wmem_max`, doubles it,
-            // and applies `SOCK_MIN_SNDBUF` to the effective buffer.
-            let requested = (*size).min(super::NETLINK_WMEM_MAX);
+        // `SO_SNDBUF`/`SO_RCVBUF` and their `CAP_NET_ADMIN` force forms reach
+        // the same `sock_setsockopt` arms on Linux and write `sk_sndbuf` and
+        // `sk_rcvbuf`, which netlink's send admission and receive queue account
+        // against. The force forms skip only the `*mem_max` clamp, so they must
+        // update these queues too: answering success while leaving the queue at
+        // its default would contradict both the readback and the admission
+        // limit imposed by the same socket layer.
+        let send = match opt {
+            SetSocketOption::SendBuffer(size) => Some((*size, false)),
+            SetSocketOption::SendBufferForce(size) => Some((*size, true)),
+            _ => None,
+        };
+        if let Some((size, is_force)) = send {
+            // Linux clamps the unforced hint to `net.core.wmem_max`, doubles
+            // it, and applies `SOCK_MIN_SNDBUF` to the effective buffer.
+            let requested = if is_force {
+                size
+            } else {
+                size.min(super::NETLINK_WMEM_MAX)
+            };
             let effective = requested.saturating_mul(2).max(super::NETLINK_SNDBUF_MIN);
             self.inner.send_buffer.store(effective, Ordering::Relaxed);
             return Ok(OptionHandled::Yes);
         }
-        if let SetSocketOption::ReceiveBuffer(size) = opt {
-            // `sock_setsockopt(SO_RCVBUF)` clamps the hint to
-            // `net.core.rmem_max`, doubles it, and applies
-            // `SOCK_MIN_RCVBUF` to the stored `sk_rcvbuf`.
-            let requested = (*size).min(super::NETLINK_RMEM_MAX);
+        let receive = match opt {
+            SetSocketOption::ReceiveBuffer(size) => Some((*size, false)),
+            SetSocketOption::ReceiveBufferForce(size) => Some((*size, true)),
+            _ => None,
+        };
+        if let Some((size, is_force)) = receive {
+            // `sock_setsockopt(SO_RCVBUF)` clamps the unforced hint to
+            // `net.core.rmem_max`, doubles it, and applies `SOCK_MIN_RCVBUF`
+            // to the stored `sk_rcvbuf`.
+            let requested = if is_force {
+                size
+            } else {
+                size.min(super::NETLINK_RMEM_MAX)
+            };
             let effective = requested.saturating_mul(2).max(super::NETLINK_RCVBUF_MIN);
             self.inner.rx_queue.lock().set_limit(effective);
             return Ok(OptionHandled::Yes);
@@ -624,18 +649,31 @@ impl Configurable for NetlinkSocket {
             {
                 return Err(KError::OperationNotPermitted);
             }
-            self.inner
+            // The first subscription links the socket into the broadcast list
+            // (`netlink_update_subscriptions` -> `sk_add_bind_node` on the
+            // protocol's `mc_list`), which is independent of `bind()`: a socket
+            // that never binds still receives its groups' multicast.
+            if self
+                .inner
                 .groups
-                .fetch_or(1u32 << (*group - 1), Ordering::Relaxed);
+                .fetch_or(1u32 << (*group - 1), Ordering::Relaxed)
+                == 0
+            {
+                super::port::subscribe(&self.inner);
+            }
             return Ok(OptionHandled::Yes);
         }
         if let SetSocketOption::NetlinkDropMembership(group) = opt {
             if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
                 return Err(KError::InvalidInput);
             }
-            self.inner
-                .groups
-                .fetch_and(!(1u32 << (*group - 1)), Ordering::Relaxed);
+            // The last subscription leaving unlinks the socket from the
+            // broadcast list, as `netlink_update_subscriptions` does when the
+            // subscription count reaches zero.
+            let bit = 1u32 << (*group - 1);
+            if self.inner.groups.fetch_and(!bit, Ordering::Relaxed) == bit {
+                super::port::unsubscribe(&self.inner);
+            }
             return Ok(OptionHandled::Yes);
         }
         self.inner.general.set_option_inner(opt)

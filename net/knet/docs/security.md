@@ -301,7 +301,9 @@ The trust relationships in the diagram define the security responsibilities of e
 | Netlink port IDs and subscription masks | `port::bind` allocates or validates the port ID per protocol, rejects nonzero group subscriptions for unknown protocols (`EPERM` without `CAP_NET_ADMIN`, `ENOENT` with it), and stores only the protocol's implemented group bits. `NETLINK_ROUTE` additionally requires `CAP_NET_ADMIN` for the reverse-path groups 30 and 31, matching `rtnetlink_bind`; authorization finishes before any stored address changes. A bound socket cannot change its port ID, and conflicting explicit IDs fail with `EADDRINUSE`. `port::publish` filters recipients by protocol, live weak reference, the socket's own subscription mask, sender exclusion, and
 requested unicast port before enqueueing. The mask lives on the socket rather than on its bound address because
 `NETLINK_ADD_MEMBERSHIP` is valid before `bind()` (`netlink_realloc_groups` needs no port id), so an unbound subscriber is still
-a recipient; `bind()` merges its `nl_groups` into the same mask. Membership changes require `CAP_NET_ADMIN` when the protocol's table lacks
+a recipient: the first subscription links the socket into the protocol's broadcast list (`port::subscribe`, Linux's `mc_list`
+through `sk_add_bind_node`), `publish` snapshots that list together with the port map and de-duplicates by socket identity, and
+dropping the last subscription unlinks it again. `bind()` merges its `nl_groups` into the same mask. Membership changes require `CAP_NET_ADMIN` when the protocol's table lacks
 `NL_CFG_F_NONROOT_RECV` and the caller does not hold it. `NETLINK_ROUTE` and
 `NETLINK_KOBJECT_UEVENT` set that flag; `NETLINK_USERSOCK` sets only
 `NL_CFG_F_NONROOT_SEND`, so its groups are privileged while its sends are not.
