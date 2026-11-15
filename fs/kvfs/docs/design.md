@@ -949,9 +949,9 @@ four behave equivalently: without a shared master a slave receives no events, a 
 mount has no peer to refuse. `MS_SHARED` is accepted rather than rejected because systemd remounts the namespace root `MS_SHARED`
 after `pivot_root`, and an `EINVAL` there aborts the switch-root. Each entry validates its call separately (`MS_PRIVATE`,
 `MS_SLAVE`, `MS_SHARED` and `MS_UNBINDABLE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns `EINVAL`), to prevent
-illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) clones the source subtree: `clone_mount_tree`
-re-grafts each cloned child under its cloned parent, so only submounts at or below the bind source are included and the tree is never
-silently flattened.
+illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) clones the source subtree:
+`attach_bind_recursive()` re-grafts each cloned child under its cloned parent, so only submounts at or below the bind source are
+included and the tree is never silently flattened. (`clone_mount_tree()` is the separate entry point behind `open_tree(OPEN_TREE_CLONE)`.)
 
 ### Detached mounts and the new mount API
 
