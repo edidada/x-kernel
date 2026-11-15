@@ -260,3 +260,23 @@ fn drm_nodes_project_a_render_minor() {
 
     kdevice::unregister_device_node(node.core_id()).expect("legacy node unregisters");
 }
+
+/// `kobject_action_type` takes the first space-separated token after dropping
+/// one trailing newline or NUL, and refuses every other whitespace.
+#[def_test]
+fn uevent_action_is_the_first_space_separated_token() {
+    assert_eq!(parse_uevent_action(b"add"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add\n"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add\0"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add uuid-1234"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"add  uuid-1234"), Ok(UeventAction::Add));
+    assert_eq!(parse_uevent_action(b"change\n"), Ok(UeventAction::Change));
+
+    // A tab, an embedded newline and a leading tab are not separators: the
+    // token then carries them and no action matches, so the write is refused.
+    assert_eq!(parse_uevent_action(b"add\tuuid-1234"), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b"add\nuuid-1234"), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b"\tadd"), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b""), Err(VfsError::InvalidInput));
+    assert_eq!(parse_uevent_action(b"\n"), Err(VfsError::InvalidInput));
+}

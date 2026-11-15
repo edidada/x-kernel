@@ -191,6 +191,20 @@ fn strip_action_terminator(data: &[u8]) -> &[u8] {
     }
 }
 
+/// Parses a `uevent` write the way `kobject_action_type` does.
+///
+/// One trailing newline or NUL is dropped, then the action is the first token
+/// up to a single space: `udevadm trigger` writes `add <uuid>` and userspace
+/// may append further `KEY=VALUE` words. Any other whitespace stays inside the
+/// token, so `add\t<uuid>`, an embedded newline or a leading tab does not name
+/// an action and the write is refused, matching the reference parser.
+fn parse_uevent_action(data: &[u8]) -> VfsResult<UeventAction> {
+    let text = strip_action_terminator(data);
+    let text = core::str::from_utf8(text).map_err(|_| VfsError::InvalidInput)?;
+    let action = text.split(' ').next().ok_or(VfsError::InvalidInput)?;
+    UeventAction::try_from(action).map_err(|()| VfsError::InvalidInput)
+}
+
 /// The device projection tree shared by every lookup.
 fn device_projection() -> &'static Mutex<DeviceProjection> {
     #[expect(
@@ -1035,12 +1049,6 @@ impl SimpleDirOps for SysfsDirectory {
         Ok(KBox::new(names.into_iter())?)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "CG-028-focused-functions: the leaf builder is one match over tree entry kinds; \
-                  splitting the uevent write arms out would hide that the two command-file \
-                  closures share the same action-parsing rule"
-    )]
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let path = self.child_path(name);
         let entry = device_projection()
@@ -1092,23 +1100,9 @@ impl SimpleDirOps for SysfsDirectory {
                         SimpleFileOperation::Write { data, .. } => {
                             projected
                                 .with_available(|node| -> VfsResult<()> {
-                                    // Linux `kobject_uevent_store` takes the action
-                                    // from the first token only: userspace may
-                                    // append extra `KEY=VALUE` pairs after it, and
-                                    // `udevadm trigger` sends "add <uuid>".
-                                    // `kobject_action_type` drops one trailing
-                                    // newline or NUL before it looks at the
-                                    // action, so a writer that leaves the
-                                    // terminator in `count` is not refused.
-                                    let text = strip_action_terminator(data);
-                                    let text = core::str::from_utf8(text)
-                                        .map_err(|_| VfsError::InvalidInput)?;
-                                    let action = text
-                                        .split_ascii_whitespace()
-                                        .next()
-                                        .ok_or(VfsError::InvalidInput)?;
-                                    let action = UeventAction::try_from(action)
-                                        .map_err(|()| VfsError::InvalidInput)?;
+                                    // `kobject_uevent_store` parses the whole
+                                    // attribute text before it publishes.
+                                    let action = parse_uevent_action(data)?;
                                     kdevice_uevent::publish(action, node, scope);
                                     Ok(())
                                 })
@@ -1136,18 +1130,9 @@ impl SimpleDirOps for SysfsDirectory {
                     match operation {
                         SimpleFileOperation::Read => Ok(Some(contents.clone())),
                         SimpleFileOperation::Write { data, .. } => {
-                            // Same first-token rule and the same one-terminator
-                            // allowance as the device-node uevent attribute:
-                            // extra `KEY=VALUE` words are allowed and a trailing
-                            // newline or NUL is dropped first.
-                            let text = core::str::from_utf8(strip_action_terminator(data))
-                                .map_err(|_| VfsError::InvalidInput)?;
-                            let action = text
-                                .split_ascii_whitespace()
-                                .next()
-                                .ok_or(VfsError::InvalidInput)?;
-                            let action = UeventAction::try_from(action)
-                                .map_err(|()| VfsError::InvalidInput)?;
+                            // The device-directory uevent parses its action
+                            // with the same rule as the device one.
+                            let action = parse_uevent_action(data)?;
                             kdevice_uevent::publish_raw(action, &path, &subsystem, &properties);
                             Ok(None)
                         }

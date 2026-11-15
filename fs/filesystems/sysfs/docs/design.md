@@ -44,7 +44,10 @@ device-management clients.
   bus, driver, and character-number paths.
 - Render read-only attributes and relative symlinks from owned snapshots.
 - Validate `uevent` action writes and pass them to the shared kobject event
-  publisher.
+  publisher. The action is parsed as `kobject_action_type` does: one trailing
+  newline or NUL is dropped, the action is the token before the first single
+  space (`udevadm trigger` writes `add <uuid>`), and any other whitespace is
+  part of the token, so a tab or an embedded newline is refused with `EINVAL`.
 - Apply Linux-compatible permissions: ordinary attributes are `0444` and
   writable `uevent` attributes are `0644`.
 
