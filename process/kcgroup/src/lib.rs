@@ -42,12 +42,14 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use kbandwidth::Bandwidth;
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 
 /// Optional scheduler callback invoked before a cpu tracker is discarded.
 pub type BandwidthReleaseHook = fn(&Arc<Bandwidth>);
 
-static BANDWIDTH_RELEASE_HOOK: SpinNoIrq<Option<BandwidthReleaseHook>> = SpinNoIrq::new(None);
+static_lock! {
+    static BANDWIDTH_RELEASE_HOOK: SpinNoIrq<Option<BandwidthReleaseHook>> = SpinNoIrq::new(None);
+}
 
 /// Installs the scheduler's bandwidth-release callback once.
 pub fn install_bandwidth_release_hook(hook: BandwidthReleaseHook) {
