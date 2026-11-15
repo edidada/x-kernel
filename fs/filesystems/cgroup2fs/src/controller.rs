@@ -98,22 +98,7 @@ pub(crate) fn subtree_control_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Ar
                         .ok_or(VfsError::NotFound)?;
                     resolved.push((kind, operation.is_enabled));
                 }
-                let mut applied = Vec::with_capacity(resolved.len());
-                for (kind, is_enabled) in resolved {
-                    let previous = cgroup.controller_subtree_enabled(kind);
-                    if previous == is_enabled {
-                        continue;
-                    }
-                    if let Err(error) = cgroup.set_subtree_control(kind, is_enabled) {
-                        // Restore every controller already changed by this
-                        // write; the visible subtree state must not be partial.
-                        for (changed, old) in applied.into_iter().rev() {
-                            let _ = cgroup.set_subtree_control(changed, old);
-                        }
-                        return Err(error);
-                    }
-                    applied.push((kind, previous));
-                }
+                cgroup.set_subtree_controls(&resolved)?;
                 Ok(None)
             }
         }),

@@ -539,6 +539,58 @@ impl Cgroup {
     ///   child still delegates the controller.
     pub fn set_subtree_control(&self, kind: ControllerKind, enabled: bool) -> KResult<bool> {
         let _transaction = self.hierarchy.transaction.lock();
+        self.set_subtree_control_locked(kind, enabled)
+    }
+
+    /// Applies several subtree-control changes under one hierarchy transaction.
+    ///
+    /// Every operation is validated before the first mutation, so a rejected
+    /// write cannot leave a prefix of controllers enabled or reset a child's
+    /// controller state through a rollback.
+    pub fn set_subtree_controls(&self, operations: &[(ControllerKind, bool)]) -> KResult<()> {
+        let _transaction = self.hierarchy.transaction.lock();
+        if !self.is_active() {
+            return Err(KError::from(LinuxError::ENOENT));
+        }
+        for &(kind, enabled) in operations {
+            self.validate_subtree_control(kind, enabled)?;
+        }
+        for &(kind, enabled) in operations {
+            let _ = self.set_subtree_control_locked(kind, enabled)?;
+        }
+        Ok(())
+    }
+
+    fn validate_subtree_control(&self, kind: ControllerKind, enabled: bool) -> KResult<()> {
+        if !kind.is_implemented() {
+            return Err(KError::from(LinuxError::EOPNOTSUPP));
+        }
+        if self.controllers.is_subtree_enabled(kind) == enabled {
+            return Ok(());
+        }
+        if enabled {
+            if !self.has_available_controller(kind) {
+                return Err(KError::from(LinuxError::EINVAL));
+            }
+            if !self.name.is_empty() && !self.member_tasks.lock().is_empty() {
+                return Err(KError::from(LinuxError::EBUSY));
+            }
+            if crate::controller::registration(kind).is_none() {
+                return Err(KError::from(LinuxError::EOPNOTSUPP));
+            }
+        } else {
+            let children = self.children.read();
+            if children
+                .values()
+                .any(|child| child.controllers.is_subtree_enabled(kind))
+            {
+                return Err(KError::from(LinuxError::EBUSY));
+            }
+        }
+        Ok(())
+    }
+
+    fn set_subtree_control_locked(&self, kind: ControllerKind, enabled: bool) -> KResult<bool> {
         if !self.is_active() {
             return Err(KError::from(LinuxError::ENOENT));
         }
