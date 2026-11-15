@@ -25,8 +25,8 @@ use smoltcp::{
 };
 
 use crate::{
-    AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
-    SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, LISTEN_TABLE, QueueLengths, RecvFlags, RecvOptions, SERVICE,
+    SOCKET_SET, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{
         TCP_KEEPCNT_DEFAULT, TCP_KEEPCNT_MAX, TCP_KEEPIDLE_DEFAULT_SECS, TCP_KEEPIDLE_MAX_SECS,
         TCP_KEEPINTVL_DEFAULT_SECS, TCP_KEEPINTVL_MAX_SECS, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN,
@@ -593,7 +593,7 @@ impl SocketOps for TcpSocket {
         TcpSocket::is_listening(self)
     }
 
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
         // `tcp_ioctl(SIOCINQ)` reports `tcp_inq()` -- the bytes queued for
         // reading -- and answers EINVAL to a listening socket, which holds no
         // data of its own. `SIOCOUTQ` reports `tp->write_seq - tp->snd_una`,
@@ -616,14 +616,9 @@ impl SocketOps for TcpSocket {
         let Some((received, queued)) = SOCKET_SET.try_with_socket_mut(self.handle, |socket| {
             (socket.recv_queue(), socket.send_queue())
         }) else {
-            *outq = 0;
-            *inq = 0;
-            return Ok(());
+            return Ok(Some(QueueLengths::default()));
         };
-        let to_i32 = |bytes: usize| i32::try_from(bytes).unwrap_or(i32::MAX);
-        *inq = to_i32(received);
-        *outq = to_i32(queued);
-        Ok(())
+        Ok(Some(QueueLengths::from_bytes(queued, received)))
     }
 
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {

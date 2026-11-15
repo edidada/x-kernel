@@ -173,8 +173,9 @@ impl FileOperations for SocketFileOps {
     }
 
     fn ioctl(&self, file: &VfsFile, _cred: &Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
-        // Linux `sock_do_ioctl` routes these to `unix_ioctl`, which copies one
-        // int result to the caller. `SIOCINQ` shares `FIONREAD`'s number
+        // Linux `sock_do_ioctl` forwards these to the protocol's ioctl
+        // (`unix_ioctl`, `tcp_ioctl`, `udp_ioctl`), which copies one int
+        // result to the caller. `SIOCINQ` shares `FIONREAD`'s number
         // (include/uapi/asm-generic/ioctls.h). Everything else keeps the
         // generic non-tty rejection, which is what an unimplemented socket
         // ioctl folds to through `sock_ioctl`.
@@ -190,10 +191,17 @@ impl FileOperations for SocketFileOps {
         if cmd == SIOCINQ && socket.is_listening() {
             return Err(KError::InvalidInput);
         }
-        let mut outq = 0i32;
-        let mut inq = 0i32;
-        socket.queue_lengths(&mut outq, &mut inq)?;
-        let amount = if cmd == SIOCOUTQ { outq } else { inq };
+        // A transport that cannot see its own queue answers ENOTTY: a zero
+        // reads as "nothing is queued" to a caller such as glibc's resolver,
+        // which abandons a lookup that has a reply waiting.
+        let Some(lengths) = socket.queue_lengths()? else {
+            return Err(KError::NotATty);
+        };
+        let amount = if cmd == SIOCOUTQ {
+            lengths.outq
+        } else {
+            lengths.inq
+        };
         osvm::write_vm_bytes(arg as *mut u8, &amount.to_ne_bytes())?;
         Ok(0)
     }

@@ -155,19 +155,13 @@ impl Configurable for DgramTransport {
     }
 }
 impl UnixTransportOps for DgramTransport {
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
-        // `unix_inq_len` reports the head skb's length for SOCK_DGRAM, and
-        // `unix_outq_len` the sender's queued bytes. This transport keeps its
-        // messages in an `async_channel::Receiver`, which has no peek, so the
-        // head length is not readable without consuming it. Reporting 0 is a
-        // conservative "nothing queued" that cannot make a client treat a
-        // working socket as broken; SEQINQ on the other datagram-shaped
-        // transport has the same limitation, and both are recorded in
-        // `docs/design.md`.
-        *outq = 0;
-        *inq = 0;
-        Ok(())
-    }
+    // No `queue_lengths`: `unix_inq_len` reports the head datagram's length for
+    // SOCK_DGRAM, but this transport keeps its messages in an
+    // `async_channel::Receiver`, which has no peek, so the length is not
+    // readable without consuming the message the caller has not asked for. The
+    // ioctl answers ENOTTY instead of a zero that a caller would read as an
+    // empty queue; reaching the head length needs a peekable queue, which is a
+    // separate change (see `docs/design.md`).
 
     fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
         let bind_slot_handle = slot.dgram.clone();

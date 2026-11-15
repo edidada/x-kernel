@@ -952,19 +952,28 @@ to the modeled `wmem_max`/`rmem_max` (4 MiB), double it, and floor it at
 which is what a client that sets N and reads back expects.
 
 `SIOCOUTQ` and `SIOCINQ`/`FIONREAD` are served by `SocketOps::queue_lengths`, a
-per-transport queue-depth query rather than a generic counter. Unix stream
-reports its channel ring occupancy on both sides (Linux's `unix_outq_len`/
-`unix_inq_len`), and TCP reports its receive queue for `SIOCINQ` and its unsent
-transmit buffer for `SIOCOUTQ`; a listening TCP socket answers `EINVAL` like
-`tcp_ioctl`.
+per-transport queue-depth query rather than a generic counter. Unix stream and
+seqpacket report their channel occupancy on both sides, which is what
+`unix_inq_len` sums for `SOCK_STREAM`/`SOCK_SEQPACKET` and what
+`unix_outq_len` reports for the peer's unread bytes. UDP reports the head
+datagram's payload length for `SIOCINQ`, as `udp_ioctl` does through
+`first_packet_length`; its `SIOCOUTQ` is 0 because `send` hands each datagram to
+the device before it returns. TCP reports its receive queue for `SIOCINQ` and
+its unsent transmit buffer for `SIOCOUTQ`, and a listening TCP or unix socket
+answers `EINVAL` to `SIOCINQ` like `tcp_ioctl` and `unix_inq_len`.
 
-Unix datagram and seqpacket answer 0 on both: those transports keep messages in
-an `async_channel::Receiver`, which has no peek, so the head message's length is
-not readable without consuming it. 0 is a conservative "nothing queued" rather
-than a wrong byte count, and unlike an `ENOTTY` it cannot make a client such as
-dbus-broker treat a working socket as broken. Reporting real queued bytes for
-them needs a peekable queue, which is a separate change to how datagrams are
-enqueued, dequeued and woken. `SO_RCVBUF` clamps its hint to
+A transport that cannot inspect its own queue returns `None`, and the ioctl
+answers `ENOTTY`, which is what an unsupported socket ioctl has always
+answered. Unix datagram is the only such transport today: `unix_inq_len` would
+report its head message's length, but the messages live in an
+`async_channel::Receiver` with no peek, so the length is not readable without
+consuming a message the caller did not ask for. A fabricated 0 is not an
+acceptable substitute. glibc 2.43's resolver issues `FIONREAD` on its UDP
+socket after each query and abandons the lookup with `EAI_AGAIN` when it reads
+0, even though the reply is already queued, so answering 0 for a queue this
+layer cannot see breaks name resolution. Reporting the real head length for
+unix datagram needs a peekable queue, which is a separate change to how
+messages are enqueued, dequeued and woken. `SO_RCVBUF` clamps its hint to
 `net.core.rmem_max` (4 MiB), doubles it, and applies the
 `SOCK_MIN_RCVBUF` floor of 2304; `getsockopt` reports the effective limit.
 Lowering the limit does not purge packets already queued. Admission adds the

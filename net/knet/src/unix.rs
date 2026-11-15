@@ -26,8 +26,8 @@ use kvfs::{
 
 pub use self::{dgram::DgramTransport, seqpacket::SeqpacketTransport, stream::StreamTransport};
 use crate::{
-    AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
-    SocketOps,
+    AcceptOptions, ConnectOptions, QueueLengths, RecvOptions, SendOptions, Shutdown, Socket,
+    SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
 };
 
@@ -130,12 +130,10 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
         Ok(())
     }
 
-    /// Queue byte counts for `SIOCOUTQ`/`SIOCINQ`; transports without byte
-    /// queues report zero, like an idle socket on Linux.
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
-        *outq = 0;
-        *inq = 0;
-        Ok(())
+    /// Byte counts for `SIOCOUTQ`/`SIOCINQ`, or `None` when this transport
+    /// keeps its receive queue somewhere the socket layer cannot peek into.
+    fn queue_lengths(&self) -> Option<QueueLengths> {
+        None
     }
 
     /// Whether this transport has reached the listening state.
@@ -682,8 +680,8 @@ impl SocketOps for UnixDomainSocket {
         self.transport.shutdown(how)
     }
 
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
-        self.transport.queue_lengths(outq, inq)
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        Ok(self.transport.queue_lengths())
     }
 
     fn is_listening(&self) -> bool {

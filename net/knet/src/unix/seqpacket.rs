@@ -22,7 +22,7 @@ use ksync::{Mutex, RwLock};
 
 use super::dgram::Datagram;
 use crate::{
-    ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown, SocketAddrEx,
+    ConnectOptions, QueueLengths, RecvFlags, RecvOptions, SendOptions, Shutdown, SocketAddrEx,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -351,7 +351,7 @@ impl UnixTransportOps for SeqpacketTransport {
             .is_some_and(|listener| listener.state.lock().is_listening())
     }
 
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+    fn queue_lengths(&self) -> Option<QueueLengths> {
         // `unix_inq_len` sums every queued skb for SOCK_SEQPACKET (unlike
         // datagram, which reports only the head), and `unix_outq_len` reports
         // the sender's queued bytes. Both are plain byte totals, so each
@@ -359,20 +359,17 @@ impl UnixTransportOps for SeqpacketTransport {
         // subtracts from; no peek is needed. A listening socket is refused for
         // `SIOCINQ` by the ioctl itself (`unix_inq_len`), not here: `SIOCOUTQ`
         // still answers on it.
-        let to_i32 = |bytes: usize| i32::try_from(bytes).unwrap_or(i32::MAX);
-        *inq = to_i32(
-            self.rx
-                .lock()
-                .as_ref()
-                .map_or(0, |(_, _, queued)| queued.load(Ordering::Relaxed)),
-        );
-        *outq = to_i32(
-            self.peer
-                .read()
-                .as_ref()
-                .map_or(0, |peer| peer.tx_bytes.load(Ordering::Relaxed)),
-        );
-        Ok(())
+        let inq = self
+            .rx
+            .lock()
+            .as_ref()
+            .map_or(0, |(_, _, queued)| queued.load(Ordering::Relaxed));
+        let outq = self
+            .peer
+            .read()
+            .as_ref()
+            .map_or(0, |peer| peer.tx_bytes.load(Ordering::Relaxed));
+        Some(QueueLengths::from_bytes(outq, inq))
     }
 
     fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {

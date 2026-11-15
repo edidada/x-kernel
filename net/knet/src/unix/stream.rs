@@ -22,8 +22,8 @@ use self::{
     listener::{ConnRequest, ListenerQueue},
 };
 use crate::{
-    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendOptions,
-    Shutdown,
+    AncillaryData, ConnectOptions, KernelAncillaryData, QueueLengths, RecvFlags, RecvOptions,
+    SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -602,7 +602,7 @@ impl UnixTransportOps for StreamTransport {
             .is_some_and(|listener| listener.is_listening())
     }
 
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
+    fn queue_lengths(&self) -> Option<QueueLengths> {
         // Linux `unix_inq_len` counts the bytes queued on the receive side and
         // `unix_outq_len` the sender's `sk_wmem_alloc`, which for this channel
         // is the tx bytes the peer has not consumed yet. Each count is read
@@ -611,19 +611,17 @@ impl UnixTransportOps for StreamTransport {
         // an empty `sk_receive_queue`.
         let channel = self.channel.lock();
         let Some(chan) = channel.as_ref() else {
-            *outq = 0;
-            *inq = 0;
-            return Ok(());
+            return Some(QueueLengths::default());
         };
-        {
+        let inq = {
             let _tx_order = chan.peer_endpoint.tx_order.lock();
-            *inq = chan.rx.occupied_len() as i32;
-        }
-        {
+            chan.rx.occupied_len()
+        };
+        let outq = {
             let _tx_order = self.endpoint.tx_order.lock();
-            *outq = chan.tx.occupied_len() as i32;
-        }
-        Ok(())
+            chan.tx.occupied_len()
+        };
+        Some(QueueLengths::from_bytes(outq, inq))
     }
 }
 

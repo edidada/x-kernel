@@ -199,6 +199,38 @@ pub struct SocketErrorInfo {
     pub offender: Option<SocketAddr>,
 }
 
+/// The byte counts `SIOCOUTQ` and `SIOCINQ` copy out.
+///
+/// Both fields are byte counts, not message counts: `outq` is the data queued
+/// for the peer that it has not consumed yet, `inq` the data the caller can
+/// read next.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct QueueLengths {
+    /// Bytes queued towards the peer (Linux `sk_wmem_alloc` /
+    /// `unix_outq_len`; the unsent transmit buffer for TCP).
+    pub outq: i32,
+    /// Bytes ready to be read: the head datagram's length for datagram
+    /// sockets, the summed queued bytes for stream and seqpacket sockets.
+    pub inq: i32,
+}
+
+impl QueueLengths {
+    /// Builds both counts from byte totals.
+    ///
+    /// A queue can in principle outgrow `int`; the ioctl copy-out has no room
+    /// for that, so each count saturates instead of wrapping into a value a
+    /// caller could mistake for a small or negative queue.
+    pub(crate) fn from_bytes(outq: usize, inq: usize) -> Self {
+        fn saturate(bytes: usize) -> i32 {
+            i32::try_from(bytes).unwrap_or(i32::MAX)
+        }
+        Self {
+            outq: saturate(outq),
+            inq: saturate(inq),
+        }
+    }
+}
+
 /// The task identity behind a kernel-attached credentials record.
 ///
 /// The pid is kept as a task-number identity (`struct pid`), not a number:
@@ -403,16 +435,23 @@ pub trait SocketOps: Configurable {
         false
     }
 
-    /// Reports the socket queue byte counts served by `SIOCOUTQ`/`SIOCINQ`.
+    /// Reports the byte counts `SIOCOUTQ` and `SIOCINQ` copy out.
     ///
-    /// Linux serves these from `unix_ioctl` (net/unix/af_unix.c):
-    /// `unix_outq_len` counts the bytes queued for the peer (the sender's
-    /// `sk_wmem_alloc`), `unix_inq_len` the bytes ready to be read. Transports
-    /// without byte queues report zero, like an idle socket.
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
-        *outq = 0;
-        *inq = 0;
-        Ok(())
+    /// `outq` is what the peer has not consumed yet (Linux's
+    /// `sk_wmem_alloc`/`unix_outq_len`, the unsent transmit buffer for TCP),
+    /// and `inq` is what the caller can read next: the head datagram's length
+    /// for datagram sockets (`first_packet_length`, `unix_inq_len` on
+    /// `SOCK_DGRAM`), the summed queued bytes for stream and seqpacket sockets,
+    /// and `tcp_inq()` for TCP.
+    ///
+    /// `None` reports that the transport keeps its receive queue where this
+    /// layer cannot inspect it. The ioctl then answers `ENOTTY`, the answer an
+    /// unsupported socket ioctl has always given. It must not substitute zero:
+    /// glibc 2.43's resolver issues `FIONREAD` on this socket after each query
+    /// and abandons the lookup with `EAI_AGAIN` when it reads 0, even though
+    /// the reply is already queued.
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        Ok(None)
     }
 
     /// Returns the `SO_TYPE` value reported by `getsockopt(SOL_SOCKET,
@@ -485,8 +524,8 @@ impl<T: SocketOps + ?Sized> SocketOps for KBox<T> {
         (**self).shutdown(how)
     }
 
-    fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
-        (**self).queue_lengths(outq, inq)
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        (**self).queue_lengths()
     }
 
     fn is_listening(&self) -> bool {

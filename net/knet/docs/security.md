@@ -76,9 +76,10 @@ permissions, `kclass` and its device providers own network-buffer validity and
 transport event contracts, and `ringbuf`, `smoltcp`, `zerocopy`, and `etherparse`
 provide their respective buffer and parsing contracts. The unix datagram and
 seqpacket transports additionally queue messages in `async_channel` channels,
-whose FIFO ordering and close semantics are that crate's contract; the queue byte
+whose FIFO ordering and close semantics are that crate's contract; the byte
 counters that `SIOCINQ`/`SIOCOUTQ` report live here because a channel offers no
-peek. Driver DMA programming,
+peek, and the datagram transport therefore refuses those ioctls with `ENOTTY`
+instead of reporting a queue depth it cannot observe. Driver DMA programming,
 raw user-pointer access, host-side handshake clients, and TIPC service policy
 are external responsibilities rather than guarantees established by `knet`.
 
