@@ -46,7 +46,17 @@ struct RxChannel {
 
 impl Drop for RxChannel {
     fn drop(&mut self) {
-        self.queued.store(0, Ordering::Relaxed);
+        // Purge what is still queued and release the sender's charge for
+        // exactly those bytes, like the skb destructors Linux runs when
+        // `unix_release_sock` purges a receive queue. Releasing is a
+        // subtraction per record rather than a single store so it composes
+        // with a concurrent `send` that is charging its own record: whichever
+        // order the two run in, the count ends at the bytes still queued --
+        // none.
+        while let Ok(datagram) = self.rx.try_recv() {
+            self.queued
+                .fetch_sub(datagram.data.len(), Ordering::Relaxed);
+        }
     }
 }
 
@@ -454,8 +464,11 @@ impl UnixTransportOps for SeqpacketTransport {
         let (from_server, client_rx) = async_channel::unbounded();
         let server_poll = Arc::new(PollSet::new());
         let client_poll = Arc::new(PollSet::new());
-        // `to_server_bytes` is the server's `SIOCOUTQ` counterpart and the
-        // client's `SIOCINQ`; `from_server_bytes` the reverse.
+        // `to_server_bytes` counts what the client queued and the server has
+        // not read: it is the client's `SIOCOUTQ` and the server's `SIOCINQ`.
+        // `from_server_bytes` counts the other direction. Each counter is held
+        // by both ends -- the sender's peer record charges it, the receiving
+        // `RxChannel` releases it -- so the two views cannot disagree.
         let to_server_bytes = Arc::new(AtomicUsize::new(0));
         let from_server_bytes = Arc::new(AtomicUsize::new(0));
 
@@ -532,8 +545,16 @@ impl UnixTransportOps for SeqpacketTransport {
         let Some(tx) = peer.tx.as_ref() else {
             return Err(KError::BrokenPipe);
         };
-        tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
+        // Charge the message before it can be observed in the queue, the way
+        // Linux sets `skb_set_owner_w` before `__skb_queue_tail`. Charging
+        // after the enqueue would race `RxChannel::drop`'s purge: the purge
+        // would release the bytes it drained and the late increment would put
+        // them back as a count nobody can read.
         peer.tx_bytes.fetch_add(len, Ordering::Relaxed);
+        if tx.try_send(packet).is_err() {
+            peer.tx_bytes.fetch_sub(len, Ordering::Relaxed);
+            return Err(KError::BrokenPipe);
+        }
         peer.read_poll.wake();
         Ok(len)
     }

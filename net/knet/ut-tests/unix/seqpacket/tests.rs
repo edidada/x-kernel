@@ -91,6 +91,21 @@ fn listener_accepts_a_queued_connection() {
     assert_eq!(&buf[..4], b"pong");
 }
 
+/// A send rejected by a released receive direction leaves no charge behind.
+///
+/// The charge is taken before the enqueue, so the rejection path has to give it
+/// back; otherwise a `SIOCOUTQ` nobody can read would stay on the socket.
+#[def_test]
+fn rejected_send_leaves_the_outq_unchanged() {
+    let (sender, receiver) = SeqpacketTransport::new_pair(test_peer_credentials());
+    drop(receiver);
+    assert_eq!(
+        sender.send(&b"lost"[..], SendOptions::default()),
+        Err(KError::BrokenPipe)
+    );
+    assert_eq!(sender.queue_lengths().unwrap().outq, 0);
+}
+
 /// A receive shutdown does not release the sender's `SIOCOUTQ`.
 ///
 /// `shutdown(SHUT_RD)` closes the receiving side but leaves the records queued
