@@ -219,7 +219,18 @@ fn write_high(cgroup: &Cgroup, limit: Option<u64>) -> VfsResult<()> {
 }
 
 fn parse_bytes(value: &str) -> VfsResult<u64> {
-    value.parse::<u64>().map_err(|_| VfsError::InvalidInput)
+    let (digits, multiplier) = match value.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&value[..value.len() - 1], 1024u64),
+        Some(b'm' | b'M') => (&value[..value.len() - 1], 1024u64 * 1024),
+        Some(b'g' | b'G') => (&value[..value.len() - 1], 1024u64 * 1024 * 1024),
+        Some(b't' | b'T') => (&value[..value.len() - 1], 1024u64 * 1024 * 1024 * 1024),
+        _ => (value, 1),
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(multiplier))
+        .ok_or(VfsError::InvalidInput)
 }
 
 fn limit_file(

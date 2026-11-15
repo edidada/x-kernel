@@ -391,8 +391,12 @@ pub type CurrentMemcgProvider = fn() -> MemcgId;
 static CURRENT_PROVIDER: AtomicUsize = AtomicUsize::new(0);
 
 fn new_node(parent: Option<Arc<Memcg>>) -> Arc<Memcg> {
-    let raw = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    assert!(raw != 0, "memory cgroup identity space exhausted");
+    let raw = loop {
+        let candidate = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        if candidate != 0 {
+            break candidate;
+        }
+    };
     let node = Arc::new(Memcg::new(MemcgId::from_raw(raw), parent));
     TREE.lock().insert(raw, Arc::clone(&node));
     node

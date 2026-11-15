@@ -599,7 +599,7 @@ impl Cgroup {
         }
         if enabled {
             if !self.has_available_controller(kind) {
-                return Err(KError::from(LinuxError::EINVAL));
+                return Err(KError::from(LinuxError::ENOENT));
             }
             if !self.name.is_empty() && !self.member_tasks.lock().is_empty() {
                 return Err(KError::from(LinuxError::EBUSY));
