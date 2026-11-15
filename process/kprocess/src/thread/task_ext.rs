@@ -47,10 +47,21 @@ impl UserTaskRuntime for Thread {
     }
 
     fn cgroup_cpus(&self) -> Option<ktask::KCpuMask> {
-        let cpus = self.cgroup()?.cpuset_effective_cpus().ok()?;
         let mut mask = ktask::KCpuMask::new();
-        for cpu in cpus.iter() {
-            mask.set(cpu, true);
+        match self.cgroup() {
+            Some(cgroup) => {
+                let cpus = cgroup.cpuset_effective_cpus().ok()?;
+                for cpu in cpus.iter() {
+                    mask.set(cpu, true);
+                }
+            }
+            None => {
+                // A task without explicit cgroup membership is in the root
+                // cgroup. It must not inherit the boot CPU's narrow affinity.
+                for cpu in 0..kcpu_id_map::nr_cpus() {
+                    mask.set(cpu, true);
+                }
+            }
         }
         Some(mask)
     }
