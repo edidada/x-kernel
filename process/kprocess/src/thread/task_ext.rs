@@ -51,8 +51,19 @@ impl UserTaskRuntime for Thread {
         match self.cgroup() {
             Some(cgroup) => {
                 let cpus = cgroup.cpuset_effective_cpus().ok()?;
-                for cpu in cpus.iter() {
-                    mask.set(cpu, true);
+                let count = cpus.iter().count();
+                // A root cgroup created before secondary CPUs were discovered
+                // may still expose only the boot CPU. Do not pin new tasks to
+                // that stale root universe; child cgroups keep their explicit
+                // narrow mask.
+                if cgroup.parent().is_none() && count == 1 && kcpu_id_map::nr_cpus() > 1 {
+                    for cpu in 0..kcpu_id_map::nr_cpus() {
+                        mask.set(cpu, true);
+                    }
+                } else {
+                    for cpu in cpus.iter() {
+                        mask.set(cpu, true);
+                    }
                 }
             }
             None => {
