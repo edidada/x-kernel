@@ -563,10 +563,10 @@ fn cpu_controller_applies_weight_and_bandwidth_rules() {
     // Weight accepts the Linux range and rejects the edges outside it.
     controller.set_weight(10_000).unwrap();
     assert_eq!(controller.weight(), 10_000);
-    assert_eq!(controller.set_weight(0).err(), Some(KError::from(LinuxError::EINVAL)));
+    assert_eq!(controller.set_weight(0).err(), Some(KError::from(LinuxError::ERANGE)));
     assert_eq!(
         controller.set_weight(10_001).err(),
-        Some(KError::from(LinuxError::EINVAL))
+        Some(KError::from(LinuxError::ERANGE))
     );
 
     // Bandwidth: numeric quota with a valid period, then Linux's edges.

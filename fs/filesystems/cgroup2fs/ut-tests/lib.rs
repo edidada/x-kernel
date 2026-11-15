@@ -291,6 +291,8 @@ fn memory_peak_write_zero_resets_only_the_visible_peak() {
         read_test_file(&root_path, "memory-peak/memory.peak"),
         b"0\n"
     );
-    assert_eq!(peak.write(b"1\n"), Err(VfsError::InvalidInput));
+    // Linux accepts any numeric write as a reset request; the value itself is
+    // not stored as the new peak.
+    assert_eq!(peak.write(b"1\n"), Ok(2));
     assert_eq!(child.memory_controller().unwrap().memcg().peak(), 0);
 }
