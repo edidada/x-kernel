@@ -46,6 +46,12 @@ struct RxChannel {
 
 impl Drop for RxChannel {
     fn drop(&mut self) {
+        // Close before draining: once the close has returned no further send
+        // can be accepted, so everything still in the queue is drained and a
+        // racing `send` either enqueued before the close (and is drained here)
+        // or fails and gives back its own charge. Draining first would let a
+        // send slip a record in behind the last empty `try_recv`.
+        self.rx.close();
         // Purge what is still queued and release the sender's charge for
         // exactly those bytes, like the skb destructors Linux runs when
         // `unix_release_sock` purges a receive queue. Releasing is a
