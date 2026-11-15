@@ -46,6 +46,15 @@ impl UserTaskRuntime for Thread {
         self.cgroup().and_then(|cgroup| cgroup.cpu_bandwidth())
     }
 
+    fn cgroup_cpus(&self) -> Option<ktask::KCpuMask> {
+        let cpus = self.cgroup()?.cpuset_effective_cpus().ok()?;
+        let mut mask = ktask::KCpuMask::new();
+        for cpu in cpus.iter() {
+            mask.set(cpu, true);
+        }
+        Some(mask)
+    }
+
     fn on_enter(&self) {
         // `activate_cpu_time` ignores a thread whose exit sample is already
         // published. `is_exiting` is set earlier and must not skip the interval.

@@ -281,6 +281,7 @@ pub(crate) fn build_process_thread_with_config(
     credentials: alloc::sync::Arc<kcred::Cred>,
     config: process_runtime::ProcessRuntimeConfig,
 ) -> kerrno::KResult<kalloc_types::KBox<Thread>> {
+    kcgroup::refresh_root_cpuset_universe();
     let runtime = ProcessRuntime::new(
         process.clone(),
         exe_path,

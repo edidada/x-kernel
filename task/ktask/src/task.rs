@@ -163,6 +163,14 @@ pub trait UserTaskRuntime: Send + Sync + Any {
         kidentity::TaskIdentityToken::unknown()
     }
 
+    /// Returns the cgroup `cpuset` CPU bound for this task, if any.
+    ///
+    /// The bound is applied when the task is constructed so a child does not
+    /// inherit a stale boot-CPU affinity from its parent.
+    fn cgroup_cpus(&self) -> Option<KCpuMask> {
+        None
+    }
+
     /// Returns the cgroup CPU bandwidth tracker charged for this task's
     /// runtime ticks, sampled once at task construction. `None` leaves the
     /// task outside `cpu.max` accounting.
@@ -696,14 +704,21 @@ impl TaskInner {
                 "a user task's identity must match its runtime number"
             );
         }
-        Self::new_with_entry(
+        let task = Self::new_with_entry(
             TaskEntry::Prepared(entry),
             name,
             kbuild_config::KERNEL_STACK_SIZE,
             TaskIdentity::User {
                 user_runtime: UserRuntimeSlot::ready(user_runtime),
             },
-        )
+        );
+        if let Some(cpus) = task
+            .user_runtime()
+            .and_then(|runtime| runtime.cgroup_cpus())
+        {
+            let _ = task.set_cgroup_cpus(cpus);
+        }
+        task
     }
 
     /// Returns the live cgroup bandwidth tracker from this task's runtime.
