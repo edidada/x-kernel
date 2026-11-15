@@ -57,7 +57,7 @@ impl UserTaskRuntime for Thread {
                 // that stale root universe; child cgroups keep their explicit
                 // narrow mask.
                 if cgroup.parent().is_none() && count == 1 && kcpu_id_map::nr_cpus() > 1 {
-                    for cpu in 0..kcpu_id_map::nr_cpus() {
+                    for cpu in 0..kcpu_id_map::nr_cpus().max(kbuild_config::NR_CPUS) {
                         mask.set(cpu, true);
                     }
                 } else {

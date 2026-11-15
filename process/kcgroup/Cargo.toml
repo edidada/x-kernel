@@ -15,6 +15,7 @@ kerrno.workspace = true
 kidentity.workspace = true
 klazy.workspace = true
 kbandwidth.workspace = true
+kbuild_config.workspace = true
 kspin.workspace = true
 ksync.workspace = true
 memacct.workspace = true

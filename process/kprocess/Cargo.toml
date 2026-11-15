@@ -20,6 +20,7 @@ fs_context.workspace = true
 kaddr_layout.workspace = true
 karch.workspace = true
 kcpu_id_map.workspace = true
+kbuild_config.workspace = true
 kbandwidth.workspace = true
 kcred.workspace = true
 kcgroup.workspace = true

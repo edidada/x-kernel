@@ -2221,6 +2221,7 @@ name = "kcgroup"
 version = "0.3.0-dev"
 dependencies = [
  "kbandwidth",
+ "kbuild_config",
  "kcpu_id_map",
  "kcred",
  "kerrno",
@@ -3134,6 +3135,7 @@ dependencies = [
  "kalloc-types",
  "karch",
  "kbandwidth",
+ "kbuild_config",
  "kcgroup",
  "kcpu_id_map",
  "kcred",
