@@ -12,6 +12,7 @@
 //! `connect` queues a connection, and `accept` takes one out.
 
 use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use async_channel::TryRecvError;
 use kerrno::{KError, KResult};
@@ -27,6 +28,14 @@ use crate::{
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
 };
 
+/// One direction's receive side: the message queue, its poll set, and how many
+/// bytes it currently holds.
+type RxChannel = (
+    async_channel::Receiver<Datagram>,
+    Arc<PollSet>,
+    Arc<AtomicUsize>,
+);
+
 /// Connections a listener may queue before `connect` starts failing.
 ///
 /// Linux applies the `listen` backlog here. The queue is bounded like a listen
@@ -41,8 +50,12 @@ const LISTEN_BACKLOG: usize = 128;
 struct Pending {
     /// What the server reads.
     to_server: async_channel::Receiver<Datagram>,
+    /// Bytes queued in `to_server` and not yet read.
+    to_server_bytes: Arc<AtomicUsize>,
     /// What the server writes.
     from_server: async_channel::Sender<Datagram>,
+    /// Bytes queued in `from_server` and not yet read.
+    from_server_bytes: Arc<AtomicUsize>,
     /// Poll set the server registers for readability of `to_server`.
     server_poll: Arc<PollSet>,
     /// Poll set the client registers for readability of `from_server`.
@@ -123,6 +136,11 @@ struct ShutdownState {
 /// sender still closes the peer's receive channel once the last sender is gone.
 struct PeerChannel {
     tx: Option<async_channel::Sender<Datagram>>,
+    /// Bytes queued in the channel `tx` feeds and the peer has not read yet.
+    ///
+    /// This is the sender's `SIOCOUTQ` (`unix_outq_len`: `sk_wmem_alloc`), so
+    /// it belongs to the direction, not to either socket.
+    tx_bytes: Arc<AtomicUsize>,
     /// Poll set the peer registers for readability of its receive channel.
     read_poll: Arc<PollSet>,
     peer_credentials: PeerCredentials,
@@ -130,7 +148,7 @@ struct PeerChannel {
 
 pub struct SeqpacketTransport {
     /// Incoming messages from the peer.
-    rx: Mutex<Option<(async_channel::Receiver<Datagram>, Arc<PollSet>)>>,
+    rx: Mutex<Option<RxChannel>>,
     /// Outgoing direction and the peer's identity.
     peer: RwLock<Option<PeerChannel>>,
     /// Accepted-connection queue of a listening socket.
@@ -182,9 +200,14 @@ impl SeqpacketTransport {
         if self.options.pass_credentials() {
             accepted.set_option(SetSocketOption::PassCredentials(&true))?;
         }
-        *accepted.rx.lock() = Some((pending.to_server, pending.server_poll));
+        *accepted.rx.lock() = Some((
+            pending.to_server,
+            pending.server_poll,
+            pending.to_server_bytes,
+        ));
         *accepted.peer.write() = Some(PeerChannel {
             tx: Some(pending.from_server),
+            tx_bytes: pending.from_server_bytes,
             read_poll: pending.client_poll,
             peer_credentials: pending.client_credentials,
         });
@@ -214,17 +237,24 @@ impl SeqpacketTransport {
         let (tx2, rx2) = async_channel::unbounded();
         let poll1 = Arc::new(PollSet::new());
         let poll2 = Arc::new(PollSet::new());
+        // `bytes12` counts what `tx2` queued and `rx2` has not read, `bytes21`
+        // the other direction; each socket holds its read side's counter in its
+        // `rx` slot and the write side's in its peer record.
+        let bytes12 = Arc::new(AtomicUsize::new(0));
+        let bytes21 = Arc::new(AtomicUsize::new(0));
         let transport1 = Self::new();
         let transport2 = Self::new();
-        *transport1.rx.lock() = Some((rx1, poll1.clone()));
+        *transport1.rx.lock() = Some((rx1, poll1.clone(), bytes21.clone()));
         *transport1.peer.write() = Some(PeerChannel {
             tx: Some(tx2),
+            tx_bytes: bytes12.clone(),
             read_poll: poll2.clone(),
             peer_credentials: credentials.clone(),
         });
-        *transport2.rx.lock() = Some((rx2, poll2.clone()));
+        *transport2.rx.lock() = Some((rx2, poll2.clone(), bytes12.clone()));
         *transport2.peer.write() = Some(PeerChannel {
             tx: Some(tx1),
+            tx_bytes: bytes21,
             read_poll: poll1,
             peer_credentials: credentials,
         });
@@ -315,13 +345,33 @@ impl Configurable for SeqpacketTransport {
 
 impl UnixTransportOps for SeqpacketTransport {
     fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
-        // `unix_inq_len` sums the queued skbs for SOCK_SEQPACKET. This transport
-        // keeps its messages in an `async_channel::Receiver`, which has no peek,
-        // so the queued byte count is not readable without consuming. Reporting
-        // 0 is a conservative "nothing queued" that cannot make a client treat a
-        // working socket as broken; the same limitation applies to datagram.
-        *outq = 0;
-        *inq = 0;
+        // `unix_inq_len` sums every queued skb for SOCK_SEQPACKET (unlike
+        // datagram, which reports only the head), and `unix_outq_len` reports
+        // the sender's queued bytes. Both are plain byte totals, so each
+        // direction carries a counter that its writer adds to and its reader
+        // subtracts from; no peek is needed. A listening socket holds no data of
+        // its own and answers EINVAL, as `unix_inq_len` does.
+        if self
+            .listener
+            .lock()
+            .as_ref()
+            .is_some_and(|listener| listener.state.lock().is_listening())
+        {
+            return Err(KError::InvalidInput);
+        }
+        let to_i32 = |bytes: usize| i32::try_from(bytes).unwrap_or(i32::MAX);
+        *inq = to_i32(
+            self.rx
+                .lock()
+                .as_ref()
+                .map_or(0, |(_, _, queued)| queued.load(Ordering::Relaxed)),
+        );
+        *outq = to_i32(
+            self.peer
+                .read()
+                .as_ref()
+                .map_or(0, |peer| peer.tx_bytes.load(Ordering::Relaxed)),
+        );
         Ok(())
     }
 
@@ -392,10 +442,16 @@ impl UnixTransportOps for SeqpacketTransport {
         let (from_server, client_rx) = async_channel::unbounded();
         let server_poll = Arc::new(PollSet::new());
         let client_poll = Arc::new(PollSet::new());
+        // `to_server_bytes` is the server's `SIOCOUTQ` counterpart and the
+        // client's `SIOCINQ`; `from_server_bytes` the reverse.
+        let to_server_bytes = Arc::new(AtomicUsize::new(0));
+        let from_server_bytes = Arc::new(AtomicUsize::new(0));
 
         let pending = Pending {
             to_server: server_rx,
+            to_server_bytes: to_server_bytes.clone(),
             from_server,
+            from_server_bytes: from_server_bytes.clone(),
             server_poll: server_poll.clone(),
             client_poll: client_poll.clone(),
             client_addr,
@@ -418,9 +474,10 @@ impl UnixTransportOps for SeqpacketTransport {
         if shutdown.read {
             client_rx.close();
         }
-        *self.rx.lock() = Some((client_rx, client_poll));
+        *self.rx.lock() = Some((client_rx, client_poll, from_server_bytes));
         *peer = Some(PeerChannel {
             tx: (!shutdown.write).then_some(to_server),
+            tx_bytes: to_server_bytes,
             read_poll: server_poll,
             // Linux connects seqpacket sockets through the stream path, so the
             // client reports the listening socket's identity as its peer.
@@ -456,6 +513,7 @@ impl UnixTransportOps for SeqpacketTransport {
             return Err(KError::BrokenPipe);
         };
         tx.try_send(packet).map_err(|_| KError::BrokenPipe)?;
+        peer.tx_bytes.fetch_add(len, Ordering::Relaxed);
         peer.read_poll.wake();
         Ok(len)
     }
@@ -470,7 +528,7 @@ impl UnixTransportOps for SeqpacketTransport {
                 // issued before `connect` installed the receiver.
                 let is_read_shutdown = self.shutdown.lock().read;
                 let mut guard = self.rx.lock();
-                let Some((rx, _)) = guard.as_mut() else {
+                let Some((rx, _, queued)) = guard.as_mut() else {
                     return Err(KError::NotConnected);
                 };
 
@@ -485,6 +543,7 @@ impl UnixTransportOps for SeqpacketTransport {
                     Err(TryRecvError::Empty) => return Err(KError::WouldBlock),
                     Err(TryRecvError::Closed) => return Ok(0),
                 };
+                queued.fetch_sub(data.len(), Ordering::Relaxed);
                 let count = dst.write(&data)?;
 
                 if let Some(from) = options.from.as_mut() {
@@ -542,7 +601,7 @@ impl UnixTransportOps for SeqpacketTransport {
         }
 
         if how.has_read() {
-            let rx_poll = self.rx.lock().as_ref().map(|(rx, poll)| {
+            let rx_poll = self.rx.lock().as_ref().map(|(rx, poll, _)| {
                 rx.close();
                 poll.clone()
             });
@@ -569,7 +628,7 @@ impl Pollable for SeqpacketTransport {
             .as_ref()
             .is_none_or(|peer| peer.tx.as_ref().is_none_or(|tx| tx.is_closed()));
 
-        if let Some((rx, _)) = self.rx.lock().as_ref() {
+        if let Some((rx, ..)) = self.rx.lock().as_ref() {
             let is_read_shutdown = state.read || rx.is_closed();
             let is_write_shutdown = state.write || is_peer_rx_closed;
             events.set(IoEvents::IN, !rx.is_empty() || is_read_shutdown);
@@ -603,7 +662,7 @@ impl Pollable for SeqpacketTransport {
         if !events.intersects(IoEvents::IN | IoEvents::RDHUP | IoEvents::HUP) {
             return Ok(());
         }
-        if let Some((_, poll)) = self.rx.lock().as_ref() {
+        if let Some((_, poll, _)) = self.rx.lock().as_ref() {
             context.register(poll)?;
         } else if let Some(listener) = self.listener.lock().as_ref() {
             context.register(&listener.poll)?;

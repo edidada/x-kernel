@@ -501,3 +501,48 @@ fn accept_conn_follows_the_listener_state() {
         .expect("AcceptConn is a get-only option");
     assert!(!listening, "a shut-down listener is not accepting");
 }
+
+/// `SIOCINQ`/`SIOCOUTQ` report the queued byte totals for a seqpacket pair.
+///
+/// Linux `unix_inq_len` sums every queued skb for `SOCK_STREAM`/`SOCK_SEQPACKET`
+/// and `unix_outq_len` reports the sender's queued bytes, so both sides are
+/// plain running totals. A socket that only inherited the trait default answered
+/// 0/0 for a connected pair with data in flight.
+#[def_test]
+fn queue_lengths_report_queued_bytes_per_direction() {
+    let (sender, receiver) = SeqpacketTransport::new_pair(test_peer_credentials());
+
+    let mut outq = -1;
+    let mut inq = -1;
+    sender
+        .queue_lengths(&mut outq, &mut inq)
+        .expect("queue lengths are queryable");
+    assert_eq!((outq, inq), (0, 0), "an idle pair queues nothing");
+
+    assert_eq!(sender.send(&b"hello"[..], SendOptions::default()), Ok(5));
+    assert_eq!(sender.send(&b"world!"[..], SendOptions::default()), Ok(6));
+
+    // The sender reports what it handed to the peer and has nothing to read.
+    let mut outq = 0;
+    let mut inq = 0;
+    sender.queue_lengths(&mut outq, &mut inq).unwrap();
+    assert_eq!((outq, inq), (11, 0));
+
+    // The receiver sees the same 11 bytes as readable.
+    let mut outq = 0;
+    let mut inq = 0;
+    receiver.queue_lengths(&mut outq, &mut inq).unwrap();
+    assert_eq!((outq, inq), (0, 11));
+
+    // Reading one message drops exactly its bytes from both views.
+    let mut buf = [0u8; 16];
+    assert_eq!(receiver.recv(&mut buf[..], RecvOptions::default()), Ok(5));
+    let mut outq = 0;
+    let mut inq = 0;
+    sender.queue_lengths(&mut outq, &mut inq).unwrap();
+    assert_eq!(outq, 6, "the acknowledged message is no longer queued");
+    let mut outq = 0;
+    let mut inq = 0;
+    receiver.queue_lengths(&mut outq, &mut inq).unwrap();
+    assert_eq!(inq, 6);
+}

@@ -614,12 +614,17 @@ pub fn sys_mount_setattr(
     attr: UserConstPtr<c_void>,
     size: usize,
 ) -> KResult<isize> {
-    // Probes (e.g. systemd mount_new_api_supported) pass size=0 / attr=NULL /
-    // path=NULL. Report ENOSYS before touching user memory so callers fall back
-    // to the classic mount API instead of seeing a fatal bad-address error.
-    if size < 16 || attr.is_null() {
-        return Err(KError::Unsupported);
-    }
+    // A short or NULL structure is refused the way Linux refuses it: the size
+    // checks below answer `EINVAL` for `usize < MOUNT_ATTR_SIZE_VER0`, and a
+    // NULL `attr` fails the user read as `EFAULT` after the privilege check, in
+    // the same order as `copy_struct_from_user`.
+    //
+    // This deliberately reports the syscall as present. systemd's
+    // `mount_new_api_supported()` probe passes `dfd=-1, path="", flags=0,
+    // attr=NULL, size=0` and treats only `ENOSYS`/`EOPNOTSUPP` as "absent"; the
+    // subset it then uses (non-cloning `open_tree`, `mount_setattr` with
+    // `AT_EMPTY_PATH`/`AT_RECURSIVE`, `fsmount`, `move_mount`) is implemented
+    // here.
     // Linux `mount_setattr` admits the four path-resolution flags only, and
     // bounds the structure size before reading it: `usize > PAGE_SIZE` is
     // `E2BIG`, anything below the published struct is `EINVAL`.
