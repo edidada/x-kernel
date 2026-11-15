@@ -337,6 +337,13 @@ impl Memcg {
         self.subtree_stats.snapshot()
     }
 
+    /// Sets a synthetic peak for reset-path tests.
+    #[cfg(unittest)]
+    pub fn set_peak_for_test(&self, value: u64) {
+        self.peak.store(value, Ordering::Release);
+        self.subtree_peak.store(value, Ordering::Release);
+    }
+
     /// Resets the visible peak to the current usage.
     ///
     /// The charge lock excludes concurrent commits, so the new peak is a

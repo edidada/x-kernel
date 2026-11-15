@@ -286,6 +286,11 @@ fn memory_peak_write_zero_resets_only_the_visible_peak() {
     let root_path = Mount::new_root(&super_block).root_path();
     let peak = open_writable_test_file(&root_path, "memory-peak/memory.peak");
 
+    child
+        .memory_controller()
+        .unwrap()
+        .memcg()
+        .set_peak_for_test(8192);
     assert_eq!(peak.write(b"0\n"), Ok(2));
     assert_eq!(
         read_test_file(&root_path, "memory-peak/memory.peak"),

@@ -169,6 +169,26 @@ fn effective_for_apply(cgroup: &Arc<Cgroup>) -> Option<(CpuMask, NodeMask)> {
 }
 
 /// Applies `cgroup`'s effective masks to one process after migration.
+/// Validates that moving `pid` to `cgroup` will not empty any task's affinity.
+pub(crate) fn validate_cpuset_affinity_for_process(
+    cgroup: &Arc<Cgroup>,
+    pid: Pid,
+) -> VfsResult<()> {
+    let Some((cpus, _mems)) = effective_for_apply(cgroup) else {
+        return Ok(());
+    };
+    let cpus = kernel_cpu_mask(cpus);
+    let Ok(process) = kprocess::scheduler::target_process(pid) else {
+        return Ok(());
+    };
+    for task in kprocess::scheduler::process_tasks(&process) {
+        if (task.requested_cpus() & cpus).is_empty() {
+            return Err(VfsError::StorageFull);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_cpuset_affinity_to_process(cgroup: &Arc<Cgroup>, pid: Pid) -> VfsResult<()> {
     // A target cgroup may have no active cpuset controller. Membership has
     // already committed, so apply the nearest ancestor's effective masks

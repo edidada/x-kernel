@@ -86,7 +86,6 @@ impl PidsController {
         loop {
             if self.is_active.load(Ordering::Acquire) && current >= self.max.load(Ordering::Acquire)
             {
-                self.max_hits.fetch_add(1, Ordering::Relaxed);
                 return Err(KError::from(LinuxError::EAGAIN));
             }
             match self.current.compare_exchange_weak(
@@ -135,6 +134,10 @@ impl PidsController {
 impl Controller for PidsController {
     fn kind(&self) -> ControllerKind {
         ControllerKind::Pids
+    }
+
+    fn note_fork_failure(&self) {
+        self.max_hits.fetch_add(1, Ordering::Relaxed);
     }
 
     fn fork_charge(&self) -> KResult<()> {

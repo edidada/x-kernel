@@ -41,6 +41,7 @@ pub(crate) fn membership_file(
                 let process_id = command::parse_command(data)?
                     .parse::<u32>()
                     .map_err(|_| VfsError::InvalidInput)?;
+                cpuset::validate_cpuset_affinity_for_process(&cgroup, process_id)?;
                 kprocess::migrate_cgroup_process(process_id, &cgroup, |source, destination| {
                     if !source.is_descendant_of(state.view_root())
                         || !destination.is_descendant_of(state.view_root())

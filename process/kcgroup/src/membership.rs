@@ -73,7 +73,12 @@ impl TaskCharge {
         };
         charge.cgroup.reservations.fetch_add(1, Ordering::AcqRel);
         for controller in controllers {
-            controller.fork_charge()?;
+            if let Err(error) = controller.fork_charge() {
+                for ancestor in controllers {
+                    ancestor.note_fork_failure();
+                }
+                return Err(error);
+            }
             charge
                 .charges
                 .push(ChargeGuard::new(Arc::clone(controller), 1));

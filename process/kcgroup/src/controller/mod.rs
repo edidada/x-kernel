@@ -213,6 +213,8 @@ pub trait Controller: Send + Sync {
     /// a failure must leave the controller unchanged. The caller wraps a
     /// successful charge in a [`ChargeGuard`], which owns the controller and
     /// releases the charge unless it is committed.
+    fn note_fork_failure(&self) {}
+
     fn fork_charge(&self) -> kerrno::KResult<()> {
         Ok(())
     }
@@ -390,6 +392,15 @@ impl ControllerInstance {
 impl Controller for ControllerInstance {
     fn kind(&self) -> ControllerKind {
         Self::kind(self)
+    }
+
+    fn note_fork_failure(&self) {
+        match self {
+            Self::Pids(controller) => controller.note_fork_failure(),
+            Self::Cpu(controller) => controller.note_fork_failure(),
+            Self::Cpuset(controller) => controller.note_fork_failure(),
+            Self::Memory(controller) => controller.note_fork_failure(),
+        }
     }
 
     fn fork_charge(&self) -> kerrno::KResult<()> {

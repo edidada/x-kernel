@@ -219,17 +219,25 @@ fn write_high(cgroup: &Cgroup, limit: Option<u64>) -> VfsResult<()> {
 }
 
 fn parse_bytes(value: &str) -> VfsResult<u64> {
-    let (digits, multiplier) = match value.as_bytes().last().copied() {
-        Some(b'k' | b'K') => (&value[..value.len() - 1], 1024u64),
-        Some(b'm' | b'M') => (&value[..value.len() - 1], 1024u64 * 1024),
-        Some(b'g' | b'G') => (&value[..value.len() - 1], 1024u64 * 1024 * 1024),
-        Some(b't' | b'T') => (&value[..value.len() - 1], 1024u64 * 1024 * 1024 * 1024),
-        _ => (value, 1),
+    let (digits, shift) = match value.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&value[..value.len() - 1], 10),
+        Some(b'm' | b'M') => (&value[..value.len() - 1], 20),
+        Some(b'g' | b'G') => (&value[..value.len() - 1], 30),
+        Some(b't' | b'T') => (&value[..value.len() - 1], 40),
+        Some(b'p' | b'P') => (&value[..value.len() - 1], 50),
+        Some(b'e' | b'E') => (&value[..value.len() - 1], 60),
+        _ => (value, 0),
     };
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|number| number.checked_mul(multiplier))
+    let number = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).map_err(|_| VfsError::InvalidInput)?
+    } else {
+        digits.parse::<u64>().map_err(|_| VfsError::InvalidInput)?
+    };
+    number
+        .checked_mul(1u64 << shift)
         .ok_or(VfsError::InvalidInput)
 }
 

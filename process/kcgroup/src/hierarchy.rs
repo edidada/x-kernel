@@ -640,7 +640,7 @@ impl Cgroup {
 
     fn enable_subtree_control(&self, kind: ControllerKind) -> KResult<()> {
         if !self.has_available_controller(kind) {
-            return Err(KError::from(LinuxError::EINVAL));
+            return Err(KError::from(LinuxError::ENOENT));
         }
         // Linux's no-internal-process rule: a non-root cgroup with member
         // tasks cannot become an interior node for the controller. Tasks in

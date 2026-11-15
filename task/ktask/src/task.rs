@@ -999,6 +999,15 @@ impl TaskInner {
         *self.affinity.lock() = TaskAffinity::new(cpumask)
     }
 
+    /// Restores only the effective mask after a failed migration.
+    ///
+    /// The requested mask belongs to userspace and the bound to cpuset; a
+    /// transient stop failure must not overwrite either of them.
+    #[inline]
+    pub(crate) fn restore_effective_cpus(&self, cpumask: KCpuMask) {
+        self.affinity.lock().effective = cpumask;
+    }
+
     /// Copies the placement inherited by a forked or cloned task.
     ///
     /// The child starts with the parent's split affinity and memory-node bound;
