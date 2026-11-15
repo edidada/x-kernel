@@ -706,7 +706,10 @@ pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
 /// so the existing fair-scheduler arbitration enforces the relative share
 /// without a second weight domain.
 pub fn set_task_weight(task: &KtaskRef, weight: u32) -> bool {
-    crate::run_queue::set_task_nice(task, weight_to_nice(weight) as isize)
+    // cgroup cpu.weight is normalized to 100 for the default Linux share;
+    // convert it to the scheduler's 1024-scale weight before the nice lookup.
+    let scheduler_weight = (u64::from(weight) * 1024 / 100).clamp(1, 88_761) as u32;
+    crate::run_queue::set_task_nice(task, weight_to_nice(scheduler_weight) as isize)
 }
 
 /// Linux `prio_to_weight` for nice 0 inverted: returns the nice value whose
