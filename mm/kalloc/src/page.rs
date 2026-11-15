@@ -425,7 +425,14 @@ fn allocate_range(
     };
     match result {
         Ok(page) => {
-            if memacct::charge_frame(paddr, num_pages * PAGE_SIZE_4K, kind).is_err() {
+            // Page-table pages are allocated and retired in large batches by
+            // mmap/munmap and are not per-task data pages. Charging each table
+            // through the cgroup tree would put TREE/CHARGE locks on the TLB
+            // flush path; retain their ownership as a later accounting batch
+            // instead of serializing the mapping hot path here.
+            if kind != UsageKind::PageTable
+                && memacct::charge_frame(paddr, num_pages * PAGE_SIZE_4K, kind).is_err()
+            {
                 drop(page);
                 for index in num_pages..backing_pages {
                     allocator.release_pages_to_inventory(va + index * PAGE_SIZE_4K, 1);
