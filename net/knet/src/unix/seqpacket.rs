@@ -344,21 +344,21 @@ impl Configurable for SeqpacketTransport {
 }
 
 impl UnixTransportOps for SeqpacketTransport {
+    fn is_listening(&self) -> bool {
+        self.listener
+            .lock()
+            .as_ref()
+            .is_some_and(|listener| listener.state.lock().is_listening())
+    }
+
     fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
         // `unix_inq_len` sums every queued skb for SOCK_SEQPACKET (unlike
         // datagram, which reports only the head), and `unix_outq_len` reports
         // the sender's queued bytes. Both are plain byte totals, so each
         // direction carries a counter that its writer adds to and its reader
-        // subtracts from; no peek is needed. A listening socket holds no data of
-        // its own and answers EINVAL, as `unix_inq_len` does.
-        if self
-            .listener
-            .lock()
-            .as_ref()
-            .is_some_and(|listener| listener.state.lock().is_listening())
-        {
-            return Err(KError::InvalidInput);
-        }
+        // subtracts from; no peek is needed. A listening socket is refused for
+        // `SIOCINQ` by the ioctl itself (`unix_inq_len`), not here: `SIOCOUTQ`
+        // still answers on it.
         let to_i32 = |bytes: usize| i32::try_from(bytes).unwrap_or(i32::MAX);
         *inq = to_i32(
             self.rx

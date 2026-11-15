@@ -517,9 +517,11 @@ fn put_list_memberships(
     let mut groups = 0u32;
     socket.get_option(GetSocketOption::NetlinkMemberships(&mut groups))?;
     let bytes = groups.to_ne_bytes();
-    if optlen > 0 {
-        let copy = (optlen as usize).min(bytes.len());
-        osvm::write_vm_bytes(optval.as_ptr() as *mut u8, &bytes[..copy])?;
+    // `netlink_getsockopt` copies whole `u32` words only (`if (len - pos <
+    // sizeof(u32)) break;`), so a buffer shorter than one word receives nothing
+    // while `optlen` still reports the full length for sizing.
+    if (optlen as usize) >= size_of::<u32>() {
+        osvm::write_vm_bytes(optval.as_ptr() as *mut u8, &bytes)?;
     }
     Ok(bytes.len() as socklen_t)
 }
@@ -595,6 +597,29 @@ fn set_ip_length_tolerant(
         _ => unreachable!(),
     }
     Ok(Some(()))
+}
+
+/// Applies one `NETLINK_ADD_MEMBERSHIP` / `NETLINK_DROP_MEMBERSHIP` request.
+///
+/// `netlink_setsockopt` copies the option value before it switches on the
+/// option, so an unreadable buffer is `EFAULT` even for a caller that would then
+/// be refused for lack of privilege; the capability check runs after the read.
+fn set_group_membership(
+    socket: &Arc<Socket>,
+    optname: u32,
+    optval: UserConstPtr<u8>,
+    optlen: socklen_t,
+) -> KResult<()> {
+    if optlen as usize != size_of::<u32>() {
+        return Err(KError::InvalidInput);
+    }
+    let group: u32 = optval.cast::<u32>().read_vm().map_err(KError::from)?;
+    check_group_membership_privilege(socket)?;
+    if optname == NETLINK_ADD_MEMBERSHIP {
+        socket.set_option(SetSocketOption::NetlinkAddMembership(&group))
+    } else {
+        socket.set_option(SetSocketOption::NetlinkDropMembership(&group))
+    }
 }
 
 /// Checks the family and the capability `NETLINK_ADD_MEMBERSHIP` needs.
@@ -717,7 +742,8 @@ pub fn sys_setsockopt(
     if level == SOL_NETLINK
         && (optname == NETLINK_ADD_MEMBERSHIP || optname == NETLINK_DROP_MEMBERSHIP)
     {
-        check_group_membership_privilege(&socket)?;
+        set_group_membership(&socket, optname, optval, optlen)?;
+        return Ok(0);
     }
     if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         if optlen == 0 {

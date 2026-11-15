@@ -90,7 +90,11 @@ impl NetlinkSocket {
     }
 
     fn local_addr_inner(&self) -> KResult<NetlinkAddr> {
-        Ok(self.inner.local_addr.read().unwrap_or_default())
+        let mut addr = self.inner.local_addr.read().unwrap_or_default();
+        // `getsockname` reports `nlk->groups`, which `NETLINK_ADD/DROP_MEMBERSHIP`
+        // updates after `bind()`; the stored address keeps the bind-time value.
+        addr.groups = self.inner.groups.load(Ordering::Relaxed);
+        Ok(addr)
     }
 
     fn handle_request(
@@ -610,6 +614,15 @@ impl Configurable for NetlinkSocket {
             // tell a subscriber it joined a group that will never deliver.
             if !(1..=NETLINK_GROUP_COUNT as u32).contains(group) {
                 return Err(KError::InvalidInput);
+            }
+            // `netlink_setsockopt` runs the protocol's `netlink_bind` hook, and
+            // `rtnetlink_bind` requires CAP_NET_ADMIN for the reverse-path
+            // groups. `bind()` enforces the same rule here; subscribing by
+            // `setsockopt` must not be the cheaper way in.
+            if super::port::group_is_privileged(self.inner.protocol, *group)
+                && !kprocess::current_cred().has_cap(CAP_NET_ADMIN)
+            {
+                return Err(KError::OperationNotPermitted);
             }
             self.inner
                 .groups

@@ -656,6 +656,13 @@ pub fn sys_mount_setattr(
     // `copy_struct_from_user` faults on an unreadable page even for a field it
     // then ignores. Linux only consults the value when IDMAP is requested.
     let _userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
+    // "`Don't bother walking through the mounts if it is a nop`" - Linux returns
+    // success here, before the privilege check, the pathname lookup and the
+    // attribute parsing, so a request that changes nothing never fails because
+    // the path is missing.
+    if attr_set == 0 && attr_clr == 0 && propagation == 0 {
+        return Ok(0);
+    }
     // `copy_struct_from_user` handles a larger structure by requiring the bytes
     // this kernel does not know to be zero: a newer caller's extension must not
     // be silently ignored, so a non-zero tail is `E2BIG` rather than success.
@@ -704,6 +711,20 @@ pub fn sys_mount_setattr(
     {
         let mount = mfd.mount.lock().clone().ok_or(KError::InvalidInput)?;
         let namespace = kprocess::current_user_process().mnt_ns()?;
+        // `do_mount_setattr` starts with `if (!path_mounted(path)) return
+        // -EINVAL;`: the fd must name the mount's own root, not a path inside it.
+        // A non-cloning `open_tree` of a subdirectory keeps that subdirectory as
+        // its path, so it is refused here instead of re-attributing the whole
+        // containing mount.
+        let attached = mfd.attached_location.lock().clone();
+        if let Some(location) = attached.as_ref() {
+            if !location.is_mount_root() {
+                return Err(KError::InvalidInput);
+            }
+            // `check_mnt`: the mount must belong to the caller's namespace,
+            // otherwise attributes of a mount the caller cannot see would change.
+            namespace.require_registered_mount(&mount)?;
+        }
         namespace.set_mount_attributes_on(&mount, set_flags, clr_flags, recursive)?;
         // The fd may name a detached mount (`fsmount`), which is not in the
         // namespace registry yet, so this uses the registration-free form.

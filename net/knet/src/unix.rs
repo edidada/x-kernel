@@ -137,6 +137,11 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
         *inq = 0;
         Ok(())
     }
+
+    /// Whether this transport has reached the listening state.
+    fn is_listening(&self) -> bool {
+        false
+    }
 }
 
 #[enum_dispatch(Configurable, UnixTransportOps)]
@@ -679,6 +684,10 @@ impl SocketOps for UnixDomainSocket {
 
     fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
         self.transport.queue_lengths(outq, inq)
+    }
+
+    fn is_listening(&self) -> bool {
+        self.transport.is_listening()
     }
 }
 

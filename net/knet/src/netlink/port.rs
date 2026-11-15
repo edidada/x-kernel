@@ -193,6 +193,14 @@ pub(super) fn allows_unprivileged_send(protocol: i32) -> bool {
     group_policy(protocol).is_some_and(|policy| policy.allows_unprivileged_send)
 }
 
+/// Whether `group` is one `rtnetlink_bind` restricts to CAP_NET_ADMIN.
+///
+/// The reverse-path groups expose routing topology, so Linux refuses them to an
+/// unprivileged subscriber through both `bind()` and `NETLINK_ADD_MEMBERSHIP`.
+pub(super) fn group_is_privileged(protocol: i32, group: u32) -> bool {
+    group_policy(protocol).is_some_and(|policy| policy.privileged_groups & group_bit(group) != 0)
+}
+
 /// Returns whether an unprivileged socket may join a multicast group.
 ///
 /// Linux gates this on `NL_CFG_F_NONROOT_RECV`. `NETLINK_ROUTE` and
@@ -312,28 +320,23 @@ pub(super) fn publish(
     };
 
     for socket in recipients {
-        // The registry snapshot above is not a decision: `bind()` can replace
-        // the subscription mask after it is released. Hold the address lock from
-        // the mask check through the enqueue; `bind_inner()` takes the write side
-        // before publishing the new mask, so a concurrent unsubscribe either
-        // wins and suppresses this packet or waits until it is queued, never
-        // removing the group between the check and the push.
+        // `netlink_setsockopt(NETLINK_ADD_MEMBERSHIP)` links the socket into the
+        // protocol's `mc_list` (`netlink_update_subscriptions` ->
+        // `sk_add_bind_node`), and `netlink_broadcast_filtered` walks exactly
+        // that list with `sk_for_each_bound`. An unbound subscriber is therefore
+        // a recipient; only the sender-exclusion check below needs a port id.
+        //
+        // The registry snapshot above is not the subscription decision, so the
+        // live mask is read here. `NETLINK_ADD/DROP_MEMBERSHIP` update it under
+        // this same record's locks, and a packet published while an unsubscribe
+        // is in flight is either suppressed by the check below or queued before
+        // the mask changes - it is never lost after the check passed.
         let addr_guard = socket.local_addr.read();
-        // A socket with no bound address receives nothing. Linux registers a
-        // socket with the protocol's multicast list on `bind()`
-        // (`netlink_insert`), not on `NETLINK_ADD_MEMBERSHIP`, and
-        // `netlink_update_listeners` walks `sk_for_each_bound`, so a socket that
-        // has never bound has no recipient entry. A subscription taken first is
-        // honoured once `bind()` inserts the socket.
-        let Some(local_addr) = *addr_guard else {
-            continue;
-        };
-        // The mask is read under the same lock as the address, so the two cannot
-        // disagree about whether this socket is a recipient.
+        let local_addr = *addr_guard;
         if socket.groups.load(Ordering::Relaxed) & mask == 0 {
             continue;
         }
-        if exclude_pid == Some(local_addr.pid) {
+        if local_addr.is_some_and(|addr| exclude_pid == Some(addr.pid)) {
             continue;
         }
         let packet = NetlinkPacket {

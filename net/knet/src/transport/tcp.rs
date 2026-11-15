@@ -589,6 +589,10 @@ impl SocketOps for TcpSocket {
         linux_raw_sys::net::IPPROTO_TCP as i32
     }
 
+    fn is_listening(&self) -> bool {
+        TcpSocket::is_listening(self)
+    }
+
     fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
         // `tcp_ioctl(SIOCINQ)` reports `tcp_inq()` -- the bytes queued for
         // reading -- and answers EINVAL to a listening socket, which holds no

@@ -184,6 +184,12 @@ impl FileOperations for SocketFileOps {
             return Err(KError::NotATty);
         }
         let socket = Self::socket(file)?;
+        // `unix_ioctl` answers SIOCOUTQ from `unix_outq_len` unconditionally,
+        // while SIOCINQ goes through `unix_inq_len`, which refuses a listening
+        // socket with EINVAL. `tcp_ioctl` makes the same split.
+        if cmd == SIOCINQ && socket.is_listening() {
+            return Err(KError::InvalidInput);
+        }
         let mut outq = 0i32;
         let mut inq = 0i32;
         socket.queue_lengths(&mut outq, &mut inq)?;

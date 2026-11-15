@@ -595,6 +595,13 @@ impl UnixTransportOps for StreamTransport {
         Ok(())
     }
 
+    fn is_listening(&self) -> bool {
+        self.listener
+            .lock()
+            .as_ref()
+            .is_some_and(|listener| listener.is_listening())
+    }
+
     fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
         // Linux `unix_inq_len` counts the bytes queued on the receive side and
         // `unix_outq_len` the sender's `sk_wmem_alloc`, which for this channel

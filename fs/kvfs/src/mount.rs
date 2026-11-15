@@ -615,6 +615,21 @@ impl MntNamespace {
         Ok((new_root, kept))
     }
 
+    /// Requires `mount` to be registered in this namespace (`check_mnt`).
+    ///
+    /// `mount_setattr` can be handed a mount through a descriptor, so the mount
+    /// is not necessarily one this namespace knows; Linux's `check_mnt` refuses
+    /// to change a mount that belongs to another namespace. A detached mount
+    /// (an `fsmount` result) is not registered yet and is not checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] when the mount is unknown here.
+    pub fn require_registered_mount(&self, mount: &Arc<Mount>) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mount)
+    }
+
     /// Makes the mount rooted at `target` private.
     ///
     /// KVFS does not yet model shared propagation groups, so registered mounts
@@ -1286,7 +1301,7 @@ impl Path {
     /// be the parent's topmost child mount, so a covered (overmounted) mount
     /// root reports `false`. Mount/umount and mount-stacking validation need
     /// this "currently attached" semantics, not the statx attribute.
-    pub(crate) fn is_mount_root(&self) -> bool {
+    pub fn is_mount_root(&self) -> bool {
         if !self.dentry_is_mount_root() {
             return false;
         }

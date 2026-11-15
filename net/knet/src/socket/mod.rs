@@ -393,6 +393,16 @@ pub trait SocketOps: Configurable {
     /// Shutdown the socket, closing the connection.
     fn shutdown(&self, how: Shutdown) -> KResult;
 
+    /// Whether the socket is in the listening state.
+    ///
+    /// `unix_inq_len` and `tcp_ioctl` refuse `SIOCINQ` for a listening socket
+    /// (it holds no data of its own) while `unix_outq_len` still answers
+    /// `SIOCOUTQ`, so the ioctl needs to tell the two apart before it asks for
+    /// the counts.
+    fn is_listening(&self) -> bool {
+        false
+    }
+
     /// Reports the socket queue byte counts served by `SIOCOUTQ`/`SIOCINQ`.
     ///
     /// Linux serves these from `unix_ioctl` (net/unix/af_unix.c):
@@ -477,6 +487,10 @@ impl<T: SocketOps + ?Sized> SocketOps for KBox<T> {
 
     fn queue_lengths(&self, outq: &mut i32, inq: &mut i32) -> KResult {
         (**self).queue_lengths(outq, inq)
+    }
+
+    fn is_listening(&self) -> bool {
+        (**self).is_listening()
     }
 }
 
