@@ -327,10 +327,11 @@ pub(super) fn publish(
         // a recipient; only the sender-exclusion check below needs a port id.
         //
         // The registry snapshot above is not the subscription decision, so the
-        // live mask is read here. `NETLINK_ADD/DROP_MEMBERSHIP` update it under
-        // this same record's locks, and a packet published while an unsubscribe
-        // is in flight is either suppressed by the check below or queued before
-        // the mask changes - it is never lost after the check passed.
+        // live mask is read here, once per recipient. The mask is an atomic the
+        // subscribe/unsubscribe path updates without this record's locks, so a
+        // concurrent unsubscribe is observed either before this read (the packet
+        // is suppressed) or after it (the packet is already claimed and is
+        // queued) - never lost between a check and a push.
         let addr_guard = socket.local_addr.read();
         let local_addr = *addr_guard;
         if socket.groups.load(Ordering::Relaxed) & mask == 0 {

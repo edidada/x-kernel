@@ -183,6 +183,15 @@ impl DeviceProjection {
     }
 }
 
+/// Strips the one trailing newline or NUL `kobject_action_type` ignores.
+fn strip_action_terminator(data: &[u8]) -> &[u8] {
+    match data {
+        [rest @ .., b'\n' | 0] => rest,
+        _ => data,
+    }
+}
+
+/// The device projection tree shared by every lookup.
 fn device_projection() -> &'static Mutex<DeviceProjection> {
     #[expect(
         clippy::expect_used,
@@ -1087,7 +1096,12 @@ impl SimpleDirOps for SysfsDirectory {
                                     // from the first token only: userspace may
                                     // append extra `KEY=VALUE` pairs after it, and
                                     // `udevadm trigger` sends "add <uuid>".
-                                    let text = core::str::from_utf8(data)
+                                    // `kobject_action_type` drops one trailing
+                                    // newline or NUL before it looks at the
+                                    // action, so a writer that leaves the
+                                    // terminator in `count` is not refused.
+                                    let text = strip_action_terminator(data);
+                                    let text = core::str::from_utf8(text)
                                         .map_err(|_| VfsError::InvalidInput)?;
                                     let action = text
                                         .split_ascii_whitespace()

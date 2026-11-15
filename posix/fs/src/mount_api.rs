@@ -656,13 +656,6 @@ pub fn sys_mount_setattr(
     // `copy_struct_from_user` faults on an unreadable page even for a field it
     // then ignores. Linux only consults the value when IDMAP is requested.
     let _userns_fd = UserConstPtr::<u64>::from(base + 24).read_vm()?;
-    // "`Don't bother walking through the mounts if it is a nop`" - Linux returns
-    // success here, before the privilege check, the pathname lookup and the
-    // attribute parsing, so a request that changes nothing never fails because
-    // the path is missing.
-    if attr_set == 0 && attr_clr == 0 && propagation == 0 {
-        return Ok(0);
-    }
     // `copy_struct_from_user` handles a larger structure by requiring the bytes
     // this kernel does not know to be zero: a newer caller's extension must not
     // be silently ignored, so a non-zero tail is `E2BIG` rather than success.
@@ -672,6 +665,13 @@ pub fn sys_mount_setattr(
     check_mount_attr_bits(attr_set)?;
     check_mount_attr_bits(attr_clr)?;
     check_mount_attr_atime(attr_set, attr_clr)?;
+    // "`Don't bother walking through the mounts if it is a nop`": Linux returns
+    // success before the privilege check, the pathname lookup and the attribute
+    // parsing - but after `copy_struct_from_user`, so a non-zero tail is still
+    // E2BIG for a request that changes nothing (checked above).
+    if attr_set == 0 && attr_clr == 0 && propagation == 0 {
+        return Ok(0);
+    }
     // `build_mount_kattr`: only the four propagation flags are defined, and at
     // most one may be requested.
     const PROPAGATION_FLAGS: u64 = linux_raw_sys::general::MS_SHARED as u64
@@ -691,10 +691,11 @@ pub fn sys_mount_setattr(
         return Err(KError::InvalidInput);
     }
     if attr_set & MOUNT_ATTR_IDMAP != 0 {
-        // Idmapped mounts are not implemented, so the descriptor can never be
-        // honoured; report the errno the reference kernel uses for a descriptor
-        // that does not resolve, rather than claiming success.
-        return Err(KError::BadFileDescriptor);
+        // Idmapped mounts are not implemented here at all, so no descriptor and
+        // no attribute word can be honoured. `EOPNOTSUPP` says that; `EBADF`
+        // (what Linux answers for a descriptor that does not resolve) would
+        // suggest the request itself is well-formed and only the fd is wrong.
+        return Err(KError::OperationNotSupported);
     }
     // `build_mount_idmapped` returns 0 without looking at `userns_fd` when
     // neither attribute word names IDMAP, so a stray descriptor is ignored
@@ -709,16 +710,27 @@ pub fn sys_mount_setattr(
         && let Ok(file) = kprocess::current_files().get_file(dfd)
         && let Ok(mfd) = mount_fd(&file)
     {
-        let mount = mfd.mount.lock().clone().ok_or(KError::InvalidInput)?;
-        let namespace = kprocess::current_user_process().mnt_ns()?;
+        // Both fields are snapshotted under one hold: the mount and the location
+        // that says whether it is attached describe one state, and validating
+        // them from separate critical sections could see a mount that has moved
+        // between the two reads.
+        let mount_slot = mfd.mount.lock();
+        let attached_slot = mfd.attached_location.lock();
+        let mount = mount_slot.clone().ok_or(KError::InvalidInput)?;
         // `do_mount_setattr` starts with `if (!path_mounted(path)) return
         // -EINVAL;`: the fd must name the mount's own root, not a path inside it.
         // A non-cloning `open_tree` of a subdirectory keeps that subdirectory as
         // its path, so it is refused here instead of re-attributing the whole
         // containing mount.
-        let attached = mfd.attached_location.lock().clone();
+        let attached = attached_slot.clone();
+        drop(attached_slot);
+        drop(mount_slot);
+        let namespace = kprocess::current_user_process().mnt_ns()?;
         if let Some(location) = attached.as_ref() {
-            if !location.is_mount_root() {
+            // `path_mounted(path)` is `dentry == mnt->mnt_root`; a mount that is
+            // covered by a later mount still names its own root, so the weaker
+            // test is the one Linux applies.
+            if !location.dentry_is_mount_root() {
                 return Err(KError::InvalidInput);
             }
             // `check_mnt`: the mount must belong to the caller's namespace,

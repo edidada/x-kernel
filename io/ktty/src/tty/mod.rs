@@ -182,10 +182,12 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
     /// keyboard, LEDs, graphics mode, or modem lines, so these requests are
     /// accepted with sane defaults (text mode, XLATE keyboard, no packet or
     /// exclusive mode) instead of failing `ENOTTY`. This lets userspace console
-    /// setup (e.g. systemd-executor) proceed. Returns `None` for every command
-    /// this helper does not recognise, which the caller then hands to the
-    /// generic terminal path; that includes the line-discipline pair only
-    /// because the console answers it here with `N_TTY`.
+    /// setup (e.g. systemd-executor) proceed.
+    ///
+    /// Returns `None` for any command it does not handle; the caller then passes
+    /// those to the generic terminal path. The line-discipline pair is handled
+    /// here rather than there because the console has exactly one discipline
+    /// (`N_TTY`) to report, so it needs no discipline table.
     fn console_ioctl(&self, cmd: u32, arg: usize) -> Option<KResult<usize>> {
         use linux_raw_sys::ioctl::*;
         // Mode/keyboard values from <linux/kd.h> and <linux/vt.h> that
