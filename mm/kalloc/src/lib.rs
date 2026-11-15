@@ -19,6 +19,7 @@
 extern crate log;
 extern crate alloc;
 
+use alloc::vec::Vec;
 use core::{
     alloc::{GlobalAlloc, Layout},
     fmt,
@@ -278,6 +279,12 @@ impl fmt::Debug for Usages {
     }
 }
 
+/// A physical range removed from the page allocator and awaiting re-addition.
+struct RemovedMemoryRegion {
+    start: usize,
+    size: usize,
+}
+
 /// The global allocator used by x-kernel.
 ///
 /// It combines a [`ByteAllocator`] and a [`PageAllocator`] into a simple
@@ -295,6 +302,10 @@ pub struct GlobalAllocator {
     /// Whether the page allocator has at least one usable memory region.
     page_ready: AtomicBool,
     palloc: SpinNoIrq<BuddyPageAllocator<{ PAGE_SIZE_4K }>>,
+    /// Regions reserved by `remove_memory` whose buddy metadata remains live.
+    removed_regions: SpinNoIrq<Vec<RemovedMemoryRegion>>,
+    /// Serializes region removal and re-addition.
+    memory_hotplug_lock: SpinNoIrq<()>,
 }
 
 impl Default for GlobalAllocator {
@@ -311,6 +322,8 @@ impl GlobalAllocator {
             heap_ready: AtomicBool::new(false),
             page_ready: AtomicBool::new(false),
             palloc: SpinNoIrq::new(BuddyPageAllocator::new()),
+            removed_regions: SpinNoIrq::new(Vec::new()),
+            memory_hotplug_lock: SpinNoIrq::new(()),
         }
     }
 
@@ -358,12 +371,80 @@ impl GlobalAllocator {
     ///
     /// By default new memory first becomes available to the page allocator.
     pub fn add_memory(&self, va: usize, size: usize) -> AllocResult {
+        let _hotplug = self.memory_hotplug_lock.lock();
+        if self.restore_removed_region(va, size)? {
+            return Ok(());
+        }
         self.init_or_extend_page_allocator(va, size)?;
-
         if !self.heap_ready.load(Ordering::Acquire) {
             self.bootstrap_heap_if_needed()?;
         }
         Ok(())
+    }
+
+    /// Removes a page-aligned region from the page allocator.
+    ///
+    /// Every page must be free. The buddy region stays registered; the pages
+    /// are reserved so a matching `add_memory` can release them again.
+    pub fn remove_memory(&self, va: usize, size: usize) -> AllocResult {
+        if size == 0 || !va.is_multiple_of(PAGE_SIZE_4K) || !size.is_multiple_of(PAGE_SIZE_4K) {
+            return Err(AllocError::InvalidInput);
+        }
+        let end = va.checked_add(size).ok_or(AllocError::InvalidInput)?;
+        if !self.page_ready.load(Ordering::Acquire) {
+            return Err(AllocError::NotInitialized);
+        }
+        let _hotplug = self.memory_hotplug_lock.lock();
+        if self
+            .removed_regions
+            .lock()
+            .iter()
+            .any(|region| region.start == va && region.size == size)
+        {
+            return Err(AllocError::InvalidInput);
+        }
+
+        let mut palloc = self.palloc.lock();
+        let mut page = va;
+        while page < end {
+            if palloc.allocate_pages_at(page, 1, PAGE_SIZE_4K).is_err() {
+                for reserved in (va..page).step_by(PAGE_SIZE_4K) {
+                    palloc.deallocate_pages(reserved, 1);
+                }
+                return Err(AllocError::NoMemory);
+            }
+            page += PAGE_SIZE_4K;
+        }
+        drop(palloc);
+
+        let mut removed = self.removed_regions.lock();
+        if removed.try_reserve(1).is_err() {
+            drop(removed);
+            let mut palloc = self.palloc.lock();
+            for reserved in (va..end).step_by(PAGE_SIZE_4K) {
+                palloc.deallocate_pages(reserved, 1);
+            }
+            return Err(AllocError::NoMemory);
+        }
+        removed.push(RemovedMemoryRegion { start: va, size });
+        Ok(())
+    }
+
+    fn restore_removed_region(&self, va: usize, size: usize) -> AllocResult<bool> {
+        let mut removed = self.removed_regions.lock();
+        let Some(index) = removed
+            .iter()
+            .position(|region| region.start == va && region.size == size)
+        else {
+            return Ok(false);
+        };
+        removed.swap_remove(index);
+        drop(removed);
+        let mut palloc = self.palloc.lock();
+        for page in (va..va + size).step_by(PAGE_SIZE_4K) {
+            palloc.deallocate_pages(page, 1);
+        }
+        Ok(true)
     }
 
     /// Allocate arbitrary number of bytes. Returns the left bound of the
@@ -934,6 +1015,14 @@ pub fn global_add_memory(va: usize, size: usize) -> AllocResult {
         va + size
     );
     GLOBAL_ALLOCATOR.add_memory(va, size)
+}
+
+/// Removes a physical region from the global allocator.
+///
+/// The caller must ensure the region is not in kernel use outside the
+/// allocator; every page must be free in the page allocator.
+pub fn global_remove_memory(va: usize, size: usize) -> AllocResult {
+    GLOBAL_ALLOCATOR.remove_memory(va, size)
 }
 
 /// Return whether the global backing page allocator is ready for requests.

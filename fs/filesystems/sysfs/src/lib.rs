@@ -735,6 +735,47 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
         class_link.clone(),
         TreeEntry::Symlink(relative_symlink(&class_link, &card)),
     );
+    // Linux publishes one class entry per connector, named after the card and
+    // the connector (`card0-Virtual-1`), and its attributes are the
+    // connector's state.
+    if let Some(connector) = node.drm_metadata() {
+        // The class entry links to the connector's *own* directory
+        // (`.../drm/card0-Virtual-1`), which is where its attributes live;
+        // linking to the card would hide every one of them.
+        let directory = format!("{card}-{}", connector.name());
+        let connector_leaf = format!("{class_link}-{}", connector.name());
+        add_entry(
+            tree,
+            connector_leaf.clone(),
+            TreeEntry::Symlink(relative_symlink(&connector_leaf, &directory)),
+        );
+        add_directory(tree, &directory);
+        for (attribute, contents) in [
+            ("status", String::from(connector.status())),
+            ("dpms", String::from(connector.dpms())),
+            ("modes", String::from(connector.modes())),
+            ("enabled", String::from("enabled")),
+        ] {
+            let mut contents = contents.into_bytes();
+            if !contents.ends_with(b"\n") {
+                contents.push(b'\n');
+            }
+            add_entry(
+                tree,
+                format!("{directory}/{attribute}"),
+                TreeEntry::Attribute(projected.clone(), contents),
+            );
+        }
+        // `edid` is raw binary, not a text attribute: Linux writes exactly the
+        // descriptor bytes, and `edid-decode` reads them back verbatim. A
+        // trailing newline would make the byte count one past the descriptor
+        // and shift every extension block.
+        add_entry(
+            tree,
+            format!("{directory}/edid"),
+            TreeEntry::Attribute(projected.clone(), connector.edid().to_vec()),
+        );
+    }
 
     // The render node is a second minor of the same card, not a second device:
     // its `dev`, `uevent`, char-device link and class link are projected from
