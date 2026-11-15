@@ -917,8 +917,8 @@ impl Cgroup {
 fn default_universe() -> (CpuMask, NodeMask) {
     let mut cpus = CpuMask::empty();
     let mut found = false;
-    kcpu_id_map::for_each_online_logical_cpu(|index, _, _| {
-        if cpus.insert(index) {
+    kcpu_id_map::for_each_present_logical_cpu(|_, logical_cpu_id, _| {
+        if cpus.insert(logical_cpu_id.as_usize()) {
             found = true;
         }
     });
