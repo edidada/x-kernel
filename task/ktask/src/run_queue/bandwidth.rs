@@ -17,7 +17,11 @@
 //! so it cannot run for more than one accounting quantum past the throttle
 //! boundary.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kbandwidth::Bandwidth;
 use kspin::{SpinNoIrq, static_lock};
@@ -25,10 +29,14 @@ use kspin::{SpinNoIrq, static_lock};
 use crate::{KtaskRef, WeakKtaskRef};
 
 static_lock! {
-    /// Bandwidth trackers seen by the scheduler. Entries persist; groups
-    /// without limits cost one atomic load per account point.
-    static TRACKED: SpinNoIrq<Vec<Arc<Bandwidth>>> = SpinNoIrq::new(Vec::new());
+    /// Bandwidth trackers seen by the scheduler. Weak entries let a destroyed
+    /// cgroup retire without leaving a permanent global reference.
+    static TRACKED: SpinNoIrq<Vec<Weak<Bandwidth>>> = SpinNoIrq::new(Vec::new());
 }
+
+/// Nonzero while at least one live tracker is registered. Groups without
+/// `cpu.max` avoid taking any bandwidth lock on the scheduler tick path.
+static ACTIVE_TRACKERS: AtomicUsize = AtomicUsize::new(0);
 
 static_lock! {
     /// Known members per tracker. Weak references: a task that exits must not
@@ -37,7 +45,7 @@ static_lock! {
 }
 
 struct Member {
-    tracker: Arc<Bandwidth>,
+    tracker: Weak<Bandwidth>,
     task: WeakKtaskRef,
 }
 
@@ -79,10 +87,16 @@ pub(crate) fn account_current(
 /// Runs the lazy period rollover for every tracked group and resumes members
 /// whose window closed.
 pub(crate) fn poll_trackers(now_ns: u64) {
+    if ACTIVE_TRACKERS.load(Ordering::Acquire) == 0 {
+        return;
+    }
     let mut resumed = Vec::new();
-    for tracker in TRACKED.lock().iter() {
+    let mut tracked = TRACKED.lock();
+    tracked.retain(|entry| entry.strong_count() != 0);
+    ACTIVE_TRACKERS.store(tracked.len(), Ordering::Release);
+    for tracker in tracked.iter().filter_map(Weak::upgrade) {
         if tracker.poll(now_ns) {
-            resumed.push(tracker.clone());
+            resumed.push(tracker);
         }
     }
     for tracker in &resumed {
@@ -97,15 +111,23 @@ pub(crate) fn poll_trackers(now_ns: u64) {
 
 fn register_tracker_once(tracker: &Arc<Bandwidth>) {
     let mut tracked = TRACKED.lock();
-    if !tracked.iter().any(|entry| Arc::ptr_eq(entry, tracker)) {
-        tracked.push(tracker.clone());
+    if !tracked
+        .iter()
+        .filter_map(Weak::upgrade)
+        .any(|entry| Arc::ptr_eq(&entry, tracker))
+    {
+        tracked.push(Arc::downgrade(tracker));
+        ACTIVE_TRACKERS.fetch_add(1, Ordering::Release);
     }
 }
 
 fn register_member(tracker: &Arc<Bandwidth>, task: &KtaskRef) {
     let mut members = MEMBERS.lock();
     let known = members.iter().any(|member| {
-        Arc::ptr_eq(&member.tracker, tracker)
+        member
+            .tracker
+            .upgrade()
+            .is_some_and(|known| Arc::ptr_eq(&known, tracker))
             && member
                 .task
                 .upgrade()
@@ -113,7 +135,7 @@ fn register_member(tracker: &Arc<Bandwidth>, task: &KtaskRef) {
     });
     if !known {
         members.push(Member {
-            tracker: tracker.clone(),
+            tracker: Arc::downgrade(tracker),
             task: KtaskRef::downgrade(task),
         });
     }
@@ -122,7 +144,11 @@ fn register_member(tracker: &Arc<Bandwidth>, task: &KtaskRef) {
 /// Parks every selectable member of `tracker` until the period rolls over.
 fn park_group(tracker: &Arc<Bandwidth>, _now_ns: u64) {
     for member in MEMBERS.lock().iter() {
-        if !Arc::ptr_eq(&member.tracker, tracker) {
+        if !member
+            .tracker
+            .upgrade()
+            .is_some_and(|known| Arc::ptr_eq(&known, tracker))
+        {
             continue;
         }
         if let Some(task) = member.task.upgrade() {
@@ -137,7 +163,11 @@ fn park_group(tracker: &Arc<Bandwidth>, _now_ns: u64) {
 /// Makes every member of `tracker` selectable again.
 fn resume_group(tracker: &Arc<Bandwidth>) {
     for member in MEMBERS.lock().iter() {
-        if !Arc::ptr_eq(&member.tracker, tracker) {
+        if !member
+            .tracker
+            .upgrade()
+            .is_some_and(|known| Arc::ptr_eq(&known, tracker))
+        {
             continue;
         }
         if let Some(task) = member.task.upgrade() {
