@@ -117,14 +117,13 @@ Five entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (the same aut
   `InvalidInput`; bytes past the published struct must be zero (`E2BIG`), so a caller relying on a field this kernel does not
   implement is refused instead of having its request truncated. An `attr_set`/`attr_clr` bit outside
   `MOUNT_SETATTR_VALID_FLAGS` is `InvalidInput` rather than a silently ignored request.
-  `MOUNT_ATTR_IDMAP` follows `build_mount_idmapped` up to the point where it would succeed: clearing an idmap is
-  `InvalidInput`, a descriptor above `INT_MAX` is `InvalidInput`, and a descriptor that does not resolve is
-  `BadFileDescriptor`; only a request Linux would accept (a live user-namespace fd) answers `EOPNOTSUPP`, because
-  idmapped mounts are not implemented. `check_mount_attr_atime` applies the field's enum semantics: `MOUNT_ATTR__ATIME` must be all-or-nothing in `attr_clr`, an
+  `check_mount_attr_atime` applies the field's enum semantics: `MOUNT_ATTR__ATIME` must be all-or-nothing in `attr_clr`, an
   atime value in `attr_set` requires the group in `attr_clr`, and only RELATIME/NOATIME/STRICTATIME are representable, so a
   combination such as `NOATIME | STRICTATIME` is `InvalidInput` rather than being applied as relatime. `propagation` admits the
-  four `MS_*` propagation flags, at most one per call; a non-zero `userns_fd` is `EOPNOTSUPP` because idmapped mounts are not
-  implemented. The whole call requires `CAP_SYS_ADMIN`, as `may_mount()` gates it in `SYSCALL_DEFINE5(mount_setattr)`.
+  four `MS_*` propagation flags, at most one per call. `MOUNT_ATTR_IDMAP` follows `build_mount_idmapped` exactly: clearing an
+  idmap or an oversized descriptor is `InvalidInput`, an unresolvable descriptor is `BadFileDescriptor`, and a descriptor that
+  resolves is `InvalidInput` because no descriptor in this kernel names a user namespace - so the request is refused at the same
+  points Linux refuses it, rather than with an `EOPNOTSUPP` of its own. The whole call requires `CAP_SYS_ADMIN`, as `may_mount()` gates it in `SYSCALL_DEFINE5(mount_setattr)`.
 
 ## Memory Safety Invariants
 

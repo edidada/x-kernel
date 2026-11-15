@@ -692,22 +692,22 @@ pub fn sys_mount_setattr(
         return Err(KError::InvalidInput);
     }
     if attr_set & MOUNT_ATTR_IDMAP != 0 {
-        // Linux's `build_mount_idmapped` chain, up to the point where it would
-        // succeed: the request can only be honoured by resolving `userns_fd` and
-        // building an idmapping, which this kernel does not implement. Every
-        // rejection before that point is reproduced exactly, so only a request
-        // Linux would accept diverges.
+        // `build_mount_idmapped` in full: an oversized descriptor is EINVAL,
+        // `fdget` resolves whatever descriptor was named (descriptor 0 included,
+        // when it is open) so only an unresolvable one is EBADF, and a file that
+        // is not a user-namespace file is EINVAL. No descriptor in this kernel
+        // names a user namespace, so every resolvable descriptor takes that last
+        // arm and the request is refused exactly where Linux refuses it.
         if userns_fd > i32::MAX as u64 {
             return Err(KError::InvalidInput);
         }
-        if userns_fd == 0
-            || kprocess::current_files()
-                .get_file(userns_fd as i32)
-                .is_err()
+        if kprocess::current_files()
+            .get_file(userns_fd as i32)
+            .is_err()
         {
             return Err(KError::BadFileDescriptor);
         }
-        return Err(KError::OperationNotSupported);
+        return Err(KError::InvalidInput);
     }
     // `build_mount_idmapped` returns 0 without looking at `userns_fd` when
     // neither attribute word names IDMAP, so a stray descriptor is ignored
