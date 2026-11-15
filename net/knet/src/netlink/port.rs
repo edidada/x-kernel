@@ -325,15 +325,18 @@ pub(super) fn publish(
         if socket.groups.load(Ordering::Relaxed) & mask == 0 {
             continue;
         }
-        // An unbound socket has no port ID yet, so there is no sender to
-        // exclude it by; it still receives the group, because
-        // `NETLINK_ADD_MEMBERSHIP` is valid before `bind()` and Linux's
-        // `netlink_broadcast_filtered` walks the protocol's multicast list,
-        // which `netlink_insert` joins on subscription rather than on bind.
+        // A socket with no bound address receives nothing. Linux registers a
+        // socket with the protocol's multicast list on `bind()`
+        // (`netlink_insert`), not on `NETLINK_ADD_MEMBERSHIP`, so a subscription
+        // taken before the socket has a port id has no recipient entry to
+        // deliver to; the subscription becomes effective when `bind()` inserts
+        // it. Delivering here instead handed unbound sockets messages they had
+        // no address to describe the sender of.
         let addr_guard = socket.local_addr.read();
-        if let Some(local_addr) = *addr_guard
-            && exclude_pid == Some(local_addr.pid)
-        {
+        let Some(local_addr) = *addr_guard else {
+            continue;
+        };
+        if exclude_pid == Some(local_addr.pid) {
             continue;
         }
         let packet = NetlinkPacket {

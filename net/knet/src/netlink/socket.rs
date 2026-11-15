@@ -497,9 +497,10 @@ impl NetlinkSocket {
         let _send_guard = self.inner.send_lock.lock();
         let current = *self.inner.local_addr.read();
         let bound = port::bind(&self.inner, requested, current, can_net_admin)?;
-        // `nl_groups` in `bind()` goes into the same `nlk->groups` bitmap that
-        // `NETLINK_ADD_MEMBERSHIP` modifies, so a later subscribe/unsubscribe
-        // composes with it rather than replacing it.
+        // `netlink_bind` *replaces* the low 32 bits of `nlk->groups` with the
+        // requested `nl_groups` (`nlk->groups[0] = (old & ~0xffffffffUL) |
+        // groups`), so a rebind drops subscriptions taken earlier rather than
+        // adding to them.
         self.inner.groups.store(bound.groups, Ordering::Relaxed);
         *self.inner.local_addr.write() = Some(bound);
         self.inner.poll_rx.wake();
