@@ -427,6 +427,53 @@ fn finish_reports_explicit_flush_boundary() {
     assert!(!modify.finish().had_pending());
 }
 
+#[def_test]
+fn deferred_kernel_invalidation_detaches_the_shootdown() {
+    let mut table = TestPageTable::try_new_kernel().expect("kernel test page table");
+    let mut modify = table.modify();
+
+    assert!(
+        modify.defer_kernel_invalidation().is_none(),
+        "nothing is pending before the first change"
+    );
+    modify
+        .map_raw(
+            vaddr(0x20_0000),
+            paddr(0x60_0000),
+            PageSize::Size4K,
+            PagingFlags::READ,
+        )
+        .expect("map test page");
+    let deferred = modify
+        .defer_kernel_invalidation()
+        .expect("kernel mapping records an invalidation");
+    assert!(
+        !modify.finish().had_pending(),
+        "the detached invalidation must not remain with the guard"
+    );
+    drop(modify);
+    deferred.complete();
+}
+
+#[def_test]
+fn deferred_kernel_invalidation_rejects_user_tables() {
+    let mut table = TestPageTable::try_new().expect("user test page table");
+    let mut modify = table.modify();
+
+    modify
+        .map_raw(
+            vaddr(0x20_0000),
+            paddr(0x60_0000),
+            PageSize::Size4K,
+            PagingFlags::READ,
+        )
+        .expect("map test page");
+    assert!(
+        modify.defer_kernel_invalidation().is_none(),
+        "user tables use residency-scoped flushes"
+    );
+}
+
 /// Checks the policy flag, not the presence or effect of either DSB.
 ///
 /// These tables are not installed in hardware. A recording hook can check
