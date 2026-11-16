@@ -1150,7 +1150,10 @@ fn clk_disable_unused_gates_idle_and_skips_critical() {
     )
     .build()
     .unwrap();
-    assert!(idle.is_enabled().unwrap());
+    assert!(
+        idle.is_enabled_in_hw().unwrap(),
+        "the fixture leaves the gate register on"
+    );
 
     let reg2 = Arc::new(MockReg::new());
     reg2.mem.lock()[0] = 1;

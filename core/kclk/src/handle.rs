@@ -174,6 +174,15 @@ impl ClkHandle {
         self.core.is_enabled()
     }
 
+    /// Whether the hardware reports the clock as enabled.
+    ///
+    /// Register-backed view for diagnostics; a gate-less provider reports
+    /// `false` even while its enable count is positive. Consumers that want
+    /// the prepare/enable contract's answer use [`Self::is_enabled`].
+    pub fn is_enabled_in_hw(&self) -> ClkResult<bool> {
+        self.core.is_enabled_in_hw()
+    }
+
     /// Whether the hardware reports the clock as prepared.
     pub fn is_prepared(&self) -> ClkResult<bool> {
         self.core.is_prepared()
