@@ -642,6 +642,19 @@ impl ClkCore {
 
     /// Whether the hardware reports the clock as enabled.
     pub fn is_enabled(&self) -> ClkResult<bool> {
+        // The consumer-facing answer is the framework's own enable count:
+        // gate-less providers (fixed-rate) have no register to query, and a
+        // counted "on" is exactly what the prepare/enable contract promises.
+        let state = self.state.lock();
+        Ok(state.enable_count > 0)
+    }
+
+    /// Whether the hardware reports the clock as enabled.
+    ///
+    /// The register-backed view: gate providers read their status bit,
+    /// gate-less providers default to `false`. `clk_disable_unused` uses
+    /// this to find clocks the bootloader left on.
+    pub fn is_enabled_in_hw(&self) -> ClkResult<bool> {
         self.ops.is_enabled()
     }
 
@@ -1453,7 +1466,7 @@ pub fn clk_disable_unused() {
             let st = clk.state.lock();
             st.enable_count == 0
         };
-        if unused && clk.is_enabled().unwrap_or(false) {
+        if unused && clk.is_enabled_in_hw().unwrap_or(false) {
             clk.ops.disable();
         }
     }
