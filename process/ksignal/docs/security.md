@@ -312,3 +312,9 @@ data is processed or logged.
 - The availability projection is written only by `SigLock::republish`, inside
   the transaction that changed state. Never publish an availability answer from
   a caller, and never clear it after releasing the lock.
+
+RISC-V signal payloads contain PC and x1–x31, excluding the kernel_sp slot in
+ExceptionContext. User edits therefore cannot restore a kernel stack pointer.
+The RV64 layout regression asserts Linux ABI offsets through the FP area and
+ucontext boundary. Existing zero-filled FP signal state is unchanged; these
+checks do not establish floating-point/vector preservation.

@@ -80,3 +80,6 @@ impl UContext {
         }
     }
 }
+
+#[cfg(target_arch = "riscv64")]
+unittest::path_mod_test!(tests, "../../ut-tests/riscv_frame.rs");

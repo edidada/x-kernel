@@ -1057,3 +1057,12 @@ other processes may still own the same configuration. Final poll-source
 destruction detaches registrations and can synchronously invoke their wakers.
 Configuration release must therefore occur outside process-domain, membership
 and signal locks, as required by `release_handlers`.
+
+## RISC-V Linux signal register boundary
+
+The RISC-V kernel trap frame retains its kernel stack pointer separately from
+GeneralRegisters. User signal frames contain PC followed by x1 through x31,
+as required by Linux user_regs_struct and glibc's 32-word gregset_t. There is
+no x0 slot between PC and RA. RV64 fixtures check the ABI byte offsets/sizes
+and restoration after a handler edits PC, RA and a0. This does not add
+floating-point/vector signal-state preservation.
