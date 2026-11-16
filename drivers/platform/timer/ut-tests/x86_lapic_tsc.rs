@@ -6,8 +6,7 @@ use raw_cpuid::{CpuId, CpuIdReader, CpuIdResult};
 use unittest::def_test;
 
 use super::{
-    Frequency, PIT_MIN_POLL_ITERATIONS, PIT_TCG_MIN_POLL_ITERATIONS, PIT_TICK_RATE,
-    PitTscCalibrator,
+    Frequency, PIT_CALIBRATION_TICKS, PIT_TICK_RATE, PitObservation, PitTscCalibrator,
     TscFrequency::{Cpuid, Hypervisor, Pit, PlatformStatic},
     cpuid_tsc_frequency, discover_tsc_frequency_with, filter_tsc_frequency,
 };
@@ -124,25 +123,44 @@ fn cpuid_rejects_out_of_range_crystal_rate_and_uses_base_frequency() {
 }
 
 #[def_test]
-fn pit_samples_require_progress_and_reject_hardware_jitter() {
-    let hardware_min = PIT_MIN_POLL_ITERATIONS;
-    let tcg_min = PIT_TCG_MIN_POLL_ITERATIONS;
-    for (is_qemu_tcg, nr_polls, min_delta, max_delta, expected) in [
-        (false, hardware_min, 10, 100, true),
-        (false, hardware_min - 1, 10, 10, false),
-        (false, hardware_min, 10, 101, false),
-        (false, hardware_min, 0, 0, false),
-        (true, tcg_min, 10, 1_000_000, true),
-        (true, tcg_min - 1, 10, 1_000_000, false),
-        (true, tcg_min, 0, 1_000_000, false),
-    ] {
-        let calibrator = PitTscCalibrator {
-            timeout_tsc_ticks: 0,
-            is_qemu_tcg,
-        };
-        assert_eq!(
-            calibrator.is_sample_usable(nr_polls, min_delta, max_delta),
-            expected
-        );
-    }
+fn pit_observations_report_the_bounded_midpoint() {
+    let interval_ticks = u64::from(PIT_CALIBRATION_TICKS);
+    let exact_frequency =
+        PitTscCalibrator::frequency_from_ticks(25_000_000, interval_ticks)
+            .expect("a plausible interval converts to a frequency");
+
+    // Both reads agree: the estimate is the rate they imply, with no spread.
+    let exact = PitTscCalibrator::estimate(Some(PitObservation {
+        low_tsc_ticks: 25_000_000,
+        high_tsc_ticks: 25_000_000,
+    }))
+    .expect("a bounded observation is usable");
+    assert_eq!(exact.frequency, exact_frequency);
+    assert_eq!(exact.low_frequency, exact_frequency);
+    assert_eq!(exact.spread_hz, 0);
+
+    // A delayed post-observation read raises the interval; the estimate stays
+    // between the two implied rates and reports the full spread.
+    let stretched = PitTscCalibrator::estimate(Some(PitObservation {
+        low_tsc_ticks: 24_000_000,
+        high_tsc_ticks: 26_000_000,
+    }))
+    .expect("a bounded observation is usable");
+    let low = PitTscCalibrator::frequency_from_ticks(24_000_000, interval_ticks)
+        .expect("lower bound converts");
+    let high = PitTscCalibrator::frequency_from_ticks(26_000_000, interval_ticks)
+        .expect("upper bound converts");
+    assert!(stretched.frequency > low && stretched.frequency < high);
+    assert_eq!(stretched.low_frequency, low);
+    assert_eq!(stretched.spread_hz, u128::from(high.as_hz() - low.as_hz()));
+
+    // A post-observation read below the pre-observation read is inconsistent.
+    assert!(
+        PitTscCalibrator::estimate(Some(PitObservation {
+            low_tsc_ticks: 26_000_000,
+            high_tsc_ticks: 24_000_000,
+        }))
+        .is_none()
+    );
+    assert!(PitTscCalibrator::estimate(None).is_none());
 }

@@ -98,19 +98,20 @@ rate is in range; otherwise it uses the nonzero leaf `0x16` processor base
 frequency as an estimate of TSC frequency. Each source is evaluated only when
 earlier sources fail.
 
-PIT channel 2 runs a mode-0 countdown of about 10 ms. Calibration takes three
-samples and selects the lowest valid frequency to reduce the effect of polling
-delays. Each sample has a one-million-iteration limit and a TSC tick budget of
-one fifth of the nominal platform frequency. This tick budget is a time bound
-only to the extent that the nominal frequency matches the running TSC.
+PIT channel 2 runs a mode-0 countdown of roughly 50 ms. Calibration reads the
+TSC immediately before and immediately after observing the terminal count: the
+first read cannot include the full interval and the second cannot miss any of
+it, so the true frequency lies between the rates they imply. A sample whose two
+rates differ by at most 2% is accepted; otherwise the largest pre-observation
+rate across five samples is used, because preemption can only shorten that
+reading. Each sample
+has a one-million-iteration limit and a TSC tick budget of one third of the
+nominal platform frequency. This tick budget is a time bound only to the extent
+that the nominal frequency matches the running TSC.
 
-Normal samples require at least 1,000 polls, nonzero adjacent TSC progress, and a
-maximum polling interval no larger than ten times the minimum. QEMU TCG samples
-require at least one poll and a nonzero minimum interval, allowing the wider
-polling jitter caused by device emulation and host scheduling. An immediately
-completed or timed-out sample is discarded. The measurement uses the last TSC
-read before the observed PIT completion, so polling granularity also affects
-its accuracy.
+A sample requires the terminal count to be observed after at least one polling
+iteration; a first-poll terminal count is a stale output level and is discarded.
+An immediately completed or timed-out sample is discarded.
 
 Runtime candidates must be at least 1 MHz and fit in `u32` after conversion to
 kHz. Bootstrap separately checks the platform minimum and the selected value's
