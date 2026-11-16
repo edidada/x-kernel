@@ -17,6 +17,7 @@ extern crate alloc;
 #[cfg(target_arch = "x86_64")]
 pub mod acpi_osl;
 mod claim;
+mod clk;
 mod device_dma;
 mod dma;
 mod irq;
@@ -26,6 +27,7 @@ mod port;
 mod time;
 mod wait;
 
+pub use clk::{XKERNEL_CLOCK_OP, XKernelClockOp};
 pub use device_dma::XKernelDeviceDma;
 /// Read-only in-use DMA resource snapshot for unit-test baselines.
 #[cfg(unittest)]

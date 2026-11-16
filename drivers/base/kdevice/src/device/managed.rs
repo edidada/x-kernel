@@ -24,8 +24,8 @@ use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use driver_os_api::{
-    CoherentMem, DevIrq, DmaOp, DmaSpec, IoMap, IrqHandler, IrqOp, IrqResource, IrqThreadHandler,
-    MmioOp, MmioRegion, ResError, ResResult,
+    Clk, ClockOp, CoherentMem, DevIrq, DmaOp, DmaSpec, IoMap, IrqHandler, IrqOp, IrqResource,
+    IrqThreadHandler, MmioOp, MmioRegion, ResError, ResResult,
 };
 
 use crate::ProbeContext;
@@ -54,6 +54,32 @@ pub fn devm_iomap_with_provider(
     let ptr = NonNull::new(io.as_ptr()).ok_or(ResError::MappingFailed)?;
     add_binding_cleanup(ctx, move || drop(io))?;
     Ok(ptr)
+}
+
+/// Resolve a clock connection with an explicit provider and tie its
+/// enable/disable lifetime to the captured binding of `ctx`.
+///
+/// The returned [`Clk`] starts disabled; the driver calls
+/// `prepare_enable` when it needs the clock on. On binding retirement the
+/// registered cleanup runs `disable_unprepare` (idempotent for an already
+/// disabled clock), so a driver cannot leak prepare/enable counts across a
+/// failed probe or removal.
+///
+/// # Errors
+///
+/// Returns the provider's failure — [`ResError::NotFound`] when the provider
+/// has not registered — and [`ResError::BadState`] when the cleanup cannot
+/// be registered.
+pub fn devm_clk_get_with_provider(
+    provider: &'static dyn ClockOp,
+    ctx: &ProbeContext<'_>,
+    provider_id: u32,
+    index: u32,
+) -> ResResult<Clk> {
+    let clk = provider.clk_get(provider_id, index)?;
+    let on_retire = clk.clone();
+    add_binding_cleanup(ctx, move || on_retire.disable_unprepare())?;
+    Ok(clk)
 }
 
 /// Register an interrupt handler with an explicit provider and tie its
