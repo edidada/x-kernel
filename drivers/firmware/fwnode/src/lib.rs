@@ -572,6 +572,45 @@ pub enum FwPropertyValue<'a> {
     Str(&'a str),
 }
 
+/// Iterator over a firmware string list (NUL-separated strings).
+///
+/// Device-tree string lists pack the entries back to back, each terminated
+/// by a NUL. The iterator yields each entry; a final entry without a
+/// terminator is still yielded, and invalid UTF-8 ends the iteration. The
+/// iterator is allocation-free.
+#[derive(Debug, Clone, Copy)]
+pub struct FwStrList<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> FwStrList<'a> {
+    pub(crate) const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+}
+
+impl<'a> Iterator for FwStrList<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        if self.bytes.is_empty() {
+            return None;
+        }
+        let end = self
+            .bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.bytes.len());
+        let entry = core::str::from_utf8(&self.bytes[..end]).ok()?;
+        self.bytes = if end < self.bytes.len() {
+            &self.bytes[end + 1..]
+        } else {
+            &self.bytes[end..]
+        };
+        Some(entry)
+    }
+}
+
 /// A named firmware property.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FwProperty<'a> {
@@ -636,6 +675,23 @@ impl<'a> FwProperty<'a> {
                     .unwrap_or(bytes.len());
                 core::str::from_utf8(&bytes[..end]).map_err(|_| FwError::InvalidValue)
             }
+            _ => Err(FwError::InvalidValue),
+        }
+    }
+
+    /// Iterates a NUL-separated string list.
+    ///
+    /// Device-tree string lists (`clock-names`, `clock-output-names`, ...)
+    /// pack the entries back to back, each terminated by a NUL. A property
+    /// holding a single string yields that one entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidValue`] for a non-string value.
+    pub fn as_str_list(self) -> Result<FwStrList<'a>, FwError> {
+        match self.value {
+            FwPropertyValue::Bytes(bytes) => Ok(FwStrList::new(bytes)),
+            FwPropertyValue::Str(value) => Ok(FwStrList::new(value.as_bytes())),
             _ => Err(FwError::InvalidValue),
         }
     }

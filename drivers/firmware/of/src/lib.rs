@@ -831,3 +831,10 @@ pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegi
 // Gate macro resolution as well as the test module for early-boot consumers.
 #[cfg(unittest)]
 unittest::path_mod_test!(unittest_tests, "../ut-tests/of_unittest.rs");
+
+/// Device-tree clock binding parsing (`clocks` / `clock-names` /
+/// `#clock-cells` / `clock-frequency` / `clock-output-names`) over the
+/// backend-neutral fwnode contract.
+pub mod clocks;
+
+unittest::path_mod_test!(clocks_tests, "../ut-tests/clocks.rs");
