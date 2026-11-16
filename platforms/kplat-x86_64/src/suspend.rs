@@ -32,6 +32,9 @@ impl SavedCpu {
         enter: extern "C" fn(*mut ()),
         argument: *mut (),
     ) {
+        debug_assert!(!karch::local_irq_enabled());
+        // No independent migration query is available here; the caller retains
+        // its CPU-pinning guard across the assembly handoff.
         unsafe extern "C" {
             fn s3_save_and_call(
                 context: *mut SavedCpu,
@@ -354,6 +357,9 @@ impl khal::power::SystemSleepIf {
         let result = unsafe { WakePage::install(context_address(0)) };
         match result {
             Ok(wake) => {
+                // No AP has been started for this owned transaction. Stop-work
+                // publication precedes AP execution; these resets need no release
+                // edge. Each AP later Release-publishes its own restored flag.
                 for restored in &CPU_RESTORED {
                     restored.store(false, Ordering::Relaxed);
                 }

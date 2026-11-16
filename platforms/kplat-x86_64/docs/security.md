@@ -20,3 +20,9 @@ before entry. Unexpected restoration failure is fatal; releasing frozen tasks
 with unusable hardware is not a recovery strategy. Physical machines, CPU
 hotplug, alternate firmware, AVX/extended context support, and firmware-specific
 `_PTS`/`_WAK` methods are outside this QEMU backend's validated contract.
+
+The test-only register-clobber wrapper retains its Rust caller registers on
+its own stack. Its transfer callback never returns through the C ABI; it jumps
+into the production restore entry with a live aligned SavedCpu. Tests exclude
+IRQs/migration and retain both stacks/context until the wrapper returns. No
+Rust frame observes the intentionally corrupted callee-saved values.

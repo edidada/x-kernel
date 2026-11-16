@@ -287,11 +287,20 @@ pub trait DeviceDriver: Send + Sync {
         Ok(())
     }
 
+    /// Whether this driver implements reversible system power management.
+    /// Default no-op callbacks do not establish DMA/IRQ quiescence or recovery.
+    fn supports_suspend(&self) -> bool {
+        false
+    }
+
     /// Quiesce a device for system suspend (low-power / sleep transition).
     ///
     /// The default does nothing. Drivers that own stateful hardware should
     /// save context and stop DMA/IRQ activity here. Unlike [`remove`], the
     /// device stays bound and is expected to be brought back via [`resume`].
+    /// An error must leave this device usable; the coordinator only resumes
+    /// callbacks that completed successfully. A participating driver must opt
+    /// in through [`supports_suspend`](DeviceDriver::supports_suspend).
     ///
     /// [`remove`]: DeviceDriver::remove
     /// [`resume`]: DeviceDriver::resume

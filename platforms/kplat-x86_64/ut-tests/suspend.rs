@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::{assert, def_test};
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 
@@ -21,6 +21,24 @@ fn aborted_sleep_restores_cpu_context_and_returns_to_saved_stack() {
     // and its callback simply returns without changing hardware or ownership.
     unsafe { context.save_and_call(entry_aborts, (&mut called as *mut bool).cast()) };
     assert!(called);
+    assert!(!karch::local_irq_enabled());
+}
+
+core::arch::global_asm!(include_str!("suspend_registers.S"));
+
+#[def_test(serial)]
+fn clobbered_callee_saved_registers_are_restored_on_saved_stack() {
+    unsafe extern "C" {
+        fn s3_test_clobbered_register_roundtrip(context: *mut SavedCpu) -> u64;
+    }
+    let mut context = SavedCpu::new();
+    let _critical = kspin::NoPreemptIrqSave::new();
+    // SAFETY: exclusive aligned context storage and this stack remain live,
+    // with IRQs/migration excluded. The assembly wrapper preserves the Rust
+    // caller's ABI, clobbers all saved registers only across its nonreturning
+    // assembly callback, and restores the original caller before returning.
+    let mismatched = unsafe { s3_test_clobbered_register_roundtrip(&mut context) };
+    assert_eq!(mismatched, 0, "callee-saved register restoration mask");
     assert!(!karch::local_irq_enabled());
 }
 

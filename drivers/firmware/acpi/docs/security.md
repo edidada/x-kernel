@@ -40,8 +40,9 @@ vendored interpreter has no instruction or step budget, so AML that loops or
 recurses can consume boot time; this is a trusted-firmware assumption, not a
 sandbox.
 
-Only three firmware-backed queries run: `\_PIC(1)` once, the root bridge
-`_PRT`, and the `_CRS` of links referenced by that `_PRT`. Root-bridge probing
+Boot-time firmware queries cover `\_PIC(1)` once, the root bridge
+`_PRT`, the `_CRS` of links referenced by that `_PRT`, and the optional
+`\_S3` sleep-type package. Root-bridge probing
 also reads `_HID`, `_CID`, `_SEG`, `_BBN`, and `_CRS`. No general driver-facing
 AML evaluation API is exported.
 

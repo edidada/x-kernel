@@ -129,8 +129,9 @@ clock-event activation remains the timer driver's responsibility.
   x2APIC systems still use the xAPIC MSI address in this
   implementation (matches QEMU/hardware compatibility, but limits
   APIC-id reach to 8 bits).
-- No suspend/resume path: APIC state is not saved or restored around
-  sleep transitions (`suspend_to_ram` is unsupported platform-wide).
+- IO-APIC routes are captured, masked and reconstructed by the owned
+  system-sleep snapshot. Per-CPU Local APIC reconstruction belongs to the
+  reset-aware platform backend; the legacy suspend_to_ram stub remains unsupported.
 - Controllers with more than 32 inputs have all hardware entries masked
   during init, but the route-vector pool and `IoApicPin` cover only pins
   `0..=31`. Higher pins are not routable by this backend until a later

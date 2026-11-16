@@ -22,3 +22,8 @@ software CPU barrier remains held until device/time recovery completes.
 Raw TSC delays implement the INIT/SIPI budget while MONOTONIC is frozen.
 IOAPIC routes are reconstructed masked and original masks are restored only by
 finish, after device recovery and remote join.
+
+The abort-path register fixture uses a test-only assembly wrapper to seed
+all six SysV callee-saved registers, clobber them in a nonreturning assembly
+callback, jump to the real s3_restore_context and inspect the restored values.
+The wrapper restores the Rust caller ABI before returning a mismatch bitmask.

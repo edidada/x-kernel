@@ -232,6 +232,22 @@ struct Ns16550IoPortSerialDriver;
 
 #[cfg(feature = "serial-ns16550-ioport")]
 impl DeviceDriver for Ns16550IoPortSerialDriver {
+    fn supports_suspend(&self) -> bool {
+        true
+    }
+
+    fn suspend(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+        console_driver::serial::stdout_port()
+            .ok_or(DriverError::BadState)?
+            .suspend_ioport()
+    }
+
+    fn resume(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+        console_driver::serial::stdout_port()
+            .ok_or(DriverError::BadState)?
+            .resume_ioport()
+    }
+
     fn name(&self) -> &'static str {
         "serial-ns16550-ioport"
     }
