@@ -13,6 +13,7 @@ members = [
     "util/kiface/crates/cpu-api",
     "util/kiface/crates/power-api",
     "util/kiface/crates/task-wait-api",
+    "core/kclk",
     "core/kpm",
     "drivers/firmware/fwnode",
     # kernel entry
@@ -149,6 +150,7 @@ krcu-list = { path = "util/krcu-list" }
 krcu-list-kernel-tests = { path = "util/krcu-list/crates/kernel-tests" }
 kfinalize = { path = "util/kfinalize" }
 ktime_types = { path = "util/ktime_types" }
+kclk = { path = "core/kclk" }
 ktime = { path = "core/ktime" }
 entropy = { path = "util/entropy" }
 

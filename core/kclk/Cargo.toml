@@ -1,0 +1,35 @@
+[package]
+name = "kclk"
+edition.workspace = true
+description = "Common clock framework core for x-kernel"
+documentation = "https://kylin-x-kernel.github.io/kclk"
+keywords = ["clk", "clock", "x-kernel"]
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+log.workspace = true
+kspin = { workspace = true }
+ksync = { workspace = true }
+bitflags = { workspace = true }
+unittest = { workspace = true }
+# Test-only: the concurrency stress test spawns contending kernel tasks.
+# A normal dependency (not dev-dependency) because `--cfg unittest` builds do
+# not separate dev deps in this workspace's Kconfig flow.
+ktask = { workspace = true }
+
+[package.metadata.cargo-shear]
+# `ktask` is exercised only by the concurrency stress tests under `ut-tests/`,
+# which are mounted via `path_mod_test!` in `--cfg unittest` builds; ordinary
+# builds never reference it. Same shape as kdriver's `kcpu_id_map` entry.
+ignored = ["ktask"]
+
+[lints]
+workspace = true
