@@ -21,6 +21,7 @@ default = []
 
 # Selected by the unittest entry, not ordinary kernel configurations.
 kernel-tests = [
+    "dep:kclk",
     "dep:krcu-list",
     "dep:krcu-list-kernel-tests",
     "dep:kxarray",
@@ -284,6 +285,7 @@ knet = { workspace = true, optional = true }
 apploader_service = { workspace = true, optional = true }
 kruntime.workspace = true
 krcu.workspace = true
+kclk = { workspace = true, optional = true }
 kxarray = { workspace = true, optional = true }
 kxarray-kernel-tests = { workspace = true, optional = true }
 krcu-list = { workspace = true, optional = true }

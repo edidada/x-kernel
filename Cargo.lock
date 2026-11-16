@@ -2334,6 +2334,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kclk"
+version = "0.3.0-dev"
+dependencies = [
+ "bitflags 2.13.2",
+ "kspin",
+ "ksync",
+ "ktask",
+ "log",
+ "unittest",
+]
+
+[[package]]
 name = "kcompletion"
 version = "0.3.0-dev"
 dependencies = [
@@ -2678,6 +2690,7 @@ dependencies = [
  "kalloc",
  "karch",
  "kbpf",
+ "kclk",
  "kdriver",
  "kexec",
  "kext4",
