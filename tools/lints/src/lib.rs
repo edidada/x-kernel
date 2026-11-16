@@ -23,6 +23,7 @@ dylint_linting::dylint_library!();
 mod facts_export;
 mod std_box_in_kernel_tests;
 mod unregistered_static_spinlock;
+mod vendored;
 
 #[cfg(test)]
 mod testing;
@@ -39,6 +40,11 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         std_box_in_kernel_tests::STD_BOX_IN_KERNEL_TESTS,
     ]);
     lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
+    // CG rules do not apply to vendored third-party code. Its facts are still
+    // exported; no checking pass runs on it, so no scan or `--fix` touches it.
+    if vendored::is_vendored_crate() {
+        return;
+    }
     std_box_in_kernel_tests::register(lint_store);
     lint_store
         .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));

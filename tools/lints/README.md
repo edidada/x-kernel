@@ -32,6 +32,12 @@ A scan only sees code that the configuration compiles; CI scans the
 aarch64 and x86_64 `qemu_defconfig` configurations. Add the platform's
 kernel target to the toolchain before scanning another configuration.
 
+No lint checks a vendored crate, one whose manifest sits directly under
+`vendor/` (see `docs/code-guidelines/README.md`, "Vendored code").
+`register_lints` registers only the facts export for it, so the dependency
+facts scan and `--fix`, which both reach these path dependencies, report and
+rewrite nothing there.
+
 `xkmake` builds this library once into `<target>/tools/lints` and passes
 it to `cargo dylint --lib-path`. The build ignores the rustflags of the
 kernel configuration (the generated `.cargo/.xconfig.toml`), so switching
@@ -237,7 +243,8 @@ version they do not know. Each line is one JSON object; `t` is its kind.
    the expected compiler output, run through `crate::testing::run_ui` with
    the mock crates the source uses (for example `testing::MOCK_KSPIN`).
 3. In `src/lib.rs`, add `mod <lint>;` and register the lint and its pass in
-   `register_lints`.
+   `register_lints`, after the vendored-crate return so the pass inherits
+   that exclusion.
 4. Add the rule file `docs/code-guidelines/CG-<nnn>-<descriptive>.md`.
 
 `dylint_testing` runs UI tests under one lock. When a test fails, the lock is
