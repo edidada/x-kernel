@@ -21,6 +21,9 @@ pub use kdevice::BoxedDriver;
 pub use kdevice::MatchResult;
 
 /// Factory function for one built-in driver descriptor.
+#[cfg(feature = "clk-fixed")]
+pub(crate) mod clk;
+
 pub type DriverFactory = fn() -> BoxedDriver;
 
 /// Register every descriptor produced by `factories`.
@@ -32,6 +35,8 @@ pub fn register_factories(registrar: &mut DriverRegistrar, factories: &[DriverFa
 
 /// Register all enabled non-VirtIO platform and PCI driver descriptors.
 pub fn register_platform_drivers(registrar: &mut DriverRegistrar) {
+    #[cfg(feature = "clk-fixed")]
+    clk::register_all(registrar);
     block::register_all(registrar);
     net::register_all(registrar);
 }
