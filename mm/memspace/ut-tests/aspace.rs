@@ -120,19 +120,25 @@ fn linear_mapping_defers_its_kernel_invalidation() {
     let start = VirtAddr::from(0x1000usize);
     let paddr = PhysAddr::from(0x20_0000usize);
 
-    let deferred = aspace
+    // Architectures whose page-table metadata needs no invalidation for an
+    // invalid-to-valid mapping (aarch64's fresh-map fence) publish the PTE
+    // without a deferred flush; the others must defer it.
+    let map_deferred = aspace
         .map_linear_deferred(
             start,
             paddr,
             PAGE_SIZE_4K,
             MappingFlags::READ | MappingFlags::WRITE,
         )
-        .expect("linear mapping should succeed")
-        .expect("a kernel mapping should defer its invalidation");
+        .expect("linear mapping should succeed");
     // The PTE is published before the remote shootdown completes.
     assert!(aspace.page_table().query(start).is_ok());
-    assert_eq!(deferred.complete(), Ok(()));
+    if let Some(deferred) = map_deferred {
+        assert_eq!(deferred.complete(), Ok(()));
+    }
 
+    // Removing a valid translation always needs an invalidation, so every
+    // architecture must defer the unmap.
     let deferred = aspace
         .unmap_linear_deferred(start, PAGE_SIZE_4K)
         .expect("linear unmap should succeed")
