@@ -273,3 +273,13 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## IO Mapping Invalidation Ordering
+
+Kernel IO-window updates (`iomap_device` / `iounmap`) defer the remote TLB
+invalidation until after `kernel_layout()` and `DEVICE_REGISTRY` are released.
+A CPU that needs either IRQ-disabled lock spins with interrupts disabled and
+cannot acknowledge a shootdown, so completing the invalidation under those
+locks would stall the initiator until its bounded give-up. Ranges containing a
+managed runtime fall back to the in-place path, whose completion runs under the
+lock by design.
