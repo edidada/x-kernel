@@ -502,6 +502,39 @@ not reentrant under a held RQ guard.
 - Blocked wake versus `on_cpu` uses the Dekker handshake in the SMP section
   below.
 
+### Lock order
+
+Scheduler code has one allowed nesting direction and no cycles:
+
+```
+run queue lock  ->  bandwidth registry (TRACKED, MEMBERS)  ->  task state atomics
+```
+
+- **The registry is never taken the other way round.** `bandwidth.rs` never
+  acquires a run-queue lock, and it never holds `TRACKED` while touching
+  `MEMBERS` or while calling `resume_group` / `park_group`. Both registry locks
+  are leaf locks over short `Vec` scans.
+- **Accounting points run under the run-queue lock** (`blocked_resched`,
+  `account_sched_tick`), so they must not block on the registry: `poll_trackers`
+  and the registration helpers use `try_lock` and skip on contention. The
+  rollover is idempotent and retried by the next accounting point on any CPU,
+  so a skipped poll only delays a rollover by one quantum. Blocking there would
+  let one CPU wait for a registry lock held by another CPU that is itself
+  waiting for a run-queue lock — the failure mode described in the parking
+  section below.
+- **No allocation while a registry lock is held**: `poll_trackers` reserves its
+  output buffer before locking so pushing a resumed tracker cannot take the
+  allocator lock under a global lock.
+- **Wake latches are leaves too.** A park latch (`SpinNoIrq<bool>`) is held
+  across `blocked_resched` and its guard contributes one no-preempt count, so it
+  must never be the reason a registry lock is taken: the accounting that runs
+  inside `blocked_resched` only uses the non-blocking rollover path described
+  above ([CG-050](../../../docs/code-guidelines/CG-050-scheduler-lock-order.md)).
+- A CPU that spins here with IRQs disabled cannot be observed by the soft
+  lockup watchdog (its timer interrupt is masked) and the hard lockup backend is
+  currently aarch64-only, so x86_64 hangs silently. Capture such a hang with an
+  external debugger or the QEMU monitor (`info registers`) instead.
+
 ## Creation and publication
 
 `ktask` splits the user-visible lifetime into two stages:
