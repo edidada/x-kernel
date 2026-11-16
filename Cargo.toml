@@ -24,7 +24,6 @@ members = [
     "task/ktimer-core",
     "task/kbandwidth",
     "sync/krtmutex",
-    "drivers/devices/hotplug",
     "tee/tee_crypto",
     "tee/xdice",
 ]
@@ -264,7 +263,6 @@ vsock = { path = "drivers/contracts/vsock" }
 
 # Internal: portable concrete drivers
 virtio = { path = "drivers/devices/virtio" }
-hotplug = { path = "drivers/devices/hotplug" }
 
 # Internal: driver adapters and integration
 driver_os_api_xkernel = { path = "drivers/adapters/xkernel/provider", package = "driver-os-api-xkernel" }

@@ -348,11 +348,13 @@ fn system_projection_follows_present_devices_and_permissions() {
         TreeEntry::SystemAttribute { permission, .. } => permission.bits(),
         _ => panic!("{path} is not a system attribute"),
     };
+    // The system view is read-only; state changes belong to the follow-up
+    // hotplug change, not this projection.
     assert_eq!(permission("devices/system/cpu/cpu0/online"), 0o444);
-    assert_eq!(permission("devices/system/cpu/cpu1/online"), 0o644);
+    assert_eq!(permission("devices/system/cpu/cpu1/online"), 0o444);
     assert_eq!(permission("devices/system/cpu/cpu1/present"), 0o444);
     assert_eq!(permission("devices/system/memory/memory3/state"), 0o444);
-    assert_eq!(permission("devices/system/memory/memory3/online"), 0o644);
+    assert_eq!(permission("devices/system/memory/memory3/online"), 0o444);
 
     let after_removal = build_tree_with_systems(&BTreeMap::new(), &[], &[cpu0]);
     assert!(!after_removal.contains_key("devices/system/cpu/cpu1/online"));

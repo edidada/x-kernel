@@ -29,7 +29,7 @@ extern crate alloc;
 
 use alloc::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     format,
     string::{String, ToString},
     sync::Arc,
@@ -39,11 +39,12 @@ use alloc::{
 
 use kalloc_types::KBox;
 use kdevice::{
-    DeviceLocation, DeviceNode, DeviceNodeEvent, DeviceNodeKind, SystemClass, SystemDeviceEvent,
-    SystemDeviceId, SystemDeviceState, subscribe_device_nodes, subscribe_system_device_events,
-    system_device_snapshot, system_device_state,
+    DeviceLocation, DeviceNode, DeviceNodeEvent, DeviceNodeKind, SystemClass, SystemDeviceControl,
+    SystemDeviceDescriptor, SystemDeviceId, SystemDeviceState, install_system_device,
+    subscribe_device_nodes, system_device_snapshot, system_device_state,
 };
 use kdevice_uevent::{self, UeventAction, UeventScope};
+use kerrno::{KErrorKind, KResult};
 use klazy::Once;
 use ksync::{Mutex, RwLock};
 use kvfs::{
@@ -56,7 +57,16 @@ use lazyinit::LazyInit;
 const SYSFS_MAGIC: u32 = 0x6265_6572;
 const READ_ONLY_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o444);
 const UEVENT_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o644);
-const HOTPLUG_WRITABLE_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o644);
+const MEMORY_BLOCK_SIZE_BYTES: u64 = 128 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct StaticSystemControl;
+impl SystemDeviceControl for StaticSystemControl {
+    fn set_online(&self, _online: bool) -> KResult<()> {
+        Err(KErrorKind::OperationNotSupported.into())
+    }
+}
+static STATIC_SYSTEM_CONTROL: StaticSystemControl = StaticSystemControl;
 
 static SYSFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 static DEVICE_PROJECTION_INITIALIZATION: Once<()> = Once::new();
@@ -275,6 +285,106 @@ fn device_projection_events() -> &'static Mutex<()> {
         .expect("sysfs device projection event serialization must initialize before callbacks")
 }
 
+fn format_cpulist(indices: impl IntoIterator<Item = u32>) -> alloc::string::String {
+    let mut indices: Vec<u32> = indices.into_iter().collect();
+    indices.sort_unstable();
+    indices.dedup();
+    let mut output = alloc::string::String::new();
+    let mut position = 0;
+    while position < indices.len() {
+        let start = indices[position];
+        let mut end = start;
+        while position + 1 < indices.len() && indices[position + 1] == end.saturating_add(1) {
+            position += 1;
+            end = indices[position];
+        }
+        if !output.is_empty() {
+            output.push(',');
+        }
+        if start == end {
+            output.push_str(&alloc::format!("{start}"));
+        } else {
+            output.push_str(&alloc::format!("{start}-{end}"));
+        }
+        position += 1;
+    }
+    output.push('\n');
+    output
+}
+
+fn format_block_bitmap(indices: impl IntoIterator<Item = u32>) -> alloc::string::String {
+    let mut indices: Vec<u32> = indices.into_iter().collect();
+    indices.sort_unstable();
+    let Some(highest) = indices.last().copied() else {
+        return alloc::string::String::from("0\n");
+    };
+    let words = (highest as usize / 32) + 1;
+    let mut bitmap = alloc::vec![0u32; words];
+    for index in indices {
+        bitmap[index as usize / 32] |= 1 << (index % 32);
+    }
+    let mut output = alloc::string::String::new();
+    for (position, word) in bitmap.iter().enumerate().rev() {
+        if position == bitmap.len() - 1 {
+            output.push_str(&alloc::format!("{word:x}"));
+        } else {
+            output.push_str(&alloc::format!("{word:08x}"));
+        }
+    }
+    output.push('\n');
+    output
+}
+
+fn install_boot_system_devices() {
+    kcpu_id_map::for_each_present_logical_cpu(|_, logical_cpu_id, _| {
+        let index = logical_cpu_id.as_usize() as u32;
+        let id = SystemDeviceId::new(SystemClass::Cpu, index);
+        if system_device_state(id).is_some() {
+            return;
+        }
+        let _ = install_system_device(SystemDeviceDescriptor::new(
+            id,
+            0,
+            0,
+            kcpu_id_map::is_cpu_online(logical_cpu_id),
+            Arc::new(STATIC_SYSTEM_CONTROL),
+        ));
+    });
+
+    let mut starts = BTreeSet::new();
+    for region in khal::mem::memory_regions() {
+        if !region.flags.contains(khal::mem::MemFlags::FREE) || region.size == 0 {
+            continue;
+        }
+        let start = region.paddr.as_usize() as u64;
+        let Some(end) = start.checked_add(region.size as u64) else {
+            continue;
+        };
+        let mut block = start / MEMORY_BLOCK_SIZE_BYTES * MEMORY_BLOCK_SIZE_BYTES;
+        while block < end {
+            starts.insert(block);
+            block = match block.checked_add(MEMORY_BLOCK_SIZE_BYTES) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+    }
+    for start in starts {
+        let index = (start / MEMORY_BLOCK_SIZE_BYTES) as u32;
+        let id = SystemDeviceId::new(SystemClass::Memory, index);
+        if system_device_state(id).is_some() {
+            continue;
+        }
+        let _ = install_system_device(SystemDeviceDescriptor::new(
+            id,
+            start,
+            MEMORY_BLOCK_SIZE_BYTES,
+            true,
+            Arc::new(STATIC_SYSTEM_CONTROL),
+        ));
+    }
+}
+
 /// Initializes the device-node projection independently of mounting sysfs.
 ///
 /// Boot calls this before driver discovery so every lifecycle add event first
@@ -282,10 +392,7 @@ fn device_projection_events() -> &'static Mutex<()> {
 /// idempotent fallback for nonstandard callers.
 pub fn init_device_projection() {
     DEVICE_PROJECTION_INITIALIZATION.call_once(|| {
-        // Boot topology must be present before the first directory lookup.
-        // `hotplug::init` is idempotent, so this also tolerates the linker
-        // initialization handler having run first.
-        hotplug::init();
+        install_boot_system_devices();
         DEVICE_PROJECTION.init_once(Mutex::new(DeviceProjection::new()));
         DEVICE_PROJECTION_EVENTS.init_once(Mutex::new(()));
 
@@ -302,21 +409,10 @@ pub fn init_device_projection() {
                 .or_insert_with(|| Arc::new(ProjectedDevice::new(node)));
         }
         projection.characters = kvfs::subscribe_character_devices(Arc::new(handle_character_event));
-        projection.systems = subscribe_system_device_events(Arc::new(handle_system_device_event));
+        projection.systems = system_device_snapshot();
         projection.rebuild_tree();
         drop(projection);
     });
-}
-
-fn handle_system_device_event(_event: SystemDeviceEvent) {
-    let _event = device_projection_events().lock();
-    let mut projection = device_projection().lock();
-    // Taking a fresh snapshot inside the serialization mutex makes Added,
-    // Offline and Removed converge even if several events were queued.
-    projection.systems = system_device_snapshot();
-    let changed = projection.rebuild_tree();
-    drop(projection);
-    invalidate_changed_paths(&changed);
 }
 
 fn handle_character_event() {
@@ -898,28 +994,28 @@ fn system_attribute_contents(
 ) -> VfsResult<Vec<u8>> {
     let global_systems = || -> VfsResult<Vec<SystemDeviceState>> { Ok(system_device_snapshot()) };
     match kind {
-        SystemAttributeKind::CpuGlobalOnline => Ok(hotplug::format_cpulist(
+        SystemAttributeKind::CpuGlobalOnline => Ok(format_cpulist(
             global_systems()?
                 .into_iter()
                 .filter(|state| state.id.class() == SystemClass::Cpu && state.is_online)
                 .map(|state| state.id.index()),
         )
         .into_bytes()),
-        SystemAttributeKind::CpuGlobalPossible => Ok(hotplug::format_cpulist(
+        SystemAttributeKind::CpuGlobalPossible => Ok(format_cpulist(
             global_systems()?
                 .into_iter()
                 .filter(|state| state.id.class() == SystemClass::Cpu)
                 .map(|state| state.id.index()),
         )
         .into_bytes()),
-        SystemAttributeKind::MemoryGlobalOnline => Ok(hotplug::format_block_bitmap(
+        SystemAttributeKind::MemoryGlobalOnline => Ok(format_block_bitmap(
             global_systems()?
                 .into_iter()
                 .filter(|state| state.id.class() == SystemClass::Memory && state.is_online)
                 .map(|state| state.id.index()),
         )
         .into_bytes()),
-        SystemAttributeKind::MemoryGlobalPossible => Ok(hotplug::format_block_bitmap(
+        SystemAttributeKind::MemoryGlobalPossible => Ok(format_block_bitmap(
             global_systems()?
                 .into_iter()
                 .filter(|state| state.id.class() == SystemClass::Memory)
@@ -939,7 +1035,7 @@ fn system_attribute_contents(
                 SystemAttributeKind::MemoryPhysIndex => append_line(&state.id.index().to_string()),
                 SystemAttributeKind::MemoryState => append_line(state.state_name()),
                 SystemAttributeKind::MemoryBlockSizeBytes => {
-                    append_line(&format!("{:x}", hotplug::MEMORY_BLOCK_SIZE_BYTES))
+                    append_line(&format!("{:x}", MEMORY_BLOCK_SIZE_BYTES))
                 }
                 SystemAttributeKind::CpuGlobalOnline
                 | SystemAttributeKind::CpuGlobalPossible
@@ -949,23 +1045,6 @@ fn system_attribute_contents(
             Ok(bytes)
         }
     }
-}
-
-fn write_system_online(device: SystemDeviceId, data: &[u8], file: &kvfs::VfsFile) -> VfsResult<()> {
-    if !file.cred().has_sys_admin() {
-        return Err(VfsError::OperationNotPermitted);
-    }
-    let text = core::str::from_utf8(data)
-        .map_err(|_| VfsError::InvalidInput)?
-        .trim_matches(['\0', '\n', '\r', ' ']);
-    let is_online = match text {
-        "0" => false,
-        "1" => true,
-        _ => return Err(VfsError::InvalidInput),
-    };
-    let controller =
-        hotplug::controller_for(device.class()).ok_or(VfsError::OperationNotSupported)?;
-    controller.set_online(device, is_online)
 }
 
 fn add_system_entries(tree: &mut BTreeMap<String, TreeEntry>, systems: &[SystemDeviceState]) {
@@ -1000,11 +1079,7 @@ fn add_system_entries(tree: &mut BTreeMap<String, TreeEntry>, systems: &[SystemD
         let id = state.id;
         match id.class() {
             SystemClass::Cpu => {
-                let permission = if id.index() == 0 {
-                    READ_ONLY_PERMISSION
-                } else {
-                    HOTPLUG_WRITABLE_PERMISSION
-                };
+                let permission = READ_ONLY_PERMISSION;
                 for kind in [
                     SystemAttributeKind::CpuOnline,
                     SystemAttributeKind::CpuPresent,
@@ -1022,10 +1097,7 @@ fn add_system_entries(tree: &mut BTreeMap<String, TreeEntry>, systems: &[SystemD
                 for (kind, permission) in [
                     (SystemAttributeKind::MemoryPhysIndex, READ_ONLY_PERMISSION),
                     (SystemAttributeKind::MemoryState, READ_ONLY_PERMISSION),
-                    (
-                        SystemAttributeKind::MemoryOnline,
-                        HOTPLUG_WRITABLE_PERMISSION,
-                    ),
+                    (SystemAttributeKind::MemoryOnline, READ_ONLY_PERMISSION),
                     (
                         SystemAttributeKind::MemoryBlockSizeBytes,
                         READ_ONLY_PERMISSION,
@@ -1430,10 +1502,7 @@ impl SimpleDirOps for SysfsDirectory {
                         SimpleFileOperation::Read => {
                             system_attribute_contents(device, kind).map(Some)
                         }
-                        SimpleFileOperation::Write { file, data } => {
-                            let device = device.ok_or(VfsError::OperationNotSupported)?;
-                            write_system_online(device, data, file).map(|()| None)
-                        }
+                        SimpleFileOperation::Write { .. } => Err(VfsError::OperationNotPermitted),
                     }
                 });
                 lookup.file(
