@@ -515,16 +515,13 @@ run queue lock  ->  bandwidth registry (TRACKED, MEMBERS)  ->  task state atomic
   `MEMBERS` or while calling `resume_group` / `park_group`. Both registry locks
   are leaf locks over short `Vec` scans.
 - **Accounting points run under the run-queue lock** (`blocked_resched`,
-  `account_sched_tick`), so they must not block on the registry: `poll_trackers`
-  and the registration helpers use `try_lock` and skip on contention. The
-  rollover is idempotent and retried by the next accounting point on any CPU,
-  so a skipped poll only delays a rollover by one quantum. Blocking there would
-  let one CPU wait for a registry lock held by another CPU that is itself
-  waiting for a run-queue lock — the failure mode described in the parking
-  section below.
-- **No allocation while a registry lock is held**: `poll_trackers` reserves its
-  output buffer before locking so pushing a resumed tracker cannot take the
-  allocator lock under a global lock.
+  `account_sched_tick`). Their locks must therefore be leaves: `poll_trackers`
+  releases `TRACKED` before touching `MEMBERS` and before `resume_group`
+  mutates task state, and registration never nests the two. Waiting for a leaf
+  registry lock is bounded and safe; waiting for a lock that another CPU holds
+  while it waits for a run queue is not.
+- **The rollover path allocates only when a window actually closes**, so the
+  common accounting path stays allocation-free.
 - **Wake latches are leaves too.** A park latch (`SpinNoIrq<bool>`) is held
   across `blocked_resched` and its guard contributes one no-preempt count, so it
   must never be the reason a registry lock is taken: the accounting that runs

@@ -32,14 +32,13 @@ triggers:
   that wedges every CPU with interrupts disabled. An observed instance on
   x86_64 had three CPUs spinning on `bandwidth::TRACKED` while a fourth spun on
   a `KWaker` wake latch.
-- **Do**: the idempotent rollover uses `try_lock` and relies on the retry of the
-  next tick; resume work is collected into a local buffer, the registry lock is
-  released, and only then are task states updated. Registration paths keep
-  blocking locks: skipping a registration would let a group escape `cpu.max`.
+- **Do**: keep registry locks as leaves — collect rollover work into a local
+  buffer, release the registry lock, and only then update task states. Skipping
+  a registration is never acceptable: it would let a group escape `cpu.max`.
 - **Don't**: take `MEMBERS` while holding `TRACKED`; allocate under a registry
-  lock; use `try_lock` on a path whose skip would lose an invariant (registration,
-  resume); add a new `static_lock!` to `run_queue/**` without appending it to the
-  order chain above.
+  lock; hold one registry lock while acquiring the other; update task state
+  under a registry lock; add a new `static_lock!` to `run_queue/**` without
+  appending it to the order chain above.
 - **Not this rule**: [CG-013](CG-013-no-sleep-under-spinlock.md) covers sleeping
   or performing I/O under a spinlock, and
   [CG-015](CG-015-no-split-critical-section.md) covers splitting one critical

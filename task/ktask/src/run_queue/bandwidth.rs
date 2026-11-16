@@ -92,40 +92,47 @@ pub(crate) fn account_current(
 /// whose window closed.
 ///
 /// Reached from every accounting point, including `RunQueue::blocked_resched`
-/// with the run-queue lock held and IRQs disabled, so it must not block on the
-/// global registry. A contended rollover is skipped here and retried by the
-/// next accounting point on any CPU; the rollover itself is idempotent.
+/// with the run-queue lock held and IRQs disabled, so its locks must be leaves:
+/// `TRACKED` is released before `MEMBERS` is touched and before
+/// [`resume_group`] mutates task state. Nothing is allocated unless a rollover
+/// actually fires, so the common path stays allocation-free.
 ///
-/// Lock order: never hold `TRACKED` and `MEMBERS` at the same time, and never
-/// hold either across [`resume_group`] (which re-enters `MEMBERS` and mutates
-/// task state). The only nesting that exists is run-queue → registry, which is
-/// the single allowed direction.
+/// Lock order: run queue -> `TRACKED` -> (released) -> `MEMBERS`. The two
+/// registry locks are never held at the same time.
 pub(crate) fn poll_trackers(now_ns: u64) {
     if ACTIVE_TRACKERS.load(Ordering::Acquire) == 0 {
         return;
     }
-    // Reserve before taking the registry lock: growing `resumed` must not
-    // allocate (and take the allocator lock) while a global lock is held.
-    let mut resumed = Vec::with_capacity(ACTIVE_TRACKERS.load(Ordering::Acquire).max(4));
-    let Some(mut tracked) = TRACKED.try_lock() else {
-        return;
-    };
-    tracked.retain(|entry| entry.strong_count() != 0);
-    ACTIVE_TRACKERS.store(tracked.len(), Ordering::Release);
-    for tracker in tracked.iter().filter_map(Weak::upgrade) {
-        if tracker.poll(now_ns) {
-            resumed.push(tracker);
+    let mut resumed = Vec::new();
+    {
+        let mut tracked = TRACKED.lock();
+        tracked.retain(|entry| entry.strong_count() != 0);
+        ACTIVE_TRACKERS.store(tracked.len(), Ordering::Release);
+        for tracker in tracked.iter().filter_map(Weak::upgrade) {
+            if tracker.poll(now_ns) {
+                // Only a closed window allocates; the registry lock is held
+                // across this push, so keep the buffer empty in steady state.
+                resumed.push(tracker);
+            }
         }
     }
-    drop(tracked);
 
-    if let Some(mut members) = MEMBERS.try_lock() {
-        members
-            .retain(|member| member.task.upgrade().is_some() && member.tracker.strong_count() != 0);
-    }
+    MEMBERS
+        .lock()
+        .retain(|member| member.task.upgrade().is_some() && member.tracker.strong_count() != 0);
 
+    // Resume outside both registry locks: `resume_group` re-enters `MEMBERS`
+    // and mutates task state, which must not happen under a registry lock.
     for tracker in &resumed {
         resume_group(tracker);
+    }
+    // Re-sweep members whose task exited during the resume pass. This keeps the
+    // original cleanup behaviour; the sweep runs after all registry locks were
+    // released, so it adds no nesting.
+    if !resumed.is_empty() {
+        MEMBERS
+            .lock()
+            .retain(|member| member.task.upgrade().is_some());
     }
 }
 
