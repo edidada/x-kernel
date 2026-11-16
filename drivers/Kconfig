@@ -168,6 +168,14 @@ endmenu # Drivers Basic Configuration
 
 menu "Device Drivers"
 
+config KFEAT_CLK_FIXED
+    bool "Fixed-clock DT clock providers (kclk)"
+    default n
+    help
+      Publish device-tree `fixed-clock` nodes into the kclk common clock
+      framework. Enable wherever a consumer resolves `clocks` against a
+      fixed-rate provider (QEMU/crosvm UART, board oscillators).
+
 comment "Block device drivers"
 
 config KFEAT_DRIVER_VIRTIO_BLK

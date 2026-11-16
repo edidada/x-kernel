@@ -457,3 +457,5 @@ unittest::path_mod_test!(
     platform_firmware_node_unittest,
     "../../ut-tests/platform_firmware_node.rs"
 );
+#[cfg(feature = "clk-fixed")]
+unittest::path_mod_test!(clk_fixed_unittest, "../../ut-tests/clk_fixed.rs");

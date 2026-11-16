@@ -61,6 +61,7 @@ unittest-threads = ["dep:ktask", "dep:ksync", "dep:kcpu_id_map", "dep:kcompletio
 # lower-level crate features and external dependencies are restored.
 virtio = ["dep:virtio", "dep:kalloc"]
 
+clk-fixed = ["dep:kclk", "dep:of", "any_firmware_driver"]
 virtio-blk = ["block", "virtio", "virtio/block"]
 virtio-net = ["net", "virtio", "virtio/net"]
 virtio-gpu = ["dep:ksync", "dep:ktask", "display", "virtio", "virtio/gpu", "dep:kworkng", "dep:kdevice_uevent"]
@@ -113,6 +114,8 @@ kworkng = { workspace = true, optional = true }
 block = { workspace = true, optional = true }
 hwrng = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }
+kclk = { workspace = true, optional = true }
+of = { workspace = true, optional = true }
 kcompletion = { workspace = true, optional = true }
 ksync = { workspace = true, optional = true }
 kirq = { workspace = true, optional = true }
