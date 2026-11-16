@@ -96,7 +96,10 @@ each with `# Safety` sections and `SAFETY:` comments:
 - Page-table attributes: coherent pages are mapped
   `READ | WRITE | UNCACHED | SHARED`; on release the flags are restored
   before the pages return to the general allocator, so cached-vs-coherent
-  aliasing cannot occur.
+  aliasing cannot occur. The provider detaches the remote invalidation and
+  the public wrapper completes it after releasing the allocator `SpinNoIrq`,
+  so contenders that are spinning with interrupts disabled can acknowledge
+  the shootdown.
 
 ## Invariants
 

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::collections::btree_map::BTreeMap;
+use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 #[cfg(feature = "dma-trace")]
 use core::panic::Location;
 use core::{alloc::Layout, ptr::NonNull};
@@ -10,7 +10,7 @@ use core::{alloc::Layout, ptr::NonNull};
 use alloc_engine::{AllocError, AllocResult};
 use kalloc::{UsageKind, global_allocator};
 use khal::mem::v2p;
-use kiface_mm_api::{DmaMappingIf, DmaMappingMode};
+use kiface_mm_api::{DmaMappingCompletion, DmaMappingIf, DmaMappingMode};
 use kspin::{SpinNoIrq, static_lock};
 use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
@@ -26,6 +26,9 @@ static_lock! {
 }
 
 pub(crate) struct DmaAllocator {
+    /// Detached kernel invalidations produced by mode changes while this
+    /// allocator was locked. The public wrappers drain them after unlocking.
+    pending_completions: Vec<DmaMappingCompletion>,
     bounce_pool: BouncePool,
     active_mappings: BTreeMap<u64, BounceMapping>,
     #[cfg(feature = "dma-trace")]
@@ -72,6 +75,7 @@ struct CoherentAllocation {
 impl DmaAllocator {
     pub(crate) const fn new() -> Self {
         Self {
+            pending_completions: Vec::new(),
             bounce_pool: BouncePool::new(),
             active_mappings: BTreeMap::new(),
             #[cfg(feature = "dma-trace")]
@@ -131,10 +135,19 @@ impl DmaAllocator {
         mode: DmaMappingMode,
     ) -> AllocResult<()> {
         let expand_size = num_pages * PAGE_SIZE_4K;
-        DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
+        let completion = DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
             error!("change table flag fail");
             AllocError::NoMemory
-        })
+        })?;
+        if let Some(completion) = completion {
+            self.pending_completions.push(completion);
+        }
+        Ok(())
+    }
+
+    /// Takes the detached invalidations accumulated under this lock.
+    pub(crate) fn take_completions(&mut self) -> Vec<DmaMappingCompletion> {
+        core::mem::take(&mut self.pending_completions)
     }
 
     fn prepare_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
