@@ -1929,6 +1929,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hotplug"
+version = "0.3.0-dev"
+dependencies = [
+ "alloc-engine",
+ "kaddr_layout",
+ "kalloc",
+ "kcpu_id_map",
+ "kdevice",
+ "kerrno",
+ "khal",
+ "kspin",
+ "lazyinit",
+ "log",
+ "macros",
+ "memspace",
+ "unittest",
+]
+
+[[package]]
 name = "hwrng"
 version = "0.3.0-dev"
 dependencies = [
@@ -2334,6 +2353,7 @@ dependencies = [
  "driver-os-api",
  "driver_base",
  "fwnode",
+ "kerrno",
  "kmutex",
  "kspin",
  "lazyinit",
@@ -5615,6 +5635,7 @@ dependencies = [
 name = "sysfs"
 version = "0.3.0-dev"
 dependencies = [
+ "hotplug",
  "kalloc-types",
  "kdevice",
  "kdevice-uevent",
