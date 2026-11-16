@@ -1402,6 +1402,13 @@ impl MmSpace {
     /// whose retirements complete in place; `defer_kernel_invalidation` returns
     /// `None` for a user page table or when a retirement is still pending, in
     /// which case the guard's drop completes the flush as before.
+    ///
+    /// This is a kernel-internal fast path for callers that already own a
+    /// validated range: unlike [`protect`](Self::protect), it does not require
+    /// full VMA coverage, alignment, or a per-VMA `allows_protection` check, and
+    /// unmapped pages inside `[start, start + size)` are skipped. The caller
+    /// must pass a page-aligned range fully covered by kernel VMAs whose mapping
+    /// mode it exclusively owns.
     pub fn protect_kernel_deferred(
         &mut self,
         start: VirtAddr,

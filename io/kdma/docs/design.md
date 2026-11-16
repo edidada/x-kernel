@@ -100,6 +100,12 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   waiting for that lock with interrupts disabled cannot acknowledge the
   shootdown. A completion that cannot confirm the invalidation is logged; the
   mode change is not silently assumed to have taken effect.
+- Restoring Normal mode on release also detaches its invalidation. The pages
+  rejoining the general allocator are freed inside that completion, after the
+  flush, so a CPU that still holds the page's uncached translation cannot
+  observe a cached alias of the reused page. The public wrapper runs the
+  completion after unlocking, so CPUs spinning on the allocator lock with
+  interrupts disabled can still answer the shootdown.
 - Coherent allocation participates in the global page allocator and page
   table updates, so it must run after `kalloc` and the address-space
   subsystem are initialized; first use of the bounce path lazily

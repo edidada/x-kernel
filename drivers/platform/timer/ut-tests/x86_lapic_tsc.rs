@@ -6,8 +6,9 @@ use raw_cpuid::{CpuId, CpuIdReader, CpuIdResult};
 use unittest::def_test;
 
 use super::{
-    CalibrationProbe, Frequency, PIT_CALIBRATION_TICKS, PIT_SAMPLE_SPREAD_PERCENT, PIT_TICK_RATE,
-    PitObservation,
+    CalibrationProbe, Frequency, PIT_CALIBRATION_SAMPLES, PIT_CALIBRATION_TICKS,
+    PIT_MAX_SAMPLE_TIMEOUTS, PIT_SAMPLE_SPREAD_PERCENT, PIT_TICK_RATE, PitObservation,
+    SampleRejection,
     TscFrequency::{Cpuid, Hypervisor, Pit, PlatformStatic},
     calibrate_samples, cpuid_tsc_frequency, discover_tsc_frequency_with, filter_tsc_frequency,
     frequency_from_ticks, measure_with,
@@ -99,13 +100,28 @@ fn observation(low_tsc_ticks: u64, high_tsc_ticks: u64) -> PitObservation {
     }
 }
 
-fn scripted_samples(
-    sequence: &[Option<PitObservation>],
-) -> impl FnMut(u64, u64) -> Option<PitObservation> + '_ {
-    let mut next = 0;
-    move |_, _| {
-        let item = sequence.get(next).copied().flatten();
-        next += 1;
+/// Replays one scripted sample result per call and records how many samples
+/// the calibration requested, so a test can detect a lost early abort.
+struct ScriptedSamples<'a> {
+    sequence: &'a [Result<PitObservation, SampleRejection>],
+    calls: usize,
+}
+
+impl<'a> ScriptedSamples<'a> {
+    fn new(sequence: &'a [Result<PitObservation, SampleRejection>]) -> Self {
+        Self { sequence, calls: 0 }
+    }
+
+    fn sample(
+        &mut self,
+        _timeout_tsc_ticks: u64,
+        _start_gap_tsc_ticks: u64,
+    ) -> Result<PitObservation, SampleRejection> {
+        let item = *self
+            .sequence
+            .get(self.calls)
+            .expect("calibration overran its sample script");
+        self.calls += 1;
         item
     }
 }
@@ -262,7 +278,10 @@ fn pit_interval_bounds_survive_a_pause_after_a_false_poll() {
 #[def_test]
 fn pit_sample_discards_a_pause_while_programming_the_countdown() {
     let script = [Step::Tsc(0), Step::Start, Step::Tsc(10_000)];
-    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000).is_none());
+    assert!(matches!(
+        measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000),
+        Err(SampleRejection::Transient)
+    ));
 }
 
 #[def_test]
@@ -276,7 +295,10 @@ fn pit_sample_discards_a_stale_first_terminal_count() {
         Step::Tsc(20),
         Step::Elapsed(true),
     ];
-    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000).is_none());
+    assert!(matches!(
+        measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000),
+        Err(SampleRejection::Transient)
+    ));
 }
 
 #[def_test]
@@ -293,7 +315,10 @@ fn pit_sample_discards_a_programming_window_large_for_the_interval() {
         Step::Elapsed(true),
         Step::Tsc(1002),
     ];
-    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000_000, 10_000).is_none());
+    assert!(matches!(
+        measure_with(&mut ScriptProbe::new(&script), 1_000_000, 10_000),
+        Err(SampleRejection::Transient)
+    ));
 }
 
 #[def_test]
@@ -305,7 +330,10 @@ fn pit_sample_timeout_discards_a_stalled_countdown() {
         Step::Tsc(2_000),
         Step::Elapsed(false),
     ];
-    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000, 1_000).is_none());
+    assert!(matches!(
+        measure_with(&mut ScriptProbe::new(&script), 1_000, 1_000),
+        Err(SampleRejection::TimedOut)
+    ));
 }
 
 #[def_test]
@@ -313,11 +341,14 @@ fn pit_calibration_accepts_only_a_tight_interval() {
     let nominal = Frequency::from_hz(4_000_000_000);
     // The first sample is 20% wide; the second is under 1% and must win.
     let sequence = [
-        Some(observation(100_000_000, 120_000_000)),
-        Some(observation(120_000_000, 121_000_000)),
+        Ok(observation(100_000_000, 120_000_000)),
+        Ok(observation(120_000_000, 121_000_000)),
     ];
-    let (frequency, is_degraded) =
-        calibrate_samples(nominal, scripted_samples(&sequence)).expect("a tight sample");
+    let mut samples = ScriptedSamples::new(&sequence);
+    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout, start_gap| {
+        samples.sample(timeout, start_gap)
+    })
+    .expect("a tight sample");
     assert!(!is_degraded);
     let low = frequency_from_ticks(120_000_000).expect("lower bound converts");
     let high = frequency_from_ticks(121_000_000).expect("upper bound converts");
@@ -328,10 +359,14 @@ fn pit_calibration_accepts_only_a_tight_interval() {
 fn pit_calibration_reports_a_bounded_degraded_result() {
     let nominal = Frequency::from_hz(4_000_000_000);
     // Every sample is 20% wide: not trustworthy, but still a bounded bound.
-    let sequence = [Some(observation(100_000_000, 120_000_000)); 8];
-    let (frequency, is_degraded) =
-        calibrate_samples(nominal, scripted_samples(&sequence)).expect("degraded result");
+    let sequence = [Ok(observation(100_000_000, 120_000_000)); PIT_CALIBRATION_SAMPLES];
+    let mut samples = ScriptedSamples::new(&sequence);
+    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout, start_gap| {
+        samples.sample(timeout, start_gap)
+    })
+    .expect("degraded result");
     assert!(is_degraded);
+    assert_eq!(samples.calls, PIT_CALIBRATION_SAMPLES);
     let low = frequency_from_ticks(100_000_000).expect("lower bound converts");
     let high = frequency_from_ticks(120_000_000).expect("upper bound converts");
     assert!((low..=high).contains(&frequency));
@@ -340,13 +375,49 @@ fn pit_calibration_reports_a_bounded_degraded_result() {
 #[def_test]
 fn pit_calibration_fails_instead_of_trusting_a_wide_guess() {
     let nominal = Frequency::from_hz(4_000_000_000);
-    let sequence = [Some(observation(50_000_000, 150_000_000)); 8];
-    assert_eq!(calibrate_samples(nominal, scripted_samples(&sequence)), None);
+    let sequence = [Ok(observation(50_000_000, 150_000_000)); PIT_CALIBRATION_SAMPLES];
+    let mut samples = ScriptedSamples::new(&sequence);
+    assert_eq!(
+        calibrate_samples(nominal, |timeout, start_gap| samples
+            .sample(timeout, start_gap)),
+        None
+    );
+    assert_eq!(samples.calls, PIT_CALIBRATION_SAMPLES);
 }
 
 #[def_test]
 fn pit_calibration_stops_after_repeated_timeouts() {
     let nominal = Frequency::from_hz(4_000_000_000);
-    let sequence = [None, None];
-    assert_eq!(calibrate_samples(nominal, scripted_samples(&sequence)), None);
+    let sequence = [Err(SampleRejection::TimedOut); PIT_CALIBRATION_SAMPLES];
+    let mut samples = ScriptedSamples::new(&sequence);
+    assert_eq!(
+        calibrate_samples(nominal, |timeout, start_gap| samples
+            .sample(timeout, start_gap)),
+        None
+    );
+    // The early abort must stop after the timeout budget, not spend the whole
+    // sample budget on a stalled countdown.
+    assert_eq!(samples.calls, PIT_MAX_SAMPLE_TIMEOUTS);
+}
+
+#[def_test]
+fn pit_calibration_retries_after_transient_rejections() {
+    let nominal = Frequency::from_hz(4_000_000_000);
+    // Two spoiled samples must not abort PIT calibration: the tight interval
+    // that follows is still accepted.
+    let sequence = [
+        Err(SampleRejection::Transient),
+        Err(SampleRejection::Transient),
+        Ok(observation(120_000_000, 121_000_000)),
+    ];
+    let mut samples = ScriptedSamples::new(&sequence);
+    let (frequency, is_degraded) = calibrate_samples(nominal, |timeout, start_gap| {
+        samples.sample(timeout, start_gap)
+    })
+    .expect("a tight sample after transient rejections");
+    assert!(!is_degraded);
+    assert_eq!(samples.calls, 3);
+    let low = frequency_from_ticks(120_000_000).expect("lower bound converts");
+    let high = frequency_from_ticks(121_000_000).expect("upper bound converts");
+    assert!((low..=high).contains(&frequency));
 }

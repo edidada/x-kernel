@@ -112,7 +112,10 @@ A sample is accepted when its interval is within 2% of the midpoint. If no
 sample is that tight, the tightest interval is reported as degraded only while
 it stays within 25%; otherwise discovery fails instead of trusting a best guess.
 Each sample has a one-million-iteration limit and a TSC timeout of one nominal
-frequency period; repeated timeouts abandon discovery.
+frequency period. Only a stalled countdown counts toward the two-timeout abort;
+a pause while programming the countdown, a stale first poll, or an interval
+shorter than its programming window only discards that sample, and the
+eight-sample budget bounds those retries.
 
 A sample requires the terminal count to be observed after at least one polling
 iteration; a first-poll terminal count is a stale output level and is discarded.

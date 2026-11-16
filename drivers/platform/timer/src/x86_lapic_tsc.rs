@@ -449,9 +449,13 @@ fn frequency_from_ticks(elapsed_tsc_ticks: u64) -> Option<Frequency> {
 /// the tightest interval is reported as degraded only while its uncertainty
 /// stays inside [`PIT_DEGRADED_SPREAD_PERCENT`]; otherwise discovery fails
 /// instead of trusting a best guess.
+///
+/// A stalled countdown counts toward [`PIT_MAX_SAMPLE_TIMEOUTS`]; a transient
+/// host pause only discards its own sample, because the remaining sample
+/// budget already bounds the retries.
 fn calibrate_samples(
     nominal_frequency: Frequency,
-    mut sample: impl FnMut(u64, u64) -> Option<PitObservation>,
+    mut sample: impl FnMut(u64, u64) -> Result<PitObservation, SampleRejection>,
 ) -> Option<(Frequency, bool)> {
     let nominal_hz = nominal_frequency.as_hz();
     let expected_ticks = (u128::from(nominal_hz) * u128::from(PIT_CALIBRATION_TICKS))
@@ -464,14 +468,20 @@ fn calibrate_samples(
     let mut tightest: Option<PitEstimate> = None;
     let mut timeouts = 0;
     for _ in 0..PIT_CALIBRATION_SAMPLES {
-        let Some(observation) = sample(timeout_tsc_ticks, start_gap_tsc_ticks) else {
-            timeouts += 1;
-            if timeouts >= PIT_MAX_SAMPLE_TIMEOUTS {
-                break;
+        let observation = match sample(timeout_tsc_ticks, start_gap_tsc_ticks) {
+            Ok(observation) => {
+                timeouts = 0;
+                observation
             }
-            continue;
+            Err(SampleRejection::TimedOut) => {
+                timeouts += 1;
+                if timeouts >= PIT_MAX_SAMPLE_TIMEOUTS {
+                    break;
+                }
+                continue;
+            }
+            Err(SampleRejection::Transient) => continue,
         };
-        timeouts = 0;
         let Some(estimate) = observation.estimate() else {
             continue;
         };
@@ -490,6 +500,17 @@ fn calibrate_samples(
     filter_tsc_frequency(Some(estimate.frequency)).map(|frequency| (frequency, true))
 }
 
+/// Why one calibration sample produced no usable interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SampleRejection {
+    /// The countdown did not reach its terminal count inside the sample
+    /// budget, so the PIT or the vCPU is stalled rather than merely delayed.
+    TimedOut,
+    /// A host pause or a stale hardware level spoiled this sample while the
+    /// PIT kept running. Another sample can succeed.
+    Transient,
+}
+
 /// Runs one countdown while keeping the interval bounds sound under host
 /// preemption.
 ///
@@ -498,11 +519,15 @@ fn calibrate_samples(
 /// after the read. The upper bound is read after a poll observed the terminal
 /// count. A pause therefore widens the interval instead of moving both bounds
 /// together, and the spread check can reject it.
+///
+/// A sample that runs past its timeout reports [`SampleRejection::TimedOut`];
+/// a pause or stale level reports [`SampleRejection::Transient`], which the
+/// caller may retry without treating the PIT as stuck.
 fn measure_with(
     probe: &mut impl CalibrationProbe,
     timeout_tsc_ticks: u64,
     start_gap_tsc_ticks: u64,
-) -> Option<PitObservation> {
+) -> Result<PitObservation, SampleRejection> {
     let start_before = probe.tsc();
     probe.start_pit();
     let start_after = probe.tsc();
@@ -511,7 +536,7 @@ fn measure_with(
     // reload. The reload lies inside the window bounded by the two reads, so
     // use its midpoint and discard samples whose window exceeds the budget.
     if start_gap > start_gap_tsc_ticks {
-        return None;
+        return Err(SampleRejection::Transient);
     }
     let start_tsc = start_before.wrapping_add(start_gap / 2);
 
@@ -524,16 +549,16 @@ fn measure_with(
             // The first poll already reports a terminal count: mode 0 drives
             // the output low on the reload, so that level is stale.
             if poll_count == 0 {
-                return None;
+                return Err(SampleRejection::Transient);
             }
             let high_tsc = probe.tsc();
             let low_tsc_ticks = low_tsc.wrapping_sub(start_tsc);
             // The measured interval is the reference for the programming
             // window; the nominal rate may be far from reality.
             if u128::from(start_gap) * PIT_START_GAP_DIVISOR > u128::from(low_tsc_ticks) {
-                return None;
+                return Err(SampleRejection::Transient);
             }
-            return Some(PitObservation {
+            return Ok(PitObservation {
                 low_tsc_ticks,
                 high_tsc_ticks: high_tsc.wrapping_sub(start_tsc),
             });
@@ -542,10 +567,11 @@ fn measure_with(
         // preceded it is a sound lower bound.
         low_tsc = probe_tsc;
         if probe_tsc.wrapping_sub(start_tsc) >= timeout_tsc_ticks {
-            return None;
+            return Err(SampleRejection::TimedOut);
         }
     }
-    None
+    // Exhausting the poll budget means the countdown never completed.
+    Err(SampleRejection::TimedOut)
 }
 
 /// Drives the real PIT channel 2 and TSC through [`measure_with`].

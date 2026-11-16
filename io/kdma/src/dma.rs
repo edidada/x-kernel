@@ -111,7 +111,11 @@ impl DmaAllocator {
             UsageKind::Dma,
         )?;
         let vaddr = va!(vaddr_raw);
-        self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?;
+        if let Some(completion) =
+            self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?
+        {
+            self.pending_completions.push(completion);
+        }
         self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
         let dma_info = DmaInfo {
             // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
@@ -128,21 +132,19 @@ impl DmaAllocator {
         Ok(dma_info)
     }
 
+    /// Applies one mapping mode and returns the invalidation the provider
+    /// detached from its lock, if it did not complete it in place.
     fn update_mapping_mode(
         &mut self,
         vaddr: VirtAddr,
         num_pages: usize,
         mode: DmaMappingMode,
-    ) -> AllocResult<()> {
+    ) -> AllocResult<Option<DmaMappingCompletion>> {
         let expand_size = num_pages * PAGE_SIZE_4K;
-        let completion = DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
+        DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
             error!("change table flag fail");
             AllocError::NoMemory
-        })?;
-        if let Some(completion) = completion {
-            self.pending_completions.push(completion);
-        }
-        Ok(())
+        })
     }
 
     /// Takes the detached invalidations accumulated under this lock.
@@ -185,10 +187,27 @@ impl DmaAllocator {
 
         // Deallocation cannot fail; the helper already logs platform release errors.
         let _ = self.release_platform_dma(v2p(vaddr), size);
-        // Deallocation cannot fail; update_mapping_mode already logs restoration errors.
-        let _ = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
-
-        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        // The pages may return to the general allocator only after every CPU
+        // has dropped its uncached translation: otherwise a CPU that still
+        // holds the coherent mapping could observe a cached alias of the
+        // reused page. The provider detaches that invalidation from the
+        // allocator lock, so release the pages inside the completion, which
+        // the public wrapper runs after unlocking.
+        match self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal) {
+            Ok(Some(flush)) => {
+                self.pending_completions
+                    .push(DmaMappingCompletion::new(move || {
+                        let is_invalidated = flush.complete();
+                        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+                        is_invalidated
+                    }));
+            }
+            // The provider completed the invalidation in place, or the mode
+            // restore failed after logging; no flush is pending.
+            Ok(None) | Err(_) => {
+                global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+            }
+        }
     }
 
     /// Returns a read-only snapshot of in-use DMA resources for test baselines.
