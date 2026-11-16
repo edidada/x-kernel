@@ -220,35 +220,32 @@ fn drm_nodes_project_a_render_minor() {
 
     assert!(tree.contains_key(&format!("dev/char/226:{}", node.index())));
 
-    // The connector is a class entry named after the card (`card0-Virtual-1`)
-    // and its attributes are the connector's state.
+    let card = node.index();
+    let connector = format!("class/drm/card{card}-Virtual-1");
+    let connector_dir = format!("devices/platform/static9002/drm/card{card}-Virtual-1");
+    // The connector is a class entry named after the card and connector.
     assert!(
-        tree.contains_key("class/drm/card0-Virtual-1"),
+        tree.contains_key(&connector),
         "the connector class entry must exist"
     );
-    // The class entry has to resolve to the connector's own directory: linking
-    // it to the card would make every attribute unreadable through the link,
-    // which is exactly what `cat /sys/class/drm/card0-Virtual-1/status` does.
-    let Some(TreeEntry::Symlink(target)) = tree.get("class/drm/card0-Virtual-1") else {
+    // The class entry has to resolve to the connector's own directory.
+    let Some(TreeEntry::Symlink(target)) = tree.get(&connector) else {
         panic!("the connector class entry must be a symlink");
     };
     assert_eq!(
-        target, "../../devices/platform/static9002/drm/card0-Virtual-1",
+        target,
+        &format!("../../{connector_dir}"),
         "the class entry must point at the connector directory"
     );
     for attribute in ["status", "dpms", "modes", "edid", "enabled"] {
         assert!(
-            tree.contains_key(&format!(
-                "devices/platform/static9002/drm/card0-Virtual-1/{attribute}"
-            )),
+            tree.contains_key(&format!("{connector_dir}/{attribute}")),
             "{attribute} must be projected"
         );
     }
     // `edid` is binary: the bytes must come back exactly as the device reported
     // them. A text attribute (`status`) is newline-terminated; `edid` is not.
-    let Some(TreeEntry::Attribute(_, edid)) =
-        tree.get("devices/platform/static9002/drm/card0-Virtual-1/edid")
-    else {
+    let Some(TreeEntry::Attribute(_, edid)) = tree.get(&format!("{connector_dir}/edid")) else {
         panic!("edid must be an attribute");
     };
     let expected = drm_metadata().edid().to_vec();
