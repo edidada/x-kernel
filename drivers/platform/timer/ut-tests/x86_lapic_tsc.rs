@@ -6,9 +6,11 @@ use raw_cpuid::{CpuId, CpuIdReader, CpuIdResult};
 use unittest::def_test;
 
 use super::{
-    Frequency, PIT_CALIBRATION_TICKS, PIT_TICK_RATE, PitObservation, PitTscCalibrator,
+    CalibrationProbe, Frequency, PIT_CALIBRATION_TICKS, PIT_SAMPLE_SPREAD_PERCENT, PIT_TICK_RATE,
+    PitObservation,
     TscFrequency::{Cpuid, Hypervisor, Pit, PlatformStatic},
-    cpuid_tsc_frequency, discover_tsc_frequency_with, filter_tsc_frequency,
+    calibrate_samples, cpuid_tsc_frequency, discover_tsc_frequency_with, filter_tsc_frequency,
+    frequency_from_ticks, measure_with,
 };
 
 fn cpuid_with_frequencies(
@@ -39,6 +41,75 @@ fn cpuid_with_frequencies(
     })
 }
 
+/// One scripted operation for [`ScriptProbe`].
+#[derive(Clone, Copy)]
+enum Step {
+    Tsc(u64),
+    Start,
+    Elapsed(bool),
+}
+
+/// Replays a fixed operation sequence so a test can verify the sampling order
+/// and inject a host pause at an exact point.
+struct ScriptProbe<'a> {
+    steps: &'a [Step],
+    next: usize,
+}
+
+impl<'a> ScriptProbe<'a> {
+    fn new(steps: &'a [Step]) -> Self {
+        Self { steps, next: 0 }
+    }
+
+    fn take(&mut self) -> Step {
+        let step = self
+            .steps
+            .get(self.next)
+            .copied()
+            .expect("calibration probe overran its script");
+        self.next += 1;
+        step
+    }
+}
+
+impl CalibrationProbe for ScriptProbe<'_> {
+    fn tsc(&mut self) -> u64 {
+        match self.take() {
+            Step::Tsc(value) => value,
+            _ => panic!("expected a TSC read"),
+        }
+    }
+
+    fn start_pit(&mut self) {
+        assert!(matches!(self.take(), Step::Start), "expected a PIT start");
+    }
+
+    fn pit_elapsed(&mut self) -> bool {
+        match self.take() {
+            Step::Elapsed(value) => value,
+            _ => panic!("expected a PIT poll"),
+        }
+    }
+}
+
+fn observation(low_tsc_ticks: u64, high_tsc_ticks: u64) -> PitObservation {
+    PitObservation {
+        low_tsc_ticks,
+        high_tsc_ticks,
+    }
+}
+
+fn scripted_samples(
+    sequence: &[Option<PitObservation>],
+) -> impl FnMut(u64, u64) -> Option<PitObservation> + '_ {
+    let mut next = 0;
+    move |_, _| {
+        let item = sequence.get(next).copied().flatten();
+        next += 1;
+        item
+    }
+}
+
 #[def_test]
 fn tsc_frequency_discovery_respects_sources_and_fallback() {
     let pit = Frequency::from_hz(1_000_000_000);
@@ -66,7 +137,7 @@ fn tsc_frequency_discovery_respects_sources_and_fallback() {
                 assert_eq!(nominal, platform);
                 assert_eq!(is_qemu_tcg, signature == b"TCGTCGTCGTCG");
                 has_calibrated = true;
-                measured
+                measured.map(Pit)
             });
         assert_eq!(selected, expected, "hypervisor: {:?}", signature);
         assert_eq!(has_calibrated, should_calibrate);
@@ -96,10 +167,6 @@ fn tsc_frequency_calculations_preserve_reference_units() {
         });
         assert_eq!(cpuid_tsc_frequency(&cpuid), expected);
     }
-    assert_eq!(
-        PitTscCalibrator::frequency_from_ticks(4_000_000_000, PIT_TICK_RATE.as_hz()),
-        Some(Frequency::from_hz(4_000_000_000))
-    );
 }
 
 #[def_test]
@@ -123,44 +190,163 @@ fn cpuid_rejects_out_of_range_crystal_rate_and_uses_base_frequency() {
 }
 
 #[def_test]
-fn pit_observations_report_the_bounded_midpoint() {
-    let interval_ticks = u64::from(PIT_CALIBRATION_TICKS);
-    let exact_frequency =
-        PitTscCalibrator::frequency_from_ticks(25_000_000, interval_ticks)
-            .expect("a plausible interval converts to a frequency");
-
-    // Both reads agree: the estimate is the rate they imply, with no spread.
-    let exact = PitTscCalibrator::estimate(Some(PitObservation {
-        low_tsc_ticks: 25_000_000,
-        high_tsc_ticks: 25_000_000,
-    }))
-    .expect("a bounded observation is usable");
-    assert_eq!(exact.frequency, exact_frequency);
-    assert_eq!(exact.low_frequency, exact_frequency);
-    assert_eq!(exact.spread_hz, 0);
-
-    // A delayed post-observation read raises the interval; the estimate stays
-    // between the two implied rates and reports the full spread.
-    let stretched = PitTscCalibrator::estimate(Some(PitObservation {
-        low_tsc_ticks: 24_000_000,
-        high_tsc_ticks: 26_000_000,
-    }))
-    .expect("a bounded observation is usable");
-    let low = PitTscCalibrator::frequency_from_ticks(24_000_000, interval_ticks)
-        .expect("lower bound converts");
-    let high = PitTscCalibrator::frequency_from_ticks(26_000_000, interval_ticks)
-        .expect("upper bound converts");
-    assert!(stretched.frequency > low && stretched.frequency < high);
-    assert_eq!(stretched.low_frequency, low);
-    assert_eq!(stretched.spread_hz, u128::from(high.as_hz() - low.as_hz()));
-
-    // A post-observation read below the pre-observation read is inconsistent.
-    assert!(
-        PitTscCalibrator::estimate(Some(PitObservation {
-            low_tsc_ticks: 26_000_000,
-            high_tsc_ticks: 24_000_000,
-        }))
-        .is_none()
+fn pit_frequency_uses_the_reference_interval() {
+    // 25 million TSC ticks over the reference countdown is about 2.5 GHz.
+    let expected_hz = u128::from(25_000_000u64) * u128::from(PIT_TICK_RATE.as_hz())
+        / u128::from(PIT_CALIBRATION_TICKS);
+    assert_eq!(
+        frequency_from_ticks(25_000_000).map(|frequency| u128::from(frequency.as_hz())),
+        Some(expected_hz)
     );
-    assert!(PitTscCalibrator::estimate(None).is_none());
+    assert_eq!(frequency_from_ticks(0), None);
+}
+
+#[def_test]
+fn pit_sample_reports_a_tight_interval_without_preemption() {
+    // The last false poll is one poll before the terminal count, so the sound
+    // interval is narrow and usable.
+    let script = [
+        Step::Tsc(0),
+        Step::Start,
+        Step::Tsc(2),
+        Step::Tsc(2000),
+        Step::Elapsed(false),
+        Step::Tsc(2080),
+        Step::Elapsed(false),
+        Step::Tsc(2090),
+        Step::Elapsed(true),
+        Step::Tsc(2091),
+    ];
+    let observation = measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000)
+        .expect("the sample completes");
+    assert_eq!(observation.low_tsc_ticks, 2079);
+    assert_eq!(observation.high_tsc_ticks, 2090);
+    assert!(
+        observation
+            .estimate()
+            .expect("bounds convert")
+            .is_within(PIT_SAMPLE_SPREAD_PERCENT)
+    );
+}
+
+#[def_test]
+fn pit_interval_bounds_survive_a_pause_after_a_false_poll() {
+    // 0: pre-start read, 1: reload, 2: start read
+    // 3/4: probe + false poll (low = 1000)
+    // 5: probe after a host pause, 6: true poll, 7: upper bound read
+    let script = [
+        Step::Tsc(0),
+        Step::Start,
+        Step::Tsc(2),
+        Step::Tsc(1000),
+        Step::Elapsed(false),
+        Step::Tsc(5000),
+        Step::Elapsed(true),
+        Step::Tsc(5001),
+    ];
+    let observation = measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000)
+        .expect("the sample completes");
+    // The lower bound stays before the false poll even though the vCPU was
+    // paused before the next probe, so the pause widens the interval.
+    assert_eq!(observation.low_tsc_ticks, 999);
+    assert_eq!(observation.high_tsc_ticks, 5000);
+    assert!(
+        !observation
+            .estimate()
+            .expect("bounds convert")
+            .is_within(PIT_SAMPLE_SPREAD_PERCENT),
+        "a pause after a false poll must not look like a tight sample"
+    );
+}
+
+#[def_test]
+fn pit_sample_discards_a_pause_while_programming_the_countdown() {
+    let script = [Step::Tsc(0), Step::Start, Step::Tsc(10_000)];
+    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000).is_none());
+}
+
+#[def_test]
+fn pit_sample_discards_a_stale_first_terminal_count() {
+    // The first poll already reports completion, so the output level belongs
+    // to the previous countdown rather than this sample.
+    let script = [
+        Step::Tsc(0),
+        Step::Start,
+        Step::Tsc(10),
+        Step::Tsc(20),
+        Step::Elapsed(true),
+    ];
+    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000_000, 1_000).is_none());
+}
+
+#[def_test]
+fn pit_sample_discards_a_programming_window_large_for_the_interval() {
+    // The pre-check budget is wide, but the measured interval is much shorter
+    // than the programming window, so the start position is not trustworthy.
+    let script = [
+        Step::Tsc(0),
+        Step::Start,
+        Step::Tsc(100),
+        Step::Tsc(1000),
+        Step::Elapsed(false),
+        Step::Tsc(1001),
+        Step::Elapsed(true),
+        Step::Tsc(1002),
+    ];
+    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000_000, 10_000).is_none());
+}
+
+#[def_test]
+fn pit_sample_timeout_discards_a_stalled_countdown() {
+    let script = [
+        Step::Tsc(0),
+        Step::Start,
+        Step::Tsc(10),
+        Step::Tsc(2_000),
+        Step::Elapsed(false),
+    ];
+    assert!(measure_with(&mut ScriptProbe::new(&script), 1_000, 1_000).is_none());
+}
+
+#[def_test]
+fn pit_calibration_accepts_only_a_tight_interval() {
+    let nominal = Frequency::from_hz(4_000_000_000);
+    // The first sample is 20% wide; the second is under 1% and must win.
+    let sequence = [
+        Some(observation(100_000_000, 120_000_000)),
+        Some(observation(120_000_000, 121_000_000)),
+    ];
+    let (frequency, is_degraded) =
+        calibrate_samples(nominal, scripted_samples(&sequence)).expect("a tight sample");
+    assert!(!is_degraded);
+    let low = frequency_from_ticks(120_000_000).expect("lower bound converts");
+    let high = frequency_from_ticks(121_000_000).expect("upper bound converts");
+    assert!((low..=high).contains(&frequency));
+}
+
+#[def_test]
+fn pit_calibration_reports_a_bounded_degraded_result() {
+    let nominal = Frequency::from_hz(4_000_000_000);
+    // Every sample is 20% wide: not trustworthy, but still a bounded bound.
+    let sequence = [Some(observation(100_000_000, 120_000_000)); 8];
+    let (frequency, is_degraded) =
+        calibrate_samples(nominal, scripted_samples(&sequence)).expect("degraded result");
+    assert!(is_degraded);
+    let low = frequency_from_ticks(100_000_000).expect("lower bound converts");
+    let high = frequency_from_ticks(120_000_000).expect("upper bound converts");
+    assert!((low..=high).contains(&frequency));
+}
+
+#[def_test]
+fn pit_calibration_fails_instead_of_trusting_a_wide_guess() {
+    let nominal = Frequency::from_hz(4_000_000_000);
+    let sequence = [Some(observation(50_000_000, 150_000_000)); 8];
+    assert_eq!(calibrate_samples(nominal, scripted_samples(&sequence)), None);
+}
+
+#[def_test]
+fn pit_calibration_stops_after_repeated_timeouts() {
+    let nominal = Frequency::from_hz(4_000_000_000);
+    let sequence = [None, None];
+    assert_eq!(calibrate_samples(nominal, scripted_samples(&sequence)), None);
 }

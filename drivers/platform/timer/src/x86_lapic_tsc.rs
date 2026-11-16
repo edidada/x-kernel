@@ -31,10 +31,20 @@ const PIT_TICK_RATE: Frequency = Frequency::from_hz(1_193_182);
 // A roughly 50 ms countdown keeps poll overhead and host preemption a small
 // fraction of the reference interval.
 const PIT_CALIBRATION_TICKS: u16 = (PIT_TICK_RATE.as_hz() / 20) as u16;
-const PIT_CALIBRATION_SAMPLES: usize = 5;
-// A sample whose pre- and post-observation reads imply rates this close is
-// treated as free of preemption at the terminal count.
+const PIT_CALIBRATION_SAMPLES: usize = 8;
+// A sample whose sound interval is this narrow is treated as trustworthy: the
+// midpoint is then within half the spread of the real frequency.
 const PIT_SAMPLE_SPREAD_PERCENT: u128 = 2;
+// When no sample is trustworthy, the tightest bound is reported as degraded
+// only while its uncertainty stays inside this ceiling.
+const PIT_DEGRADED_SPREAD_PERCENT: u128 = 25;
+// The TSC budget for programming the countdown: at most 1% of the countdown
+// expected at the nominal rate. The reload lies inside that window, so the
+// midpoint keeps the residual interval shift within half a percent.
+const PIT_START_GAP_DIVISOR: u128 = 100;
+// A PIT that never fires (or a vCPU descheduled this long) abandons discovery
+// instead of spending the whole sample budget.
+const PIT_MAX_SAMPLE_TIMEOUTS: usize = 2;
 const PIT_MAX_POLL_ITERATIONS: usize = 1_000_000;
 const MIN_TSC_FREQUENCY: Frequency = Frequency::from_hz(1_000_000);
 static INIT_TICK: AtomicU64 = AtomicU64::new(0);
@@ -123,6 +133,8 @@ impl TimerConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TscFrequency {
     Pit(Frequency),
+    /// Bounded PIT sample whose uncertainty exceeded the trustworthy limit.
+    PitDegraded(Frequency),
     Hypervisor(Frequency),
     Cpuid(Frequency),
     PlatformStatic(Frequency),
@@ -132,6 +144,7 @@ impl TscFrequency {
     const fn source_name(self) -> &'static str {
         match self {
             Self::Pit(_) => "PIT calibration",
+            Self::PitDegraded(_) => "PIT calibration (degraded)",
             Self::Hypervisor(_) => "hypervisor CPUID",
             Self::Cpuid(_) => "CPUID",
             Self::PlatformStatic(_) => "platform static fallback",
@@ -141,6 +154,7 @@ impl TscFrequency {
     const fn frequency(self) -> Frequency {
         match self {
             Self::Pit(frequency)
+            | Self::PitDegraded(frequency)
             | Self::Hypervisor(frequency)
             | Self::Cpuid(frequency)
             | Self::PlatformStatic(frequency) => frequency,
@@ -247,6 +261,12 @@ pub fn early_init(config: TimerConfig) {
             selected.source_name()
         );
     } else {
+        if matches!(selected, TscFrequency::PitDegraded(_)) {
+            log::warn!(
+                "TSC frequency discovery is degraded: best PIT bounds are wider than {}%",
+                PIT_SAMPLE_SPREAD_PERCENT
+            );
+        }
         kernel_boot::bootln!(
             "TSC frequency: {} kHz, source: {}",
             frequency_khz,
@@ -275,7 +295,24 @@ fn discover_tsc_frequency(platform_frequency: Frequency) -> TscFrequency {
     discover_tsc_frequency_with(
         &CpuId::new(),
         platform_frequency,
-        |nominal, _is_qemu_tcg| PitTscCalibrator::calibrate(nominal),
+        |nominal, _is_qemu_tcg| {
+            calibrate_samples(nominal, |timeout, start_gap| {
+                x86_64::instructions::interrupts::without_interrupts(|| {
+                    let mut probe = KernelCalibrationProbe {
+                        pit: PitChannel2::acquire(),
+                    };
+                    measure_with(&mut probe, timeout, start_gap)
+                })
+            })
+            .and_then(|(frequency, is_degraded)| {
+                let frequency = filter_tsc_frequency(Some(frequency))?;
+                Some(if is_degraded {
+                    TscFrequency::PitDegraded(frequency)
+                } else {
+                    TscFrequency::Pit(frequency)
+                })
+            })
+        },
     )
 }
 
@@ -284,12 +321,12 @@ fn discover_tsc_frequency(platform_frequency: Frequency) -> TscFrequency {
 fn discover_tsc_frequency_with(
     cpuid: &CpuId<impl CpuIdReader>,
     platform_frequency: Frequency,
-    calibrate_fn: impl FnOnce(Frequency, bool) -> Option<Frequency>,
+    calibrate_fn: impl FnOnce(Frequency, bool) -> Option<TscFrequency>,
 ) -> TscFrequency {
     let is_qemu_tcg = cpuid
         .get_hypervisor_info()
         .is_some_and(|info| matches!(info.identify(), Hypervisor::QEMU));
-    let try_pit = || calibrate_fn(platform_frequency, is_qemu_tcg).map(TscFrequency::Pit);
+    let try_pit = || calibrate_fn(platform_frequency, is_qemu_tcg);
     let try_hypervisor = || hypervisor_tsc_frequency(cpuid).map(TscFrequency::Hypervisor);
     let try_cpuid = || cpuid_tsc_frequency(cpuid).map(TscFrequency::Cpuid);
     // TCG: PIT -> hypervisor -> CPUID.
@@ -340,126 +377,193 @@ fn filter_tsc_frequency(frequency: Option<Frequency>) -> Option<Frequency> {
     })
 }
 
-/// One PIT countdown observed through both TSC reads.
+/// Hardware operations of one calibration sample.
 ///
-/// The terminal count happens between the two reads. The pre-observation read
-/// cannot include the full interval, and the post-observation read cannot miss
-/// any of it, so the true frequency lies between the frequencies they imply.
-/// The distance between them measures how much host preemption delayed the
-/// observation of the terminal count.
+/// Split from the arithmetic so tests can drive the exact read order and
+/// inject host pauses between a TSC read and the following PIT poll.
+trait CalibrationProbe {
+    fn tsc(&mut self) -> u64;
+    fn start_pit(&mut self);
+    fn pit_elapsed(&mut self) -> bool;
+}
+
+/// One PIT countdown observed through TSC reads placed around the polls.
+///
+/// `low_tsc_ticks` comes from a TSC read that preceded a poll reporting "still
+/// counting": the terminal count is after that poll, hence after the read.
+/// `high_tsc_ticks` comes from a read taken after a poll observed the terminal
+/// count. The true interval therefore lies between them even when the host
+/// pauses the vCPU between any two operations.
+#[derive(Clone, Copy)]
 struct PitObservation {
     low_tsc_ticks: u64,
     high_tsc_ticks: u64,
 }
 
-/// The frequency implied by one observation and its relative uncertainty.
-struct PitEstimate {
-    /// Midpoint between the rates implied by the two reads.
-    frequency: Frequency,
-    /// Rate implied by the pre-observation read; never above the true rate by
-    /// more than one poll iteration.
-    low_frequency: Frequency,
-    /// Distance between the two implied rates.
-    spread_hz: u128,
-}
-
-/// Shares the timeout and sample-selection policy across a PIT calibration run.
-struct PitTscCalibrator {
-    timeout_tsc_ticks: u64,
-}
-
-impl PitTscCalibrator {
-    fn calibrate(nominal_frequency: Frequency) -> Option<Frequency> {
-        let calibrator = Self {
-            // A healthy PIT expires after roughly 50 ms. Allow a wide margin
-            // for host scheduling delays so a vCPU that is descheduled during
-            // the observation does not turn into a bogus failure, while a PIT
-            // that never fires stays bounded.
-            timeout_tsc_ticks: nominal_frequency.as_hz() / 3,
-        };
-        let mut best_low: Option<Frequency> = None;
-        for _ in 0..PIT_CALIBRATION_SAMPLES {
-            let observation =
-                x86_64::instructions::interrupts::without_interrupts(|| calibrator.measure_once());
-            let Some(estimate) = PitTscCalibrator::estimate(observation) else {
-                continue;
-            };
-            // A tight spread means no preemption covered the terminal count,
-            // so the midpoint is accurate to half the spread.
-            if estimate.spread_hz * 100
-                <= u128::from(estimate.frequency.as_hz()) * PIT_SAMPLE_SPREAD_PERCENT
-            {
-                return filter_tsc_frequency(Some(estimate.frequency));
-            }
-            // Preemption can only shorten the pre-observation reading, so the
-            // largest lower bound is the closest estimate when no sample was
-            // clean. It converges upward as samples are added.
-            best_low = Some(best_low.map_or(estimate.low_frequency, |current| {
-                current.max(estimate.low_frequency)
-            }));
-        }
-        filter_tsc_frequency(best_low)
-    }
-
-    fn measure_once(&self) -> Option<PitObservation> {
-        let mut pit = PitChannel2::acquire();
-        pit.start_one_shot(PIT_CALIBRATION_TICKS);
-        let start_tsc = read_tsc_raw();
-        let mut last_tsc = start_tsc;
-
-        for poll_count in 0..PIT_MAX_POLL_ITERATIONS {
-            if pit.has_elapsed() {
-                // `poll_count == 0` means the first poll already reported a
-                // terminal count. Mode 0 drives the output low when the reload
-                // is written, so that level belongs to a stale countdown.
-                if poll_count == 0 {
-                    return None;
-                }
-                return Some(PitObservation {
-                    low_tsc_ticks: last_tsc.wrapping_sub(start_tsc),
-                    high_tsc_ticks: read_tsc_raw().wrapping_sub(start_tsc),
-                });
-            }
-
-            last_tsc = read_tsc_raw();
-            if last_tsc.wrapping_sub(start_tsc) >= self.timeout_tsc_ticks {
-                return None;
-            }
-        }
-        None
-    }
-
-    /// Converts one observation into the midpoint frequency and its spread.
-    fn estimate(observation: Option<PitObservation>) -> Option<PitEstimate> {
-        let observation = observation?;
-        let low = Self::frequency_from_ticks(
-            observation.low_tsc_ticks,
-            u64::from(PIT_CALIBRATION_TICKS),
-        )?;
-        let high = Self::frequency_from_ticks(
-            observation.high_tsc_ticks,
-            u64::from(PIT_CALIBRATION_TICKS),
-        )?;
+impl PitObservation {
+    /// Converts the sound interval into its midpoint and spread.
+    fn estimate(self) -> Option<PitEstimate> {
+        let low = frequency_from_ticks(self.low_tsc_ticks)?;
+        let high = frequency_from_ticks(self.high_tsc_ticks)?;
         if high < low {
             return None;
         }
         let spread_hz = high.as_hz() - low.as_hz();
-        let midpoint_hz = low.as_hz() + spread_hz / 2;
         Some(PitEstimate {
-            frequency: Frequency::from_hz(midpoint_hz),
-            low_frequency: low,
+            frequency: Frequency::from_hz(low.as_hz() + spread_hz / 2),
             spread_hz: u128::from(spread_hz),
         })
     }
+}
 
-    fn frequency_from_ticks(elapsed_tsc_ticks: u64, elapsed_pit_ticks: u64) -> Option<Frequency> {
-        if elapsed_tsc_ticks == 0 || elapsed_pit_ticks == 0 {
+/// The frequency implied by one observation and its uncertainty.
+struct PitEstimate {
+    /// Midpoint between the rates implied by the two bounds.
+    frequency: Frequency,
+    /// Distance between the two implied rates.
+    spread_hz: u128,
+}
+
+impl PitEstimate {
+    /// Returns whether the interval is within `percent` of the midpoint. The
+    /// midpoint of such an interval is within half that percentage of truth.
+    fn is_within(&self, percent: u128) -> bool {
+        self.spread_hz * 100 <= u128::from(self.frequency.as_hz()) * percent
+    }
+}
+
+fn frequency_from_ticks(elapsed_tsc_ticks: u64) -> Option<Frequency> {
+    if elapsed_tsc_ticks == 0 {
+        return None;
+    }
+    let frequency_hz = u128::from(elapsed_tsc_ticks)
+        .checked_mul(u128::from(PIT_TICK_RATE.as_hz()))?
+        / u128::from(PIT_CALIBRATION_TICKS);
+    u64::try_from(frequency_hz).ok().map(Frequency::from_hz)
+}
+
+/// Calibrates the TSC against the PIT and reports whether the result is a
+/// degraded estimate rather than a tight one.
+///
+/// A tight sample is accepted as soon as it appears. If no sample is tight,
+/// the tightest interval is reported as degraded only while its uncertainty
+/// stays inside [`PIT_DEGRADED_SPREAD_PERCENT`]; otherwise discovery fails
+/// instead of trusting a best guess.
+fn calibrate_samples(
+    nominal_frequency: Frequency,
+    mut sample: impl FnMut(u64, u64) -> Option<PitObservation>,
+) -> Option<(Frequency, bool)> {
+    let nominal_hz = nominal_frequency.as_hz();
+    let expected_ticks = (u128::from(nominal_hz) * u128::from(PIT_CALIBRATION_TICKS))
+        / u128::from(PIT_TICK_RATE.as_hz());
+    let start_gap_tsc_ticks = u64::try_from(expected_ticks / PIT_START_GAP_DIVISOR).ok()?;
+    // A PIT that never fires, or a vCPU descheduled for this long, cannot
+    // produce a sample. The countdown is only 1/20 of this budget at the
+    // nominal rate, so a healthy sample never approaches it.
+    let timeout_tsc_ticks = nominal_hz;
+    let mut tightest: Option<PitEstimate> = None;
+    let mut timeouts = 0;
+    for _ in 0..PIT_CALIBRATION_SAMPLES {
+        let Some(observation) = sample(timeout_tsc_ticks, start_gap_tsc_ticks) else {
+            timeouts += 1;
+            if timeouts >= PIT_MAX_SAMPLE_TIMEOUTS {
+                break;
+            }
+            continue;
+        };
+        timeouts = 0;
+        let Some(estimate) = observation.estimate() else {
+            continue;
+        };
+        if estimate.is_within(PIT_SAMPLE_SPREAD_PERCENT) {
+            return filter_tsc_frequency(Some(estimate.frequency))
+                .map(|frequency| (frequency, false));
+        }
+        if tightest
+            .as_ref()
+            .is_none_or(|best| estimate.spread_hz < best.spread_hz)
+        {
+            tightest = Some(estimate);
+        }
+    }
+    let estimate = tightest.filter(|estimate| estimate.is_within(PIT_DEGRADED_SPREAD_PERCENT))?;
+    filter_tsc_frequency(Some(estimate.frequency)).map(|frequency| (frequency, true))
+}
+
+/// Runs one countdown while keeping the interval bounds sound under host
+/// preemption.
+///
+/// The TSC is read before every PIT poll. A read only becomes the lower bound
+/// after its poll reports "still counting", which places the terminal count
+/// after the read. The upper bound is read after a poll observed the terminal
+/// count. A pause therefore widens the interval instead of moving both bounds
+/// together, and the spread check can reject it.
+fn measure_with(
+    probe: &mut impl CalibrationProbe,
+    timeout_tsc_ticks: u64,
+    start_gap_tsc_ticks: u64,
+) -> Option<PitObservation> {
+    let start_before = probe.tsc();
+    probe.start_pit();
+    let start_after = probe.tsc();
+    let start_gap = start_after.wrapping_sub(start_before);
+    // A pause while programming the PIT moves the measured start away from the
+    // reload. The reload lies inside the window bounded by the two reads, so
+    // use its midpoint and discard samples whose window exceeds the budget.
+    if start_gap > start_gap_tsc_ticks {
+        return None;
+    }
+    let start_tsc = start_before.wrapping_add(start_gap / 2);
+
+    let mut low_tsc = start_tsc;
+    for poll_count in 0..PIT_MAX_POLL_ITERATIONS {
+        // Read before polling. If the poll reports "still counting", this read
+        // is provably earlier than the terminal count.
+        let probe_tsc = probe.tsc();
+        if probe.pit_elapsed() {
+            // The first poll already reports a terminal count: mode 0 drives
+            // the output low on the reload, so that level is stale.
+            if poll_count == 0 {
+                return None;
+            }
+            let high_tsc = probe.tsc();
+            let low_tsc_ticks = low_tsc.wrapping_sub(start_tsc);
+            // The measured interval is the reference for the programming
+            // window; the nominal rate may be far from reality.
+            if u128::from(start_gap) * PIT_START_GAP_DIVISOR > u128::from(low_tsc_ticks) {
+                return None;
+            }
+            return Some(PitObservation {
+                low_tsc_ticks,
+                high_tsc_ticks: high_tsc.wrapping_sub(start_tsc),
+            });
+        }
+        // The poll confirmed the countdown is still running; the read that
+        // preceded it is a sound lower bound.
+        low_tsc = probe_tsc;
+        if probe_tsc.wrapping_sub(start_tsc) >= timeout_tsc_ticks {
             return None;
         }
-        let frequency_hz = u128::from(elapsed_tsc_ticks)
-            .checked_mul(u128::from(PIT_TICK_RATE.as_hz()))?
-            / u128::from(elapsed_pit_ticks);
-        u64::try_from(frequency_hz).ok().map(Frequency::from_hz)
+    }
+    None
+}
+
+/// Drives the real PIT channel 2 and TSC through [`measure_with`].
+struct KernelCalibrationProbe {
+    pit: PitChannel2,
+}
+
+impl CalibrationProbe for KernelCalibrationProbe {
+    fn tsc(&mut self) -> u64 {
+        read_tsc_raw()
+    }
+
+    fn start_pit(&mut self) {
+        self.pit.start_one_shot(PIT_CALIBRATION_TICKS);
+    }
+
+    fn pit_elapsed(&mut self) -> bool {
+        self.pit.has_elapsed()
     }
 }
 

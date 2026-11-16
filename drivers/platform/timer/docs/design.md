@@ -98,20 +98,24 @@ rate is in range; otherwise it uses the nonzero leaf `0x16` processor base
 frequency as an estimate of TSC frequency. Each source is evaluated only when
 earlier sources fail.
 
-PIT channel 2 runs a mode-0 countdown of roughly 50 ms. Calibration reads the
-TSC immediately before and immediately after observing the terminal count: the
-first read cannot include the full interval and the second cannot miss any of
-it, so the true frequency lies between the rates they imply. A sample whose two
-rates differ by at most 2% is accepted; otherwise the largest pre-observation
-rate across five samples is used, because preemption can only shorten that
-reading. Each sample
-has a one-million-iteration limit and a TSC tick budget of one third of the
-nominal platform frequency. This tick budget is a time bound only to the extent
-that the nominal frequency matches the running TSC.
+PIT channel 2 runs a mode-0 countdown of roughly 50 ms. The TSC is read before
+every PIT poll, and another read follows the poll that observes the terminal
+count. A pre-poll read becomes the lower bound only after its poll reported
+"still counting", which proves the terminal count is later; the post-poll read
+is the upper bound. Host preemption can therefore only widen the interval
+instead of moving both ends together, and the spread check rejects it. The
+countdown itself is programmed between two TSC reads; that window bounds how far
+the measured start can sit from the reload, its midpoint is used, and it must
+stay within 1% of the measured interval.
+
+A sample is accepted when its interval is within 2% of the midpoint. If no
+sample is that tight, the tightest interval is reported as degraded only while
+it stays within 25%; otherwise discovery fails instead of trusting a best guess.
+Each sample has a one-million-iteration limit and a TSC timeout of one nominal
+frequency period; repeated timeouts abandon discovery.
 
 A sample requires the terminal count to be observed after at least one polling
 iteration; a first-poll terminal count is a stale output level and is discarded.
-An immediately completed or timed-out sample is discarded.
 
 Runtime candidates must be at least 1 MHz and fit in `u32` after conversion to
 kHz. Bootstrap separately checks the platform minimum and the selected value's
