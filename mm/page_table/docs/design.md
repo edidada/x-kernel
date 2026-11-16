@@ -153,8 +153,11 @@ that protects the table before the remote shootdown. This matters when the
 shootdown waits for acknowledgements: a CPU that needs the same lock must not
 spin with interrupts disabled, or it can never answer the IPI. The method
 refuses user tables (their flushes are residency-scoped), fresh-map fencing,
-and pending managed retirements, which must complete in place. Dropping the
-handle without completing it still invalidates, but at the drop site.
+and pending managed retirements, which must complete in place. `complete()`
+returns the backend result and retries a failed scoped or partial shootdown once
+as a full-TLB invalidation; callers must not treat the mapping change as
+complete on error. Dropping the handle without completing it still invalidates,
+but at the drop site and without a result.
 
 ### PTE Lifecycle
 

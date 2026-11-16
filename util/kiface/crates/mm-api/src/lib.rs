@@ -28,34 +28,38 @@ pub enum DmaMappingMode {
 /// cannot acknowledge a TLB shootdown, so completing while the lock is held
 /// can stall the initiator until its bounded give-up.
 pub struct DmaMappingCompletion {
-    complete: Option<Box<dyn FnOnce() + Send>>,
+    complete: Option<Box<dyn FnOnce() -> bool + Send>>,
 }
 
 impl DmaMappingCompletion {
-    /// Wraps the completion work.
-    pub fn new(complete: impl FnOnce() + Send + 'static) -> Self {
+    /// Wraps completion work that reports whether the invalidation succeeded.
+    pub fn new(complete: impl FnOnce() -> bool + Send + 'static) -> Self {
         Self {
             complete: Some(Box::new(complete)),
         }
     }
 
-    /// Runs the pending invalidation now.
-    pub fn complete(mut self) {
-        self.run();
+    /// Runs the pending invalidation and reports whether it completed.
+    ///
+    /// Must be called after releasing every lock held around the mode change.
+    /// The result must not be treated as success when it is `false`.
+    pub fn complete(mut self) -> bool {
+        self.run()
     }
 
-    fn run(&mut self) {
-        if let Some(complete) = self.complete.take() {
-            complete();
+    fn run(&mut self) -> bool {
+        match self.complete.take() {
+            Some(complete) => complete(),
+            None => true,
         }
     }
 }
 
 impl Drop for DmaMappingCompletion {
     fn drop(&mut self) {
-        // A caller that forgets to complete must still not leave stale
-        // translations behind.
-        self.run();
+        // Safety net: a caller that forgets to complete must still attempt the
+        // invalidation. A drop site cannot report the result.
+        let _ = self.run();
     }
 }
 

@@ -52,6 +52,7 @@ mod dma;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::AllocResult;
+use log::error;
 use memaddr::PhysAddr;
 
 #[cfg(unittest)]
@@ -80,7 +81,9 @@ fn run_allocator<R>(operation: impl FnOnce(&mut DmaAllocator) -> R) -> R {
         (result, allocator.take_completions())
     };
     for completion in completions {
-        completion.complete();
+        if !completion.complete() {
+            error!("DMA mapping change did not confirm remote TLB invalidation");
+        }
     }
     result
 }

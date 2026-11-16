@@ -29,10 +29,9 @@ impl kiface_mm_api::DmaMappingIf {
             let mut layout = crate::kernel_layout().lock();
             layout.protect_kernel_deferred(vaddr, size_bytes, mapping_flags(mode))?
         };
-        Ok(
-            deferred
-                .map(|flush| kiface_mm_api::DmaMappingCompletion::new(move || flush.complete())),
-        )
+        Ok(deferred.map(|flush| {
+            kiface_mm_api::DmaMappingCompletion::new(move || flush.complete().is_ok())
+        }))
     }
 }
 

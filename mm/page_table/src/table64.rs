@@ -456,10 +456,12 @@ impl<M: PagingMetaData> ToFlush<M> {
 /// with interrupts disabled, or it can never acknowledge the shootdown.
 ///
 /// Dropping the value without completing still performs the invalidation, but
-/// it then runs at the drop site, which may still hold the lock.
+/// it then runs at the drop site, which may still hold the lock, and its result
+/// is not reported. Callers that must observe completion use
+/// [`complete`](Self::complete).
 pub struct DeferredKernelTlbFlush {
     scope: Option<DeferredKernelTlbFlushScope>,
-    flush_all_cpus: fn(Option<usize>),
+    flush_all_cpus: fn(Option<usize>) -> TlbFlushResult,
 }
 
 enum DeferredKernelTlbFlushScope {
@@ -468,29 +470,48 @@ enum DeferredKernelTlbFlushScope {
 }
 
 impl DeferredKernelTlbFlush {
-    /// Performs the detached invalidation.
-    pub fn complete(mut self) {
-        self.invalidate();
+    /// Performs the detached invalidation and reports whether every relevant
+    /// CPU confirmed it.
+    ///
+    /// A failed scoped or partial shootdown is retried once as a full-TLB
+    /// invalidation, mirroring the guard's `ToFlush::Full` retry. The caller
+    /// must not treat the mapping change as complete when this returns an
+    /// error.
+    pub fn complete(mut self) -> TlbFlushResult {
+        self.invalidate()
     }
 
-    fn invalidate(&mut self) {
+    fn invalidate(&mut self) -> TlbFlushResult {
         let Some(scope) = self.scope.take() else {
-            return;
+            return Ok(());
         };
-        match scope {
+        let result = match scope {
             DeferredKernelTlbFlushScope::Full => (self.flush_all_cpus)(None),
             DeferredKernelTlbFlushScope::Addresses(addresses) => {
+                let mut result = Ok(());
                 for address in addresses {
-                    (self.flush_all_cpus)(Some(address));
+                    let current = (self.flush_all_cpus)(Some(address));
+                    if current.is_err() {
+                        result = current;
+                    }
                 }
+                result
             }
+        };
+        if result.is_ok() {
+            return Ok(());
         }
+        // A partial or scoped failure cannot authorize reuse; retry the whole
+        // TLB once, as the guard would retain a full-scope retry.
+        (self.flush_all_cpus)(None)
     }
 }
 
 impl Drop for DeferredKernelTlbFlush {
     fn drop(&mut self) {
-        self.invalidate();
+        // Best effort: a drop site cannot report failure. Callers that need
+        // the result call `complete`.
+        let _ = self.invalidate();
     }
 }
 
@@ -1560,7 +1581,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
             scope: Some(scope),
             flush_all_cpus: |vaddr| {
                 let vaddr = vaddr.map(M::VirtAddr::from);
-                let _ = M::flush_tlb_all_cpus(vaddr);
+                M::flush_tlb_all_cpus(vaddr)
             },
         })
     }

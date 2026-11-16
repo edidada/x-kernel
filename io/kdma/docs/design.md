@@ -98,7 +98,8 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 - A coherent mode change detaches its remote TLB invalidation. The public
   wrappers complete it after releasing the allocator lock, because a CPU
   waiting for that lock with interrupts disabled cannot acknowledge the
-  shootdown.
+  shootdown. A completion that cannot confirm the invalidation is logged; the
+  mode change is not silently assumed to have taken effect.
 - Coherent allocation participates in the global page allocator and page
   table updates, so it must run after `kalloc` and the address-space
   subsystem are initialized; first use of the bounce path lazily
