@@ -4282,6 +4282,7 @@ dependencies = [
 name = "of"
 version = "0.3.0-dev"
 dependencies = [
+ "fwnode",
  "lazyinit",
  "log",
  "memaddr",
