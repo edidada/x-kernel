@@ -54,6 +54,12 @@ fn handle_page_fault(tf: &mut ExceptionContext) {
 /// Architecture-specific trap entry point.
 #[unsafe(no_mangle)]
 fn x86_trap_handler(tf: &mut ExceptionContext) {
+    if super::nmi::is_active() {
+        // A recoverable exception's IRET would reopen NMI delivery during the
+        // final IST restoration window. Faults/debug traps in NMI are terminal;
+        // do not return through that exception or acquire panic/console locks.
+        karch::stop_cpu();
+    }
     let _tf_guard = crate::ExceptionContextGuard::new(tf);
     match tf.vector as u8 {
         PAGE_FAULT_VECTOR => handle_page_fault(tf),
@@ -120,4 +126,17 @@ pub(super) fn err_code_to_flags(err_code: u64) -> Result<PageFaultFlags, u64> {
         }
         Ok(flags)
     }
+}
+
+/// Dedicated assembly entry, after establishing kernel GS on the NMI stack.
+#[unsafe(no_mangle)]
+fn x86_nmi_handler(tf: &mut ExceptionContext) {
+    super::nmi::set_active(true);
+    let _tf_guard = crate::ExceptionContextGuard::new(tf);
+    if let Some(handler) = crate::excp::NMI.first() {
+        // SAFETY: the assembly entry supplies the pinned initialized CPU,
+        // dedicated stack, native NMI classification and ordinary IRQ mask.
+        unsafe { handler(2) };
+    }
+    super::nmi::set_active(false);
 }

@@ -16,6 +16,9 @@
 
 mod config;
 pub mod discovery;
+mod irq_work;
+#[cfg(feature = "nmi-native")]
+pub mod nmi;
 mod runtime;
 
 pub use config::{
@@ -58,7 +61,12 @@ impl kirq::IntrManagerIf {
         None
     }
 
-    fn percpu_nmi(_: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
+    fn percpu_nmi(desc: kirq::IrqDesc) -> Option<&'static kirq::PerCpuNmiChip> {
+        #[cfg(feature = "nmi-native")]
+        if nmi::source(desc).is_some() {
+            return Some(&nmi::CHIP);
+        }
+        let _ = desc;
         None
     }
 
@@ -71,7 +79,7 @@ impl kirq::IntrManagerIf {
     }
 
     fn prepare_local_irq_work() -> Option<fn()> {
-        None
+        irq_work::prepare()
     }
 
     fn configure(desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
@@ -93,7 +101,14 @@ impl kirq::IntrManagerIf {
 
     /// # Safety
     /// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
-    unsafe fn dispatch_nmi(_irq: usize) {}
+    unsafe fn dispatch_nmi(_irq: usize) {
+        #[cfg(feature = "nmi-native")]
+        // SAFETY: native architecture entry retains CPU/IRQ exclusion and KIRQ
+        // established effective NMI and RCU watching before this provider call.
+        unsafe {
+            nmi::dispatch()
+        };
+    }
 
     /// # Safety
     /// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.

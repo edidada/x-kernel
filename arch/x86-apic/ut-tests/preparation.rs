@@ -45,14 +45,14 @@ fn boot_checked_masked_preparation() {
 
 #[unittest::def_test]
 fn owner_failure_preserves_cpu_slot_and_uses_nowait() {
-    let guard = kspin::NoPreemptIrqSave::new();
-    let before = super::LOCAL_APIC_PTR.read(&guard);
+    let _guard = kspin::NoPreemptIrqSave::new();
+    let before = super::LOCAL_APIC_PTR.current_shared().load(Ordering::Acquire);
     let result = super::install_local_apic_with(super::build_local_apic(), |_, flags| {
         assert_eq!(flags, kalloc_types::AllocFlags::NOWAIT);
         Err(kerrno::KError::NoMemory)
     });
     assert_eq!(result, Err(kerrno::KError::NoMemory));
-    assert_eq!(super::LOCAL_APIC_PTR.read(&guard), before);
+    assert_eq!(super::LOCAL_APIC_PTR.current_shared().load(Ordering::Acquire), before);
 }
 
 #[unittest::def_test]

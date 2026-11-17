@@ -1,10 +1,11 @@
 extern crate std;
 
-use self::std::{cell::RefCell, vec::Vec};
+use self::std::{boxed::Box, cell::RefCell, vec::Vec};
 use super::*;
 
 std::thread_local! {
     static ACCESSES: RefCell<Vec<Access>> = const { RefCell::new(Vec::new()) };
+    static ICR_HIGH_HOOK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +28,12 @@ pub(super) fn record_write(address: u64, value: u32) {
             .borrow_mut()
             .push(Access::Write(address as usize & 0xfff, value))
     });
+    if address as usize & 0xfff == 0x310 {
+        let hook = ICR_HIGH_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
 
 #[repr(C, align(4096))]
@@ -170,4 +177,131 @@ fn legacy_error_preserves_status_without_esr_write() {
             ]
         )
     });
+}
+
+#[test]
+fn nested_nmi_cannot_overwrite_an_interrupted_xapic_destination() {
+    let mut page = RegisterPage([0; 1024]);
+    let apic = mock_apic(&mut page).into_runtime();
+    let pointer = core::ptr::from_ref(&apic);
+    ACCESSES.with(|accesses| accesses.borrow_mut().clear());
+    ICR_HIGH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            // SAFETY: synchronous hook runs between the outer command's two
+            // MMIO writes while apic and its private mapping remain live.
+            // Only shared borrows coexist, modeling NMI reentry on this CPU.
+            let nested = unsafe { &*pointer };
+            // SAFETY: same private mock CPU/registers, no physical delivery.
+            let result = unsafe {
+                nested
+                    .try_send_ipi(IpiCommand::Nmi, IpiTarget::Destination(0x77))
+            };
+            assert_eq!(result, Err(IpiSendError::Busy));
+            // An independent NMI-owned register may still be written while
+            // ICR belongs to the interrupted sender.
+            // SAFETY: this test owns the mock performance LVT and its producer.
+            unsafe { nested.set_performance_nmi_enabled(false) };
+        }));
+    });
+    // SAFETY: private aligned register page, initialized handle, no CPU migration.
+    let result = unsafe {
+        apic.try_send_ipi(IpiCommand::Fixed(0x55), IpiTarget::Destination(0x23))
+    };
+    assert_eq!(result, Ok(()));
+    assert_eq!(page.0[0x310 / 4], 0x2300_0000);
+    assert_eq!(page.0[0x300 / 4], 0x4055);
+    assert_eq!(page.0[0x340 / 4], 0x10400);
+    let writes: Vec<_> = ACCESSES.with(|accesses| {
+        accesses
+            .borrow()
+            .iter()
+            .filter_map(|access| match access {
+                Access::Write(offset, value)
+                    if *offset == 0x300 || *offset == 0x310 =>
+                {
+                    Some((*offset, *value))
+                }
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(writes, [(0x310, 0x2300_0000), (0x300, 0x4055)]);
+    // Admission was released after the full outer transaction.
+    // SAFETY: same private mock and stable handle, no physical NMI delivery.
+    assert_eq!(
+        unsafe {
+            apic.try_send_ipi(IpiCommand::Nmi, IpiTarget::Destination(0x77))
+        },
+        Ok(())
+    );
+    assert_eq!(page.0[0x310 / 4], 0x7700_0000);
+    assert_eq!(page.0[0x300 / 4], 0x4400);
+}
+
+#[test]
+fn hardware_busy_and_invalid_destination_never_write_icr() {
+    let mut page = RegisterPage([0; 1024]);
+    page.0[0x300 / 4] = 1 << 12;
+    page.0[0x310 / 4] = 0x1200_0000;
+    let apic = mock_apic(&mut page).into_runtime();
+    ACCESSES.with(|accesses| accesses.borrow_mut().clear());
+    // SAFETY: private register mapping and no privileged operations or delivery.
+    assert_eq!(
+        unsafe {
+            apic.try_send_ipi(IpiCommand::Nmi, IpiTarget::Destination(0x44))
+        },
+        Err(IpiSendError::Busy)
+    );
+    // SAFETY: same mock; oversized target must be rejected before register writes.
+    assert_eq!(
+        unsafe {
+            apic.try_send_ipi(IpiCommand::Nmi, IpiTarget::Destination(0x100))
+        },
+        Err(IpiSendError::InvalidDestination)
+    );
+    assert_eq!(page.0[0x300 / 4], 1 << 12);
+    assert_eq!(page.0[0x310 / 4], 0x1200_0000);
+    assert!(ACCESSES.with(|accesses| accesses
+        .borrow()
+        .iter()
+        .all(|access| !matches!(access, Access::Write(..)))));
+    page.0[0x300 / 4] = 0;
+    // SAFETY: busy rejection must have released software admission.
+    assert_eq!(
+        unsafe {
+            apic.try_send_ipi(IpiCommand::Nmi, IpiTarget::AllExcludingSelf)
+        },
+        Ok(())
+    );
+    assert_eq!(page.0[0x300 / 4], 0xc4400);
+}
+
+#[test]
+fn runtime_error_and_timer_operations_preserve_source_ownership() {
+    let mut page = RegisterPage([0; 1024]);
+    page.0[VERSION.1 as usize / 4] = 6 << 16;
+    let mut startup = mock_apic(&mut page);
+    // SAFETY: private mapping, xAPIC setup performs no privileged MSR access.
+    unsafe { startup.enable_masked() };
+    let runtime = startup.into_runtime();
+    // SAFETY: the test owns each mock local source without competing writes.
+    unsafe { runtime.enable_error() };
+    // SAFETY: same owned timer; configure mode before exposing timer delivery.
+    unsafe { runtime.prepare_timer() };
+    // SAFETY: mock timer handler is represented by the test itself.
+    unsafe { runtime.set_timer_enabled(true) };
+    // SAFETY: caller retains exclusive timer programming.
+    unsafe { runtime.set_timer_initial(1234) };
+    // SAFETY: owns the performance source independently of the timer.
+    unsafe { runtime.set_performance_nmi_enabled(true) };
+    assert_eq!(page.0[LVT_TIMER.1 as usize / 4], 0xf0);
+    assert_eq!(page.0[TICR.1 as usize / 4], 1234);
+    assert_eq!(page.0[LVT_PERF.1 as usize / 4], 0x400);
+    assert_eq!(page.0[LVT_ERROR.1 as usize / 4], 0xf2);
+    // SAFETY: mock in-service error is exclusively owned by this test.
+    let _ = unsafe { runtime.acknowledge_error() };
+    assert_eq!(page.0[EOI.1 as usize / 4], 0);
+    // SAFETY: independent timer source stays programmed through error completion.
+    unsafe { runtime.set_timer_initial(0) };
+    assert_eq!(page.0[TICR.1 as usize / 4], 0);
 }

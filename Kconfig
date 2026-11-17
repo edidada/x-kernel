@@ -326,29 +326,36 @@ config KFEAT_SYMTAB
 
 config KFEAT_PMU
     bool "PMU support"
-    depends on ARCH_AARCH64
+    depends on ARCH_AARCH64 || (ARCH_X86_64 && KFEAT_NMI_PMU)
     help
       Enable Performance Monitor Unit support for hardware performance
-      counters.  This is a generic feature whose current implementation is
-      AArch64-only; when NMI support is enabled, the PMU also serves as the
-      periodic NMI source.
+      counters. AArch64 may use PMU interrupts independently. On x86 the
+      current exclusive PMU backend is the periodic native-NMI source, so it is
+      available only when that source is selected.
 
 config KFEAT_NMI
     bool "NMI support"
-    depends on MACHINE_AARCH64_QEMU
+    depends on MACHINE_AARCH64_QEMU || MACHINE_X86_64_QEMU
     help
       Enable non-maskable interrupt (NMI) support.  The NMI mechanism
       (hardware NMI vs pseudo-NMI) is selected at build time below.
       Enabling NMI requires exactly one NMI source (selected below), so
       every NMI consumer is guaranteed a source at configuration time.
-      The mechanism is arch-neutral; current support is AArch64 QEMU only.
+      Supports AArch64 QEMU and native x86 NMI entry. A usable runtime
+      periodic source is still required; unsupported PMUs degrade explicitly.
 
 choice
     prompt "NMI mechanism"
     depends on KFEAT_NMI
+    default KFEAT_NMI_MODE_NATIVE
     default KFEAT_NMI_MODE_PSEUDO
 
+config KFEAT_NMI_MODE_NATIVE
+    bool "Native x86 NMI (vector 2)"
+    depends on ARCH_X86_64
+
 config KFEAT_NMI_MODE_PSEUDO
+    depends on ARCH_AARCH64
     bool "Pseudo-NMI (PMR priority masking)"
     help
       Use the GICv3 PMR priority mask to deliver NMIs as high-priority
@@ -356,6 +363,7 @@ config KFEAT_NMI_MODE_PSEUDO
       interrupt masking discipline is compiled in.
 
 config KFEAT_NMI_MODE_HARDWARE
+    depends on ARCH_AARCH64
     bool "Hardware NMI (GICv3.3 + FEAT_NMI)"
     help
       Use GICv3.3 NMI attribute interrupts with FEAT_NMI (Superpriority).
@@ -375,6 +383,14 @@ config KFEAT_NMI_PMU
     select KFEAT_PMU
     help
       Use the PMU cycle counter as the periodic NMI source.
+
+config KFEAT_NMI_PEER_TIMER
+    bool "Peer CPU timer / NMI IPI (x86 SMP without PMU)"
+    depends on ARCH_X86_64
+    help
+      Each armed CPU periodically samples a peer through a native NMI IPI.
+      Requires at least two active CPUs; cannot detect a system in which all
+      peers stop taking timer IRQs. Choose PMU for independent local sampling.
 
 # Future NMI sources (e.g. SDEI) are added as additional choice members.
 

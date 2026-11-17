@@ -106,6 +106,8 @@ impl PlatformBootIf {
             ),
         );
         kernel_boot::bootln!("timer init");
+        #[cfg(feature = "nmi")]
+        khal::nmi::early_init();
         let io_apic_config = io_apic_config();
         // The console is the first legacy-IRQ consumer. Route its ISA line
         // through the selected boot configuration; if selection failed, stay
@@ -139,12 +141,18 @@ impl PlatformBootIf {
             .get()
             .copied()
             .ok_or(KError::InvalidInput)??;
-        irq_driver::x86::init(config)
+        irq_driver::x86::init(config)?;
+        #[cfg(feature = "nmi")]
+        khal::nmi::late_init();
+        Ok(())
     }
 
     #[cfg(feature = "smp")]
     fn prepare_local_interrupts(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> kerrno::KResult<()> {
-        irq_driver::x86::init_secondary()
+        irq_driver::x86::init_secondary()?;
+        #[cfg(feature = "nmi")]
+        khal::nmi::late_init();
+        Ok(())
     }
 
     fn activate_local_interrupts() -> kerrno::KResult<()> {

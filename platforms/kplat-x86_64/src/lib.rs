@@ -10,6 +10,8 @@
 
 #[macro_use]
 extern crate log;
+#[cfg(feature = "nmi")]
+extern crate alloc;
 extern crate irq_driver as _;
 extern crate kernel_boot;
 mod init;

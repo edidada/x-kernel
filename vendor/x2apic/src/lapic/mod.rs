@@ -7,6 +7,9 @@ mod builder;
 pub use builder::xapic_base;
 pub use builder::LocalApicBuilder;
 
+mod runtime;
+pub use runtime::{IpiCommand, IpiSendError, IpiTarget, RuntimeLocalApic};
+
 mod lapic_msr;
 use lapic_msr::*;
 pub use lapic_msr::{
@@ -51,6 +54,13 @@ pub struct LocalApic {
 }
 
 impl LocalApic {
+    /// Consumes the exclusive startup handle into a shared runtime interface.
+    /// Runtime timer writes do not update the builder's cached settings, and
+    /// every runtime ICR writer uses the same non-waiting transaction admission.
+    pub fn into_runtime(self) -> RuntimeLocalApic {
+        RuntimeLocalApic::new(self)
+    }
+
     /// Enables the local APIC with its timer, error vector and LINT pins masked.
     ///
     /// Unlike `enable`, this initializes a stopped one-shot timer regardless
@@ -464,4 +474,5 @@ const _: fn() = || {
     // has more than one candidate impl and will therefore fail to compile
     // without explicit type annotations.
     let _ = <LocalApic as AmbiguousIfImpl<_>>::some_item;
+    let _ = <RuntimeLocalApic as AmbiguousIfImpl<_>>::some_item;
 };

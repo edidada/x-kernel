@@ -17,10 +17,10 @@
 //!   Consumer (watchdog)
 //!     → khal::nmi::enable_periodic_nmi(period_ns, cb)
 //!       → PeriodicNmiSourceIf provider (e.g. PMU cycle counter backend)
-//!         → khal::irq::configure_nmi(hwirq)          (per CPU)
-//!           → NmiMechanismIf::configure_nmi(hwirq)
-//!             → kirq::prepare_percpu_nmi(desc)
-//!               → local GIC NMI attribute / pseudo-NMI priority transaction
+//!         → source-owned local delivery preparation
+//!           → AArch64 PMU: kirq::prepare_percpu_nmi(desc)
+//!             → GIC NMI attribute / pseudo-NMI priority transaction
+//!           → native-NMI sources: their controller-specific routing
 //!   pmu feature init (kruntime)
 //!     → khal::pmu::register_overflow_dispatch(hwirq)
 //!       → pmu-only build: kirq::try_register_startup(...)
@@ -36,7 +36,7 @@ pub type NmiCb = fn();
 /// Runtime NMI capability reported by the platform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NmiMode {
-    /// True hardware NMI (GICv3.3 — cannot be masked by IRQ disable).
+    /// Native hardware NMI, unaffected by ordinary IRQ masking.
     Hardware,
     /// Pseudo-NMI implemented via high-priority IRQ + PMR masking.
     Pseudo,
@@ -58,8 +58,8 @@ pub trait NmiMechanismIf {
     /// Called during `early_driver_init`, after the interrupt controller
     /// distributor has been mapped and initialised. Typically queries
     /// controller‑wide NMI capability (for example, `GICD_TYPER.NMI` on GICv3.3);
-    /// per-IRQ NMI attributes and the per-CPU enable belong to
-    /// `configure_nmi` / `late_init`.
+    /// CPU-wide enables belong to `late_init`. Source routing and attributes
+    /// belong to the source backend's local preparation transaction.
     fn early_init() -> bool;
 
     /// Per‑CPU NMI initialization.
@@ -76,24 +76,12 @@ pub trait NmiMechanismIf {
 
     /// Current operating NMI mode.
     ///
-    /// Used by [`NmiMechanismIf::configure_nmi`] to decide how to promote an IRQ
-    /// line to NMI delivery.
+    /// Source backends query this before preparing delivery. Native NMI does
+    /// not require promotion of an ordinary IRQ or a hardware IRQ identifier.
     fn mode() -> NmiMode;
 
     /// Returns the static descriptor for this NMI implementation.
     fn info() -> NmiSourceInfo;
-
-    /// Promote the hardware interrupt `hwirq` to NMI delivery on the
-    /// **calling CPU** according to the current [`NmiMode`].
-    ///
-    /// The platform validates the selected mechanism and enters KIRQ's local
-    /// preparation protocol. The irqchip owns mode-specific attributes. Initial
-    /// preparation requires a disabled, registered CPU-local NMI source and is
-    /// performed before PMU IRQ activation on every participating CPU. Repeated
-    /// preparation is a no-op but still rejects Closing. Shared lines are not
-    /// supported by this entry. Returns false on rejected or failed preparation;
-    /// it does not enable the source or start its producer.
-    fn configure_nmi(hwirq: usize) -> bool;
 }
 
 /// Source‑neutral periodic NMI provider.
@@ -101,7 +89,8 @@ pub trait NmiMechanismIf {
 /// Consumers such as the hardlockup watchdog ask for a periodic NMI through
 /// this interface without knowing which hardware source (PMU cycle counter,
 /// future sources) generates the events.  The platform implements this trait
-/// in the source's own subsystem.
+/// in the source's own subsystem. Enabling the project's NMI facility still
+/// requires exactly one periodic provider; that provider need not use a PMU.
 ///
 /// kiface allows exactly one provider per interface.  With a single source
 /// the platform implements this trait directly in the source backend; when a
@@ -109,23 +98,24 @@ pub trait NmiMechanismIf {
 /// provider and dispatch to per‑source backends.
 #[device_interface]
 pub trait PeriodicNmiSourceIf {
+    /// Registers the selected source's dispatch actions once during allocated
+    /// boot, before activation. The source owns routing and handler identity.
+    fn register_source() -> bool;
+
     /// Arm a periodic NMI with period `period_ns`.
     ///
     /// Must be called on **each CPU** so every CPU arms its own source.
     /// The provider keeps setup, rollback and producer start on the calling
     /// CPU. This local exclusion does not serialize a remote source shutdown;
     /// the source owner must exclude concurrent shutdown and restart.
-    /// This method never registers an IRQ-level handler: the line's
-    /// overflow-dispatch handler is registered exactly once by the PMU
-    /// feature init (`khal::pmu::register_overflow_dispatch`, backed by
-    /// `PmuInterruptIf::register_overflow_irq`) — as a normal IRQ handler in
-    /// pmu-only builds, or as an NMI handler with normal-IRQ fallback when
-    /// the PMU is the compiled NMI source.  This method only arms the local
-    /// CPU's source: it registers the consumer callback into the per-CPU
-    /// source state, prepares and enables local line delivery (e.g. PPI priority
-    /// / NMI attribute), and starts the counter. `handler` is invoked in NMI
-    /// context on each overflow.  Returns `false` if no periodic NMI source
-    /// is available or the local source is already armed.
+    /// The backend owns its source identity, callback publication and delivery
+    /// preparation. It must make dispatch state ready before enabling the local
+    /// producer, without requiring promotion of an ordinary IRQ. For example,
+    /// AArch64 PMU startup registers its Line handler through `PmuInterruptIf`,
+    /// and this transaction prepares the disabled PPI before starting a counter.
+    /// Native NMI sources may configure a different controller route instead.
+    /// `handler` runs in NMI context on each sample. Returns false when the
+    /// mechanism/source is unavailable, ownership conflicts or local setup fails.
     fn enable_periodic_nmi(period_ns: u64, handler: NmiCb) -> bool;
 
     /// Quiesce the calling CPU's periodic NMI source for a terminal stop.
@@ -154,4 +144,43 @@ pub trait PeriodicNmiSourceIf {
     /// must collect successful execution on every participant before removing
     /// that handler. A later restart must prepare and enable local delivery again.
     fn shutdown_periodic_nmi() -> bool;
+
+    /// Requests prompt samples on other armed CPUs, best effort from NMI.
+    /// Publication must precede hardware notification. False means unavailable
+    /// or incomplete notification; consumers must retain bounded fallback waits.
+    fn request_peer_samples() -> bool;
+}
+
+/// Native shared-vector source identities, independent of CPU vector numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeNmiSource {
+    /// Locally reserved periodic hardware counter.
+    Periodic,
+    /// Explicit software request delivered by an NMI IPI.
+    Notification,
+}
+
+/// Platform-owned native-NMI producer/controller integration.
+/// Generic registration, action publication and dispatch remain in KIRQ.
+/// Claim/complete run pinned in NMI; control runs pinned outside NMI, with
+/// ordinary IRQs masked. None may allocate, sleep or take ordinary IRQ locks.
+#[device_interface]
+pub trait NativeNmiSourceIf {
+    /// Claims only an owned periodic overflow and stops it before dispatch.
+    fn claim_periodic() -> bool;
+    /// Claims a published IPI notification request, independent of PMU state.
+    fn claim_notification() -> bool;
+    /// Prepares a disabled source before KIRQ publishes its local action.
+    fn prepare(source: NativeNmiSource) -> bool;
+    /// Removes disabled source routing after the owner has stopped production.
+    fn teardown(source: NativeNmiSource) -> bool;
+    /// Changes local delivery admission; this does not start a counter.
+    fn set_enabled(source: NativeNmiSource, enabled: bool);
+    /// Reloads and restarts a claimed counter only if its owner remains armed.
+    fn complete_periodic();
+    /// Stops every local producer, then retires the native KIRQ source Lines.
+    /// Requires sleepable task context and retryable all-CPU synchronous work.
+    fn shutdown_sources() -> kerrno::KResult<()>;
+    /// Republishes all native source Lines after a completed global shutdown.
+    fn restore_sources() -> kerrno::KResult<()>;
 }

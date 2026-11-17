@@ -56,6 +56,18 @@ pub(super) fn init() {
     assert_eq!(gdt.append(Descriptor::kernel_data_segment()), KDATA);
     assert_eq!(gdt.append(Descriptor::user_data_segment()), UDATA);
     assert_eq!(gdt.append(Descriptor::user_code_segment()), UCODE64);
+    let nmi_top = super::nmi::init();
+    // SAFETY: the local TSS is still exclusively initialized before loading
+    // the IDT; NMI stacks and metadata are complete and remain mapped forever.
+    let tss_offset = kcpu_slot::__cpu_slot_symbol_offset!(__KCPU_SLOT_TSS);
+    let tss_state = (x86_64::registers::model_specific::GsBase::read().as_u64() as usize
+        + tss_offset) as *mut x86_64::structures::tss::TaskStateSegment;
+    // SAFETY: no descriptor/entry yet reads the field; write through the raw
+    // template address without creating a lasting mutable TSS reference.
+    let ist = unsafe { core::ptr::addr_of_mut!((*tss_state).interrupt_stack_table) }
+        .cast::<x86_64::VirtAddr>();
+    // SAFETY: the derived IST field is writable during exclusive TSS setup.
+    unsafe { ist.write_unaligned(nmi_top) };
     // The TSS template is permanent and `TaskStateSegment: Sync`, so the
     // guard-free shared accessor yields the `&'static` descriptor needs.
     let tss = gdt.append(Descriptor::tss_segment(TSS.current_shared()));

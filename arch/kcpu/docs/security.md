@@ -530,3 +530,20 @@ saved CPU state; user-return callbacks must retain the existing IRQ-off contract
 The captured stack remains valid across the ordinary HAL scheduling checkpoint.
 NMI entry retains ordinary IRQ/migration exclusion until return and does not
 authorize scheduling. Page-fault callbacks do not inherit this unsafe signature.
+
+## x86 dedicated NMI stack boundary
+
+The NMI stack metadata is initialized before installing the IDT gate and is
+never user writable. Each CPU has independent primary/nested stacks; TSS IST
+points below metadata. Assembly offset/layout contracts are fixed to the saved
+ExceptionContext and TSS IST0 field. Entry accesses no GS-relative state until
+installing the trusted base; it preserves exact user/kernel GS rather than
+assuming user addresses occupy a particular canonical half.
+
+The alternate IST prevents a nested delivery overwriting the primary frame.
+Nested assembly performs no faulting memory outside permanent mapped stacks,
+no Rust call and no intermediate IRET. Recoverable exceptions/debug traps inside
+primary NMI are deliberately unsupported and terminally stop this CPU. A corrupt
+stack or machine fault remains outside normal recovery; ordinary panic locks
+must not be acquired there. Live NMI tests cover masked IRQ delivery and a
+SWAPGS transition with canonical user GS, not every hardware fault scenario.

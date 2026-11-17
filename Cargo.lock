@@ -3081,13 +3081,19 @@ dependencies = [
  "kbuild_config",
  "kcpu",
  "kcpu_id_map",
+ "kcpu_slot",
  "kernel-boot",
  "kerrno",
  "khal",
  "kiface",
+ "kiface-task-api",
+ "kipi",
+ "kirq",
  "klazy",
+ "kmutex",
  "kplat",
  "kspin",
+ "ktask",
  "ktime",
  "ktime_types",
  "log",
@@ -3096,6 +3102,7 @@ dependencies = [
  "timer-driver",
  "unittest",
  "x86-apic",
+ "x86-pmu",
  "x86_64",
 ]
 
@@ -5874,7 +5881,6 @@ dependencies = [
  "riscv",
  "sbi-rt",
  "unittest",
- "x2apic",
  "x86-apic",
  "x86_64",
 ]
@@ -6602,6 +6608,13 @@ dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "kernel-elf-loader",
+]
+
+[[package]]
+name = "x86-pmu"
+version = "0.3.0-dev"
+dependencies = [
+ "unittest",
 ]
 
 [[package]]

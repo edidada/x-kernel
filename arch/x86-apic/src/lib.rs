@@ -77,14 +77,19 @@ pub use io_apic::{
     probe_io_apic, retarget_edge, retarget_supported, retrigger_pin, set_pin_enabled,
 };
 pub use local_apic::{
-    end_of_interrupt, handle_error_interrupt, init_local_primary, init_secondary, raw_apic_id,
-    send_ipi_all_but_self, send_ipi_raw, send_ipi_self, set_local_timer_enabled, with_local_apic,
+    end_of_interrupt, handle_error_interrupt, init_local_primary, init_secondary,
+    prepare_local_timer, raise_local_irq_work, raw_apic_id, send_init_ipi_raw,
+    send_ipi_all_but_self, send_ipi_raw, send_ipi_self, send_startup_ipi_raw,
+    set_local_performance_nmi_enabled, set_local_timer_enabled, set_local_timer_initial,
+    try_send_nmi_all_but_self, try_send_nmi_raw,
 };
 pub use msix::{msi_route_matches, retrigger_msi};
 
 pub const APIC_TIMER_VECTOR: u8 = 0xf0;
 pub const APIC_SPURIOUS_VECTOR: u8 = 0xf1;
 pub const APIC_ERROR_VECTOR: u8 = 0xf2;
+/// Permanent ordinary vector for NMI-deferred local reclamation.
+pub const APIC_IRQ_WORK_VECTOR: u8 = 0xf4;
 pub const MSIX_VECTOR_BASE: u8 = 0x40;
 pub const IO_APIC_VECTOR_BASE: usize = 0x20;
 
@@ -236,3 +241,6 @@ pub enum IoApicTriggerPolicy {
         polarity: IoApicPolarity,
     },
 }
+
+#[cfg(unittest)]
+pub use local_apic::self_nmi_with_swapped_gs_for_test;

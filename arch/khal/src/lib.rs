@@ -147,7 +147,7 @@ pub use kplat::boot::{activate_local_interrupts, prepare_interrupts};
 pub mod nmi {
     pub use kplat::nm_irq::{
         NmiCb, NmiMode, NmiSourceInfo, early_init, enable_periodic_nmi, info, late_init, mode,
-        shutdown_periodic_nmi,
+        register_source, request_peer_samples, shutdown_periodic_nmi,
     };
 }
 
@@ -167,7 +167,7 @@ pub mod pmu {
 /// the intentional stop for a lockup and panic into a platform power-off.
 #[inline]
 pub fn quiesce_nmi() {
-    #[cfg(feature = "nmi_pmu")]
+    #[cfg(feature = "nmi")]
     {
         // The periodic-source provider is per-CPU. Keep this CPU pinned while
         // it finds and stops the local source; its counter access is safe

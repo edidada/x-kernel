@@ -215,11 +215,13 @@ tipc = ["ksyscall/tipc", "kprocess/tipc", "linux_sysno/tipc"]
 vsock_tipc_bridge = ["knet/vsock_tipc_bridge", "kruntime/vsock_tipc_bridge"]
 
 # Pmu
-pmu = ["kruntime/pmu", "khal/pmu", "kplat-aarch64?/pmu"]
+pmu = ["kruntime/pmu", "khal/pmu", "kplat-aarch64?/pmu", "kplat-x86_64?/pmu"]
 
 # NMI
-nmi = ["khal/nmi", "kruntime/nmi", "kplat-aarch64?/nmi"]
-nmi_pmu = ["khal/nmi_pmu", "kplat-aarch64?/nmi-pmu"]
+nmi = ["khal/nmi", "kruntime/nmi", "kplat-aarch64?/nmi", "kplat-x86_64?/nmi"]
+nmi_pmu = ["khal/nmi_pmu", "kplat-aarch64?/nmi-pmu", "kplat-x86_64?/nmi-pmu"]
+nmi_peer_timer = ["kplat-x86_64?/nmi-peer-timer"]
+nmi_mode_native = []
 nmi_mode_pseudo = ["khal/nmi_pseudo", "kplat-aarch64?/nmi-pseudo"]
 nmi_mode_hardware = ["khal/nmi_hardware", "kplat-aarch64?/nmi-hardware"]
 

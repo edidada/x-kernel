@@ -18,7 +18,11 @@
 
 .macro DEF_HANDLER, i
 .Ltrap_handler_\i:
-.if \i == 8 || (\i >= 10 && \i <= 14) || \i == 17 || \i == 21 || \i == 29 || \i == 30
+.if \i == 2
+    push    0
+    push    2
+    jmp     .Lx86_nmi_entry
+.elseif \i == 8 || (\i >= 10 && \i <= 14) || \i == 17 || \i == 21 || \i == 29 || \i == 30
     # error code pushed by CPU
     push    \i          # interrupt vector
     jmp     .Ltrap_common
@@ -172,3 +176,54 @@ enter_user:
 .Lsysret:
     mov rsp, [rsp + 24]                 # load user rsp
     sysretq
+
+
+# NMI never uses the ordinary user-return frame. Hardware entered an IST whose
+# top points immediately below trusted per-CPU metadata. No GS-relative access
+# is allowed until IA32_GS_BASE has been saved and replaced from that metadata.
+.Lx86_nmi_entry:
+    cld
+    push    -1
+    PUSH_GENERAL_REGS
+    mov     r12, rsp
+    lea     r14, [rsp + {trapframe_size}]
+    mov     ecx, 0xc0000101             # IA32_GS_BASE
+    rdmsr
+    shl     rdx, 32
+    or      rax, rdx
+    mov     r13, rax                    # exact interrupted GS, no sign heuristic
+    mov     rax, [r14]                  # trusted kernel CPU-slot base
+    mov     rdx, rax
+    shr     rdx, 32
+    wrmsr
+    cmp     qword ptr [r14 + 24], 0
+    jne     .Lx86_nmi_nested
+    mov     rax, [r14 + 8]              # reserve independent nested IST
+    mov     gs:[offset __KCPU_SLOT_TSS + 36], rax
+.Lx86_nmi_repeat:
+    mov     qword ptr [r14 + 32], 0
+    mov     rdi, r12
+    and     rsp, -16
+    call    x86_nmi_handler
+    mov     rsp, r12
+    cmp     qword ptr [r14 + 32], 0
+    jne     .Lx86_nmi_repeat
+    # No faulting operation or IRET is allowed before the final IRET below;
+    # NMI blocking protects restoring the primary IST and saved registers.
+    mov     gs:[offset __KCPU_SLOT_TSS + 36], r14
+    jmp     .Lx86_nmi_restore
+.Lx86_nmi_nested:
+    # An exception's IRET inside the primary handler can reopen NMI delivery.
+    # The nested path never enters Rust, faults, or reuses the primary frame.
+    mov     rax, [r14 + 16]
+    mov     qword ptr [rax + 32], 1
+.Lx86_nmi_restore:
+    mov     ecx, 0xc0000101
+    mov     rax, r13
+    mov     rdx, rax
+    shr     rdx, 32
+    wrmsr                              # restore either side of SWAPGS verbatim
+    mov     rsp, r12
+    POP_GENERAL_REGS
+    add     rsp, 24
+    iretq

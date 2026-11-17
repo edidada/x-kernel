@@ -74,8 +74,10 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
   the `0x40..0xf0` vector window, `compose_msi_message` building the xAPIC
   `0xFEE0_0000 | (apic_id << 12)` message form, and affinity resolution
   through `kcpu_id_map`.
-- Common helpers: `with_local_apic` (per-CPU LAPIC access),
-  `end_of_interrupt`, `raw_apic_id`.
+- Narrow LAPIC operations: `prepare_local_timer`, `set_local_timer_initial`,
+  `set_local_timer_enabled`, `end_of_interrupt` and `raw_apic_id`.
+- NMI-capable operations: `try_send_nmi_raw`, `try_send_nmi_all_but_self` and
+  `set_local_performance_nmi_enabled`, with explicit source/entry preconditions.
 
 ## Non-Responsibilities
 
@@ -101,7 +103,7 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
 | State | Owner and lifetime |
 | --- | --- |
 | PIC masking, x2APIC/xAPIC mode, LAPIC vectors | This crate; boot CPU during `init_local_primary` |
-| Per-CPU `LocalApic` handle | This crate; one leaked NOWAIT `KBox` in the CPU-local slot, installed by `init_local_primary`/`init_secondary` |
+| Per-CPU `RuntimeLocalApic` handle | This crate; one leaked NOWAIT `KBox` in the CPU-local slot, installed by `init_local_primary`/`init_secondary` |
 | IO-APIC MMIO mappings and register lock | This crate; every installed controller, indexed by `IoApicInstanceId` |
 | IO-APIC probed `pin_count`, per-pin vector and configured mark | This crate; retained per instance under the registry lock. `pin_count` is immutable after publication; vector assignment happens on first configuration, and the configured mark tracks the latest configuration transaction |
 | IO-APIC delivery vectors | This crate; one 32-entry route table shared by all instances, assigned on first configuration |
@@ -155,8 +157,9 @@ io_apic_route(vector): shared VectorTable -> (instance, pin) for dispatch
 configure first use: allocate lowest free vector in 0x20..0x40 for the route
 unmask: only after configure_pin_checked recorded a verified vector
 
-per-CPU: LOCAL_APIC_PTR (kcpu_slot::cpu_slot_cell!) holds a leaked LocalApic handle
-         installed by init_local_primary / init_secondary
+per-CPU: LOCAL_APIC_PTR (atomic CPU slot) publishes a leaked RuntimeLocalApic
+         Startup LocalApic is consumed before Release publication.
+         Runtime uses only shared borrows; ICR writers share one transaction gate.
 
 kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)
                    ──> compose_msi_message (xAPIC 0xFEE0_0000 form)
@@ -256,9 +259,9 @@ CPU performing the request. There is no other creation or cleanup path.
   `retrigger_pin` take the IO-APIC registry spin lock and may be called
   from task or ordinary IRQ context through `kirq`. They must not be used
   from NMI.
-- `with_local_apic` masks local interrupts for the borrow duration, so
-  LAPIC accesses cannot re-enter from an interrupt handler on the same
-  CPU.
+- Normal LAPIC operations pin the CPU and mask ordinary IRQs. The private
+  shared-handle helper never lends an exclusive Rust reference. NMI operations
+  require callers to supply IRQ exclusion and target/source readiness.
 - `msi_route_matches` takes the MSI allocator spin lock. It permits task and
   ordinary IRQ context, but not NMI or callers already holding that lock.
 - IPI senders and `end_of_interrupt` may run in interrupt context; they
@@ -272,9 +275,15 @@ CPU performing the request. There is no other creation or cleanup path.
   tables. Instances are published in installation order; the integration
   layer verifies the returned `IoApicInstanceId` matches that order. A
   second registry publication is a programming error and panics.
-- `LOCAL_APIC_PTR`: a per-CPU slot holding a deliberately leaked
-  `LocalApic` handle; local IRQs stay masked while a `&mut LocalApic` is
-  borrowed, excluding overlapping borrows on the same CPU.
+- `LOCAL_APIC_PTR`: a CPU-local atomic pointer, Release-published once after
+  consuming `LocalApic` into `RuntimeLocalApic`. Acquire lookup observes immutable
+  register metadata. NMI reentry creates only shared borrows. Timer, ESR and
+  LVTPC programming remain owned by their respective source.
+- Runtime ICR writers share one Acquire/Release transaction claim. A sender
+  holds it across xAPIC destination-high and command-low writes, or the single
+  x2APIC MSR write. A busy NMI sender returns immediately without register
+  writes; ordinary mandatory IPIs retry at most 1,000,000 times before failing
+  fatally rather than silently dropping a required scheduler/TLB notification.
 - `IS_X2APIC` / `XAPIC_BASE`: set once at `init_local_primary`, read with
   `Relaxed` afterwards.
 - `MSIX_VECTOR_ALLOCATOR`: `SpinNoIrq` protects the allocation bitmap
@@ -304,8 +313,9 @@ All unsafe blocks are volatile/port access with `SAFETY:` comments:
 - xAPIC MMIO page mapped through `memspace::iomap_device` before the
   builder consumes it.
 - IO-APIC register access under the crate's spin lock.
-- The per-CPU `LocalApic` borrow in `with_local_apic` (exclusion via
-  masked local interrupts + one handle per CPU).
+- Shared access to the leaked `RuntimeLocalApic` after Acquire publication;
+  CPU pinning selects the correct hardware, source ownership protects RMWs,
+  and the runtime ICR transaction gate excludes interrupted/nested senders.
 
 ## Design Decisions
 
@@ -380,3 +390,37 @@ Private register-model tests cover masked programming/readback failure, route
 preservation and exact target/vector selection. Allocation tests cover unbound,
 released, conflicting and reused routes. QEMU boot tests complement, rather than
 replace, those tests; they do not constitute physical-controller timing proof.
+
+
+## NMI-safe runtime access
+
+Exclusive startup prepares timer/LINT/error state and then consumes its
+`LocalApic` into the immutable `RuntimeLocalApic` before publication. The public
+API no longer lends the complete mutable handle to timer or SMP boot callers.
+Those clients use timer and INIT/SIPI operations, which share runtime ICR
+admission with fixed-vector IPIs and NMI notifications. INIT/SIPI retain unsafe
+startup-memory/target preconditions.
+
+NMI send helpers attempt exactly once: unpublished state returns BadState,
+software/hardware busy returns ResourceBusy, and unrepresentable destinations
+return InvalidInput. None of those rejections writes ICR. A successful return
+means submission, not remote execution or collection. NMI entry must already
+be installed on every target; these helpers do not enable x86 NMI handling.
+LVTPC configuration writes a complete NMI-mode value. The future periodic
+source must own it, validate hardware support and coordinate counter stop,
+callback publication, quiescence and reload; an immutable handle is not a
+hardware-lifecycle synchronization mechanism.
+
+Vendored host tests inject a nested NMI attempt between the actual mock xAPIC
+high/low writes and verify rejection without changing the outer destination.
+They also cover hardware-busy/invalid-target rejection, claim release and
+independent timer, performance-LVT and error-source operations.
+
+
+The x2APIC ICR write is preceded by `MFENCE; LFENCE`, following Linux's
+`weak_wrmsr_fence`. The atomic writer claim alone is not the documented ordering
+boundary between request-memory publication and the non-serializing WRMSR.
+Host tests also cover full-width x2APIC destinations, vector-free NMI command
+encoding and nested-sender Busy rejection before any privileged register access.
+Those checks do not establish hardware x2APIC delivery; the available TCG backend
+rejects CPUID.x2APIC, so system IPI/TLB coverage currently exercises xAPIC.

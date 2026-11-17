@@ -66,9 +66,9 @@ All unsafe blocks carry `SAFETY:` comments and fall into four groups:
   propagates to the runtime's fatal boot boundary.
 - IO-APIC volatile register access — serialized by the crate's
   `SpinNoIrq`, bounds-checked per redirection entry.
-- The per-CPU `LocalApic` borrow in `with_local_apic` — soundness rests
-  on one leaked handle per CPU, installed before interrupts are enabled,
-  and local IRQ masking for the borrow duration.
+- The per-CPU `RuntimeLocalApic` shared borrow: immutable mode/register metadata
+  is Release-published once and acquired by pinned readers. NMI entry never
+  reconstructs an exclusive borrow over an interrupted caller's handle.
 
 ## Protected Resources
 
@@ -92,7 +92,9 @@ clock-event activation remains the timer driver's responsibility.
 - `IO_APICS` (`LazyInit<SpinNoIrq<IoApicRegistry>>`): every installed
   IO-APIC handle, its probed pin count, assigned vectors, and configured-pin
   flags; every redirection access goes through the registry lock.
-- `LOCAL_APIC_PTR` (per-CPU): the exclusive Local APIC handle slot.
+- `LOCAL_APIC_PTR` (per-CPU atomic): one permanent shared runtime handle. Source
+  owners serialize timer/error/performance LVT changes. Every ICR writer retains
+  a common non-waiting transaction claim across destination/command writes.
 - `MSIX_VECTOR_ALLOCATOR` (`SpinNoIrq` bitmap and destination bindings): the MSI-X vector window
   `0x40..0xf0`; double allocation is structurally impossible (bits are
   set under the lock), and `free` clears bits only for in-window
@@ -180,3 +182,30 @@ inherit the previous destination. The notification is not an acknowledgement:
 an already issued interrupt may still be pending in a LAPIC after the lock is
 released. Device shutdown and safe vector reuse remain caller/system lifecycle
 obligations, not properties proven by a bitmap or by KIRQ software in-flight.
+
+
+## NMI reentry and ICR transaction boundary
+
+The vendor runtime handle is neither Send nor Sync and has immutable register
+metadata. Kernel access stays on the published owner CPU. An NMI may share the
+handle while interrupting ordinary code; there is no overlapping `&mut` and no
+normal lock acquisition. Source-owned RMWs still require a separate ownership
+contract; shared references alone do not serialize device state.
+
+All runtime ICR commands, including fixed, self, INIT/SIPI and NMI, use the same
+atomic admission. A nested NMI cannot wait for the interrupted holder: it returns
+ResourceBusy before any register write. xAPIC delivery-pending and invalid-target
+rejections likewise leave ICR unchanged, and RAII releases software admission.
+The successful command retains admission through both xAPIC writes. Ordinary
+mandatory senders have a finite retry bound and fail fatally on exhaustion.
+This is command submission, never a delivery-drain or remote-stop barrier.
+
+Public NMI operations require initialized NMI entry on every destination.
+LVTPC writes additionally require validated hardware capability and exclusive
+producer/routing ownership. Those primitives do not establish a PMU backend or
+make x86 hardlockup detection available by themselves.
+
+For x2APIC, the ICR WRMSR is non-serializing. The runtime performs MFENCE/LFENCE
+before submission so a destination cannot observe notification before the
+sender's preceding request stores are published. This ordering is independent
+of CPU-local writer admission and does not acknowledge remote processing.

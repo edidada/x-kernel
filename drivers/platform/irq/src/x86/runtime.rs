@@ -192,9 +192,14 @@ pub(crate) fn select_x86_flow(
 ) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
     use kirq::{IrqController, IrqFlags, IrqFlow, IrqTrigger};
     let unsupported = kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq };
+    #[cfg(feature = "nmi-native")]
+    if super::nmi::source(desc).is_some() {
+        return Ok(IrqFlow::PerCpu);
+    }
     if desc.domain.is_none()
         && desc.controller == IrqController::Unknown
         && (desc.hwirq == usize::from(x86_apic::APIC_TIMER_VECTOR)
+            || desc.hwirq == usize::from(x86_apic::APIC_IRQ_WORK_VECTOR)
             || desc.hwirq == kbuild_config::IPI_IRQ)
     {
         return Ok(IrqFlow::PerCpu);
@@ -276,6 +281,11 @@ pub(crate) fn configure_with(
 }
 
 pub(crate) fn enable(desc: kirq::IrqDesc, enabled: bool) {
+    #[cfg(feature = "nmi-native")]
+    if let Some(source) = super::nmi::source(desc) {
+        kplat::nm_irq::NativeNmiSourceIf::set_enabled(source, enabled);
+        return;
+    }
     if desc.hwirq == usize::from(x86_apic::APIC_TIMER_VECTOR) {
         x86_apic::set_local_timer_enabled(enabled);
         return;

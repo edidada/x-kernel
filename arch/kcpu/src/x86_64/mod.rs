@@ -15,6 +15,7 @@ mod current;
 pub use current::{current_task_ptr, set_current_task_ptr};
 mod gdt;
 mod idt;
+mod nmi;
 
 pub mod instrs;
 pub use instrs as asm;

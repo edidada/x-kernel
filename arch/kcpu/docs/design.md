@@ -536,3 +536,19 @@ arbitrary safe Rust to call it and pose as an interrupt. The kernel-mode and use
 Ordinary deferred work may briefly enable IRQs after interrupt claim completes, but must restore the masked state before returning;
 the ordinary adapter is responsible for the scheduling tail after the interrupt completes, while a dedicated NMI callback must
 return without queuing. The page-fault callback keeps its own safe signature.
+
+## Native x86 NMI entry
+
+Vector 2 selects an IST slot initialized on each CPU before IDT load. Two
+permanent 64-KiB stacks have trusted metadata immediately above their stack top.
+Entry saves a full ExceptionContext, reads the exact interrupted IA32_GS_BASE,
+loads the kernel GS from stack metadata and never consults saved CS or GS sign
+to guess whether SWAPGS has executed. It restores the original base verbatim
+before IRET, covering kernel code on either side of a user GS transition.
+
+Before calling Rust, the primary entry selects the second IST. A nested entry
+records a pending retry and returns without Rust or ordinary frame mutation.
+The primary repeats dispatch when needed and restores the first IST only during
+its final NMI-blocked restore sequence. Ordinary exceptions while the NMI-active
+marker is set stop terminally: no exception IRET may reopen delivery across that
+final window. NMI return performs neither user-trap handoff nor scheduling.

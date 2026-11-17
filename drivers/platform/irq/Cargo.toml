@@ -10,6 +10,7 @@ repository.workspace = true
 
 [features]
 default = []
+nmi-native = ["kplat/nmi"]
 nmi-hardware = ["kplat/nmi"]
 nmi-pseudo = ["karch/nmi-pseudo", "kplat/nmi"]
 

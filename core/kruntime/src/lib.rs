@@ -951,11 +951,15 @@ fn init_interrupt() {
     #[cfg(unittest)]
     tests_irq_startup::record_handlers_ready();
 
-    // PMU overflow dispatch.  Perf counters report overflow on the PMU
-    // interrupt line; register the dispatch handler under the `pmu` feature
-    // so it exists independently of the watchdog/hardlockup NMI path.  The
-    // platform owns the IRQ wiring; kruntime only triggers it.
-    #[cfg(feature = "pmu")]
+    // Source registration precedes local arming and is independent of the
+    // watchdog consumer. NMI selects exactly one periodic provider; PMU-only
+    // configurations retain their ordinary overflow registration entry.
+    #[cfg(feature = "nmi")]
+    assert!(
+        khal::nmi::register_source(),
+        "NMI source registration failed"
+    );
+    #[cfg(all(feature = "pmu", not(feature = "nmi")))]
     khal::pmu::register_overflow_dispatch();
 
     // Activation must precede task placement, which can reprogram clockevents.

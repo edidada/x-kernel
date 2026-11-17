@@ -271,6 +271,7 @@ kdevice_uevent = { path = "drivers/integration/kdevice-uevent", package = "kdevi
 
 # Internal: platform, firmware, and host driver support
 aarch64-pmuv3 = { path = "drivers/platform/aarch64-pmuv3" }
+x86-pmu = { path = "drivers/platform/x86-pmu" }
 console_driver = { path = "drivers/platform/console", package = "console-driver" }
 pci = { path = "drivers/platform/pci" }
 rs_fdtree = { path = "drivers/firmware/rs-fdtree" }

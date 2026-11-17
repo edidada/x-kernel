@@ -8,3 +8,6 @@
 
 pub(crate) mod bootmem;
 pub(crate) mod mp;
+
+#[cfg(feature = "nmi")]
+pub(crate) mod nmi;

@@ -1,0 +1,12 @@
+[package]
+name = "x86-pmu"
+description = "CPU-local Intel and AMD periodic performance counter hardware"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+unittest.workspace = true
+
+[lints]
+workspace = true
