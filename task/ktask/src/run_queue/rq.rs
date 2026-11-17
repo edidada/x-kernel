@@ -483,7 +483,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///
     /// # Caller obligations
     ///
-    /// 1. The caller must hold the wait-queue / waker lock represented by `woke`.
+    /// 1. The caller owns the wake latch (`latch`) and must have consumed it
+    ///    before publishing `Blocked`; the latch is a lock-free atomic, so no
+    ///    wait-queue / waker lock is held across this call.
     /// 2. The current task must be running and must not be idle.
     /// 3. The caller must keep an **extra** [`KtaskRef`] to the current task across
     ///    the context switch. The into_raw current slot, `Scheduler.curr`, and
@@ -492,7 +494,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///    requeue, so that clone keeps the task alive until the wait queue
     ///    takes over. Do not drop the clone thinking the current slot counts
     ///    as the extra ref.
-    /// 4. The wait-queue lock is released inside this function before rescheduling.
+    /// 4. The wake latch is consumed again inside this function before the
+    ///    reschedule, and a wake recorded in that window self-unblocks the task;
+    ///    no wait-queue lock is taken or released here.
     /// 5. `stop` runs after Blocked publication. It must not sleep, allocate,
     ///    panic, or acquire scheduler/wake-latch locks. Its state writers release
     ///    their predicate lock before task wakeup.
