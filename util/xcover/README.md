@@ -14,6 +14,11 @@ All types of instrumentation using the LLVM profiling runtime are supported:
 
 Note that to profile both C and Rust code at the same time you must use Clang with the same LLVM version as the LLVM used by rustc. You can pass these flags to C code compiled with the `cc` crate using [environment variables](https://github.com/rust-lang/cc-rs#external-configuration-via-environment-variables).
 
+The exported profiling ABI follows the pinned Rust toolchain's LLVM 22.1
+compiler-rt declarations. In particular, the data and counter size helpers
+receive Begin/End pointers, the data-count helper receives data Begin/End
+pointers, and `__llvm_profile_runtime` is a C `int` marker.
+
 ## Usage
 
 Note: This crate requires a recent nightly compiler.
@@ -55,6 +60,11 @@ fn main() {
 ```
 
 If your program is running on a different system than your build system then you will need to transfer this file back to your build system.
+
+An image without LLVM profile records was not built with instrumentation, so
+`write_profraw` returns `ProfileError::NotEnabled` instead of emitting a
+header-only profile; `is_enabled()` exposes the same check so callers can skip
+the write and any filesystem flush that would persist it.
 
 Sinks must implement the `ProfileWriter` trait. If the default `alloc` feature is enabled then an implementation is provided for `Vec<u8>`.
 

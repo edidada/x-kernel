@@ -297,7 +297,7 @@ fn apply_build_log_level() -> &'static str {
     level
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct RegionLogSummary {
     name: &'static str,
     flags: MemFlags,

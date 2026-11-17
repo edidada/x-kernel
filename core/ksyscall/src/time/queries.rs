@@ -10,14 +10,14 @@ use ktime_types::{ClockId, SystemTime, TimeSpan};
 use linux_raw_sys::general::{__kernel_clockid_t, timespec, timeval, timezone};
 use posix_types::{SystemTimeLike, TimeSpanLike, UserConstPtr, UserPtr};
 
-use super::clock_id::parse_clock_id;
+use super::clock_id::{parse_clock_id, parse_query_clock_id};
 
 /// Returns the current time from the specified clock.
 pub(crate) fn sys_clock_gettime(
     clock_id: __kernel_clockid_t,
     ts: UserPtr<timespec>,
 ) -> KResult<isize> {
-    let clock = parse_clock_id(clock_id).ok_or_else(|| {
+    let clock = parse_query_clock_id(clock_id, true).ok_or_else(|| {
         warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
         KError::InvalidInput
     })?;
@@ -32,7 +32,7 @@ pub(crate) fn sys_clock_gettime(
         ClockId::ProcessCpu => {
             timespec::from_time_span(kprocess::current_user_process().process_cpu_time())
         }
-        ClockId::ThreadCpu => timespec::from_time_span(kprocess::current_user_thread().cpu_time()),
+        ClockId::ThreadCpu => timespec::from_time_span(kprocess::current_thread_cpu_clock()),
     };
     ts.write_vm(value)?;
     Ok(0)
@@ -105,12 +105,16 @@ pub(crate) fn sys_clock_getres(
     clock_id: __kernel_clockid_t,
     res: UserPtr<timespec>,
 ) -> KResult<isize> {
-    let _clock = parse_clock_id(clock_id).ok_or_else(|| {
+    let clock = parse_query_clock_id(clock_id, false).ok_or_else(|| {
         warn!("Called sys_clock_getres for unsupported clock {clock_id}");
         KError::InvalidInput
     })?;
     if let Some(res) = res.check_non_null() {
-        res.write_vm(timespec::from_time_span(TimeSpan::from_micros(1)))?;
+        let resolution = match clock {
+            ClockId::ProcessCpu | ClockId::ThreadCpu => TimeSpan::from_nanos(1),
+            _ => TimeSpan::from_micros(1),
+        };
+        res.write_vm(timespec::from_time_span(resolution))?;
     }
     Ok(0)
 }

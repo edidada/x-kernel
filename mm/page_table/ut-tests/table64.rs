@@ -4,11 +4,9 @@
 
 #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
 use core::ptr::NonNull;
-#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-use core::sync::atomic::AtomicBool;
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
@@ -18,11 +16,11 @@ use unittest::def_test;
 
 use crate::{
     PageSize, PageTable64, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData,
-    PteReplaceError, TlbFlushResult,
+    PtError, PteReplaceError, TlbFlushResult,
 };
 
-#[derive(Clone, Copy)]
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 pub(super) struct TestEntry(usize);
 
 impl PageTableEntry for TestEntry {
@@ -409,6 +407,49 @@ fn replace_if_same_reports_changed_without_overwrite() {
     );
 }
 
+/// Metadata whose all-CPU invalidation is observable and can fail once.
+///
+/// Only the deferred-invalidation test uses this type, so its counters cannot
+/// be polluted by sibling test cases.
+struct DeferredTestMeta;
+
+static ALL_CPU_FLUSHES: AtomicUsize = AtomicUsize::new(0);
+static FAIL_NEXT_ALL_CPU_FLUSH: AtomicBool = AtomicBool::new(false);
+
+impl PagingMetaData for DeferredTestMeta {
+    type VirtAddr = VirtAddr;
+
+    const LEVELS: usize = 4;
+    const PA_MAX_BITS: usize = usize::BITS as usize - 1;
+    const VA_MAX_BITS: usize = usize::BITS as usize - 1;
+
+    fn vaddr_is_valid(_vaddr: usize) -> bool {
+        true
+    }
+
+    fn paddr_is_valid(_paddr: usize) -> bool {
+        true
+    }
+
+    fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
+
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+        Self::flush_tlb(vaddr);
+        Ok(())
+    }
+
+    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+        ALL_CPU_FLUSHES.fetch_add(1, Ordering::Relaxed);
+        if FAIL_NEXT_ALL_CPU_FLUSH.swap(false, Ordering::Relaxed) {
+            return Err(crate::TlbFlushError::TimedOut);
+        }
+        Self::flush_tlb(vaddr);
+        Ok(())
+    }
+}
+
+type DeferredTestPageTable = PageTable64<DeferredTestMeta, TestEntry, TestHandler>;
+
 #[def_test]
 fn finish_reports_explicit_flush_boundary() {
     let mut table = TestPageTable::try_new().expect("test page table");
@@ -425,6 +466,93 @@ fn finish_reports_explicit_flush_boundary() {
         .expect("map test page");
     assert!(modify.finish().had_pending());
     assert!(!modify.finish().had_pending());
+}
+
+#[def_test]
+fn deferred_kernel_invalidation_detaches_the_shootdown() {
+    let mut table = TestPageTable::try_new_kernel().expect("kernel test page table");
+    let mut modify = table.modify();
+    modify
+        .map_raw(
+            vaddr(0x20_0000),
+            paddr(0x60_0000),
+            PageSize::Size4K,
+            PagingFlags::READ,
+        )
+        .expect("map test page");
+    let mut deferred = modify
+        .defer_kernel_flush()
+        .expect("kernel mapping can detach its invalidation");
+    assert!(table.query(vaddr(0x20_0000)).is_ok());
+    assert!(deferred.try_finish().is_ok());
+    assert!(!table.modify().finish().had_pending());
+}
+
+#[def_test]
+fn deferred_kernel_invalidation_rejects_user_tables() {
+    let mut table = TestPageTable::try_new().expect("user test page table");
+    let mut modify = table.modify();
+    modify
+        .map_raw(
+            vaddr(0x20_0000),
+            paddr(0x60_0000),
+            PageSize::Size4K,
+            PagingFlags::READ,
+        )
+        .expect("map test page");
+    assert!(matches!(
+        modify.defer_kernel_flush(),
+        Err(PtError::InvalidAddress)
+    ));
+}
+
+#[def_test]
+fn deferred_kernel_invalidation_performs_and_retries_the_shootdown() {
+    ALL_CPU_FLUSHES.store(0, Ordering::Relaxed);
+    FAIL_NEXT_ALL_CPU_FLUSH.store(false, Ordering::Relaxed);
+
+    let mut table = DeferredTestPageTable::try_new_kernel().expect("kernel test page table");
+    let mut modify = table.modify();
+    modify
+        .map_raw(
+            vaddr(0x30_0000),
+            paddr(0x70_0000),
+            PageSize::Size4K,
+            PagingFlags::READ,
+        )
+        .expect("map test page");
+    let mut deferred = modify
+        .defer_kernel_flush()
+        .expect("kernel mapping records an invalidation");
+    assert_eq!(
+        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
+        0,
+        "ending the table borrow must not complete the detached flush"
+    );
+    assert_eq!(deferred.try_finish(), Ok(()));
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 1);
+
+    FAIL_NEXT_ALL_CPU_FLUSH.store(true, Ordering::Relaxed);
+    let mut modify = table.modify();
+    modify
+        .map_raw(
+            vaddr(0x40_0000),
+            paddr(0x80_0000),
+            PageSize::Size4K,
+            PagingFlags::READ,
+        )
+        .expect("map retry page");
+    let mut deferred = modify
+        .defer_kernel_flush()
+        .expect("retry mapping records an invalidation");
+    assert!(deferred.try_finish().is_err());
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 2);
+    assert_eq!(deferred.try_finish(), Ok(()));
+    assert_eq!(
+        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
+        3,
+        "an explicit retry completes the retained full invalidation"
+    );
 }
 
 /// Checks the policy flag, not the presence or effect of either DSB.

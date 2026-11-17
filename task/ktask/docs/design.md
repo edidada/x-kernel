@@ -1,5 +1,20 @@
 # ktask — Design
 
+## Prepared unit-test entries
+
+Direct unit-test task constructors transfer PreparedTaskEntry owners rather
+than allocating legacy boxed closures. new_kthread_with_entry preserves the
+root PID identity of new_kthread; PID-less fixtures use the existing prepared
+constructor. Entry preparation precedes PID allocation and task publication.
+The legacy closure constructors and spawn wrappers remain unchanged.
+
+Ordinary fixtures prepare with KERNEL in sleepable, reclaim-safe task context.
+Freezer helpers use NOWAIT under their serialization/admission gates; PI workers
+use NOWAIT because their callers can hold an RtMutex. Scheduler helpers used
+under exclusion guards, the BH-disabled preparation fixture and the abandoned
+RCU reader's sentinel also use NOWAIT. Entry flags do not grant those callers
+permission to sleep or change the existing stack/bookkeeping allocations.
+
 ## Priority inheritance
 
 `pi::TaskPiHost` binds `krtmutex` to `KtaskRef` and the `PiTaskNode` embedded
@@ -453,8 +468,9 @@ entries:
   is restored and the call returns `false`. A ready off-CPU task is dequeued
   and `migrate_entry`'d. The caller does not `switch_to` on the remote CPU.
 - `init_percpu_helpers` runs once per CPU after the timer IRQ handler is
-  registered and before local IRQs are enabled. Activating Stop can preempt
-  the bring-up task immediately; `task_entry` then enables IRQs.
+  registered and before local IRQs are enabled. It starts the periodic tick
+  for a busy boot task, then activates Stop, which can immediately preempt the
+  bring-up task; `task_entry` then enables IRQs.
 - `stop_one_cpu` requires sleepable task context and does not return until
   the callback has run and `notify_one` has finished writing the stack
   completion. The callback runs on the target CPU with IRQs disabled and
@@ -486,6 +502,39 @@ not reentrant under a held RQ guard.
   `init_secondary`.
 - Blocked wake versus `on_cpu` uses the Dekker handshake in the SMP section
   below.
+
+### Lock order
+
+Scheduler code has one allowed nesting direction and no cycles:
+
+```
+run queue lock  ->  bandwidth registry (TRACKED, MEMBERS)  ->  task state atomics
+```
+
+- **The registry is never taken the other way round.** `bandwidth.rs` never
+  acquires a run-queue lock, and it never holds `TRACKED` while touching
+  `MEMBERS` or while calling `resume_group` / `park_group`. Both registry locks
+  are leaf locks over short `Vec` scans.
+- **Accounting points run under the run-queue lock** (`blocked_resched`,
+  `account_sched_tick`). Their locks must therefore be leaves: `poll_trackers`
+  releases `TRACKED` before touching `MEMBERS` and before `resume_group`
+  mutates task state, and registration never nests the two. Waiting for a leaf
+  registry lock is bounded and safe; waiting for a lock that another CPU holds
+  while it waits for a run queue is not.
+- **The rollover path allocates only when a window actually closes**, so the
+  common accounting path stays allocation-free.
+- **Wake latches are never locks.** `park::ParkLatch` is a lock-free
+  `AtomicBool` (`record` / `take`). A parker consumes it before publishing
+  `Blocked`, publishes the state, then consumes it once more: a waker that
+  sampled a stale `Running` state and gave up still left its wake recorded, so
+  the second consume turns it into a self-unblock instead of a lost wake.
+  Holding a spinlock-shaped latch across `blocked_resched` made the parker wait
+  for locks held by wakers that needed that latch (#IKVT98), so the latch must
+  not contribute a preempt count and must not be held across the switch.
+- A CPU that spins here with IRQs disabled cannot be observed by the soft
+  lockup watchdog (its timer interrupt is masked) and the hard lockup backend is
+  currently aarch64-only, so x86_64 hangs silently. Capture such a hang with an
+  external debugger or the QEMU monitor (`info registers`) instead.
 
 ## Creation and publication
 
@@ -634,13 +683,15 @@ above; timer repair neither owns that state nor adds a periodic wake tick.
 ### Hardware timer drive and dynamic schedule timer
 
 `ktask` owns all hardware timer-drive logic. `kruntime` only registers the
-clock interrupt vector; the handler calls `ktask::on_timer_fire()`. Schedule
-and owned timers share a per-CPU oneshot device and arbitrate by absolute-ns
-deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
+clock interrupt vector; the handler calls `ktask::on_timer_fire()`. The
+periodic tick, schedule deadline and owned timers share a per-CPU oneshot
+device and arbitrate by absolute-ns deadline:
 
 1. The IRQ entry first calls the `register_timer_irq_note` hook (watchdog
-   hardlock heartbeat counts any timer IRQ, not only the 4s sample), then
-   charges the current task with `update_current(elapsed_ns)` from
+   hardlock heartbeat counts any timer IRQ, not only the 4s sample). The
+   existing user-runtime accounting hook runs on each timer IRQ; a due periodic
+   tick also requests the current runtime's deferred timer work. The handler
+   charges the current task from
    `now - last_accounted_ns` (idle runtime is not charged; resched is
    requested only when the request is exhausted). The schedule deadline
    stays armed while idle when a class still reports a future event, so a
@@ -648,8 +699,9 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
    slot then runs
    Linux `entity_tick` / `check_preempt_tick`: `need_resched` is set only
    when pick would change (eligible NEXT_BUDDY or an earlier deadline).
-   Owned timer IRQs only account, so a later-deadline WF_SYNC wakee is not
-   immediately pulled back. An ineligible buddy is armed until eligible by
+   Periodic and owned timer IRQs only account unless the independent schedule
+   deadline is also due, so a later-deadline WF_SYNC wakee is not immediately
+   pulled back. An ineligible buddy is armed until eligible by
    `next_preemption_ns`; other waiters are not polled every 10 µs. A failed
    IRQ-tail probe still returns immediately.
 2. Due owned timers run outside timer/runqueue locks, with IRQs disabled.
@@ -658,11 +710,17 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
    `NEXT_SCHED_DEADLINE_NS`, then `rearm_local_timer` to
 
 ```text
-min(next_sched_deadline?, prepared_service_deadline?)
+min(next_sched_deadline?, next_periodic_tick?, prepared_service_deadline?)
 ```
 
-   If both sources are empty, `disarm_timer()` runs. Stale/expired IRQs only
-   catch up accounting and rearm; they do not loop catch-up ticks.
+   If all sources are empty, `disarm_timer()` runs. The periodic tick uses
+   `TICKS_PER_SECOND` with Linux `TICK_NSEC` rounding, stays armed for a busy
+   runner and stops on idle. A switch between busy tasks preserves its phase;
+   an idle-to-busy switch starts the next phase-aligned tick. A late tick is
+   delivered once and forwarded past `now`, rather than replaying missed ticks
+   against the task that happens to be current. Its CPU-local deadline plays
+   the `tick_sched` role without allocating or starting an owned timer under
+   scheduler exclusion. IRQ and migration exclusion protect the slot.
 
    The schedule slot is written from the class view (`next_event_ns()`), not
    from the runner alone: all four writers — `request_resched_on`,
@@ -674,11 +732,11 @@ min(next_sched_deadline?, prepared_service_deadline?)
    event. The idle class reports no runner event of its own, so nothing is
    armed on behalf of the runner itself.
 
-   With `sched_stat`, IRQs are classified from the schedule slot and prepared
-   dispatch result. The existing diagnostic field names remain
+   With `sched_stat`, IRQs are classified from the schedule and periodic slots
+   and the prepared dispatch result. The existing diagnostic field names remain
    (`timer_irq_sched` / `timer_irq_soft` / `timer_irq_periodic` /
-   `timer_irq_stale`); `timer_irq_periodic` stays zero because that source was
-   removed. The `soft` name denotes owned timer delivery, not softirq execution.
+   `timer_irq_stale`). The `soft` name denotes owned timer delivery, not
+   softirq execution.
 
 Schedule deadlines are written by `program_sched_deadline`, matching Linux
 `hrtick_start`: a positive relative delay is floored at 10 µs. When
@@ -941,8 +999,8 @@ to their callers.
 - After waking `interrupt_waker`, `TaskInner::interrupt()` calls
   `kick_running_task()` if the task is still `on_cpu`: local `need_resched`
   under `preempt`, remote IPI always (`kfeat/smp` also enables IPI). Signal
-  delivery to a task running in user mode must take this path; a NOHZ lone
-  runner has no periodic tick fallback.
+  delivery to a task running in user mode must take this path rather than rely
+  on a later timer tick.
 - `WaitQueue` wraps `event_listener` wait/notify and supports timeout and
   predicate wait. Both predicate variants recheck the condition after registering
   the listener so a notification between the first check and registration cannot
@@ -1101,9 +1159,8 @@ ordinary IRQ before worker submission, without inline Task destruction.
   next wake goes home if prev is idle, otherwise seeks idle again.
   Spawn / `activate_task` / affinity migrate-in still use `find_idlest_cpu`.
 - `add_task` always `kick` after first enqueue (local `need_resched` plus
-  timer re-arm; remote IPI). A dynamic timer is already disarmed for a lone
-  task; a busy home cannot rely on a nonexistent periodic tick to discover a
-  new peer later.
+  timer re-arm; remote IPI). A lone runner may have no schedule deadline; the
+  accounting tick does not replace wakeup preemption.
 - EEVDF (`ksched`) matches Linux `pick_eevdf` / `place_entity`:
   - Wake `PLACE_LAG`: `vruntime = V - lag` (lag first inflated by `(W+w)/W`).
     Deadline uses the **full request** (`vd = ve + r/w`, request in ns,
@@ -1548,7 +1605,7 @@ rendezvous, device PM, wake source or sleep-accounting path is introduced.
 
 This follows the separation of Linux tick_suspend_local/tick_resume_local and
 clock-event tick-resume from clocksource timekeeping. It does not import Linux
-periodic ticks, broadcast timers or CPU-hotplug machinery. The guest regressions
+broadcast timers or CPU-hotplug machinery. The guest regressions
 in ut-tests/timer_suspend.rs include independent state-machine cases and scoped
 initialized-CPU fixtures. The fixtures restore events and cancel test timers
 before releasing IRQ/preemption guards, without time injection or latency
@@ -1633,8 +1690,9 @@ On successful cleanup it first removes freeze requests and thaws old tasks,
 then detaches the deferred activation list and reopens admission. Deferred tasks
 re-enter normal admission before enqueue, so a subsequent freeze can retain them
 again. No allocation or callback occurs while modifying list links; registration
-and list ownership use the project intrusive list. The pending strong owner is
-released on activation, including when callers dropped every external reference.
+and list ownership use an `Arc` adapter over `intrusive_collections::LinkedList`.
+The pending strong owner is released on activation, including when callers
+dropped every external reference.
 
 This corresponds to the task preparation responsibilities of Linux v6.12
 `kernel/power/process.c` (`freeze_processes`, `freeze_kernel_threads`, thaw),
@@ -1678,3 +1736,18 @@ Existing callback-boundary, cancellation, idle-wait and manager-stop tests also
 execute on SMP. A switch observer asserts that confirmation has not been
 published on the outgoing stack; a staged completion test checks stale-round
 identity. None of these fixtures powers down CPUs or changes global clocks.
+
+## Cgroup CPU controls
+
+`UserTaskRuntime` exposes the live cgroup `cpu.weight` and `Bandwidth`
+tracker. The task samples weight at activation and reapplies it after a
+process-wide cgroup migration; a task forked or moved into a group therefore
+does not keep the scheduler-default nice value.
+
+`cpu.max` runtime is charged by `run_queue::bandwidth` on scheduler account
+points. Trackers and weak member references are registered lazily; an atomic
+live count skips the registry lock entirely when no task is under a bandwidth
+limit. A tick first polls an expired period, then charges the new period, so a
+window close is not consumed by the period rollover. When a window is open,
+every selectable member is parked before the next pick. Destroyed trackers are
+weak and retired by the next poll rather than held forever.

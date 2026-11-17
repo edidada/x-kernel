@@ -8,7 +8,7 @@
 //! SimpleFile has no folio reader and its bytes are not a runnable program.
 //! These tests do not enter userspace; exit_tail covers last-user MM retirement.
 
-use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use alloc::{format, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
@@ -24,7 +24,6 @@ use kvfs::{
     DirMapping, FileSystemType, Mount, NodeFlags, NodePermission, Path, SimpleDir, SimpleFile,
     SimpleFs, VfsInode,
 };
-use osvm::{VirtMutPtr, VirtPtr};
 use unittest::{TestResult, def_test};
 use unittest_support::TestUserValue;
 
@@ -272,35 +271,30 @@ impl ExecProbe {
         matches!(self.case, Case::Fatal | Case::Retirement)
     }
 
-    #[expect(
-        clippy::allow_attributes,
-        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
-    )]
-    #[allow(
-        unknown_lints,
-        std_box_in_kernel_tests,
-        reason = "CG-049-no-std-box-in-kernel-tests: PartialInstallProbe::observe requires Box<dyn Fn(&MmSpace) + Send + Sync>; preserve the existing exec-loader probe API"
-    )]
-    pub(super) fn attach_failure_probes(
-        &mut self,
+    pub(super) fn prepare_image_probe(
+        &self,
         image: kexec::PreparedExecImage,
-        update: kprocess::ProcessExecUpdate,
-    ) -> (kexec::PreparedExecImage, kprocess::ProcessExecUpdate) {
-        let image = if self.case == Case::Partial {
+    ) -> KResult<kexec::PreparedExecImage> {
+        Ok(if self.case == Case::Partial {
             let switch = self.switch.clone();
-            image.with_partial_install_probe(kexec::PartialInstallProbe {
-                hits: self.partial_hits.clone(),
-                observe: Box::new(move |mm| observe_partial(mm, &switch)),
-            })
+            image.with_partial_install_probe(kexec::PartialInstallProbe::new(
+                self.partial_hits.clone(),
+                move |mm| observe_partial(mm, &switch),
+            )?)
         } else {
             image
-        };
-        let update = if self.case == Case::Update {
+        })
+    }
+
+    pub(super) fn attach_update_probe(
+        &self,
+        update: kprocess::ProcessExecUpdate,
+    ) -> kprocess::ProcessExecUpdate {
+        if self.case == Case::Update {
             update.with_failure_probe(self.update_hits.clone())
         } else {
             update
-        };
-        (image, update)
+        }
     }
 
     pub(super) fn observe_update(&self, process: &kprocess::Process, entry: usize, sp: usize) {
@@ -335,7 +329,12 @@ impl ExecProbe {
             );
             assert!(mm.find_vma(sp.into()).is_some());
         }
-        assert_eq!((sp as *const usize).read_vm().unwrap(), 1);
+        assert_eq!(
+            posix_types::UserConstPtr::<usize>::from(sp)
+                .read_vm()
+                .unwrap(),
+            1
+        );
         check_current_root(None);
     }
 
@@ -577,8 +576,15 @@ fn run_child(
         tee_session: has_tee_session.then(tee_kernel::tee::ExecSessionFixture::provision),
     };
     if case.is_early() {
-        assert_eq!((sentinel_addr as *const u64).read_vm().unwrap(), 0x1234);
-        (sentinel_addr as *mut u64).write_vm(0x5678).unwrap();
+        assert_eq!(
+            posix_types::UserConstPtr::<u64>::from(sentinel_addr)
+                .read_vm()
+                .unwrap(),
+            0x1234
+        );
+        posix_types::UserPtr::<u64>::from(sentinel_addr)
+            .write_vm(0x5678)
+            .unwrap();
     }
     // Early errors preserve these; activated targets must reset before fatal cleanup.
     thread.set_clear_child_tid(0x4000);
@@ -675,7 +681,12 @@ fn run_child(
             );
             assert_eq!(check_current_root(None), old_root);
             assert_eq!(process.heap_top().unwrap(), old_heap);
-            assert_eq!((sentinel_addr as *const u64).read_vm().unwrap(), 0x5678);
+            assert_eq!(
+                posix_types::UserConstPtr::<u64>::from(sentinel_addr)
+                    .read_vm()
+                    .unwrap(),
+                0x5678
+            );
             assert_eq!(thread.clear_child_tid(), 0x4000);
             assert_eq!(thread.robust_list_head(), 0x5000);
             let stack = signal.stack();
@@ -718,7 +729,12 @@ fn run_child(
                 );
             }
             // The stack is populated; reading argc does not fault an ELF segment.
-            assert_eq!((uctx.sp() as *const usize).read_vm().unwrap(), 1);
+            assert_eq!(
+                posix_types::UserConstPtr::<usize>::from(uctx.sp())
+                    .read_vm()
+                    .unwrap(),
+                1
+            );
             if let Some(retained) = retained {
                 retained.verify_and_release(process, uctx.ip());
             }

@@ -4,7 +4,7 @@
 
 use alloc::{format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     task::{Context, RawWaker, RawWakerVTable, Waker},
 };
 
@@ -367,6 +367,14 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
 }
 
 fn prepare_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskRef {
+    prepare_test_thread_with_entry(process, tid, || {})
+}
+
+fn prepare_test_thread_with_entry(
+    process: &Arc<Process>,
+    tid: crate::Tid,
+    entry: impl FnOnce() + Send + 'static,
+) -> ktask::KtaskRef {
     let task_number = kidentity::PidHandle::fixed_root(tid);
     let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
@@ -386,7 +394,12 @@ fn prepare_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
         credentials,
     )
     .expect("test thread preparation");
-    let task = TaskInner::new_user(ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"), format!("test-thread-{tid}"), task_number, thread);
+    let task = TaskInner::new_user(
+        ktask::PreparedTaskEntry::new_nowait(entry).expect("test entry preparation"),
+        format!("test-thread-{tid}"),
+        task_number,
+        thread,
+    );
 
     prepare_task(task)
 }
@@ -906,6 +919,74 @@ fn test_reap_after_reparent_removes_child_from_current_parent() {
     );
 
     parent.free();
+}
+
+fn listed_child_count(parent: &Process, child: &Process) -> usize {
+    parent
+        .children()
+        .iter()
+        .filter(|listed| listed.pid() == child.pid())
+        .count()
+}
+
+#[def_test(serial)]
+fn test_child_removal_ignores_slot_linked_in_another_parent() {
+    let init = ensure_init();
+    let parent = init.fork(320);
+    let other = init.fork(321);
+    let child = parent.fork(322);
+
+    // Removal from the wrong list must be rejected before the member-only
+    // cursor removal, leaving the slot linked under its real parent.
+    assert!(!Process::remove_child_from_parent_for_tests(&other, &child));
+    assert_eq!(listed_child_count(&parent, &child), 1);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(parent.pid()));
+
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert!(wait_reap::try_reap_zombie_process(&child));
+    assert_eq!(listed_child_count(&parent, &child), 0);
+    // A second removal of the now-unlinked slot is a no-op, not a list operation.
+    assert!(!wait_reap::try_reap_zombie_process(&child));
+    assert!(!Process::remove_child_from_parent_for_tests(&parent, &child));
+
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    parent.free();
+    other.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    other.free();
+}
+
+#[def_test(serial)]
+fn test_repeated_reparenting_links_each_slot_once() {
+    let init = ensure_init();
+    let outer = init.fork(323);
+    outer.set_child_subreaper(true);
+    let inner = outer.fork(324);
+    inner.set_child_subreaper(true);
+    let parent = inner.fork(325);
+    let child = parent.fork(326);
+
+    // Subreaper adoption reuses the slot just popped from the exiting parent;
+    // init adoption uses the reserved init slot. Neither may be relinked.
+    parent.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(inner.pid()));
+    assert_eq!(listed_child_count(&inner, &child), 1);
+    assert_eq!(listed_child_count(&parent, &child), 0);
+
+    inner.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(outer.pid()));
+    assert_eq!(listed_child_count(&outer, &child), 1);
+    assert_eq!(listed_child_count(&inner, &child), 0);
+
+    outer.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(child.parent().map(|parent| parent.pid()), Some(init.pid()));
+    assert_eq!(listed_child_count(&init, &child), 1);
+    assert_eq!(listed_child_count(&outer, &child), 0);
+
+    parent.free();
+    inner.free();
+    outer.free();
+    child.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    child.free();
 }
 
 #[def_test(serial)]
@@ -1993,6 +2074,114 @@ fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
     proc.free();
 }
 
+#[def_test(user, serial)]
+fn test_process_scheduler_clock_retains_runtime_during_sibling_exit() {
+    let pid = kidentity::allocate_root_pid_handle().unwrap().root_nr();
+    let tid = kidentity::allocate_root_pid_handle().unwrap().root_nr();
+    let process = ensure_init().fork(pid);
+    let leader = publish_test_thread(&process, pid);
+    // Exercise more members than one stack batch while the worker exits.
+    let siblings: Vec<_> = (0..5)
+        .map(|_| {
+            let sibling_tid = kidentity::allocate_root_pid_handle().unwrap().root_nr();
+            publish_test_thread(&process, sibling_tid)
+        })
+        .collect();
+    let ready = Arc::new(AtomicBool::new(false));
+    let retire = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let was_last = Arc::new(AtomicBool::new(true));
+    let worker_sample = Arc::new(AtomicU64::new(0));
+    let worker = prepare_test_thread_with_entry(&process, tid, {
+        let process = process.clone();
+        let ready = ready.clone();
+        let retire = retire.clone();
+        let done = done.clone();
+        let was_last = was_last.clone();
+        let worker_sample = worker_sample.clone();
+        move || {
+            let until = khal::time::monotonic_time() + TimeSpan::from_millis(25);
+            while khal::time::monotonic_time() < until {
+                core::hint::spin_loop();
+            }
+            worker_sample.store(ktask::refresh_current_execution_runtime_ns(), Ordering::Release);
+            ready.store(true, Ordering::Release);
+            while !retire.load(Ordering::Acquire) {
+                ktask::yield_now();
+            }
+            was_last.store(process.exit_thread(&ktask::current().clone(), 0), Ordering::Release);
+            done.store(true, Ordering::Release);
+        }
+    });
+    process_publication().publish_task(&worker).unwrap();
+    ktask::activate_task(&worker);
+    let timeout = khal::time::monotonic_time() + TimeSpan::from_secs(3);
+    while !ready.load(Ordering::Acquire) && khal::time::monotonic_time() < timeout {
+        ktask::yield_now();
+    }
+    assert!(ready.load(Ordering::Acquire));
+    let mut previous = process.process_cpu_time();
+    assert!(previous.as_nanos_u64_saturating() >= worker_sample.load(Ordering::Acquire));
+    retire.store(true, Ordering::Release);
+    while !done.load(Ordering::Acquire) && khal::time::monotonic_time() < timeout {
+        let current = process.process_cpu_time();
+        assert!(current >= previous);
+        previous = current;
+        ktask::yield_now();
+    }
+    assert!(done.load(Ordering::Acquire));
+    assert!(!was_last.load(Ordering::Acquire));
+    assert_eq!(worker.join(), 0);
+    assert!(process.process_cpu_time() >= previous);
+    for sibling in &siblings {
+        assert!(!process.exit_thread(sibling, 0));
+        assert!(process.process_cpu_time() >= previous);
+    }
+    assert!(process.exit_thread(&leader, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert!(process.process_cpu_time() >= previous);
+    process.free();
+}
+
+#[def_test(user, serial)]
+fn test_last_exiting_thread_remains_in_scheduler_clock_until_publication() {
+    let pid = kidentity::allocate_root_pid_handle().unwrap().root_nr();
+    let process = ensure_init().fork(pid);
+    let before = Arc::new(AtomicU64::new(0));
+    let after = Arc::new(AtomicU64::new(0));
+    let published = Arc::new(AtomicU64::new(0));
+    let was_last = Arc::new(AtomicBool::new(false));
+    let worker = prepare_test_thread_with_entry(&process, pid, {
+        let process = process.clone();
+        let before = before.clone();
+        let after = after.clone();
+        let published = published.clone();
+        let was_last = was_last.clone();
+        move || {
+            was_last.store(process.exit_thread(&ktask::current().clone(), 0), Ordering::Release);
+            before.store(process.process_cpu_time().as_nanos_u64_saturating(), Ordering::Release);
+            let until = khal::time::monotonic_time() + TimeSpan::from_millis(25);
+            while khal::time::monotonic_time() < until {
+                core::hint::spin_loop();
+            }
+            after.store(process.process_cpu_time().as_nanos_u64_saturating(), Ordering::Release);
+            process_exit::finalize_process_exit(&process);
+            published.store(process.process_cpu_time().as_nanos_u64_saturating(), Ordering::Release);
+        }
+    });
+    process_publication().publish_task(&worker).unwrap();
+    ktask::activate_task(&worker);
+    assert_eq!(worker.join(), 0);
+    assert!(was_last.load(Ordering::Acquire));
+    let before = before.load(Ordering::Acquire);
+    let after = after.load(Ordering::Acquire);
+    let published = published.load(Ordering::Acquire);
+    assert!(after >= before.saturating_add(10_000_000));
+    assert!(published >= after);
+    assert_eq!(process.process_cpu_time().as_nanos_u64_saturating(), published);
+    process.free();
+}
+
 #[def_test(serial)]
 fn test_pidfd_exit_poll_registration_races_and_cancellation() {
     use kpoll::{IoEvents, Pollable};
@@ -2584,6 +2773,65 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     assert!(process.exit_thread(&leader_task, 0));
     assert!(thread.has_exit_address_space());
     assert_eq!(process.thread_count(), 0);
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    let _ = process_publication().unpublish_process_if_matches(&process);
+    drop(leader_task);
+    process_publication().cleanup();
+}
+
+/// A thread pidfd (`CLONE_THREAD | CLONE_PIDFD`) names the thread's own tid for
+/// every observer until that tid stops resolving to the captured identity.
+#[def_test(user, serial)]
+fn test_thread_pidfd_fdinfo_reports_its_own_tid() {
+    let process = ensure_init().fork(9200);
+    let leader_task = publish_test_thread(&process, process.pid());
+    let leader = leader_task.as_thread();
+    let prepared = leader
+        .prepare_thread_clone()
+        .expect("thread clone should allocate a sibling tid");
+    let tid = prepared.tid();
+    let (cloned, task_number) = prepared.into_parts();
+    let identity = cloned.identity_token();
+    let pidfd_file = crate::PidFd::new_file_for_task(
+        &process,
+        task_number.clone(),
+        identity,
+        kvfs::OpenFlags::READ_WRITE.bits(),
+        initial_cred(),
+    )
+    .unwrap();
+    let pidfd = crate::PidFd::from_file(&pidfd_file).unwrap();
+
+    let thread_ns = process.active_pid_namespace();
+    let child_ns = kidentity::PidNamespace::new_child(&thread_ns);
+
+    // The pidfd is created before its thread is published (Linux attaches the
+    // pid before the pidfd), so a reader that races publication sees no task.
+    assert_eq!(pidfd.fdinfo_pid(None), -1);
+
+    let sibling = prepare_user_task(TaskInner::new_user(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
+        String::from("pidfd-thread"),
+        task_number,
+        cloned,
+    ))
+    .publish()
+    .unwrap();
+    // Member-thread identities are allocated root-only, so a reader in the
+    // thread's own namespace (here the root one) or an ancestor reports the
+    // root tid that gettid(2) and the clone3 return value give, while a reader
+    // below that branch sees no projection and gets Linux pid_nr_ns's 0.
+    assert_eq!(pidfd.fdinfo_pid(None), i64::from(tid));
+    assert_eq!(pidfd.fdinfo_pid(Some(&thread_ns)), i64::from(tid));
+    assert_eq!(pidfd.fdinfo_pid(Some(&child_ns)), 0);
+
+    // Once the thread leaves, the tid no longer names the captured identity.
+    assert!(!process.exit_thread(sibling.task(), 0));
+    assert_eq!(pidfd.fdinfo_pid(None), -1);
+    drop(sibling);
+
+    assert!(process.exit_thread(&leader_task, 0));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = process_publication().unpublish_process_if_matches(&process);
@@ -3727,6 +3975,25 @@ fn test_cpu_timer_gate_tracks_cpu_itimer_arm_and_disarm() {
     );
 }
 
+#[def_test(serial)]
+fn periodic_cpu_timer_work_is_gated_and_coalesced() {
+    let (process, task) = build_prepared_test_user_task();
+    let task = prepare_task(task);
+    let thread = task.as_thread();
+    ktask::UserTaskRuntime::on_periodic_tick(thread);
+    assert!(!thread.has_pending_cpu_timer_work());
+
+    process.set_cpu_timers_armed(true);
+    ktask::UserTaskRuntime::on_periodic_tick(thread);
+    ktask::UserTaskRuntime::on_periodic_tick(thread);
+    assert!(thread.has_pending_cpu_timer_work());
+    assert!(thread.take_cpu_timer_work());
+    assert!(!thread.take_cpu_timer_work());
+    process.set_cpu_timers_armed(false);
+    ktask::UserTaskRuntime::on_periodic_tick(thread);
+    assert!(!thread.has_pending_cpu_timer_work());
+}
+
 /// Checks the gate short-circuits the poll before the runtime is touched.
 ///
 /// A process with no attached runtime distinguishes the two branches: the
@@ -3798,10 +4065,9 @@ fn test_timer_completion_is_bound_to_originating_runtime() {
                 TimeSpan::from_nanos(1),
                 TimeSpan::from_nanos(1),
                 TimeSpan::ZERO,
-                TimeSpan::ZERO,
             )
             .unwrap();
-        notifications.extend(manager.poll_cpu_timers(TimeSpan::from_nanos(3), TimeSpan::ZERO));
+        notifications.extend(manager.poll_cpu_timers(TimeSpan::from_nanos(3), TimeSpan::ZERO, TimeSpan::from_nanos(3)));
         drop(manager);
         update.finish();
     }
@@ -3877,14 +4143,13 @@ fn test_ignored_periodic_timer_replays_with_accumulated_overruns() {
             TimeSpan::from_nanos(1),
             TimeSpan::from_nanos(1),
             TimeSpan::ZERO,
-            TimeSpan::ZERO,
         )
         .unwrap();
     update.finish();
     let deliveries = runtime
         .timer_manager()
         .lock()
-        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO);
+        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1));
     assert_eq!(deliveries.len(), 1);
     for delivery in deliveries {
         crate::dispatch_timer_delivery(owner.pid(), delivery);
@@ -3894,7 +4159,7 @@ fn test_ignored_periodic_timer_replays_with_accumulated_overruns() {
         runtime
             .timer_manager()
             .lock()
-            .poll_cpu_timers(TimeSpan::from_nanos(4), TimeSpan::ZERO)
+            .poll_cpu_timers(TimeSpan::from_nanos(4), TimeSpan::ZERO, TimeSpan::from_nanos(4))
             .is_empty()
     );
     assert_eq!(owner.get_posix_timer_overrun(timer_id).unwrap(), 0);
@@ -3947,7 +4212,6 @@ fn test_distinct_posix_timers_deliver_the_same_standard_signal() {
                 TimeSpan::ZERO,
                 TimeSpan::from_nanos(1),
                 TimeSpan::ZERO,
-                TimeSpan::ZERO,
             )
             .unwrap();
         update.finish();
@@ -3955,7 +4219,7 @@ fn test_distinct_posix_timers_deliver_the_same_standard_signal() {
     let deliveries = runtime
         .timer_manager()
         .lock()
-        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO);
+        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1));
     assert_eq!(deliveries.len(), 2);
     for delivery in deliveries {
         crate::dispatch_timer_delivery(owner.pid(), delivery);
@@ -4009,12 +4273,13 @@ fn test_timer_rearm_and_delete_cancel_pending_without_acknowledgement() {
                     TimeSpan::ZERO,
                     TimeSpan::from_nanos(1),
                     TimeSpan::ZERO,
-                    TimeSpan::ZERO,
                 )
                 .unwrap();
             let delivery = manager
-                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
-                .remove(0);
+                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1))
+                .into_iter()
+                .next()
+                .unwrap();
             (update, delivery)
         };
         update.finish();
@@ -4074,11 +4339,10 @@ fn test_returned_record_progresses_rearmed_cpu_one_shot_without_another_tick() {
                 TimeSpan::ZERO,
                 TimeSpan::from_nanos(1),
                 TimeSpan::ZERO,
-                TimeSpan::ZERO,
             )
             .unwrap();
         let old = manager
-            .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
+            .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1))
             .remove(0);
         let update = manager
             .set_posix_timer(
@@ -4087,7 +4351,6 @@ fn test_returned_record_progresses_rearmed_cpu_one_shot_without_another_tick() {
                 TimeSpan::ZERO,
                 TimeSpan::from_nanos(1),
                 TimeSpan::from_nanos(2),
-                TimeSpan::ZERO,
             )
             .unwrap();
         assert!(!manager.any_cpu_timer_armed());
@@ -4147,12 +4410,13 @@ fn test_timer_dispatch_uses_captured_target_not_numeric_envelope() {
                     TimeSpan::ZERO,
                     TimeSpan::from_nanos(1),
                     TimeSpan::ZERO,
-                    TimeSpan::ZERO,
                 )
                 .unwrap();
             let delivery = manager
-                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
-                .remove(0);
+                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1))
+                .into_iter()
+                .next()
+                .unwrap();
             drop(manager);
             update.finish();
             delivery

@@ -10,7 +10,7 @@ use core::{ffi::CStr, iter};
 use filemap::{PrivateFileViewSpec, new_file_private_vma};
 use kcred::Cred;
 use kernel_elf_parser::{
-    AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, app_stack_region_with_auxv,
+    AuxEntry, AuxType, ElfError, ElfHeaders, ElfHeadersBuilder, app_stack_region_with_auxv,
 };
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
@@ -315,17 +315,27 @@ pub struct PartialInstallProbe {
     /// Observes borrowed mappings and schedules without reacquiring this MM.
     /// The peer must never require this MM mutex or an inverse lock.
     /// Captured request-local state owns the peer handshake and migration target.
-    #[expect(
-        clippy::allow_attributes,
-        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
-    )]
-    #[allow(
-        unknown_lints,
-        std_box_in_kernel_tests,
-        reason = "CG-049-no-std-box-in-kernel-tests: the existing exec-loader probe API receives \
-                  a standard Box callback from the syscall exec lifecycle fixture"
-    )]
-    pub observe: alloc::boxed::Box<dyn Fn(&MmSpace) + Send + Sync>,
+    observe: kalloc_types::KBox<dyn Fn(&MmSpace) + Send + Sync>,
+}
+
+#[cfg(unittest)]
+impl PartialInstallProbe {
+    /// Prepares a request-local observer before irreversible exec operations.
+    ///
+    /// Requires sleepable, reclaim-safe task context without locks needed by
+    /// reclaim. Returns `NoMemory` if owner allocation fails, dropping the
+    /// captures without invoking the observer. Invocation and destruction must
+    /// satisfy the captures' context requirements; invocation holds the target
+    /// MM lock and must not reacquire it or introduce an inverse lock order.
+    pub fn new(
+        hits: Arc<core::sync::atomic::AtomicUsize>,
+        observe: impl Fn(&MmSpace) + Send + Sync + 'static,
+    ) -> KResult<Self> {
+        Ok(Self {
+            hits,
+            observe: kalloc_types::KBox::new(observe)?,
+        })
+    }
 }
 
 #[cfg(unittest)]
@@ -420,7 +430,7 @@ fn map_elf(
     Ok(())
 }
 
-fn map_elf_error(err: &'static str) -> KError {
+fn map_elf_error(err: ElfError) -> KError {
     debug!("Failed to parse ELF file: {err}");
     KError::InvalidExecutable
 }
@@ -681,7 +691,14 @@ fn initial_aux_vector(
         AuxEntry::new(AuxType::PHENT, image.program_header_entry_size()),
         AuxEntry::new(AuxType::PHNUM, image.program_header_count()),
         AuxEntry::new(AuxType::PAGESZ, PAGE_SIZE_4K),
+        AuxEntry::new(AuxType::CLKTCK, posix_types::USER_HZ as usize),
         AuxEntry::new(AuxType::ENTRY, image.entry(executable_bias)?),
+        // Linux publishes the CPU capability word here, and user runtimes read
+        // it instead of probing control registers: glibc's IFUNC resolvers and
+        // LLVM's `getHostCPUFeatures` (behind llvmpipe's JIT) pick instruction
+        // paths from it. Omitting it makes every reader see "no optional
+        // features", and a JIT that still emits a feature-gated path faults.
+        AuxEntry::new(AuxType::HWCAP, khal::cpu_hwcap()),
     ];
     if let Some(interpreter_bias) = layout.interpreter_bias() {
         auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));

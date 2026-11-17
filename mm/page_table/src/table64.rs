@@ -158,6 +158,14 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
         Self::try_new_inner(true)
     }
 
+    /// Returns whether this table owns the global kernel mappings.
+    ///
+    /// Kernel tables invalidate through the all-CPU scope; user tables use the
+    /// owning address space's residency mask.
+    pub const fn is_kernel(&self) -> bool {
+        self.is_kernel
+    }
+
     fn try_new_inner(is_kernel: bool) -> PtResult<Self> {
         let root_paddr = Self::alloc_table()?;
         Ok(Self {

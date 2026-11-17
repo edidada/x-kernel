@@ -1,5 +1,15 @@
 # posix-process — Security and reliability
 
+## Physical OOM faults
+
+A user page fault that returns `OutOfMemory` terminates the allocating process
+through kernel `SIGKILL`, independently of user signal handlers. There is no
+retry loop, address-error misclassification, global victim scan or reclaim.
+MM cleanup releases commitments and private pages, but unrelated infallible
+kernel allocations can still fail; this policy is not an end-to-end NOFAIL
+recovery guarantee. Default overcommit admission and `MAP_NORESERVE` semantics
+are owned by `memspace`, not the signal layer.
+
 ## Synchronous signal-frame faults
 
 The fault API accepts only kernel-generated fault information in the current
@@ -60,9 +70,14 @@ user-supplied exception interpretations.
 Internal syscall restart codes are resolved according to handler installation,
 not merely signal consumption. Default continue actions cannot suppress this
 resolution, and signal return must not restart an already restored context.
+CPU-timer work is requested by a periodic IRQ and consumed on user return.
+An armed timer alone does not force a group scan after each syscall; a task
+that never returns to userspace can still defer its own timer delivery.
 
 `exit_robust_list` reads the registered userspace head and linked nodes through
-`read_vm`; failed reads stop the walk. Pointer low-bit tags distinguish PI
+`UserConstPtr::read_vm`; `RobustListHead` and `RobustList` implement `UserRead`
+because their pointer and integer fields admit every bit pattern. Failed reads
+stop the walk. Pointer low-bit tags distinguish PI
 entries. Both kinds are marked, but only ordinary entries use plain wake.
 The walk stops at the sentinel or `ROBUST_LIST_LIMIT`, then separately handles
 a nonnull pending entry.

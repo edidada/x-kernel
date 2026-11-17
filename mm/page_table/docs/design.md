@@ -144,7 +144,17 @@ under [AArch64 Fresh-Map Recovery Evidence](#aarch64-fresh-map-recovery-evidence
 | `Addresses` | `Full` | Another address would exceed the threshold. |
 | `Addresses` | `None` | Confirmed `finish()` or `Drop` completion. |
 | `Full` | `None` | Confirmed `finish()` or `Drop` completion. |
+| `Addresses` / `Full` | `None` | Detached by `defer_kernel_flush` into `KernelTlbFlush`. |
 | `Addresses` / `Full` | `Full` | Unconfirmed shootdown; retain data holds for retry. |
+
+`PageTableMut::defer_kernel_flush` consumes a kernel-table edit guard and
+moves pending invalidation, fresh-map ordering and managed retirement holds into
+`KernelTlbFlush`. The caller releases the table lock before `try_finish`, and
+keeps the kernel table and raw backing live while serializing conflicting
+transitions. Failure retains the holds and upgrades the batch to a full flush
+for explicit retry. Dropping an unfinished batch performs only local ordering
+and pins its holds; it never hides a remote wait. User-table flushes remain
+residency-scoped and cannot be detached.
 
 ### PTE Lifecycle
 

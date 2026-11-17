@@ -1726,3 +1726,184 @@ fn test_non_relatime_overwrites_future_atime() {
 
     assert!(inode.times().accessed_at >= before);
 }
+
+#[def_test]
+fn test_move_mount_rejects_target_inside_source_subtree() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let child_fs = mock_filesystem(StatFsFlags::empty());
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+    let child = namespace.attach(&mountpoint, &child_fs).unwrap();
+    let child_root = child.root_path();
+
+    // Target equal to the source mount root: ELOOP, tree unchanged.
+    assert_eq!(
+        namespace.move_mount_to(&child_root, &child_root),
+        Err(VfsError::FilesystemLoop)
+    );
+    // Target strictly inside the source subtree: ELOOP, tree unchanged.
+    let inside = lookup_child_in_mount(&child_root, "mnt").unwrap();
+    assert_eq!(
+        namespace.move_mount_to(&child_root, &inside),
+        Err(VfsError::FilesystemLoop)
+    );
+    // The source is still attached at its original mountpoint (a rejected move
+    // must not detach it).
+    assert!(Arc::ptr_eq(
+        lookup_no_follow(&root, "mnt").unwrap().mount(),
+        &child
+    ));
+    assert!(child.location().is_some());
+}
+
+#[def_test]
+fn test_recursive_bind_clones_submounts_reachably() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let host_fs = mock_filesystem(StatFsFlags::empty());
+    let sub_fs = mock_filesystem(StatFsFlags::empty());
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+
+    let host_mp = lookup_child_in_mount(&root, "mnt").unwrap();
+    let host = namespace.attach(&host_mp, &host_fs).unwrap();
+    let host_root = host.root_path();
+    let sub_mp = lookup_child_in_mount(&host_root, "mnt").unwrap();
+    let sub = namespace.attach(&sub_mp, &sub_fs).unwrap();
+    let sub_root = sub.root_path();
+
+    // Recursive bind of the host subtree (host + sub) onto a directory. This
+    // exercises the happy path: a submount under the bind source is cloned and
+    // stays reachable under the new bind root.
+    let target = lookup_child_in_mount(&sub_root, "mnt").unwrap();
+    let bind = namespace.attach_bind_recursive(&host_root, &target).unwrap();
+    let bind_root = bind.root_path();
+
+    // The cloned submount must be reachable under the new bind root.
+    let cloned_sub = lookup_no_follow(&bind_root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(cloned_sub.mount().super_block(), &sub_fs));
+
+    // Lazy unmount removes the whole cloned tree without leaking registrations.
+    namespace.detach_tree(&bind_root).unwrap();
+}
+
+#[def_test]
+fn test_recursive_bind_skips_sibling_submounts_outside_source() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let host_fs = mock_filesystem(StatFsFlags::empty());
+    let sibling_fs = mock_filesystem(StatFsFlags::empty());
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let cred = kcred::initial_cred();
+
+    let host_mp = lookup_child_in_mount(&root, "mnt").unwrap();
+    let host = namespace.attach(&host_mp, &host_fs).unwrap();
+    let host_root = host.root_path();
+
+    // A sibling submount on a branch (host/alt) different from the bind source.
+    let alt = host_root
+        .mkdir("alt", NodePermission::default(), &cred)
+        .unwrap();
+    let sibling = namespace.attach(&alt, &sibling_fs).unwrap();
+
+    // Bind source is host/mnt, a plain subdirectory of the host mount (no mount
+    // there), so collect_subtree(host) also yields the sibling at host/alt.
+    let source = lookup_child_in_mount(&host_root, "mnt").unwrap();
+    let target = host_root
+        .mkdir("target", NodePermission::default(), &cred)
+        .unwrap();
+    let bind = namespace.attach_bind_recursive(&source, &target).unwrap();
+    let bind_root = bind.root_path();
+
+    // The sibling lies outside the bind source subtree and must not be cloned
+    // under the new root (the unfiltered code grafted it at an unreachable
+    // dentry, making unmount permanently EBUSY and leaking the registration).
+    assert!(bind_root.mount().children().is_empty());
+    assert!(Arc::ptr_eq(
+        lookup_no_follow(&host_root, "alt").unwrap().mount(),
+        &sibling
+    ));
+
+    // With no unreachable cloned child, a plain unmount succeeds.
+    namespace.detach(&bind_root).unwrap();
+}
+
+#[def_test]
+fn test_clone_mount_tree_reproduces_a_stacked_mountpoint() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let lower_fs = mock_filesystem(StatFsFlags::empty());
+    let upper_fs = mock_filesystem(StatFsFlags::empty());
+
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+
+    // Two mounts stacked on one mountpoint: Linux keeps the upper one visible
+    // and chains the lower one through its overmount link. Each gets a distinct
+    // devname because every mock reports the same filesystem name, so the
+    // devname is the only thing that tells the layers apart in an assertion.
+    let lower = namespace
+        .attach_with_flags_and_devname(&mountpoint, &lower_fs, MountFlags::empty(), Some("lower"))
+        .unwrap();
+    let upper = namespace
+        .attach_with_flags_and_devname(&mountpoint, &upper_fs, MountFlags::empty(), Some("upper"))
+        .unwrap();
+    let visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(visible.mount(), &upper));
+    assert!(!Arc::ptr_eq(&lower, &upper));
+    assert_eq!(visible.mount().devname(), Some("upper"));
+    let source_lower = visible.mount().covered_mount().unwrap();
+    assert_eq!(
+        source_lower.devname(),
+        Some("lower"),
+        "the source stack is upper over lower"
+    );
+
+    // `open_tree(OPEN_TREE_CLONE)` must reproduce that stack, top over bottom.
+    // A clone that dropped the displaced mount, or installed the layers in the
+    // wrong order, shows a different visible devname or a different layer
+    // underneath.
+    let (cloned_root, kept) = namespace.clone_mount_tree(&root).unwrap();
+    let cloned_mountpoint = lookup_no_follow(&cloned_root.root_path(), "mnt").unwrap();
+    let cloned_visible = cloned_mountpoint.mount();
+    assert!(
+        !Arc::ptr_eq(cloned_visible, &upper),
+        "the clone must not alias the source's mount"
+    );
+    assert_eq!(
+        cloned_visible.devname(),
+        Some("upper"),
+        "the clone's visible layer is the top of the source stack"
+    );
+    let covered = cloned_visible
+        .covered_mount()
+        .expect("the lower layer survives the clone");
+    assert_eq!(
+        covered.devname(),
+        Some("lower"),
+        "the layer under the clone's top is the source stack's bottom"
+    );
+    assert!(
+        !Arc::ptr_eq(&covered, cloned_visible),
+        "the stack has two distinct layers, not one mount covering itself"
+    );
+    assert!(
+        kept.iter().any(|mount| Arc::ptr_eq(mount, cloned_visible))
+            && kept.iter().any(|mount| Arc::ptr_eq(mount, &covered)),
+        "both cloned layers are handles the caller keeps alive"
+    );
+    assert!(
+        !Arc::ptr_eq(&covered, &lower),
+        "the clone copies the layers instead of sharing the source's"
+    );
+
+    // The source stack is untouched.
+    let source_visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(source_visible.mount(), &upper));
+    let source_lower = source_visible.mount().covered_mount().unwrap();
+    assert!(
+        Arc::ptr_eq(&source_lower, &lower),
+        "the source still covers its own lower mount"
+    );
+}
+

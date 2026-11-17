@@ -79,6 +79,17 @@ Symlink entries are cached by the same mapping. kvfs provides
 `/dev/ptmx -> pts/ptmx`, so the call direction is devfs -> kvfs. The target is
 stored in the inode and returned by `read_link` without being re-resolved.
 
+File creation and hard links in simple directories are opt-in. The default
+`SimpleDirOps::create_file` and `SimpleDirOps::install_link` reject both
+operations, matching pseudo filesystems such as procfs and sysfs whose
+directories must stay immutable from userspace. Filesystems that mirror a
+writable backing store — ramfs-backed devtmpfs directories — override the two
+hooks; `SimpleDirInodeOperations` then routes `vfs_create` and `vfs_link`
+through them and instantiates the negative dentry like every other
+create-like callback. Link accounting is symmetric: `install_link` increments
+the target inode's link count and `DirMapping::unlink` decrements it, so
+`stat` nlink tracks the alias count for hook-backed filesystems.
+
 ## Same-superblock mount reuse
 
 Mounting a filesystem over the root of its own superblock with no requested
@@ -546,7 +557,9 @@ block-special inodes uniformly install KVFS's `DefaultBlkdevFileOperations`, cor
 after withdrawal or device-number reuse. The claim preserves `O_EXCL`; ioctl uses
 the current nonblocking flag. Last-file release closes once.
 A block-device special inode has no canonical block address space yet, so mmap returns ENODEV; the medium-change invalidation protocol must be implemented before enabling it.
-KVFS supplies checked argument access and `has_sys_admin` from the current caller.
+KVFS supplies checked argument access and `has_sys_admin` from the current caller;
+the scalar argument is read through `posix_types::UserConstPtr`, whose `UserRead`
+bound constrains the ABI type at the call site.
 The ioctl path receives the syscall caller's `&Cred`, without retaining extra credentials.
 Generic block commands and the driver fallback for unknown commands are dispatched uniformly by `BlockDevice::ioctl`. An ordinary close and write do not implicitly flush; only an explicit fsync passes the
 durability request to the backend. KVFS maintains no second `dev_t -> DeviceFileOps` table;
@@ -932,11 +945,26 @@ original root at `put_old`. All fallible checks are completed before the first m
 tree behind. `mount_edge_detach` is the shared single-edge detach primitive (restore covers / delete the child index + clear the
 location), reused by pivot and by the later MS_MOVE.
 
-`MntNamespace::make_mount_private()` and `make_mount_slave()` only validate that the target is a registered mount root and record no propagation state. KVFS does not yet have
-shared propagation groups, so slave and private behave equivalently: without a shared master, a slave receives no propagation events.
-Each of the two validates its call separately (`MS_PRIVATE`/`MS_SLAVE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns
-`EINVAL`), to prevent illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) is accepted only when the source subtree's mount count is
-zero, in which case the result is identical to cloning a single mount; otherwise it returns `EINVAL` instead of silently flattening the mount tree.
+`MntNamespace::make_mount_private()`, `make_mount_slave()`, `make_mount_shared()` and `make_mount_unbindable()` only validate
+that the target is a registered mount root and record no propagation state. KVFS does not yet have shared propagation groups, so all
+four behave equivalently: without a shared master a slave receives no events, a shared mount propagates nothing, and an unbindable
+mount has no peer to refuse. `MS_SHARED` is accepted rather than rejected because systemd remounts the namespace root `MS_SHARED`
+after `pivot_root`, and an `EINVAL` there aborts the switch-root. Each entry validates its call separately (`MS_PRIVATE`,
+`MS_SLAVE`, `MS_SHARED` and `MS_UNBINDABLE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns `EINVAL`), to prevent
+illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) clones the source subtree:
+`attach_bind_recursive()` re-grafts each cloned child under its cloned parent, so only submounts at or below the bind source are
+included and the tree is never silently flattened. (`clone_mount_tree()` is the separate entry point behind `open_tree(OPEN_TREE_CLONE)`.)
+
+### Detached mounts and the new mount API
+
+`MntNamespace::clone_mount_tree()` produces the detached tree behind `open_tree(OPEN_TREE_CLONE)`: it clones the mount at the
+resolved path, then walks that mount's subtree and installs each clone under the clone of its parent, returning the root together with
+every clone so the caller (the mount fd) keeps the whole tree alive. `create_detached_mount()` and `attach_detached_mount()` are the
+pair behind `fsmount` and `move_mount`; the attach consumes the detached mount and restores it if the graft fails, so a failed move
+does not spend the descriptor. `set_mount_attributes()` and `set_mount_attributes_on()` apply a translated `MOUNT_ATTR_*` set/clear
+pair to the mount at a path or to a mount object directly (`AT_EMPTY_PATH`), optionally recursing into the subtree. The
+`CAP_SYS_ADMIN` check lives in the syscall layer, which is the boundary that owns it; the namespace methods validate only mount
+identity and flag legality.
 
 ### Pathname and Open Files
 
@@ -1020,14 +1048,29 @@ zeroing the range, which frees no blocks.
 A file without independent backing uses the inode operation's default truncate implementation; a filesystem with backing state
 overrides it and completes its own preparation before calling `truncate_setsize()`.
 
-`AddressSpaceOperations` provides only folio read, writeback, and cache-state callbacks; it no longer goes through the byte-level
-`read_at`/`write_at` default forwarding. Byte reads that a filesystem needs can stay in its private backing helper,
+`AddressSpaceOperations` provides folio read, writeback, cache-state and
+per-folio buffered-write callbacks (`write_begin`/`write_end`); it no longer
+goes through the byte-level `read_at`/`write_at` default forwarding. A backend
+that wants batched buffered writes additionally exposes a
+`BatchedWriteOperations` vtable through `batched_write_ops()`; the mapping
+samples it once at construction, and `None` keeps every write on the per-folio
+path. Byte reads that a filesystem needs can stay in its private backing helper,
 and are reused explicitly by `read_folio` and `readahead`.
 
 `simple_write_end` stays in `kvfs::libfs` and serves only ramfs/memfs-style aops.
-After a block-device filesystem completes its own write-end, it publishes the accepted `i_size` via `AddressSpace::write_end_set_size()`
+A per-folio write-end of a block-device filesystem publishes the accepted `i_size` via `AddressSpace::write_end_set_size()`
 within the same generic-write data-lock and copied-folio-lock critical section, instead of disguising ext4 semantics as a
-libfs helper.
+libfs helper. Batched tail release publishes no size because a batched run never extends the visible size.
+
+`WriteEndRequest` contains the matching `WriteBeginRequest` range and copied
+byte count. The generic writer validates the range's exclusive end before
+admission, and copying is bounded by the range length. `write_end_set_size`
+compares the accepted end against the inode's current size under the caller's
+inode data lock and publishes growth.
+The hook returns at most the copied count and publishes a nonempty accepted
+prefix before returning success. The generic writer can then advance its local
+EOF bound for cache preparation and batch admission. Zero-byte cancellation
+preserves the file length.
 
 `AddressSpace` itself holds the object-id, the mapped views, the statically shared `AddressSpaceOperations` and
 `i_pages: MappingPages`. This field embeds the cache container directly without a separate `Arc` allocation, corresponding to Linux
@@ -1606,11 +1649,15 @@ discard clean folios in the range. A folio that stayed dirty is reported as
 `ResourceBusy` after the clean ones were already discarded, matching Linux
 partial invalidation.
 
-Buffered `write()` and the mmap write fault share one exclusion boundary: the
-folio instantiation and dirty window of the write path holds the invalidate read
-lock, matching `page_mkwrite`, so a truncate or range invalidation holding the
-write lock cannot discard a page between its residency check and its dirty
-publication. Registered views cover page-aligned file ranges only: a partial tail
+Buffered `write()` and the mmap write fault publish their dirty state while
+holding the folio lock, which cache discard also takes before marking a
+detached identity, so neither path can lose a page between its residency check
+and its dirty publication. The fault additionally holds the invalidate read
+guard across its EOF recheck and PTE publication; `write()` runs under the
+inode data lock instead, matching Linux `generic_perform_write`, which holds no
+invalidate lock here. Truncate, range invalidation and mapping revocation all
+take that data lock, so none of them interleaves with a buffered write.
+Registered views cover page-aligned file ranges only: a partial tail
 page is COW or zero-filled and owns no cache reference, so the view ends on the
 page boundary instead of reaching into that anonymous tail. Executable images
 register their private file views at load with a live invalidation handle, so the
@@ -1676,12 +1723,20 @@ pagecache; repeated dirtying through writable PTEs remains dependent on G.
 
 ### Buffered acceptance and live writeback EOF
 
-Copying, dirty publication, write_end acceptance and visible i_size publication
-finish under the same folio lock and invalidate read guard. A successful-copy
-write_end hook may update reservations and inode metadata, but cannot reacquire
-the folio, invalidate the cache or wait for writeback. Copy-failure cancellation
-and short-accept/error cache rollback run after releasing these guards. The
-writer retains its inode data lock; completion never needs that lock.
+A single-folio buffered write copies, dirties, accepts in `write_end` and
+publishes visible i_size under one folio lock. A batched run of already-resident
+pages copies and dirties each slot under its own folio lock, then releases the
+whole run's unaccepted tail once through the batched-write tail-release hook
+after those locks are released; the published count is decided by the generic
+path and the release hook's return type cannot change it. The batch never
+extends the visible size, so tail release publishes no size and the slot is
+accepted as soon as it is dirty.
+A successful-copy `write_end` hook may update reservations and inode metadata,
+but cannot reacquire the folio, invalidate the cache or wait for writeback.
+Cancellation releases only the units that the matching admission newly reserved,
+never reservations owned by earlier writes. Copy-failure cancellation and
+short-accept/error cache rollback run after releasing those guards. The writer
+retains its inode data lock; completion never needs that lock.
 
 All cache writeback adapters pass one control object and a live inode-size
 supplier. Pagecache selects a finite target independently of EOF and samples

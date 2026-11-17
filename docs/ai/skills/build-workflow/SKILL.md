@@ -27,7 +27,7 @@ Do not use a bare `cargo check -p <crate>` as the main kernel validation path.
 
 - the Rust toolchain and targets from `rust-toolchain.toml`;
 - `cargo-binutils` and `rust-objcopy`;
-- the target architecture's musl cross toolchain (`<arch>-linux-musl-gcc`) for
+- the target architecture's GNU cross toolchain (`<arch>-linux-gnu-gcc`) for
   user apps, TEE tests and harness guest cases; the kernel build itself does
   not compile C;
 - the matching QEMU system emulator for `make run`;
@@ -73,6 +73,10 @@ exports the compiler's code facts (call graph, items, unsafe and atomic sites)
 for the review code index and packs them into `<dir>`; see
 `tools/lints/README.md`. Install the pinned tools with
 `make install-tools` after adding the nightly components and target above.
+`make dylint XKMAKE_ARGS=--fix` applies machine suggestions across local
+packages in the configured application's compilation graph, including
+dependencies of `entry`. It checks that selecting those packages for fixes
+does not change their resolved features.
 
 ## Configuration
 

@@ -233,7 +233,7 @@ impl DentryAlias {
 }
 
 /// Strong reference to a VFS directory entry.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Dentry(Arc<DentryInner>);
 
 /// A dentry view protected by the VFS namespace operation that created it.
@@ -433,10 +433,7 @@ impl Dentry {
             parent,
             name,
         )));
-        if !inode.add_dentry_alias(&dentry) {
-            let alias = inode
-                .directory_alias()
-                .expect("directory alias disappeared while constructing dentry");
+        if let Err(alias) = inode.add_dentry_alias_or_existing(&dentry) {
             let requested_location = dentry.0.location.read();
             let location = alias.0.location.read();
             let has_same_parent = match (&location.parent, &requested_location.parent) {

@@ -29,7 +29,7 @@ use crate::dma::map_dma_direction;
 /// The host prepares kdma's streaming pool before publishing drivers; subsequent
 /// streaming map/unmap supports ordinary IRQ/BH contexts without mapping changes.
 /// Neither path is valid in NMI. Streaming guard release performs unmapping.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct XKernelDeviceDma {
     info: DmaInfo,
 }

@@ -1,5 +1,22 @@
 # Kernel Benchmarks And Soak
 
+Soak producer entries use PreparedTaskEntry with KERNEL permissions in the
+sleepable, reclaim-safe boot coordinator. All entries and CPU masks are prepared
+before any producer is activated. Failure returns to the runner's assertion
+boundary without starting that group or emitting its PASS markers; prepared
+task references retain their existing deferred cleanup. The duration clock
+still starts before producer preparation, so startup cost remains part of the
+soak window. Earlier warmup work is already drained. Task stacks, task owners
+and dynamic worker services retain their existing allocation contracts.
+Guest validation exercises the successful group; it does not inject entry OOM.
+
+The ordinary Work fixtures are stack-pinned for their full lexical lifetime.
+Their captures outlive the Work, and final flush/cancel completes before either
+leaves scope. This removes two fixture-owner allocations without changing the
+timed enqueue/flush interval. It does not remove allocations in owned delayed
+work, task creation, or the benchmark's Vec/Arc state; measurements across this
+layout change must retain their source revision rather than claim equivalence.
+
 This opt-in runner uses real boot-installed NG normal/BH/high-BH providers,
 workers, timers and IPIs. It is not a host simulation or an ordinary unit test.
 Cargo bench auto-discovery is disabled: the kernel compiles this runner through

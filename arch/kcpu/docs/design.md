@@ -69,9 +69,16 @@ ID before publication. Add synthetic register/firmware tests and extend procfs's
 per-architecture formatter and spelling table. Keep hardware filtering in kcpu
 and Linux field names in procfs. Update both crates' design/security documents.
 
-These are per-CPU diagnostic snapshots, not Linux's system-wide capability
-intersection. AT_HWCAP/AT_HWCAP2 generation and scheduler placement policy remain
-separate; this change does not synchronize those interfaces with cpuinfo.
+`cpu_info()` returns per-CPU diagnostic snapshots. `CpuInfo::hwcap()` converts
+one CPU's *usable* set into the Linux `AT_HWCAP` encoding, `for_each_cpu_info()`
+iterates the published snapshots as the public building block for system-wide
+queries, and `system_hwcap()` folds that iteration into the intersection exec
+publishes as `AT_HWCAP`. The intersection is required because the scheduler may
+migrate a process to any online core after exec, and a frozen auxiliary-vector
+word cannot be revised; Linux reaches the same answer from its sanitised
+system-wide feature registers. `current_cpu_info()` still reports the calling
+core for callers that need per-core detail. Scheduler placement policy remains
+separate and is not synchronized with cpuinfo.
 
 ## x86_64 extended state
 
@@ -296,6 +303,9 @@ on its first switch-out.
   Each architecture completes exception-table sorting, hardware descriptor table loading and trap vector base setup in this function.
 - **trap handler** (such as `x86_trap_handler`): runs in an interrupts-disabled context
   and must not sleep or block. It is called directly by the assembly entry, with the full trap frame already saved on the stack at call time.
+- **RISC-V trapframe layout**: slot 0 stores the kernel stack pointer used by user-mode
+  entry and return; `GeneralRegisters` contains x1–x31 in architectural order in slots
+  1–31, followed by `sepc` and `sstatus`. Signal frames reuse the register layout after PC.
 - **riscv64 `gp` invariant**: `gp` (x3) is the per-CPU percpu base, set once at boot by the
   `set_current_base` of the `kcpu_slot` architecture layer and constant during an S-mode trap, so it is **not** saved/restored by
   `PUSH_POP_GENERAL_REGS` - it must never be placed in the migratable per-task trapframe.

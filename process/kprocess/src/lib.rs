@@ -100,7 +100,9 @@ pub mod wait_reap;
 #[macro_use]
 extern crate klogger;
 
-pub use cgroup::{cgroup_member_process_ids, current_cgroup, migrate_cgroup_process};
+pub use cgroup::{
+    cgroup_member_process_ids, current_cgroup, current_memcg, migrate_cgroup_process,
+};
 pub use credentials::{current_cred, current_real_cred};
 pub use kidentity::PidHandle as PidIdentity;
 pub use pidfd::PidFd;
@@ -123,9 +125,9 @@ pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 pub use thread::{
     AsThread, CpuTimeState, CurrentFiles, CurrentThread, NiceValue, PreparedUserClone,
     SchedulerParameters, SeccompContext, Thread, current_files, current_fs_context,
-    current_user_mm_id, current_user_pid, current_user_ppid, current_user_process,
-    current_user_process_address_space, current_user_process_fs_context, current_user_thread,
-    current_user_tid, with_current_user_thread,
+    current_thread_cpu_clock, current_user_mm_id, current_user_pid, current_user_ppid,
+    current_user_process, current_user_process_address_space, current_user_process_fs_context,
+    current_user_thread, current_user_tid, with_current_user_thread,
 };
 pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers_for, spawn_alarm_task,
@@ -279,6 +281,7 @@ pub(crate) fn build_process_thread_with_config(
     credentials: alloc::sync::Arc<kcred::Cred>,
     config: process_runtime::ProcessRuntimeConfig,
 ) -> kerrno::KResult<kalloc_types::KBox<Thread>> {
+    kcgroup::refresh_root_cpuset_universe();
     let runtime = ProcessRuntime::new(
         process.clone(),
         exe_path,

@@ -11,7 +11,7 @@ use kprocess::{AsThread, Pid};
 use ksignal::Signo;
 use ktimer::{PosixTimerCreateNotify, PosixTimerSigValue, TimerSigValue};
 use linux_raw_sys::general::{
-    SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD_ID, TIMER_ABSTIME, itimerspec,
+    CLOCK_PROCESS_CPUTIME_ID, SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD_ID, TIMER_ABSTIME, itimerspec,
 };
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigevent};
 
@@ -39,12 +39,16 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
     };
 
     let sevp = sevp.read_vm()?;
+    // SAFETY: UserRead copied the complete sigevent record from userspace,
+    // including every byte of sigev_value. The pointer arm is read only to
+    // preserve those opaque bits; it is never dereferenced.
+    let value_bits = unsafe { sevp.sigev_value.sival_ptr as usize };
     match sevp.sigev_notify as u32 {
         SIGEV_NONE => Ok(PosixTimerCreateNotify::None),
         SIGEV_SIGNAL => Ok(PosixTimerCreateNotify::Signal {
             signo: Signo::from_raw(sevp.sigev_signo).ok_or(KError::InvalidInput)?,
             target_tid: None,
-            value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw(sevp.sigev_value)),
+            value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw_bits(value_bits)),
         }),
         SIGEV_THREAD_ID => {
             // SAFETY: `_sigev_un._tid` is the ABI-defined field for
@@ -67,7 +71,7 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
             Ok(PosixTimerCreateNotify::Signal {
                 signo: Signo::from_raw(sevp.sigev_signo).ok_or(KError::InvalidInput)?,
                 target_tid: Some(tid),
-                value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw(sevp.sigev_value)),
+                value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw_bits(value_bits)),
             })
         }
         _ => Err(KError::InvalidInput),
@@ -86,6 +90,12 @@ pub(crate) fn sys_timer_create(
 ) -> KResult<isize> {
     let notify = parse_sigevent(sevp)?;
     let process = kprocess::current_user_process();
+    let clockid = if super::clock_id::is_current_process_sched_clock(clockid, process.visible_pid())
+    {
+        CLOCK_PROCESS_CPUTIME_ID as i32
+    } else {
+        clockid
+    };
     let timer_id = process.create_posix_timer(clockid, notify)?;
     if let Err(error) = timerid.write_vm(timer_id) {
         // A peer may already have deleted this timer, or runtime teardown may

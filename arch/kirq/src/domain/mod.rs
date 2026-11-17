@@ -65,6 +65,7 @@ impl IrqDomain {
         self.kind
     }
 
+    #[cfg(unittest)]
     pub(crate) const fn is_identity(&self) -> bool {
         self.is_identity
     }
@@ -207,6 +208,7 @@ pub(crate) fn for_each_domain(mut visit: impl FnMut(&'static IrqDomain) -> bool)
     }
 }
 
+#[cfg(unittest)]
 pub(crate) fn slot(id: IrqDomainId) -> Option<usize> {
     match id {
         crate::desc::GIC_ROOT_DOMAIN => Some(0),
@@ -256,7 +258,7 @@ pub(crate) fn resolve(id: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
 }
 
 /// The namespace of a controller claim; completion always uses its original cookie.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqRef {
     /// Domain-local hardware number, resolved through an RCU-protected Line index.
     Domain(IrqDomainId, Hwirq),

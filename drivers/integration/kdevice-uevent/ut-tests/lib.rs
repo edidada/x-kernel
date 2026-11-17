@@ -24,7 +24,10 @@ fn capability_bitmaps_use_linux_word_order() {
 #[def_test]
 fn actions_accept_only_the_linux_kobject_set() {
     assert_eq!(UeventAction::try_from("change"), Ok(UeventAction::Change));
-    assert_eq!(UeventAction::try_from("change\0remove"), Err(()));
+    assert_eq!(
+        UeventAction::try_from("change\0remove"),
+        Err(InvalidUeventAction)
+    );
 }
 
 #[def_test]
@@ -70,5 +73,5 @@ fn drm_render_node_has_its_own_uevent_projection() {
         .into_bytes()
     );
 
-    kdevice::unregister_device_node(node.core_id());
+    kdevice::unregister_device_node(node.core_id()).expect("legacy node unregisters");
 }

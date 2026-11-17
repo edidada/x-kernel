@@ -1,5 +1,26 @@
 # memspace — Security and Reliability Analysis
 
+## Commitment admission and cleanup
+
+Untrusted private writable requests exceeding managed RAM are rejected with
+`NoMemory`, including writable `mprotect` and `mremap` growth. This admission is
+independent of a process's `RLIMIT_AS`. `MAP_NORESERVE`, shared mappings, and
+many individually admissible mappings can still exhaust physical memory; the
+default heuristic is not a denial-of-service boundary or a backing reservation.
+
+Only installed accounted VMA ranges own global charges. Metadata snapshots do
+not acquire ownership; splitting/relocating must preserve accounted/noreserve
+state, and failed preparation must drop its local `CommitCharge`. Releasing
+pages with `MADV_DONTNEED` preserves the VMA commitment. VMA unmap and clear
+release the corresponding charge exactly once, including fork failure cleanup.
+
+Private range release must run after PTE invalidation and TLB completion while
+the caller excludes new faults/fork on the mapping. The allocation-free
+`release_range_after_unmap` callback runs outside the anonymous object lock.
+A partial page-table unmap failure leaves object slots retained rather than
+freeing frames that may still be visible. Clearing an MM allocates no VMA or
+private-page snapshot lists, but this is not an end-to-end NOFAIL exit guarantee.
+
 ## Post-populate hook safety
 
 `PopulateHook` uses safe one-shot adaptation over `KBox<dyn FnMut(&mut MmSpace)>`;
@@ -82,10 +103,10 @@ The test migration does not change production visibility, unsafe preconditions, 
   anon lineage together.
 - Private-anon page state must be held by `AnonPrivateObject`, and the runtime must not own a separate
   private frame table.
-- Detach frame, unmap PTE, TLB finalization and frame release must keep their order.
+- PTE teardown and TLB finalization must precede object-slot and frame release.
 - A sparse range unmap of a private mapping skips only nonexistent page-table subtrees and non-present
   entries; the actual leaf size must match the runtime. When a page-table walk fails, backing ownership is kept,
-  the RAII rollback of the detached slots restores the object records; the already cleared PTE prefix can be
+  object slots remain intact; the already cleared PTE prefix can be
   re-established by later faults, and frames must not be released early on the failure path. The original address-space lock and
   the TLB guard still cover the process and do not release intermediate page tables.
 - `mremap` move-style source retirement must not call ordinary runtime
@@ -162,6 +183,11 @@ The test migration does not change production visibility, unsafe preconditions, 
 9. An mm object observer blocks exit cleanup or reactivates a torn-down address space.
    - Mitigation: only `MmUserHandle` increments the active user count; `MmPin` only pins the object, and
      upgrade and the last release are mutually exclusive through a single atomic state.
+
+10. Exit cleanup copies a large VMA set under memory pressure.
+    - Mitigation: walk the stable set directly before and after TLB completion;
+      this outer walk needs no VMA-count-sized allocation. Backend teardown may
+      still allocate and has its own failure constraints.
 
 ## Failure Mode and Effects Analysis (FMEA)
 

@@ -517,8 +517,10 @@ dependencies = [
  "klazy",
  "kprocess",
  "ksync",
+ "ktask",
  "kvfs",
  "macros",
+ "memacct",
  "unittest",
 ]
 
@@ -1171,7 +1173,9 @@ dependencies = [
  "lazyinit",
  "linux-raw-sys",
  "macros",
+ "memaddr",
  "osvm",
+ "pagecache",
  "posix-types",
  "tee_crypto 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "unittest",
@@ -1558,7 +1562,7 @@ dependencies = [
  "lazyinit",
  "log",
  "memaddr",
- "osvm",
+ "posix-types",
  "unittest",
 ]
 
@@ -2157,6 +2161,7 @@ dependencies = [
  "kcpu_slot",
  "kspin",
  "log",
+ "memacct",
  "memaddr",
  "page-meta",
  "strum",
@@ -2193,6 +2198,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbandwidth"
+version = "0.3.0-dev"
+dependencies = [
+ "kspin",
+ "unittest",
+]
+
+[[package]]
 name = "kbpf"
 version = "0.3.0-dev"
 dependencies = [
@@ -2207,10 +2220,15 @@ version = "0.3.0-dev"
 name = "kcgroup"
 version = "0.3.0-dev"
 dependencies = [
+ "kbandwidth",
+ "kcpu_id_map",
+ "kcred",
  "kerrno",
  "kidentity",
  "klazy",
+ "kspin",
  "ksync",
+ "memacct",
  "unittest",
 ]
 
@@ -2229,6 +2247,7 @@ dependencies = [
  "lazyinit",
  "log",
  "net",
+ "unittest",
  "virtio",
  "vsock",
 ]
@@ -2315,6 +2334,7 @@ dependencies = [
  "driver-os-api",
  "driver_base",
  "fwnode",
+ "kerrno",
  "kmutex",
  "kspin",
  "lazyinit",
@@ -2368,6 +2388,7 @@ dependencies = [
  "driver_base",
  "hwrng",
  "input",
+ "intrusive-collections",
  "kalloc",
  "kalloc-types",
  "karch",
@@ -2386,7 +2407,6 @@ dependencies = [
  "ktime_types",
  "kworkng",
  "lazyinit",
- "linked_list_r4l",
  "log",
  "memaddr",
  "memspace",
@@ -2440,7 +2460,6 @@ name = "kernel-elf-parser"
 version = "0.3.0-dev"
 dependencies = [
  "xmas-elf",
- "zero",
  "zerocopy",
 ]
 
@@ -2465,6 +2484,7 @@ dependencies = [
  "entropy",
  "filemap",
  "kaddr_layout",
+ "kalloc-types",
  "kcred",
  "kernel-elf-parser",
  "kerrno",
@@ -2477,6 +2497,7 @@ dependencies = [
  "memaddr",
  "memspace",
  "ouroboros",
+ "posix-types",
  "tee_task_iface",
  "unittest",
  "xmas-elf",
@@ -2916,6 +2937,7 @@ dependencies = [
  "linux-raw-sys",
  "log",
  "net",
+ "osvm",
  "ringbuf",
  "smoltcp",
  "tipc",
@@ -3112,9 +3134,11 @@ version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "fs_context",
+ "intrusive-collections",
  "kaddr_layout",
  "kalloc-types",
  "karch",
+ "kbandwidth",
  "kcgroup",
  "kcpu_id_map",
  "kcred",
@@ -3136,8 +3160,8 @@ dependencies = [
  "ktimer",
  "kvfs",
  "lazyinit",
- "linked_list_r4l",
  "linux_sysno",
+ "memacct",
  "memaddr",
  "memspace",
  "posix-types",
@@ -3348,7 +3372,6 @@ dependencies = [
  "log",
  "memaddr",
  "memspace",
- "osvm",
  "posix-types",
  "strum",
  "unittest",
@@ -3448,8 +3471,10 @@ dependencies = [
  "backtrace",
  "event-listener",
  "futures-util",
+ "intrusive-collections",
  "kalloc-types",
  "karch",
+ "kbandwidth",
  "kbuild_config",
  "kcompletion",
  "kcpu_id_map",
@@ -3476,7 +3501,6 @@ dependencies = [
  "ktime_types",
  "ktimer-core",
  "lazyinit",
- "linked_list_r4l",
  "log",
  "memaddr",
  "unittest",
@@ -3600,7 +3624,7 @@ dependencies = [
  "kvfs",
  "kworkng",
  "linux-raw-sys",
- "osvm",
+ "posix-types",
  "ringbuf",
  "unittest",
 ]
@@ -3651,8 +3675,8 @@ dependencies = [
  "linux-raw-sys",
  "log",
  "memaddr",
- "osvm",
  "pagecache",
+ "posix-types",
  "slab",
  "smallvec",
  "unittest",
@@ -3854,12 +3878,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "linked_list_r4l"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1730c4ce817dc3edb092739ca5c109fe551018e5ea5a8361a8ddaa13d79ac8ed"
-
-[[package]]
 name = "linkme"
 version = "0.3.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3955,6 +3973,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "memacct"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "klazy",
+ "kspin",
+ "memaddr",
+ "page-meta",
+ "unittest",
+]
+
+[[package]]
 name = "memaddr"
 version = "0.3.0-dev"
 dependencies = [
@@ -4022,6 +4052,7 @@ dependencies = [
  "ksync",
  "lazyinit",
  "log",
+ "memacct",
  "memaddr",
  "page_table",
  "unittest",
@@ -4514,6 +4545,7 @@ dependencies = [
 name = "posix-fs"
 version = "0.3.0-dev"
 dependencies = [
+ "anon_inodefs",
  "bitflags 2.13.2",
  "fs_context",
  "iov_iter",
@@ -4523,6 +4555,7 @@ dependencies = [
  "kio",
  "klazy",
  "klogger",
+ "kns",
  "kprocess",
  "kquota",
  "ksync",
@@ -4634,6 +4667,7 @@ dependencies = [
  "osvm",
  "posix-fs",
  "posix-ipc",
+ "posix-types",
  "tee_kernel",
  "unittest",
 ]
@@ -4747,6 +4781,7 @@ dependencies = [
 name = "procfs"
 version = "0.3.0-dev"
 dependencies = [
+ "entropy",
  "kaddr_layout",
  "kalloc",
  "kalloc-types",
@@ -4761,6 +4796,7 @@ dependencies = [
  "klogger",
  "kns",
  "kprocess",
+ "ksync",
  "ktask",
  "ktime",
  "ktime_types",
@@ -5587,8 +5623,11 @@ name = "sysfs"
 version = "0.3.0-dev"
 dependencies = [
  "kalloc-types",
+ "kcpu_id_map",
  "kdevice",
  "kdevice-uevent",
+ "kerrno",
+ "khal",
  "klazy",
  "ksync",
  "kvfs",
@@ -6063,6 +6102,7 @@ dependencies = [
  "memaddr",
  "memspace",
  "osvm",
+ "posix-types",
  "unittest",
 ]
 
@@ -6186,9 +6226,10 @@ dependencies = [
  "driver_base",
  "hwrng",
  "input",
+ "intrusive-collections",
  "kspin",
  "kvirtiodrivers",
- "linked_list_r4l",
+ "lock_api",
  "log",
  "net",
  "pci",

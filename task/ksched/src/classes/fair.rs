@@ -293,9 +293,17 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     }
 
     fn first_deadline_key(&self, tok: RqLocked) -> Option<DeadlineKey> {
-        self.first_deadline
-            .as_ref()
+        let first = self.first_deadline.as_ref()?;
+        if !first.is_cgroup_parked() {
+            return Some(Self::deadline_key(first, tok));
+        }
+        // The front entity is cgroup-throttled: pick the earliest deadline
+        // among the remaining selectable entities without disturbing order.
+        self.ready
+            .iter()
+            .filter(|task| !task.is_cgroup_parked())
             .map(|task| Self::deadline_key(task, tok))
+            .min()
     }
 
     fn contains(&self, task: &SchedTask<T>, tok: RqLocked) -> bool {
@@ -308,7 +316,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         let vruntime = task.fair().vruntime.get(tok);
         let id = self.alloc_enqueue_id();
         task.fair().tree_id.set(id, tok);
-        let deadline = task.fair().deadline.get(tok);
+        let key = Self::deadline_key(&task, tok);
         let weight = Self::weight(&task, tok);
         task.set_seat(QueueSeat::from_sched_class(SchedClass::Fair), tok);
         debug_assert!(!task.fair().ready_link.is_linked());
@@ -316,7 +324,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         if self
             .first_deadline
             .as_ref()
-            .is_none_or(|first| (deadline, id) < Self::deadline_key(first, tok))
+            .is_none_or(|first| key < Self::deadline_key(first, tok))
         {
             self.first_deadline = Some(task.clone());
         }
@@ -357,10 +365,16 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
 
     fn earliest_eligible(&self, avg: i64, tok: RqLocked) -> Option<DeadlineKey> {
         let first = self.first_deadline.as_ref()?;
-        if is_eligible(first.fair().vruntime.get(tok), avg) {
+        if !first.is_cgroup_parked() && is_eligible(first.fair().vruntime.get(tok), avg) {
             return Some(Self::deadline_key(first, tok));
         }
-        self.ready.earliest_eligible(avg)
+        // Walk the deadline-ordered tree until the first eligible entity.
+        // Parked entities are skipped; do not filter the whole tree, which
+        // turns the common pick path into O(n).
+        self.ready.iter().find_map(|task| {
+            (!task.is_cgroup_parked() && is_eligible(task.fair().vruntime.get(tok), avg))
+                .then(|| Self::deadline_key(task, tok))
+        })
     }
 
     fn clear_buddy(&mut self) {
@@ -379,16 +393,15 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     }
 
     fn is_buddy_eligible(&self, avg: i64, tok: RqLocked) -> bool {
-        self.next_buddy
-            .as_ref()
-            .is_some_and(|buddy| is_eligible(buddy.fair().vruntime.get(tok), avg))
+        self.next_buddy.as_ref().is_some_and(|buddy| {
+            !buddy.is_cgroup_parked() && is_eligible(buddy.fair().vruntime.get(tok), avg)
+        })
     }
 
     fn entity_before(a: &SchedTask<T>, b: &SchedTask<T>, tok: RqLocked) -> bool {
-        let a_deadline = a.fair().deadline.get(tok);
-        let b_deadline = b.fair().deadline.get(tok);
-        a_deadline < b_deadline
-            || (a_deadline == b_deadline && a.fair().tree_id.get(tok) < b.fair().tree_id.get(tok))
+        // The deadline is EEVDF virtual time, not wall time; ties fall back to
+        // enqueue order through the tree id.
+        Self::deadline_key(a, tok) < Self::deadline_key(b, tok)
     }
 
     fn set_next_buddy(&mut self, wakee: Owner, tok: RqLocked) {
@@ -405,6 +418,15 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     fn pick_buddy(&mut self, tok: RqLocked) -> Option<Owner> {
         let avg = self.avg_vruntime(None, tok);
         if !self.is_buddy_eligible(avg, tok) {
+            return None;
+        }
+        if self
+            .next_buddy
+            .as_ref()
+            .is_some_and(|buddy| buddy.is_cgroup_parked())
+        {
+            // Keep the nomination; it becomes selectable again after the
+            // throttle window closes.
             return None;
         }
         let buddy = self.next_buddy.take()?;
@@ -638,17 +660,16 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
         let avg = self.avg_vruntime(None, tok);
         let key = match self.earliest_eligible(avg, tok) {
             Some(key) => key,
-            None =>
-            {
-                #[expect(
-                    clippy::expect_used,
-                    reason = "CG-021-no-panic-on-reachable-failure: The ready tree was checked \
-                              nonempty and the selected key remains present under the runqueue \
-                              lock"
-                )]
-                self.first_deadline_key(tok)
-                    .expect("ready tree is not empty")
-            }
+            None => match self.first_deadline_key(tok) {
+                Some(key) => key,
+                None => {
+                    // Every queued entity is cgroup-throttled; the class has
+                    // no selectable runner and arbitration falls to a lower
+                    // class (ultimately idle) until a window closes.
+                    self.clear_buddy();
+                    return None;
+                }
+            },
         };
         #[expect(
             clippy::expect_used,

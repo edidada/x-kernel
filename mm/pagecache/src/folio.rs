@@ -148,8 +148,8 @@ impl PinnedFolio {
 /// Clones retain the same content object and its lock for private-file COW.
 /// The PTE independently owns its physical hold. Removing this token never
 /// waits for TLB retirement and cannot release a page still held by a PTE.
-#[derive(Clone, Debug)]
 #[must_use = "retain the content token while private COW may read this page"]
+#[derive(Clone, Debug)]
 pub struct MappedFolio {
     pin: PinnedFolio,
 }
@@ -366,8 +366,8 @@ impl Drop for Folio {
                 self.index, dirty, writeback
             );
         }
-        // Cache quota was returned when the mapping detached this identity.
-        // This PageRef only keeps physical storage alive for remaining owners.
+        // Cache quota follows the physical PageRef, not this cache identity:
+        // page tables may keep the page alive after this Folio is dropped.
     }
 }
 
@@ -472,6 +472,14 @@ impl FolioGuard<'_> {
     }
 
     /// Marks the folio dirty unless its cache identity has been invalidated.
+    ///
+    /// `dirty_marks` is a derived index reconciled when the pagecache
+    /// folio-locking wrapper exits. Dirtying outside such a wrapper must
+    /// publish the index entry before returning: writeback selects candidates
+    /// from `dirty_marks`, not from this bit.
+    ///
+    /// Locking: caller holds this folio's lock through the guard; the mapping
+    /// index lock is not taken here.
     pub fn mark_dirty(&mut self) {
         self.folio.set_dirty();
     }

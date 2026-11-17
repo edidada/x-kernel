@@ -4,16 +4,26 @@
 
 //! Driver identity and driver-core objects shared by the driver framework.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use driver_base::{DeviceKind, DriverResult};
 use kspin::SpinNoPreempt;
 
 use crate::{
-    BusTypeId, DeviceDesc, DeviceId, DeviceIdentity, DeviceObject, DiscoveryOrigin, TransportInfo,
+    BusTypeId, DeviceDesc, DeviceId, DeviceIdentity, DiscoveryOrigin, TransportInfo,
     device::desc::PlatformIdentity,
 };
+
+mod context;
+mod data;
+mod erased;
+
+pub(crate) use context::ContextPermit;
+pub use context::{PmContext, ProbeContext, RemoveContext};
+pub(crate) use data::DriverData;
+pub use erased::BoxedDriver;
+pub(crate) use erased::ErasedCallError;
 
 /// Probe accounting for a driver or bus instance.
 ///
@@ -24,7 +34,7 @@ use crate::{
 /// Counters are cumulative for the lifetime of the object and are diagnostics
 /// only: they never suppress a candidate, blacklist a driver, or prevent a
 /// later retry.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProbeStats {
     /// Total probe attempts dispatched.
     pub attempts: u64,
@@ -73,7 +83,7 @@ impl Default for ProbeCounters {
 }
 
 /// Globally unique driver identifier assigned at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DriverId(u64);
 
 impl DriverId {
@@ -89,7 +99,7 @@ impl DriverId {
 }
 
 /// Persistent driver metadata.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct DriverInfo {
     /// Unique driver ID.
     pub id: DriverId,
@@ -104,7 +114,7 @@ pub struct DriverInfo {
 /// Matching is no longer scored. Candidates are evaluated in registration
 /// order and the first successful probe wins, so a matcher only reports
 /// whether the driver supports the device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MatchResult {
     /// The driver does not support this device.
     NoMatch,
@@ -113,7 +123,7 @@ pub enum MatchResult {
 }
 
 /// PCI vendor/device ID pair for matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciDeviceId {
     /// PCI vendor id to match against.
     pub vendor_id: u16,
@@ -126,7 +136,7 @@ pub struct PciDeviceId {
 /// The `alias` is the stable kernel-side identity used by platform-static
 /// fallback descriptors. Raw firmware identifiers stay split by source so DT,
 /// ACPI, and static fallbacks do not accidentally match each other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirmwareMatchSpec {
     /// Stable kernel-side identity name used for platform-static fallback devices.
     pub alias: &'static str,
@@ -266,7 +276,16 @@ impl DeviceMatcher for NeverMatcher {
 }
 
 /// Linux-like device driver operations.
+///
+/// `Data` is owned by one binding runtime for the
+/// lifetime of one binding. `probe_device` returns it; the framework stores it
+/// and passes the same instance to `remove`/PM callbacks. Drivers never see
+/// the type-erased storage or an `Any` getter.
 pub trait DeviceDriver: Send + Sync {
+    /// Private state of one binding. `Send` is required because the binding
+    /// may be retired from another task; `Sync` is deliberately not required.
+    type Data: Send + 'static;
+
     /// Stable human-readable driver name.
     fn name(&self) -> &'static str;
 
@@ -279,45 +298,31 @@ pub trait DeviceDriver: Send + Sync {
     /// Device matcher exposed to the bus type during probe.
     fn matcher(&self) -> &dyn DeviceMatcher;
 
-    /// Probe an unpublished device object and bind runtime state to its class.
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()>;
+    /// Probe an unpublished device and return this binding's private state.
+    fn probe_device(&self, ctx: &ProbeContext<'_>) -> DriverResult<Self::Data>;
 
     /// Remove a previously probed device.
-    fn remove(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    ///
+    /// Returning `Ok` or `Err` both require the device to be stopped and no
+    /// longer DMA/IRQ accessible before returning. `Err` reports a non-fatal
+    /// post-stop cleanup error; the framework logs it and continues teardown.
+    /// Implementations that cannot stop must not return through this path.
+    fn remove(&self, _ctx: &RemoveContext<'_>, _data: Option<&mut Self::Data>) -> DriverResult<()> {
         Ok(())
     }
 
-    /// Quiesce a device for system suspend (low-power / sleep transition).
-    ///
-    /// The default does nothing. Drivers that own stateful hardware should
-    /// save context and stop DMA/IRQ activity here. Unlike [`remove`], the
-    /// device stays bound and is expected to be brought back via [`resume`].
-    ///
-    /// [`remove`]: DeviceDriver::remove
-    /// [`resume`]: DeviceDriver::resume
-    fn suspend(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    /// Quiesce a device for system suspend. PM scheduling is not wired yet.
+    fn suspend(&self, _ctx: &PmContext<'_>, _data: Option<&mut Self::Data>) -> DriverResult<()> {
         Ok(())
     }
 
     /// Restore a device previously quiesced by [`suspend`].
-    ///
-    /// The default does nothing. Drivers should re-program hardware and
-    /// restore any context saved during suspend.
-    ///
-    /// [`suspend`]: DeviceDriver::suspend
-    fn resume(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn resume(&self, _ctx: &PmContext<'_>, _data: Option<&mut Self::Data>) -> DriverResult<()> {
         Ok(())
     }
 
-    /// Bring a device to a quiescent state on system shutdown/reboot.
-    ///
-    /// The default does nothing. Drivers should stop ongoing activity and
-    /// leave the hardware in a safe state for firmware/the next boot. Unlike
-    /// [`remove`], no resources need to be released because the system is
-    /// going down.
-    ///
-    /// [`remove`]: DeviceDriver::remove
-    fn shutdown(&self, _device: Arc<DeviceObject>) {}
+    /// Bring a device to a quiescent state on shutdown/reboot.
+    fn shutdown(&self, _ctx: &PmContext<'_>, _data: Option<&mut Self::Data>) {}
 }
 
 /// Registered driver object saved in the matching domain.
@@ -327,20 +332,89 @@ pub trait DeviceDriver: Send + Sync {
 /// there is no risk of getting an out-of-sync cached copy.
 pub struct DriverObject {
     id: DriverId,
-    ops: Arc<dyn DeviceDriver>,
+    ops: BoxedDriver,
     bound_devices: SpinNoPreempt<Vec<DeviceId>>,
     probe: ProbeCounters,
 }
 
 impl DriverObject {
     /// Create a registered driver object.
-    pub fn new(id: DriverId, ops: Arc<dyn DeviceDriver>) -> Self {
+    pub fn new(id: DriverId, ops: BoxedDriver) -> Self {
         Self {
             id,
             ops,
             bound_devices: SpinNoPreempt::new(Vec::new()),
             probe: ProbeCounters::new(),
         }
+    }
+
+    pub(crate) fn probe_erased(&self, ctx: &ProbeContext<'_>) -> DriverResult<DriverData> {
+        self.ops.erased().probe(ctx)
+    }
+
+    pub(crate) fn remove_erased(
+        &self,
+        ctx: &RemoveContext<'_>,
+        data: Option<&mut DriverData>,
+    ) -> Result<(), ErasedCallError> {
+        self.ops.erased().remove(ctx, data)
+    }
+
+    #[cfg_attr(
+        all(not(unittest), not(doc)),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
+                      builds"
+        )
+    )]
+    pub(crate) fn suspend_erased(
+        &self,
+        ctx: &PmContext<'_>,
+        data: Option<&mut DriverData>,
+    ) -> Result<(), ErasedCallError> {
+        self.ops.erased().suspend(ctx, data)
+    }
+
+    #[cfg_attr(
+        all(not(unittest), not(doc)),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
+                      builds"
+        )
+    )]
+    pub(crate) fn resume_erased(
+        &self,
+        ctx: &PmContext<'_>,
+        data: Option<&mut DriverData>,
+    ) -> Result<(), ErasedCallError> {
+        self.ops.erased().resume(ctx, data)
+    }
+
+    #[cfg_attr(
+        all(not(unittest), not(doc)),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
+                      builds"
+        )
+    )]
+    pub(crate) fn shutdown_erased(
+        &self,
+        ctx: &PmContext<'_>,
+        data: Option<&mut DriverData>,
+    ) -> Result<(), ErasedCallError> {
+        self.ops.erased().shutdown(ctx, data)
+    }
+
+    /// Matcher metadata exposed to bus types.
+    pub fn matcher(&self) -> &dyn DeviceMatcher {
+        self.ops.erased().matcher()
+    }
+
+    pub fn supports_adoption(&self) -> bool {
+        self.ops.supports_adoption()
     }
 
     /// Unique driver ID.
@@ -352,29 +426,24 @@ impl DriverObject {
     pub fn info(&self) -> DriverInfo {
         DriverInfo {
             id: self.id,
-            name: self.ops.name(),
-            device_kind: self.ops.device_kind(),
+            name: self.ops.erased().name(),
+            device_kind: self.ops.erased().device_kind(),
         }
     }
 
     /// Driver name.
     pub fn name(&self) -> &'static str {
-        self.ops.name()
+        self.ops.erased().name()
     }
 
     /// Produced device kind.
     pub fn device_kind(&self) -> DeviceKind {
-        self.ops.device_kind()
+        self.ops.erased().device_kind()
     }
 
     /// Bus matching domains.
     pub fn bus_types(&self) -> &'static [BusTypeId] {
-        self.ops.bus_types()
-    }
-
-    /// Runtime operations.
-    pub fn ops(&self) -> Arc<dyn DeviceDriver> {
-        self.ops.clone()
+        self.ops.erased().bus_types()
     }
 
     /// Record a bound device.

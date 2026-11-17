@@ -14,9 +14,11 @@ use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 use strum::IntoEnumIterator;
 
+#[cfg(unittest)]
+use crate::SignalInfo;
 use crate::{
     DefaultSignalAction, MAX_SIGNALS, SigLock, SigchldChildExitSignalInfo, SignalAction,
-    SignalActionFlags, SignalDisposition, SignalInfo, SignalNotification, SignalSet, Signo,
+    SignalActionFlags, SignalDisposition, SignalNotification, SignalSet, Signo,
     TimerSignalRejection, TimerSignalSendOutcome,
 };
 
@@ -135,7 +137,7 @@ impl PreparedChildExitSignal {
 }
 
 /// Outcome of an immediately sent child-exit notification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildExitSignalOutcome {
     autoreap: bool,
 }

@@ -302,6 +302,10 @@ fn release_unit(unit: AllocationInfo) {
     // SAFETY: the caller transfers one existing hold after all protected use.
     // The unit geometry was saved before decrementing its sole head counter.
     if unsafe { head.release_reference() } {
+        memacct::uncharge_frame(
+            PhysAddr::from(unit.head_pfn() * PAGE_SIZE_4K),
+            unit.page_count() * PAGE_SIZE_4K,
+        );
         // SAFETY: true selected the unique retiring holder; all links are cleared
         // before storage becomes reusable and no old metadata write follows.
         let kind = unsafe { metadata_table().finish_reference_retirement(unit.head_pfn()) };
@@ -439,6 +443,17 @@ fn allocate_range(
         RangeSource::Dma32 => allocator.alloc_dma_pages(backing_pages, alignment_bytes, kind)?,
     };
     let paddr = PhysAddr::from(kaddr_layout::v2p(va));
+    // Charge before constructing PageRef: failure after publication would make
+    // the drop path account a deallocation that was never allocated for
+    // RustHeap and would leave spare-page usage behind.
+    let is_charged = kind != UsageKind::PageTable;
+    if is_charged && memacct::charge_frame(paddr, num_pages * PAGE_SIZE_4K, kind).is_err() {
+        if kind != UsageKind::RustHeap {
+            allocator.record_usage_dealloc(kind, backing_pages * PAGE_SIZE_4K);
+        }
+        allocator.release_pages_to_inventory(va, backing_pages);
+        return Err(AllocError::NoMemory);
+    }
     let result = if kaddr_layout::p2v(paddr.as_usize()) != va {
         Err(PageMetaError::InvalidRange)
     } else {
@@ -463,6 +478,9 @@ fn allocate_range(
             Ok(page)
         }
         Err(error) => {
+            if is_charged {
+                memacct::uncharge_frame(paddr, num_pages * PAGE_SIZE_4K);
+            }
             if kind != UsageKind::RustHeap {
                 allocator.record_usage_dealloc(kind, backing_pages * PAGE_SIZE_4K);
             }

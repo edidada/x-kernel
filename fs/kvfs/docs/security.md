@@ -545,9 +545,18 @@ Locks constrain only cooperating callers; file reads and writes without an advis
 
 ### Mount propagation limits
 
-- Mount propagation covers only `MS_PRIVATE`/`MS_SLAVE` (there are no shared propagation groups, so the two behave equivalently) and non-recursive
-  bind; `MS_SHARED`/`MS_UNBINDABLE` and copying of recursively bind-mounted subtrees still return `EINVAL`,
-  and the mount tree is not silently flattened. A recursive bind is accepted only when the source subtree has no mounts, in which case the result is the same as for a non-recursive one.
+- There are no shared propagation groups, so every propagation request is behaviourally private. `MS_PRIVATE`/`MS_SLAVE`
+  are accepted after validating the target is a registered mount in this namespace, and `MS_SHARED`/`MS_UNBINDABLE` are accepted
+  as validated no-ops for the same reason: a shared mount here would propagate no events and an unbindable one has no peer to
+  refuse, and systemd remounts the namespace root `MS_SHARED` after `pivot_root`, so rejecting it would abort the switch-root.
+  An invalid target is still `EINVAL` in all four cases, and the mount tree is never silently flattened.
+- Recursive bind (`MS_BIND|MS_REC`) is supported: `attach_bind_recursive` clones the source mount subtree and re-grafts each cloned
+  child under its cloned parent. Only submounts at or below the bind source are cloned (sibling submounts elsewhere in the host mount
+  are excluded), so every cloned child stays reachable under the new root and can be unmounted; the tree is not silently flattened.
+- `MS_MOVE` (`move_mount_to`) is supported with Linux `do_move_mount` safeguards: a target at or below the moved subtree is rejected
+  with `ELOOP` (no self-referential mount), the directory/non-directory match is validated before any detach so a failing move leaves
+  the source attached, and the whole detach + re-graft runs under the namespace registry lock plus the touched inodes'
+  namespace-exclusive locks (no split critical section).
 
 ### Validity of buffered read window hints
 
@@ -880,9 +889,10 @@ revoked views allow clean-folio discard. A dirty folio reported as
 must treat the range as not fully invalidated and must not assume the cache
 still holds every folio.
 
-Buffered writes publish or dirty cache folios only while holding the invalidate
-read lock, so an invalidation that holds it exclusively cannot report completion
-while a concurrent writer can still make the range dirty again. A registered
+Buffered writes dirty cache folios only while holding the folio lock, and the
+generic write path holds the inode data lock that every invalidation and
+set-length entry also takes, so an invalidation cannot report completion while
+a concurrent writer can still make the range dirty again. A registered
 view never spans a partial tail page: that page is anonymous and must survive a
 file invalidation, so rounding the view to the page boundary keeps file
 invalidation from zapping user data in an executable's BSS tail. Executable text
@@ -944,10 +954,24 @@ owned I/O is still drained and cache ownership remains intact.
 
 ## Buffered acceptance/writeback handoff
 
-The copied folio remains locked through write_end acceptance and i_size
-publication, with invalidate shared held. Write-end implementations cannot
-reacquire that folio or wait for its I/O. Cancellation and rollback release
-those guards before lifecycle waits, while retaining writer data serialization.
-Writeback samples live EOF only after taking the same folio lock. Attempted
-work and filesystem declines share one pagecache-owned control; completion
-never retains it. This does not replace shared-PTE dirty rearming/invalidation.
+A single-folio write keeps the copied folio locked through write_end acceptance
+and i_size publication. A batched run accepts each slot while its own folio is
+locked and releases the run's unaccepted tail afterwards, unlocked, in one
+tail-release hook whose return type cannot change the published count; it
+publishes no size and releases
+only the reservation units that run newly created, never reservations owned by
+earlier writes. Write-end implementations cannot reacquire a folio or wait for
+its I/O. Cancellation and rollback release those guards before lifecycle waits,
+while retaining writer data serialization. Writeback samples live EOF only
+after taking the same folio lock. Attempted work and filesystem declines share
+one pagecache-owned control; completion never retains it. This does not replace
+shared-PTE dirty rearming/invalidation.
+
+Buffered completion requests describe only the prepared range and copied count;
+the range's exclusive end is validated before admission, and the copy count is
+bounded by its length. The size-publication helper compares the accepted end
+against the owning inode's current size while the inode data lock excludes
+competing writes and truncate. Hooks must accept at most the copied count and
+publish a nonempty accepted prefix before returning success. Cancellation
+preserves the file length. Writeback continues to sample live EOF under its own
+folio-lock protocol.

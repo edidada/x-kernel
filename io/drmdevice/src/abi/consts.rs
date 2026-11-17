@@ -78,6 +78,14 @@ pub(crate) const DRM_CAP_ADDFB2_MODIFIERS: u64 = 0x10;
 /// `DRM_CLOEXEC`: install the descriptor close-on-exec.
 pub(crate) const DRM_CLOEXEC: u32 = 0o2000000;
 
+/// `DRM_RDWR`: export the buffer with read/write access.
+///
+/// `drm.h` defines it as `O_RDWR`, so the value is 2. A client that intends to
+/// read *and* write the exported buffer passes it together with `DRM_CLOEXEC`
+/// (Mesa's `gbm_bo_get_fd_for_plane` passes `0x80002`); `drm_prime.c`
+/// `drm_prime_handle_to_fd_ioctl` admits exactly these two flags.
+pub(crate) const DRM_RDWR: u32 = 2;
+
 /// `DRM_CAP_SYNCOBJ`: binary `SYNCOBJ_*` commands are implemented.
 pub(crate) const DRM_CAP_SYNCOBJ: u64 = 0x13;
 /// `DRM_CAP_PRIME`: the driver supports dma-buf import and export.
@@ -119,6 +127,16 @@ pub(crate) const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE: u32 = 1 << 2;
 
 /// `DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE`: publish `deadline_nsec` on the
 /// fences the wait parks on.
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unitless_time_integer,
+    reason = "CG-011-time-unit-names: Linux UAPI name `DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE` from \
+              `include/uapi/drm/drm.h`"
+)]
 pub(crate) const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE: u32 = 1 << 3;
 
 /// Upper bound on objects one `SYNCOBJ_*` request may address.

@@ -74,7 +74,12 @@ The syscall layer supplies validated socket arguments and current-call
 credentials. `kcred` defines credential predicates, `kvfs` enforces pathname
 permissions, `kclass` and its device providers own network-buffer validity and
 transport event contracts, and `ringbuf`, `smoltcp`, `zerocopy`, and `etherparse`
-provide their respective buffer and parsing contracts. Driver DMA programming,
+provide their respective buffer and parsing contracts. The unix datagram and
+seqpacket transports additionally queue messages in `async_channel` channels,
+whose FIFO ordering and close semantics are that crate's contract; the byte
+counters that `SIOCINQ`/`SIOCOUTQ` report live here because a channel offers no
+peek, and the datagram transport therefore refuses those ioctls with `ENOTTY`
+instead of reporting a queue depth it cannot observe. Driver DMA programming,
 raw user-pointer access, host-side handshake clients, and TIPC service policy
 are external responsibilities rather than guarantees established by `knet`.
 
@@ -131,6 +136,19 @@ It rejects sizes and offsets that exceed the 16-bit ABI fields, names that do no
 fit a NUL-terminated ABI field, and conditions whose meaning would change in the
 legacy format. The output buffer may be partially written on failure and must
 be discarded. The encoder receives kernel values and does not access user memory.
+
+INPUT runs on complete, validated local IPv4 datagrams before transport delivery
+or protocol/port-unreachable replies. Fragment queues do not evaluate partial datagrams.
+Unknown input interfaces and invalid match contexts drop the packet. Interface
+names are copied on configuration changes, so matching needs no Router lock.
+Loopback reserves queue capacity before INPUT, then evaluates UDP outside the
+queue lock and before disabling BH. NetRx never acquires the filter's sleepable lock. Deferred receive work carries the accepted UDP continuation
+through table changes. Ingress resumes that delivery without another INPUT
+check; ordinary network input still evaluates the current table.
+
+Local IPv4 OUTPUT runs in task context with Router held and must accept the
+packet before fragmentation, loopback receive, or device transmission.
+Filter publication never waits for Router while holding the configuration lock.
 
 Entry decoding bounds every record by `next_offset`, keeps extensions before the
 target, and checks their aligned sizes before slicing. Each decode allocates at
@@ -284,7 +302,17 @@ The trust relationships in the diagram define the security responsibilities of e
 | Asset | Protection requirement and local evidence |
 |-------|-------------------------------------------|
 | Per-send `Cred` capability sets | `NetlinkSocket::send_with_cred` inspects the effective capabilities of the sender's credential captured at each send. Rtnetlink mutation and destination checks require `CAP_NET_ADMIN`; the `NETLINK_KOBJECT_UEVENT` receive callback requires `CAP_SYS_ADMIN`. `bind_with_cred` and `connect_with_cred` require `CAP_NET_ADMIN` for group or nonzero-destination authorization. A connected destination is authorized at connect time and is not rechecked by address-less sends. For an address-less or connected send to a kernel protocol, both the current sender and the credential captured at socket-file open (`SendOptions::opener_cred`) must hold the protocol capability, matching `__netlink_ns_capable`'s `NETLINK_SKB_DST` conjunct; an explicit `msg_name` check uses only the current sender. Effective UID 0 alone grants nothing when the capability has been dropped from the effective set. Credential-free bind, send, and connect paths have no administrative authority. |
-| Netlink port IDs and subscription masks | `port::bind` allocates or validates the port ID per protocol, rejects nonzero group subscriptions for unknown protocols (`EPERM` without `CAP_NET_ADMIN`, `ENOENT` with it), and stores only the protocol's implemented group bits. `NETLINK_ROUTE` additionally requires `CAP_NET_ADMIN` for the reverse-path groups 30 and 31, matching `rtnetlink_bind`; authorization finishes before any stored address changes. A bound socket cannot change its port ID, and conflicting explicit IDs fail with `EADDRINUSE`. `port::publish` filters recipients by protocol, live weak reference, bound subscription mask, sender exclusion, and requested unicast port before enqueueing. |
+| Netlink port IDs and subscription masks | `port::bind` allocates or validates the port ID per protocol, rejects nonzero group subscriptions for unknown protocols (`EPERM` without `CAP_NET_ADMIN`, `ENOENT` with it), and stores only the protocol's implemented group bits. `NETLINK_ROUTE` additionally requires `CAP_NET_ADMIN` for the reverse-path groups 30 and 31, matching `rtnetlink_bind`; authorization finishes before any stored address changes. A bound socket cannot change its port ID, and conflicting explicit IDs fail with `EADDRINUSE`. `port::publish` filters recipients by protocol, live weak reference, the socket's own subscription mask, sender exclusion, and
+requested unicast port before enqueueing. The mask lives on the socket rather than on its bound address because
+`NETLINK_ADD_MEMBERSHIP` is valid before `bind()` (`netlink_realloc_groups` needs no port id), so an unbound subscriber is still
+a recipient: the first subscription links the socket into the protocol's broadcast list (`port::subscribe`, Linux's `mc_list`
+through `sk_add_bind_node`), `publish` snapshots that list together with the port map and de-duplicates by socket identity, and
+dropping the last subscription unlinks it again. `bind()` merges its `nl_groups` into the same mask. Membership changes require `CAP_NET_ADMIN` when the protocol's table lacks
+`NL_CFG_F_NONROOT_RECV` and the caller does not hold it. `NETLINK_ROUTE` and
+`NETLINK_KOBJECT_UEVENT` set that flag; `NETLINK_USERSOCK` sets only
+`NL_CFG_F_NONROOT_SEND`, so its groups are privileged while its sends are not.
+The answer comes from the netlink layer's own per-protocol `GroupPolicy`, so
+the bind-time and setsockopt-time policies cannot diverge. |
 | Pathname socket inode and binding identity | `lookup_bind_entry` in [src/unix.rs](../src/unix.rs) checks final-inode `MAY_WRITE` through kvfs, verifies `NodeType::Socket`, and uses `path_bind_matches` to compare the upgraded inode with the resolved inode through `Arc::ptr_eq`. A stale or missing binding returns `ConnectionRefused`. |
 | Filesystem ownership fields | Path lookup and creation pass the same `Cred` to kvfs. kvfs uses `fsuid`, `fsgid`, supplementary groups, inode owner/group, and mode bits for DAC and ownership initialization. User bind supplies `0777 & !umask`; `bind_with_cred` receives an explicit mode from its kernel caller. |
 | Driver RX/TX memory and `PacketBuf` data | `EthernetDevice::poll_rx` finishes `handle_rx_frame` before `recycle_rx`; the provider owns buffer validity. `PacketBuf` owns packet storage and validates offsets and ranges through its accessors. Reference-counted handles keep storage alive across queues. |
@@ -761,7 +789,7 @@ IPv4 reassembly queues publish their earliest deadline through a separate atomic
 ### 21. TX and Receive-Window Handoff Conditions
 
 Sockets and Router must publish newly generated TX work through `notify(PollReason::Tx)`.
-After TCP consumes data from a receive buffer whose free space is below the maximum window-scaling quantum, it must publish zero-window recovery work through `notify(PollReason::RxWindow)`.
+After TCP consumes receive data, it must publish window-update work through `notify(PollReason::RxWindow)` after releasing the socket-set mutex, including when the advertised window remains positive. Peeks and reads that consume no data do not create window-update work.
 
 TCP readiness waiters use socket-local read/write sources and listener accept sources, so unrelated traffic cannot repeatedly drive an empty epoll wait. smoltcp retains only the aggregated source wakers, not the `TcpSocket` owner. Registration precedes the caller's readiness recheck; callbacks only wake poll sources and must not reenter the socket-set mutex. Global RX and timer notifications remain responsible for scheduling protocol progress.
 
@@ -812,7 +840,7 @@ Raw-packet batches already taken from devices, admitted-packet batches awaiting 
 
 ### 27. Loopback UDP Delivery Boundary
 
-Before disabling BH, the loopback send path must write validated metadata for complete IPv4 UDP packets. Under `local_bh_disable`, it then places the same `PacketBuf` into `pending_udp` in the shared `NET_RX_QUEUE` and triggers `NetRx`.
+Before disabling BH, the loopback send path must write validated metadata for complete IPv4 UDP packets. Under `local_bh_disable`, it then places the prepared UDP handle into `pending_udp` in the shared `NET_RX_QUEUE` and triggers `NetRx`.
 `NetRx` dequeues only UDP packets with validated metadata from `pending_udp` and does not look up `LoopbackDevice`.
 Both `NetRx` and supplemental processing in task context must use `SpinNoIrq` for UDP PCB lookup and enqueueing.
 Delivery of complete IPv4 UDP packets is independent of the poller's `RUNNING` execution ownership.
@@ -822,7 +850,9 @@ Delivery of complete IPv4 UDP packets is independent of the poller's `RUNNING` e
 
 `pending_udp` and `deferred` must be preallocated according to `SOCKET_BUFFER_SIZE` when the device is created. `enqueue` checks capacity against the combined number of queued and in-flight packets and rejects excess packets, so `push_back` must never trigger capacity growth within `SpinNoIrq` or the `NetRx` softirq.
 UDP packets with validated metadata taken by `process_pending` must count toward the in-flight reservation. Each batch is limited to `NET_RX_BUDGET` and delivered outside the lock.
-Packets without a matching PCB must retain exclusive handle ownership, have their metadata cleared, and enter `deferred`.
+Packets without a matching PCB retain their prepared UDP view and enter
+`deferred` as local-delivery work. This queue preserves FIFO order with ordinary
+network input and never sends local-delivery work back through INPUT.
 When the queue is full, `enqueue` must return the packet to the caller. The send path then drops it after releasing the `NET_RX_QUEUE` lock and BH guard.
 `discard_ifindex` must first move matching packets to a local container and drop them after unlocking to avoid heap deallocation within `SpinNoIrq`.
 Supplemental processing in the send path's task context handles only the `pending_udp` packets present at entry, split into a fixed number of rounds according to `NET_RX_BUDGET`.
@@ -890,7 +920,7 @@ RAII must return the slot if reservation fails, the operation is interrupted, or
 | T-28 | TCP file closure loses data already accepted for transmission | Medium | `write` copies data into the smoltcp buffer and asynchronously publishes TX work, but file Drop removes the handle before the poller processes it | Payload already accepted by write is discarded before protocol transmission completes. | Drop transfers handles with incomplete protocol closure to the deferred-close registry; the poller reclaims them after data transmission, FIN processing, and retransmission complete; the 60-second deadline only limits resource retention by `FIN_WAIT_2` handles detached from user file objects |
 | T-29 | Concurrent socket waits block network-timer updates | Medium | Socket wait registration manually polls an asynchronous sleep object under the timeout-state mutex, and waiting for the timer-wheel lock blocks the poller | Blocked timer updates delay protocol work and socket wakeups. | Deadlines are published atomically; after expiration, the periodic sampling callback directly wakes waiters and notifies the poller without holding the timeout-state mutex or creating or polling timer futures |
 | T-30 | TCP close follows the FIN path despite unread data, notifying the peer of an orderly shutdown and losing the RST semantics expected by Linux | Medium | File-object release omits the receive-queue check, and protocol close directly enters FIN_WAIT1 | The peer receives an orderly close despite unread data being discarded. | Drop checks the smoltcp receive queue; unread data triggers abort, and the handle is retained until RST dispatch completes |
-| T-31 | TCP zero-window recovery lacks background processing | Medium | The application reads the TCP receive buffer while the advertised window is still encoded as zero, without publishing window-recovery work | The peer continues to observe a closed receive window, stalling transmission. | Reads call `notify(PollReason::RxWindow)` when receive-buffer free space is below the maximum window-scaling quantum; after that quantum is reached, RX and registered protocol timers drive further window growth |
+| T-31 | TCP receive-window growth lacks background processing | Medium | The application frees receive-buffer space without publishing window-update work, while the advertised window is zero or too small for the peer to send | Transmission stalls until an unrelated packet or timer drives protocol processing. | Every non-peeking read that consumes data calls `notify(PollReason::RxWindow)` after releasing the socket-set mutex; protocol processing selects whether to advertise the enlarged window |
 | T-32 | New events are lost during poller execution | Medium | RX, TX, or timer notifications race with the completion state update | Pending RX, TX, or timer work is stranded after the executor finishes. | NetRx softirq, TX, and timer notifications share the same `NetworkPoller` state machine; work arriving during execution is published as `RUNNING_PENDING`; one IRQ-safe state lock serializes notifications with completion, and submission follows outside the lock |
 | T-33 | A compound link update commits partially | Medium | Renaming succeeds before MTU or flag validation fails | The device is renamed while other requested configuration fields remain unchanged. | `DeviceRegistry::update_device_link` validates the target device, name format and uniqueness, and MTU range before writing; the rtnetlink entry point ignores `IFF_VOLATILE` changes and rejects actual changes to unsupported writable bits; device setters receive only validated values |
 | T-34 | Shared mutexes held by ordinary tasks retain poller execution ownership for an extended period | Medium | After acquiring `RUNNING`, the poller waits for Router, IngressProcessor, Interface, or socket-set held by another socket or control-plane task | Other network work cannot progress while the sole poller waits for a shared lock. | Polling rounds use `try_lock` for these shared locks; contention preserves batches awaiting handoff, returns `has_more`, and schedules later rounds through the existing four-state machine; IPv4 reassembly attempts the IngressProcessor lock only when expired events are pending and continues TX after contention; assisted processing remains limited to one round and checks execution ownership once under the short poller state lock |

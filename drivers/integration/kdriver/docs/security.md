@@ -205,8 +205,9 @@ contain inert device state, not a transport whose final Drop could occur in IRQ.
 the single PENDING_DEVICES lock, rather than adding independently ordered slot locks.
 Every state access, list push and list pop holds that lock. Only the owning,
 pinned CPU consumes its finite detached batch. Queued also means detached, so
-remote requests cannot link the same device completion twice. List<Arc<BlockIoReclaimer>> retains
-the allocation; the module never manufactures raw ownership pointers.
+remote requests cannot link the same device completion twice. LinkedList<PendingAdapter>
+(an Arc adapter) retains the allocation; the module never manufactures raw ownership pointers.
+Double-linking a reclaimer panics; the phase state machine makes that unreachable.
 
 The unsafe Sync implementation relies on this lock discipline, stable Arc
 ownership, and Send+Sync devices. The fields remain private to block_completion_dispatch.
@@ -284,7 +285,7 @@ Callers:
 
 ### 3. VirtIoHalImpl — Unsafe Trait Implementation
 
-Location: `src/driver_registry/virtio/glue.rs:277`
+Location: `src/driver_registry/virtio/glue.rs:279`
 
 ```rust
 unsafe impl VirtIoHal for VirtIoHalImpl { ... }
@@ -673,6 +674,7 @@ Callers:
 | T-16 | VirtIO input is published before its interrupt action is usable | Medium | Input construction succeeds but IRQ registration fails or races publication | `virtio/input.rs` requires an IRQ, registers its devres action first, and calls `publish_input` only after registration succeeds. |
 | T-17 | A stale or forged firmware-node handle lets probe read another device's properties | Medium | A handle is constructed for storage that has been freed, or one backend is confused with another | `FwNode` equality includes the backend pointer and local id; fallible backend queries return `FwError::InvalidNode` for unknown handles (infallible `name`/`parent` accessors return `None`); only boot-static backends are published; `kdriver` copies the handle resolved during discovery and never re-searches by name or compatible. |
 | T-18 | Two enumeration/driver-registration paths bind the same descriptor, producing duplicate devices or a deadlock | Medium | A backend rescans while a probe or another registration scan is in flight | `kdevice` serializes binders on the descriptor's stable binding lock; `kdriver` treats `Busy` (same-task recursion only) and core errors as "leave Pending, log, retry later", and `Skipped` as already bound. |
+| T-19 | A VirtIO GPU command waits indefinitely for completion | Medium | Missing route, registration after discovery, or IRQ disabled across the wait | `gpu::activate` registers the shared handler before `DRIVER_OK`. The driver rejects non-sleepable callers and drains commands before PCI INTx is masked. |
 
 Impact levels:
 
@@ -831,3 +833,13 @@ DeviceManager's backend serialization is a sleepable task mutex. Enumeration,
 rescan and orderly bus teardown must not run from IRQ/BH or preemption-excluded
 scopes. Bus MMIO preparation may wait for TLB completion with ordinary IRQs
 serviceable; no backend-manager spinlock is held across that wait.
+
+## VirtIO block binding data
+
+VirtIO block activation is owned by the block binding's typed `Data`, not by a
+`DeviceId -> closure` table. `remove` takes the activation and runs
+`begin_close`, disk withdrawal, drain, IRQ release, reclaimer stop, and
+`finish_close` before framework devres/Data release. `Drop` only covers probe
+failure paths; the production remove path closes explicitly. Non-block VirtIO
+kinds retain their legacy class/devres cleanup and are not claimed as audited
+for the stop contract.

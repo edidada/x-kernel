@@ -15,13 +15,15 @@ mod read_cost;
 #[path = "sync_scaling.rs"]
 mod sync_scaling;
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use kalloc_types::KBox;
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+use kerrno::KResult;
 use krcu::{CallbackNode, PreparedCallback};
 
 const SAMPLES: usize = 32;
@@ -43,12 +45,12 @@ struct Record {
 const _: () = assert!(core::mem::offset_of!(Record, node) == 0);
 
 /// # Safety
-/// Consume the unique raw Box projection created by prepare, once after queue
+/// Consume the unique raw KBox projection created by prepare, once after queue
 /// detachment. No other owner may access the record after accepted submission.
 unsafe fn invoke(node: *mut CallbackNode) {
     let entry_ns = khal::time::monotonic_time_nanos();
-    // SAFETY: repr(C) and the offset assertion preserve the original Box base.
-    let record = unsafe { Box::from_raw(node.cast::<Record>()) };
+    // SAFETY: repr(C) and the offset assertion preserve the original KBox base.
+    let record = unsafe { KBox::from_raw(node.cast::<Record>()) };
     let is_valid = khal::percpu::this_cpu_id() == record.cpu
         && kirq::context::interrupt_context_level()
             == kirq::context::InterruptContextLevel::Softirq;
@@ -63,27 +65,27 @@ unsafe fn invoke(node: *mut CallbackNode) {
 }
 
 /// # Safety
-/// Consume the same raw Box projection as invoke, but only while its sole
+/// Consume the same raw KBox projection as invoke, but only while its sole
 /// submission handle owns the unqueued record. It was never published to readers.
 unsafe fn cancel(node: *mut CallbackNode) {
     // SAFETY: cancellation retains the unique unsubmitted allocation owner.
-    drop(unsafe { Box::from_raw(node.cast::<Record>()) });
+    drop(unsafe { KBox::from_raw(node.cast::<Record>()) });
 }
 
-fn prepare(cpu: LogicalCpuId, observation: &Arc<Observation>) -> PreparedCallback {
-    let record = Box::into_raw(Box::new(Record {
+fn prepare(cpu: LogicalCpuId, observation: &Arc<Observation>) -> KResult<PreparedCallback> {
+    let record = KBox::into_raw(KBox::new(Record {
         node: CallbackNode::new(invoke),
         observation: observation.clone(),
         cpu,
-    }));
+    })?);
     // SAFETY: raw field projection retains the enclosing allocation's provenance.
     let node = unsafe { &raw mut (*record).node };
-    // SAFETY: the initialized field of this live Box cannot be null.
+    // SAFETY: the initialized field of this live KBox cannot be null.
     let node = unsafe { NonNull::new_unchecked(node) };
     // SAFETY: sole stable submission owner, never published to readers. Both
-    // cancellation and invocation release the Box without blocking. Observation
+    // cancellation and invocation release the KBox without blocking. Observation
     // storage and permanent callback code outlive either path on any CPU.
-    unsafe { PreparedCallback::new(node, cancel) }
+    Ok(unsafe { PreparedCallback::new(node, cancel) })
 }
 
 struct Sample {
@@ -120,7 +122,13 @@ fn measure(cpu: LogicalCpuId) -> Vec<Sample> {
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let observation = Arc::new(Observation::default());
-        let prepared = prepare(cpu, &observation);
+        let prepared = match prepare(cpu, &observation) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                klogger::kprintln!("RCU_LATENCY_PREPARE_FAILED error={error:?}");
+                return samples;
+            }
+        };
         let begin = khal::time::monotonic_time_nanos();
         // SAFETY: unpublished record, nonblocking callback, permanent boot
         // service/code, no RCU or scheduler locks held. Preparation is untimed.
@@ -172,8 +180,17 @@ fn report(cpu: LogicalCpuId, round: usize, metric: &str, mut values: Vec<u64>) {
 ///
 /// # Panics
 /// Panics on rejected operations, failed joins, wrong callback context/CPU or
-/// inconsistent clock observations. There is no latency pass threshold.
+/// inconsistent clock observations or task-entry preparation failure.
+/// There is no latency pass threshold.
 pub(crate) fn run() {
+    let result = run_prepared();
+    assert!(
+        result.is_ok(),
+        "RCU latency task preparation failed: {result:?}"
+    );
+}
+
+fn run_prepared() -> KResult<()> {
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
     assert!(!cpus.is_empty());
@@ -185,8 +202,8 @@ pub(crate) fn run() {
         for round in 0..=ROUNDS {
             let result = Arc::new(kmutex::Mutex::new(RoundSamples::default()));
             let output = result.clone();
-            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-                move || {
+            let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+                ktask::PreparedTaskEntry::new(move || {
                     let callbacks = measure(cpu);
                     let sync_wait_ns = measure_sync_wait();
                     let reads = read_cost::measure();
@@ -195,7 +212,7 @@ pub(crate) fn run() {
                         sync_wait_ns,
                         reads,
                     };
-                },
+                })?,
                 "rcu-latency".into(),
                 kbuild_config::TASK_STACK_SIZE,
             ));
@@ -252,4 +269,5 @@ pub(crate) fn run() {
     sync_scaling::run(&cpus);
     preempted_readers::run(&cpus);
     klogger::kprintln!("RCU_LATENCY_PASS");
+    Ok(())
 }

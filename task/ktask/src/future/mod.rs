@@ -15,7 +15,7 @@ use core::{
 
 use kerrno::{KError, KResult};
 use kpoll::{PollRegisterError, PollRegistrations};
-use kspin::{NoPreemptIrqSave, SpinNoIrq};
+use kspin::NoPreemptIrqSave;
 
 use crate::{KtaskRef, TaskState, WeakKtaskRef, current, park::park_task, select_wake_run_queue};
 
@@ -27,14 +27,14 @@ pub use time::*;
 
 struct KWaker {
     task: WeakKtaskRef,
-    woke: SpinNoIrq<bool>,
+    woke: crate::park::ParkLatch,
 }
 
 impl KWaker {
     fn new(task: &KtaskRef) -> Arc<Self> {
         Arc::new(KWaker {
             task: KtaskRef::downgrade(task),
-            woke: SpinNoIrq::new(false),
+            woke: crate::park::ParkLatch::new(),
         })
     }
 
@@ -51,10 +51,7 @@ impl Wake for KWaker {
 
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(task) = self.task.upgrade() {
-            {
-                let mut woke = self.woke.lock();
-                *woke = true;
-            }
+            self.woke.record();
             select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, true);
         }
     }
@@ -233,10 +230,10 @@ fn block_on_with_state<F: IntoFuture>(f: F, state: TaskState) -> F::Output {
 unittest::path_mod_test!(prepared_tests, "../../ut-tests/future/prepared_tests.rs");
 
 /// Error returned by [`interruptible`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Interrupted(InterruptCause);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum InterruptCause {
     Task,
     Registration(PollRegisterError),

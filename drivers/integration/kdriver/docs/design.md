@@ -198,6 +198,8 @@ The reclaimer holds an intrusive pending_link, Weak device, ProcessingState
 PENDING_DEVICES SpinNoIrq protects the per-CPU lists and all processing state.
 Idle/Queued(cpu)/Running(cpu)/RunningAgain(cpu) are the processing phases. Detachment gives
 the pinned CPU a finite batch; detached nodes remain Queued and cannot relink.
+Only the Idle and RunningAgain transitions to Queued link a reclaimer, and it is
+unlinked then, so the intrusive-collections relink panic is unreachable.
 Callbacks and notifications run outside the global lock. RunningAgain requeues
 only into the next batch. Enqueue and raise stay pinned across daemon wake.
 
@@ -424,6 +426,19 @@ Registered ──► early_init() ──► enumerate() ──► probe_pending(
    - register through `EnumerationContext::register_device` with a
      `DeviceDescSpec` whose `parent` points at the host bridge or parent
      bridge.
+
+A PCI INTx line is level-triggered and may be shared by several functions.
+Once a VirtIO transport is created the device has seen `DRIVER_OK` and may
+assert that line at any moment. A device kind whose activation installs its
+interrupt owner later — input, vsock, and display — must therefore have INTx
+masked while the action is still absent: on a shared line an unrouted
+assertion is never acknowledged, so the interrupt never deasserts and the CPU
+spins in the handler forever, starving the very activation that would have
+installed the owner. `virtio::probe_pci_device` masks INTx for those kinds, and
+activation unmasks it only after registering the handler; a devres cleanup
+re-masks it before the action is released. Input and display use the shared
+`set_pci_intx_disabled` helper; vsock never re-enables INTx because it does not
+use it.
 
 ### Platform bus enumeration
 
@@ -657,13 +672,17 @@ transports:
    the dispatch result. Removing a published device drops its class runtime
    first, so a VSOCK or sound device owner unsets its queues, resets the
    device, and releases RX mappings and queue rings before the transport (and
-   therefore the claim) is dropped; other device kinds still rely on their
-   transport `Drop` alone. The teardown order and its evidence are described
+   therefore the claim) is dropped. GPU devres cleanup drains the active
+   command, detaches the queues from callers and resets the device before
+   withdrawing its IRQ handler. The teardown order and its evidence are described
    in `drivers/devices/virtio/docs/design.md`.
 3. **Dispatch**: `dispatch_virtio_try_new` dispatches on `DeviceKind`:
    - `DeviceKind::Net` → `VirtIoNet::try_new` → `kclass::publish_net`
    - `DeviceKind::Block` → `block::activate` → IRQ setup → `kclass::publish_block`
-   - `DeviceKind::Display` → `VirtIoGpu::try_new` → `kclass::publish_display` → `glue::install_irq` when an IRQ is present
+   - `DeviceKind::Display` → `gpu::activate` → devres IRQ registration → PCI INTx enable when applicable → `gpu.start()` → `kclass::publish_display`.
+     Activation captures the current `BindingRef` before acquiring resources;
+     IRQ registration, INTx masking and GPU close callbacks all belong to that
+     binding, including probe-failure rollback.
    - `DeviceKind::Input` → local `virtio/input.rs` activation → devres IRQ registration → PCI INTx enable when applicable → `kclass::publish_input`
    - `DeviceKind::Vsock` → `VirtIoSocket::try_new` → `kclass::publish_vsock`
    - `DeviceKind::Fs9p` → `VirtIo9p::try_new` → `kclass::publish_virtio_9p`

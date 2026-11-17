@@ -18,7 +18,7 @@ use kcpu_id_map::nr_cpus;
 use kcred::Cred;
 use kfd_objects::inotify::Inotify;
 use khal::paging::MappingFlags;
-use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
+use kprocess::{AsThread, LiveAddressSpace, PidFd, Process, TaskStat, procfs};
 use ktask::{KCpuMask, KtaskRef, WeakKtaskRef, current};
 use ktime_types::SystemTime;
 #[cfg(feature = "tee")]
@@ -1131,7 +1131,7 @@ const O_CLOEXEC: u32 = 0o2000000;
 /// The generic lines are the ones this kernel can answer: the file offset,
 /// the open file description's flags, and the mount id of its location, in
 /// Linux's order. Type-specific lines are rendered for objects that have them;
-/// only inotify does so far, in man 5 proc_pid_fdinfo's field order and hex
+/// inotify and pidfd do, in man 5 proc_pid_fdinfo's field order and hex
 /// formatting (`wd`, `ino`, `sdev`, `mask`, `ignored_mask`). The trailing
 /// `fhandle-*` fields that page documents are absent because those exist only
 /// for file handles exported through an NFS file handle, which this kernel
@@ -1162,6 +1162,22 @@ fn render_fdinfo(file: &VfsFile, cloexec: bool) -> String {
                 watch.watch_descriptor, watch.inode, watch.device, watch.mask
             );
         }
+    }
+    // Linux's pidfd_show_fdinfo() emits the referenced task's id *as seen from
+    // the PID namespace of the procfs instance being read*, and -1 once the pid
+    // has no task attached (a waitable zombie still reports, a reaped one does
+    // not). glibc and systemd resolve a clone3(CLONE_PIDFD) pidfd to a pid by
+    // reading this line from /proc/self/fdinfo/<pidfd>; without it
+    // posix_spawn/pidfd_spawn cannot report the child pid and service spawn
+    // fails. This procfs does not model a per-mount PID namespace, so the
+    // reading task's active namespace is the observer — the same number that
+    // task's getpid(2)/wait(2) use. A kernel-task reader has none and gets the
+    // internal number instead of panicking in `current_user_process()`.
+    if let Ok(pidfd) = PidFd::from_file(file) {
+        let observer = ktask::current()
+            .try_as_thread()
+            .map(|thread| thread.process().active_pid_namespace());
+        let _ = writeln!(out, "Pid:\t{}", pidfd.fdinfo_pid(observer.as_ref()));
     }
     out
 }
@@ -1209,7 +1225,7 @@ fn make_thread_dir(
 /// Namespace kinds exposed through `/proc/<pid>/ns`.
 ///
 /// Ordering matches Linux's proc directory listing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProcNsKind {
     Mnt,
     Pid,

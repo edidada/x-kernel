@@ -69,8 +69,8 @@ fn ns_reaper_is_exited(ns: &Arc<PidNamespace>) -> bool {
         .is_some_and(|reaper| reaper.is_exited())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProcessExitState {
     Running = 0,
     Zombie  = 1,
@@ -272,6 +272,17 @@ impl Process {
         self.exit_state() == ProcessExitState::Zombie
     }
 
+    /// Returns `true` while a task is still attached to this process, i.e. it
+    /// runs or is a zombie that has not been reaped — Linux
+    /// `pid_has_task(pid, PIDTYPE_PID)`.
+    ///
+    /// Only a reaped (`Dead`) process has been detached from its pid, so
+    /// reported-pid consumers such as pidfd fdinfo keep naming an
+    /// exited-but-unreaped child and report absence afterwards.
+    pub fn has_attached_task(&self) -> bool {
+        self.exit_state() != ProcessExitState::Dead
+    }
+
     pub(super) fn exit_state(&self) -> ProcessExitState {
         self.exit_state.load(Ordering::Acquire)
     }
@@ -350,6 +361,7 @@ impl Process {
         publication: ProcessExitPublication,
         prepare_sigchld: impl Fn(&Arc<Process>) -> Option<(T, bool)>,
     ) -> ProcessExitTransition<T> {
+        self.finish_exiting_thread_runtime();
         loop {
             let snapshot = self.exit_parent_snapshot();
             let prepared = self.prepare_child_exit_signal_for_snapshot(&snapshot, &prepare_sigchld);
