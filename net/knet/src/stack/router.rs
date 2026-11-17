@@ -1221,14 +1221,10 @@ impl Router {
         SOCKET_BUFFER_SIZE.saturating_sub(self.rx_queue.len().max(self.forward_queue.len()))
     }
 
-    #[cfg_attr(
-        not(unittest),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: dead_code: ingress and forwarding controls follow \
-                      in IKIXDM"
-        )
-    )]
+    pub(crate) fn ipv4_forwarding(&self) -> i32 {
+        self.ipv4_forwarding
+    }
+
     pub(crate) fn set_ipv4_forwarding(&mut self, value: i32) {
         self.ipv4_forwarding = value;
         if value == 0 {
@@ -1238,14 +1234,6 @@ impl Router {
     }
 
     /// Batch sizes are limited by `ingress_capacity` before draining devices.
-    #[cfg_attr(
-        not(unittest),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: dead_code: ingress and forwarding controls follow \
-                      in IKIXDM"
-        )
-    )]
     pub(crate) fn enqueue_forward_packets(&mut self, packets: &mut Vec<Ipv4ForwardInput>) {
         if self.ipv4_forwarding != 0 {
             debug_assert!(packets.len() <= SOCKET_BUFFER_SIZE - self.forward_queue.len());

@@ -324,3 +324,78 @@ fn cpuinfo_supports_partial_reads_and_rejects_writes() {
         Err(VfsError::BadFileDescriptor)
     );
 }
+
+#[cfg(feature = "net")]
+#[def_test(user, serial)]
+fn ip_forward_checks_current_capability_and_keeps_namespace_state_separate() {
+    struct Restore {
+        namespace: Arc<kns::NetNamespace>,
+        value: i32,
+        cred: Arc<kcred::Cred>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            kprocess::current_user_thread().commit_creds(self.cred.prepare());
+            knet::netns::set_ipv4_forwarding(&self.namespace, self.value).unwrap();
+        }
+    }
+    let thread = kprocess::current_user_thread();
+    let namespace = thread.process().net_ns().unwrap();
+    let restore = Restore {
+        value: knet::netns::ipv4_forwarding(&namespace).unwrap(),
+        namespace,
+        cred: thread.real_cred(),
+    };
+    thread.commit_creds(kcred::Cred::root());
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        let mut root = DirMapping::new();
+        add_root_entries(&mut root, fs.clone());
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    let names = Filename::new("/net/ip_tables_names")
+        .open_with_flags_at(&root, &root, OpenFlags::READ_WRITE.bits(),
+            NodePermission::empty(), NodePermission::empty(), kcred::initial_cred()).unwrap();
+    let mut names_buf = [0; 32];
+    let count = names.read_from(&mut names_buf, &mut 0).unwrap();
+    assert_eq!(&names_buf[..count], b"filter\n");
+    assert_eq!(names.path().getattr().unwrap().mode.permission().bits(), 0o440);
+    assert_eq!(names.write(b"nat\n"), Err(VfsError::BadFileDescriptor));
+    let file = Filename::new("/sys/net/ipv4/ip_forward")
+        .open_with_flags_at(
+            &root,
+            &root,
+            OpenFlags::READ_WRITE.bits(),
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+        .unwrap();
+    assert_eq!(
+        file.path().getattr().unwrap().mode.permission().bits(),
+        0o644
+    );
+    assert_eq!(file.write_from(b"1\n", &mut 0), Ok(2));
+    let mut buf = [0; 8];
+    assert_eq!(file.read_from(&mut buf, &mut 0), Ok(2));
+    assert_eq!(&buf[..2], b"1\n");
+    assert_eq!(file.write_from(b"0\n", &mut 2), Ok(2));
+    assert_eq!(knet::netns::ipv4_forwarding(&restore.namespace).unwrap(), 1);
+    assert_eq!(file.write_from(b"bad", &mut 0), Err(VfsError::InvalidInput));
+    assert_eq!(knet::netns::ipv4_forwarding(&restore.namespace).unwrap(), 1);
+    thread.commit_creds(kcred::Cred::new(1000, 1000));
+    assert_eq!(
+        file.write_from(b"0\n", &mut 0),
+        Err(VfsError::OperationNotPermitted)
+    );
+    thread.commit_creds(kcred::Cred::root());
+    assert_eq!(file.write_from(b"0\n", &mut 0), Ok(2));
+    assert_eq!(knet::netns::ipv4_forwarding(&restore.namespace).unwrap(), 0);
+    let child = kns::NetNamespace::new();
+    knet::netns::ensure_stack(&child).unwrap();
+    assert_eq!(knet::netns::ipv4_forwarding(&child).unwrap(), 0);
+    knet::netns::set_ipv4_forwarding(&child, -1).unwrap();
+    assert_eq!(knet::netns::ipv4_forwarding(&child).unwrap(), -1);
+    assert_eq!(knet::netns::ipv4_forwarding(&restore.namespace).unwrap(), 0);
+}

@@ -15,6 +15,7 @@ ignored = ["log"]
 
 [features]
 default = []
+net = ["dep:knet"]
 sysrq = ["ktask/snapshot"]
 tee = ["kprocess/tee", "dep:tee_task_iface"]
 lock_stat = ["dep:klockstat", "klockstat/stats"]
@@ -27,6 +28,7 @@ kalloc-types.workspace = true
 kfd_objects.workspace = true
 kbuild_config.workspace = true
 kcred.workspace = true
+knet = { workspace = true, optional = true }
 kns.workspace = true
 kvfs.workspace = true
 macros.workspace = true

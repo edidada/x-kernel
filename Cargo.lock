@@ -4788,6 +4788,7 @@ dependencies = [
  "khal",
  "klockstat",
  "klogger",
+ "knet",
  "kns",
  "kprocess",
  "ksync",

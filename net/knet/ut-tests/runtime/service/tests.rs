@@ -6,16 +6,16 @@ use alloc::{sync::Weak, task::Wake, vec, vec::Vec};
 use core::{sync::atomic::AtomicBool, task::Context};
 
 use kpoll::PollRegistrations;
-use crate::stack::socket_set::SocketSetState;
 use unittest::{assert, def_test};
 
 use super::*;
 use crate::{
-    buf::PacketOwner,
+    buf::{PacketBuf, PacketOwner},
     device::LoopbackDevice,
     ip::{Ipv4Address, Ipv4Cidr},
     ipv4,
     network::{interface_address::Ipv4AddrEntry, router::ROUTE_SCOPE_HOST},
+    stack::socket_set::SocketSetState,
 };
 
 const TEST_POLL_BUDGET: PollBudget = PollBudget {
@@ -23,6 +23,41 @@ const TEST_POLL_BUDGET: PollBudget = PollBudget {
     tx_packets: 1,
     timer_events: 1,
 };
+
+#[def_test]
+fn nonlocal_batch_survives_router_contention_before_forwarding() {
+    let mut router = Router::new();
+    router.set_ipv4_forwarding(1);
+    let service = Service::new(router);
+    let bytes = ipv4::build_ipv4_packet(
+        Ipv4Address::new(192, 0, 2, 7),
+        Ipv4Address::new(203, 0, 113, 9),
+        ipv4::PROTOCOL_UDP,
+        64,
+        &[0; 8],
+    )
+    .unwrap();
+    let mut packets = vec![RxPacket::Network(PacketBuf::from_ip_packet_vec(
+        1,
+        bytes,
+        PacketOwner::DeviceRx,
+    ))];
+    let mut batch = IngressBatch::new(1);
+    assert!(service.try_process_rx_batch(monotonic_time(), &mut packets, &mut batch));
+    assert!(packets.is_empty());
+    {
+        let _router = service.router.lock();
+        assert!(!service.try_flush_ingress_batches(&mut batch));
+        assert_eq!(batch.forward.len(), 1);
+        assert_eq!(batch.forward[0].packet().network_packet().unwrap()[8], 64);
+    }
+    assert!(service.try_flush_ingress_batches(&mut batch));
+    assert!(batch.is_empty());
+    assert_eq!(
+        service.router.lock().dispatch_budgeted(monotonic_time(), 0),
+        (0, true)
+    );
+}
 
 struct TxCapacityWakeProbe {
     service: Weak<Service>,

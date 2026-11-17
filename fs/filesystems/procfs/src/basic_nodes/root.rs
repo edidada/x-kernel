@@ -162,6 +162,8 @@ impl SimpleFileOps for UtsNameFile {
               independent procfs root entry"
 )]
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    #[cfg(feature = "net")]
+    super::net::add_root_entries(root, &fs);
     root.add(
         "cmdline",
         SimpleFile::new_regular(fs.clone(), || {
@@ -255,6 +257,8 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     );
     root.add("sys", {
         let mut sys = DirMapping::new();
+        #[cfg(feature = "net")]
+        super::net::add_entries(&mut sys, &fs);
 
         sys.add("kernel", {
             let mut kernel = DirMapping::new();

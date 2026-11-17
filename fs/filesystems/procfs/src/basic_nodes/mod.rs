@@ -5,4 +5,6 @@
 //! Basic procfs root nodes.
 
 mod cpuinfo;
+#[cfg(feature = "net")]
+mod net;
 pub(crate) mod root;

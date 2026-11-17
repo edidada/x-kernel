@@ -81,6 +81,11 @@ impl Ipv4ForwardInput {
         Some(Self(packet))
     }
 
+    #[cfg(unittest)]
+    pub(crate) fn packet(&self) -> &PacketBuf {
+        &self.0
+    }
+
     pub(crate) fn destination(&self) -> Ipv4Address {
         Ipv4Header::parse_header_only(self.0.network_packet().expect("validated IPv4 packet"))
             .expect("validated IPv4 header")
@@ -126,6 +131,7 @@ impl Ipv4ForwardInput {
 }
 
 impl PreparedIpv4Forward {
+    #[cfg(unittest)]
     pub(crate) fn packet(&self) -> &PacketBuf {
         &self.packet
     }
