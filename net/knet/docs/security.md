@@ -594,7 +594,7 @@ IPv4 validation and snooping run outside the Router lock.
 remains held while the service uses this adapter. Its TX token retains an exclusive
 queue borrow from the capacity check through enqueue; receiving also requires a
 TX slot so an admitted input can produce a response. Dropping an unused token does
-not consume capacity. The adapter cannot invoke physical-device operations.
+not consume capacity. One admitted TSO packet may retain up to 65,535 bytes; it blocks further producers until its last segment leaves. Segments are materialized one per dequeue, preventing a small peer MSS from causing an allocation burst at admission. The adapter cannot invoke physical-device operations.
 
 
 ### 4. Ring-Buffer Publication Rules

@@ -27,10 +27,27 @@ fn poll_until_idle(
     while iface.poll(current, device, sockets) != PollResult::None {}
 }
 
+fn poll_stack_until_idle(
+    iface: &mut Interface,
+    rx: &mut alloc::collections::VecDeque<PacketBuf>,
+    tx: &mut DataTxQueue,
+    sockets: &mut super::SocketSetState<'_>,
+    current: Instant,
+) {
+    loop {
+        while let Some(pkt) = tx.pop_front() {
+            rx.push_back(pkt);
+        }
+        let mut dev = StackDevice::new(rx, tx, 1500);
+        if iface.poll(current, &mut dev, sockets) == PollResult::None && tx.is_empty() {
+            break;
+        }
+    }
+}
+
 #[def_test]
 fn only_a_protocol_accepted_reset_publishes_a_consumable_error() {
     let current = Instant::from_millis(1);
-    let mut device = Loopback::new(Medium::Ip);
     let mut rx = alloc::collections::VecDeque::new();
     let mut tx = DataTxQueue::with_capacity(4);
     // Use production checksum capabilities; Loopback alone disables checks.
@@ -52,12 +69,12 @@ fn only_a_protocol_accepted_reset_publishes_a_consumable_error() {
         .get_mut::<tcp::Socket>(client)
         .connect(iface.context(), (address, 40000), (address, 40001))
         .unwrap();
-    poll_until_idle(&mut iface, &mut device, &mut sockets, current);
+    poll_stack_until_idle(&mut iface, &mut rx, &mut tx, &mut sockets, current);
     sockets
         .get_mut::<tcp::Socket>(server)
         .send_slice(b"x")
         .unwrap();
-    poll_until_idle(&mut iface, &mut device, &mut sockets, current);
+    poll_stack_until_idle(&mut iface, &mut rx, &mut tx, &mut sockets, current);
     sockets.get_mut::<tcp::Socket>(server).abort();
 
     iface.poll_egress(
