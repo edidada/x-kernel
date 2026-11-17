@@ -5,10 +5,9 @@ Soft and hard lockup detection for system monitoring.
 ## Overview
 
 watchdog combines timer-driven soft-lockup checks with optional NMI-based
-hard-lockup detection. The soft-lockup heartbeat is a per-CPU watchdog task:
-it is pinned to the owning CPU, runs with elevated scheduler priority, and
-periodically updates the local CPU timestamp. Timer interrupt callbacks check
-whether that timestamp is stale.
+hard-lockup detection. The soft-lockup heartbeat is updated by each CPU's Stop thread after timer
+IRQs queue a touch. The timer callback checks whether that timestamp is stale.
+The pinned watchdog task performs optional workqueue inspection.
 
 With `KFEAT_KWORK_STALL_CHECK`, the per-CPU watchdog task also requests warning-only
 workqueue backlog inspection through `WorkqueueStallInspectorIf`. This never runs in
@@ -18,7 +17,11 @@ system-workqueue check is no longer registered.
 
 The hard-lockup detector uses a periodic NMI to check each CPU's watchdog
 tasks, including whether timer interrupts are still arriving. On failure, all
-CPUs rendezvous, dump task snapshots, and the cause CPU panics.
+successfully armed CPUs are requested to collect their interrupted frames on
+their next timer IRQ or NMI. The reporter waits at most five seconds or a finite
+poll budget, prints available running stacks and missing CPU masks, then halts.
+Responders retain their stacks by halting until reset. Collection is best effort;
+missing CPUs are not certified stopped.
 
 ## Usage
 
@@ -44,13 +47,21 @@ interface; the platform backend (currently the PMU cycle counter) owns the
 counter, the per-CPU GIC promotion (priority 0 / NMI attribute), and the
 one-time global handler registration.
 
+The x86 integration is detailed in [docs/x86-backend.md](docs/x86-backend.md).
+They cover dedicated NMI entry, source identification, APIC operations, PMU
+ownership and platform lifecycle contracts.
+
 ## Notes
 
-- Currently supported on AArch64 only.
+- Hardlockup sources: AArch64 PMU and x86 native NMI (PMU or explicit SMP peer timer).
 - Requires initialization on each core in multi-core systems.
 - The NMI interrupt is promoted to the highest GIC priority (0).
-- Hard lockup failure response: global snapshot dump via `ktask::snapshot`,
-  then panic on the cause CPU.
+- Hard lockup failure response: an independent write-once
+  `ktask::snapshot::TerminalSnapshot`, bounded partial collection, emergency
+  output and direct CPU halt. It does not enter the normal panic logger or
+  power-off path.
+- Concurrent sysrq snapshots cannot reserve or clear terminal-report storage.
+- Atomic report protocol tests: see `tests/report-protocol/README.md`.
 
 ## Development Status
 

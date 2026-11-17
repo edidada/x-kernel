@@ -162,7 +162,9 @@ static TIMER_IRQ_NOTE: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Registers a hook invoked from every local timer IRQ (`on_timer_fire`).
 ///
-/// The hook runs with IRQs disabled and must stay short and non-blocking.
+/// The hook runs with IRQs disabled and must stay short and non-blocking during
+/// normal execution. A fatal diagnostic hook may publish local state and park
+/// terminally; it must never sleep or wait for task/IRQ progress.
 /// Replacing the hook is last-writer-wins. Used by watchdog so hardlockup
 /// heartbeats on any timer IRQ, not only the 4s sample callback.
 pub fn register_timer_irq_note(note_fn: TimerIrqNoteFn) {

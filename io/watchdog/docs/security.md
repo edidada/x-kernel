@@ -1,164 +1,134 @@
-# io/watchdog — Security and Reliability Analysis
+# Watchdog Security
 
-## Trust Model
+## Trust boundaries
 
-This crate is a trusted kernel component.
-Its inputs are hardware events (timer interrupts and NMI/PMU overflows) and internal
-kernel state (task scheduling and mutexes).
-It accepts no user input.
+Watchdog consumes kernel-owned heartbeat timestamps, task-check registrations,
+CPU identities and hardware timer/NMI events. It exposes no user-memory access
+interface. Users can affect kernel workload and timing indirectly, but cannot
+register checks or provide report pointers through this crate.
 
-The optional `WorkqueueStallInspectorIf` contract adds a trusted kernel provider taking
-CPU identity, a monotonic sample and a threshold. It accepts no raw pointers or
-external payload. Its caller must be a sleepable task with no held spinlocks;
-it must not be called from the existing NMI or timer IRQ checks. A provider that
-blocks indefinitely or attempts queue recovery could stall monitoring, so the
-contract is warning-only and permits skipping busy or uninitialized state. This
-provider is invoked by the per-CPU watchdog task, never by IRQ/NMI checks.
-Before workqueue publication it may skip inspection. Queue stalls do not enter
-the fatal rendezvous; the legacy system-workqueue fatal check is removed.
-Enabling the feature requires exactly one `kiface` implementation at link time.
+The periodic source backend owns counter reservation, capability validation,
+interrupt promotion/routing and local quiescence. Watchdog trusts a successful
+arming transaction and the backend's NMI-safe quiescence contract.
 
-## External Boundaries and Attack Surface
+The optional `WorkqueueStallInspectorIf` provider receives only trusted CPU
+identity, time and threshold values. It runs from a sleepable watchdog task
+without held spinlocks, may skip busy or unpublished state, and must neither
+recover queues nor enter the fatal report protocol. Exactly one provider is
+required when the feature is enabled.
 
-- Timer interrupts and NMI events from PMU overflows: Event frequency and correctness
-  depend on the hardware or emulator.
-- Kernel internals: `ktask` snapshots, task state, and mutex state examined by `check_mutex_deadlock`.
-- Triggered diagnostic output: `kprint_atomic!` uses emergency serial transmission
-  without ordinary locks and may discard output when its polling budget is exhausted.
-  Argument evaluation and formatting must also avoid locks.
-  It does not guarantee complete messages or serialized output across CPUs.
+## State and resource inventory
 
-## Unsafe Code Inventory
+- Cache-aligned per-CPU atomic soft/hard heartbeat state.
+- A per-CPU task-check vector, immutable after Release publication.
+- Retained timer owners and Stop-thread work storage.
+- Report owner, frozen target mask, per-CPU admission and ready masks, and a
+  monotonic closed flag. These fields have no reset or reuse path.
+- A static `ktask::snapshot::TerminalSnapshot` containing one write-once frame
+  slot per configured CPU. It owns no heap allocation.
 
-### `init.rs`
+`LockupDetection` embeds its atomic state in `karch::cache::CacheAligned`.
+The wrapper changes layout only; atomics provide synchronization and the
+alignment policy supplies no DMA or cache-maintenance guarantee.
 
-- `init_softlockup_detection` writes the per-CPU
-  `SOFTLOCKUP_TIMER: Option<ktask::Timer<SoftlockupTimer>>` under
-  `NoPreemptIrqSave`. Only initialization accesses this owner slot, once per
-  CPU; callbacks and NMIs never borrow it. The slot retains storage forever.
-  Its unsafe `Timer::start` call follows local scheduler/IRQ setup, with an
-  IRQ-compatible handler. Callback-scoped rearm retains the running CPU owner.
-- The timer callback in `init_softlockup_detection` reads and writes
-  `LAST_SOFTLOCKUP_REPORT` through the guard-based per-CPU `read`/`write`
-  accessors under `NoPreemptIrqSave`.
-  Invariant: This plain `Option<MonotonicInstant>` is only read and written by
-  the current CPU's timer callback, and the accessors never return a reference.
-  Safe entry point: The timer callback registered by `init_softlockup_detection`.
-- `SOFTLOCKUP_STOP_WORK` is a per-CPU `ktask::CpuStopWork` filled with
-  `unsafe { CpuStopWork::empty() }`. That value owns no heap memory and no
-  queued callback, so copying the template does not alias a live callback.
-  `queue_softlockup_touch` borrows the slot with
-  `unsafe { SOFTLOCKUP_STOP_WORK.get_mut_unchecked(&guard) }` under
-  `NoPreemptIrqSave`. The guard pins this CPU. The timer IRQ and this CPU's
-  Stop thread share the slot; `queued` keeps a second sample from reusing it
-  before the touch returns.
+`NR_CPUS <= usize::BITS` is checked at compile time. Report membership is formed
+from successfully armed CPUs, rather than a contiguous firmware CPU count.
+The owner is always included. Present but unarmed CPUs are visible as
+`NOT COLLECTED`, but are not included in the wait target.
 
-### `lockup_detection.rs`
+## Unsafe boundaries
 
-- `current_lockup_detection` constructs a kernel-lifetime shared reference from
-  the current CPU's slot.
-  Invariant: Callers are this CPU's Stop thread (`touch_softlockup` via
-  `softlockup_fn`), timer IRQs (`timer_tick` / `check_softlockup`), or NMIs.
-  The slot is initialized and cannot migrate. `LockupDetection` exposes only
-  shared operations over atomic fields, so these contexts may access it
-  concurrently. The pinned watchdog task does not call into this boundary.
-  Safe entry points: The timer callback and Stop callback registered by
-  `init_softlockup_detection`, and the NMI hard-lockup check.
+The watchdog's per-CPU slot access and timer ownership retain their documented
+pinning, IRQ exclusion and lifetime contracts. The task-check vector may be
+mutated only before publication, and no further registration is permitted after
+arming begins. Every NMI reads the published list through a shared reference.
 
-### `watchdog_task.rs`
+`init_softlockup_detection` writes its retained timer owner once under
+`NoPreemptIrqSave` after local timer/scheduler setup. Timer callbacks never
+access the owner slot and rearm only through callback-scoped control. The plain
+last-report timestamp is accessed only by the pinned IRQ-masked timer callback.
+Stop-work storage remains permanent, and its queue flag excludes reuse before
+the Stop callback returns. No hotplug or timer-owner teardown is supported.
 
-- `register_watchdog_task` (mutating push) and `check_watchdog_tasks` (shared slice) dereference the current CPU's `WATCHDOG_TASK_LIST` `UnsafeCell` obtained via `shared_current()`.
-  The caller must be pinned to an initialized CPU; the inner
-  `UnsafeCell<Vec<_>>` is reachable only through the registration/publication
-  protocol.
-- `WatchdogTaskList: Sync`: Per-CPU initialization exclusively mutates the list
-  before publication; the `Release` publish permanently closes the mutation
-  phase, and NMIs form a shared slice only after an `Acquire` observes it. Any
-  registration after publication panics.
+Report admission and frame publication add no unsafe storage access. Terminal
+frame publication uses `klazy::Once`; a separate atomic first-entry claim ensures its initializer has
+only one caller for each CPU, avoiding a wait on an interrupted initializer.
+It never borrows ordinary snapshot `UnsafeCell` slots or resets their session.
+The coordinator's sole unsafe dump call requires every selected interrupted
+stack to remain mapped and unchanged through output; ready responders park,
+and the reporter retains its own NMI stack. The unsafe API documents that
+copying a frame alone does not retain the stack it references.
 
-## Memory Safety Invariants
+## Concurrency invariants
 
-- Per-CPU state may be accessed only by its owning CPU.
-- The `&'static` per-CPU pointers referenced by NMI callbacks live as long as the kernel.
-- Atomic ordering: `Release` stores and `Acquire` loads make soft-lockup timestamp
-  initialization visible; `mark_dump_done` and `reset` publish rendezvous phase changes with `Release` stores, and `arrived_bitmap` reads with `Acquire`.
+1. Owner election stores the reporter id itself. There is no request-visible
+   interval with an unknown reporter identity.
+2. Targets are published once after election. A peer seeing no targets does
+   not spin or park, and later CPU registration cannot extend the active wait.
+3. A CPU claims capture once. Nested IRQ/NMI participation returns immediately
+   so the original collector can finish.
+4. A ready bit is set only after frame publication. The owner acquires ready
+   bits, and the snapshot reader independently acquires each Once publication.
+5. Remote responders quiesce their local periodic source and park until reset.
+   Their interrupted stacks remain live for backtrace reads.
+6. Closing chooses a final collected mask. Already admitted writers may finish
+   later in distinct immutable slots; no slot is cleared or reused.
+7. Partial reports inspect only collected running stacks. They avoid task
+   metadata formatting, which can try ordinary IRQ locks, and do not walk saved
+   contexts of tasks that an unresponsive CPU could still migrate or execute.
+8. Missing CPUs are not certified stopped. Fatal reporting never authorizes
+   cleanup, memory reclamation or a return to normal operation.
 
-## Thread Safety
+## Threat analysis
 
-- NMIs and timer interrupts may concurrently access the same CPU's `LockupDetection`;
-  all entry points hold only shared references and all fields are atomic, with
-  the heartbeat using `Release` writes and `Acquire` reads.
-- The watchdog task list is published with a `Release` store before NMIs are
-  armed; after an NMI's `Acquire` succeeds the list is permanently read-only and
-  never overlaps the `Vec` mutation of the registration phase.
-- Global rendezvous atomics are visible across CPUs.
-  `try_trigger` uses `compare_exchange` to select a unique initiating CPU.
-- `ARRIVED_BITMAP` bits are written by CPU ID.
-  IDs at or above `usize::BITS` are ignored, under the assumption that the platform
-  has at most 64 CPUs.
+| ID | Threat | Mitigation and residual limit |
+|----|--------|-------------------------------|
+| T-01 | NMI interrupts a holder of an ordinary console/IRQ lock | Reporting uses emergency output and never enters the normal panic logger or platform halt logger. It stops through `karch::stop_cpu`. |
+| T-02 | A CPU never receives another NMI | Timer IRQs can also collect. The owner waits at most five seconds or a finite poll budget, prints missing CPUs and stops. |
+| T-03 | Diagnostic clock stops or regresses | The 50,000,000-poll cap terminates collection independently of elapsed-clock progress; it is not a wall-time estimate. |
+| T-04 | A CPU marks arrival before its frame exists | Ready publication follows the completed local frame copy. Readers acquire publication before accessing the slot. |
+| T-05 | A late collector races snapshot reuse | Terminal snapshots are separate, write-once and retained until reset. There is no finish/reset/reuse after timeout. |
+| T-06 | An ordinary snapshot is already active | Terminal storage and ownership are independent, so the failure is still reported without clearing that session. Output may interleave. |
+| T-07 | Nested NMI interrupts a timer-IRQ collector | First-entry admission rejects the nested participant instead of waiting or parking over the unfinished collector. |
+| T-08 | A missing CPU continues scheduler activity | Only stable interrupted stacks of responders are expanded. No saved task-context walk or global stop guarantee is inferred. |
+| T-09 | Simultaneous failures or arming during a report | One atomic owner wins; losers join that report. Targets are frozen, including the owner, and later registration does not extend the wait. |
+| T-10 | Late softlockup diagnostics cause timer catch-up loops | Rearm relative to completion once; out-of-range rearm logs and stops sampling rather than replaying missed deadlines. |
+| T-11 | False softlockup reports flood the console | Stop-thread touches distinguish scheduler starvation from a delayed lower-priority task, and reports are limited to one per threshold interval. |
 
-## Threat Analysis
+## Failure handling
 
-| ID | Threat | Impact Level | Trigger | Mitigation |
-|----|--------|--------------|---------|------------|
-| T-01 | NMI callback acquires an ordinary IRQ lock | High (same-CPU self-deadlock) | A pseudo-NMI preempts an ordinary IRQ path holding the lock | NMI paths use only atomics and spinning; enforced through code review. |
-| T-02 | NMI does not arrive at the expected interval | Medium (false hard-lockup report) | Delayed or lost NMI under TCG emulation | The hard-lockup heartbeat must first be initialized (`hard_timestamp_initialized`); detection is disabled at boot if NMI is unavailable. |
-| T-03 | A CPU can never enter NMI context | High (initiating CPU spins forever) | The CPU's interrupt/NMI handling has stopped | The strong rendezvous intentionally has no timeout because the system is already unusable; documented in the design. |
-| T-04 | Snapshot reentry | Medium (snapshot corruption/deadlock) | NMI interrupts an existing snapshot operation | Skip the dump if `nmi_begin()` fails; `kprint_atomic!` bypasses normal serial locks for best-effort output. |
-| T-05 | False soft-lockup reports flood the console | Low (log storm) | The Stop thread does not run while the timer IRQ still does | Limit reports to one per threshold interval. The touch runs on Stop, so a lower-priority task being starved is not itself a softlockup. |
-| T-06 | Sampling accesses the wrong CPU or expired storage | High | Owner migration, duplicate initialization or premature release | Retain one owner in each per-CPU slot under an IRQ/preemption guard, reject duplicate initialization, and rearm only through callback-scoped control on the running CPU. No hotplug or runtime teardown is supported. |
-| T-07 | Late diagnostics trigger an IRQ catch-up loop | High | Reporting takes longer than the sample interval | Rearm once at completion plus the interval. Deadline range failure logs and stops sampling; loss of soft-lockup sampling is the residual risk. |
+Unavailable NMI support or failed source arming logs a per-CPU degradation and
+leaves softlockup sampling available. Normal softlockup reports remain
+rate-limited and do not stop the system.
 
-## Failure Mode and Effects Analysis (FMEA)
+A failed NMI task check is terminal. The elected reporter prints the failure
+identity before waiting, then target/collected/missing masks, available stacks
+and a final marker. Report participants halt until reset; the reporter also
+halts directly after output. Missing CPUs can remain active, and power remains
+on. Emergency console output is best effort; corrupted backtrace state or stalled
+hardware output can still prevent report completion. The collection deadline
+does not promise a total time bound for all diagnostic code.
 
-| ID | Failure Mode | Cause | Local Effect | System Effect | Severity | Mitigation |
-|----|--------------|-------|--------------|---------------|----------|------------|
-| F-01 | NMI mechanism unavailable | GICv2 or no FEAT_NMI | Hard-lockup detection disabled | Loss of hard-lockup detection; soft-lockup detection cannot cover a hard hang | 3 | Log at boot, check `mode()`, and return. |
-| F-02 | Periodic NMI arming fails | PMU unavailable or arming returns `false` | Hard-lockup detection disabled on this CPU | One CPU loses hard-lockup detection | 3 | Log an error when `enable_periodic_nmi` fails. |
-| F-03 | False soft-lockup report | Stop thread does not run while the timer IRQ still does | Soft-lockup log and snapshot | Log and dump, once per threshold interval | 3 | The touch runs on the Stop thread, so a starved lower-priority watchdog task is not a softlockup. Reports are limited to one per threshold interval. |
-| F-04 | Timer interrupts stop | Interrupt masking or hardware failure | The `hard_timestamp` heartbeat goes stale | NMI detects a hard lockup, then rendezvous and panic follow | 2 | This is the intended behavior of hard-lockup detection. |
-| F-05 | Initiating CPU panics during rendezvous | A task check failed | System stops | Shutdown with diagnostic dump output retained | 1 | Intentional: stop the system while preserving diagnostics. |
+The backend's current AArch64 cycle conversion still assumes 2.5 GHz. Actual
+sampling intervals depend on the platform, hardware and emulation. That backend
+limitation is separate from the heartbeat's monotonic-time comparison.
 
-## Failure Management
+## Privacy
 
-- Soft lockup: Log the failure and dump scheduling statistics and CPU tasks without
-  stopping the system.
-- Hard lockup: Enter the global rendezvous, collect every CPU's snapshot, and panic
-  on the initiating CPU to stop the system.
-- Boot-time failures (NMI unavailable or arming failed): Log and disable the affected
-  detection without blocking boot.
+The initial local heartbeat is seeded before arming, so an IRQ-off lockup before
+the first timer IRQ cannot evade detection through uninitialized state.
+The x86 peer source is explicitly dependent on another CPU taking timer IRQs;
+all-peer stalls require the independent PMU source for periodic sampling.
 
-## Privacy Analysis
+Reports can expose kernel addresses, CPU state and task identities. Access to
+the console and exported logs belongs to platform/deployment policy.
 
-No user data is processed.
-Dump output may contain internal state such as kernel task names and is not intended
-for users.
+## Audit checklist
 
-## Known Limitations
-
-- The strong rendezvous has no timeout: If any CPU cannot enter NMI context, the
-  initiating CPU spins forever.
-- Hard-lockup detection depends on NMI timing accuracy.
-  The platform PMU backend currently converts thresholds using a fixed 2.5 GHz clock;
-  see `platforms/kplat-aarch64/src/peripherals/pmu.rs`.
-  A code TODO calls for reading the DT OPP frequency instead.
-- `usize::BITS` limits the bitmap: `mark_arrived` ignores CPU IDs of 64 or above;
-  `all_arrived_mask` handles the upper limit of the bitmap width.
-- Concurrent use of `reset()` while other CPUs are still spinning in NMI context
-  requires care, as stated in its comment.
-
-## Audit Checklist
-
-- [ ] Do NMI callback paths contain ordinary IRQ spinlocks or blocking calls?
-- [ ] Are all per-CPU accesses protected against migration by CPU pinning, disabled IRQs, or NMI context?
-- [ ] Do all rendezvous state transitions use the correct atomic ordering?
-- [ ] Does `nmi_begin()` protect every snapshot path against reentry?
-- [ ] Are NMI-unavailable and arming-failure paths explicitly logged and degraded?
-
-## Cache Alignment Boundary
-
-`LockupDetection` embeds its private atomic state in
-`karch::cache::CacheAligned`. The wrapper owns the state and changes layout only;
-it performs no unsafe access or synchronization. Existing atomic orderings,
-per-CPU access preconditions and NMI lifetime assumptions remain unchanged.
-The alignment policy is not a DMA or cache-maintenance contract.
+- Are source arming and NMI-safe quiescence owned by the backend?
+- Are checks immutable before NMI arming and readers paired with publication?
+- Are snapshot ready bits published after frame copies?
+- Can nested entry return without waiting for an interrupted publisher?
+- Are late writers excluded from any reset, reuse or cleanup path?
+- Does collection terminate if CPUs or the diagnostic clock stop responding?
+- Does a partial report avoid non-running task contexts and normal console locks?

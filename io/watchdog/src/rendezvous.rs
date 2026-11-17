@@ -2,135 +2,101 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Rendezvous coordination for watchdog failures.
+//! Best-effort fatal reports from pinned IRQ/NMI context with ordinary IRQs
+//! masked. No allocation, normal console lock, scheduler wait or reset occurs.
+//! Responders retain their interrupted stacks by parking until reset. Only the
+//! reporter waits for peers, with both a time limit and a finite poll budget.
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use khal::percpu::this_cpu_id;
+use ktime_types::TimeSpan;
 
-/// Rendezvous phases.
-#[repr(usize)]
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Phase {
-    /// No rendezvous in progress.
-    Idle      = 0,
-    /// Triggered: all CPUs must enter NMI and mark arrived.
-    Triggered = 1,
-    /// Dump done: non-cause CPUs can stop spinning if desired.
-    DumpDone  = 2,
-}
+mod state;
+use state::{Participation, ReportState, WaitBudget, cpu_bit};
 
-impl Phase {
-    #[inline]
-    fn load() -> Self {
-        match PHASE.load(Ordering::Acquire) {
-            0 => Phase::Idle,
-            1 => Phase::Triggered,
-            2 => Phase::DumpDone,
-            _ => Phase::Idle,
-        }
+// A healthy idle CPU has a watchdog timer deadline every four seconds. Timer
+// IRQ participation avoids waiting a full PMU cycle budget on such CPUs.
+const REPORT_WAIT_TIMEOUT: TimeSpan = TimeSpan::from_secs(5);
+const MAX_REPORT_WAIT_POLLS: u32 = 50_000_000;
+
+static WATCHED_CPUS: AtomicUsize = AtomicUsize::new(0);
+static REPORT: ReportState = ReportState::new();
+static SNAPSHOT: ktask::snapshot::TerminalSnapshot = ktask::snapshot::TerminalSnapshot::new();
+
+const _: () = assert!(
+    kbuild_config::NR_CPUS <= usize::BITS as usize,
+    "watchdog report mask cannot represent all configured CPUs"
+);
+
+/// Registers this pinned CPU only after its periodic source was armed. The
+/// reporter freezes membership when elected; subsequent registrations cannot
+/// extend an active wait. Source teardown is terminal for watchdog today.
+pub(crate) fn register_cpu() {
+    if let Some(bit) = cpu_bit(this_cpu_id().as_usize()) {
+        WATCHED_CPUS.fetch_or(bit, Ordering::Release);
     }
 }
 
-static PHASE: AtomicUsize = AtomicUsize::new(Phase::Idle as usize);
-
-/// The CPU id which detected the failure and triggered the rendezvous.
-static CAUSE_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-/// Per-cpu arrived bitmap stored in an AtomicUsize where bit i means CPU i arrived.
-static ARRIVED_BITMAP: AtomicUsize = AtomicUsize::new(0);
-
-/// Returns whether a rendezvous is in progress.
-#[inline]
-pub fn is_triggered() -> bool {
-    Phase::load() == Phase::Triggered
+pub(crate) fn is_active() -> bool {
+    REPORT.is_active()
 }
 
-/// Returns whether the dump phase has completed.
-#[inline]
-pub fn is_dump_done() -> bool {
-    Phase::load() == Phase::DumpDone
-}
-
-/// Try to trigger rendezvous.
-///
-/// The calling CPU becomes the cause CPU only if this call transitions the
-/// rendezvous from idle to triggered.
-#[inline]
-pub fn try_trigger() {
+/// Called by local timer IRQs and periodic NMIs. Nested entry on a collecting
+/// CPU returns immediately; a newly admitted remote CPU publishes once and
+/// parks without waiting for the reporter. It never resumes normal execution.
+pub(crate) fn participate() {
     let cpu = this_cpu_id().as_usize();
-    if PHASE
-        .compare_exchange(
-            Phase::Idle as usize,
-            Phase::Triggered as usize,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        )
-        .is_ok()
-    {
-        CAUSE_CPU.store(cpu, Ordering::Release);
+    let Some(participation) = REPORT.claim(cpu) else {
+        return;
+    };
+    khal::quiesce_nmi();
+    if matches!(participation, Participation::Capture) {
+        SNAPSHOT.collect_local();
+        REPORT.mark_ready(cpu);
+    }
+    if !REPORT.is_owner(cpu) {
+        karch::stop_cpu();
     }
 }
 
-/// Returns the CPU that triggered the rendezvous.
-#[inline]
-pub fn cause_cpu() -> Option<usize> {
-    if Phase::load() == Phase::Idle {
-        return None;
-    }
-    let cpu = CAUSE_CPU.load(Ordering::Acquire);
-    (cpu != usize::MAX).then_some(cpu)
-}
-
-/// Mark the current CPU as arrived.
-#[inline]
-pub fn mark_arrived() {
-    let id = this_cpu_id().as_usize();
-    if id >= usize::BITS as usize {
-        // Cannot represent this CPU in the bitmap without overflowing the shift.
+/// Elects the first failing CPU and halts after a bounded collection attempt.
+/// Losers only join the existing report; ordinary snapshots cannot suppress
+/// this independent terminal snapshot. Called only from the watchdog NMI.
+pub(crate) fn trigger(failed_task: &'static str) {
+    let cpu = this_cpu_id().as_usize();
+    if !REPORT.try_begin(cpu, WATCHED_CPUS.load(Ordering::Acquire)) {
+        participate();
         return;
     }
-    ARRIVED_BITMAP.fetch_or(1usize << id, Ordering::AcqRel);
-}
+    khal::kprint_atomic!("\n[watchdog] failure on cpu={cpu}, failed_task={failed_task}\n");
+    let _ = khal::nmi::request_peer_samples();
+    participate();
 
-pub fn arrived_bitmap() -> usize {
-    ARRIVED_BITMAP.load(Ordering::Acquire)
-}
-
-pub fn all_arrived_mask() -> usize {
-    // Cover only the CPUs the platform actually described (DT/ACPI), not the
-    // compile-time `NR_CPUS` cap; otherwise the rendezvous would wait forever
-    // for non-present CPUs to arrive.
-    let n = kcpu_id_map::nr_cpus();
-    if n >= usize::BITS as usize {
-        usize::MAX
-    } else {
-        (1usize << n) - 1
-    }
-}
-
-/// Busy-wait until all CPUs have arrived.
-///
-/// This is a *strong* rendezvous: no timeout.
-pub fn wait_all_arrived_strong() {
-    let expect = all_arrived_mask();
-    while arrived_bitmap() & expect != expect {
+    let mut budget = WaitBudget::new(
+        khal::time::monotonic_time().as_nanos_u64_saturating(),
+        REPORT_WAIT_TIMEOUT.as_nanos() as u64,
+        MAX_REPORT_WAIT_POLLS,
+    );
+    while !REPORT.all_ready() {
+        if budget.is_exhausted(khal::time::monotonic_time().as_nanos_u64_saturating()) {
+            break;
+        }
         core::hint::spin_loop();
     }
-}
-
-/// Mark dump done so other CPUs can release from spinning.
-pub fn mark_dump_done() {
-    PHASE.store(Phase::DumpDone as usize, Ordering::Release);
-}
-
-/// Reset rendezvous state.
-///
-/// Note: in your intended flow, other CPUs may keep spinning in NMI forever.
-/// If you want them to be able to return from NMI, call this after
-/// `mark_dump_done()` and after ensuring they observed it.
-#[inline]
-pub fn reset() {
-    ARRIVED_BITMAP.store(0, Ordering::Release);
-    CAUSE_CPU.store(usize::MAX, Ordering::Release);
-    PHASE.store(Phase::Idle as usize, Ordering::Release);
+    let collected = REPORT.close();
+    let targets = REPORT.targets();
+    khal::kprint_atomic!(
+        "[watchdog] targets={targets:#x}, collected={collected:#x}, missing={:#x}\n",
+        targets & !collected,
+    );
+    // SAFETY: ready publication follows each captured frame. Remote collectors
+    // park before returning to scheduler/task execution; the owner's NMI frame
+    // stays on this stack. Only those retained stacks are selected, and terminal
+    // storage is never cleared or reused even when another collector is late.
+    unsafe { SNAPSHOT.dump(collected) };
+    khal::kprint_atomic!("[watchdog] fatal report complete; halting reporter cpu={cpu}\n");
+    // The normal panic and platform halt paths may log through ordinary console
+    // locks. A failed CPU may hold those locks, so use the bare CPU stop instead.
+    karch::stop_cpu();
 }

@@ -27,7 +27,8 @@ pub trait WorkqueueStallInspectorIf {
 
 pub mod init;
 pub mod lockup_detection;
-pub mod rendezvous;
+#[cfg(feature = "nmi")]
+pub(crate) mod rendezvous;
 pub mod watchdog_task;
 pub use crate::{
     init::{init_primary, init_secondary},

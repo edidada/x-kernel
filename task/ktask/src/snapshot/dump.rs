@@ -141,3 +141,35 @@ fn dump_running_task_backtrace(cpu_id: LogicalCpuId, force: bool, bt: &backtrace
         ),
     }
 }
+
+/// Prints only a retained interrupted stack, without looking up or formatting
+/// task metadata: even a task name's Debug implementation can try an IRQ lock.
+pub(super) fn dump_terminal_backtrace(cpu_id: LogicalCpuId, tf: &TrapFrame) {
+    #[cfg(target_arch = "aarch64")]
+    let (fp, ip, ra) = (tf.x[29] as usize, tf.elr as usize, tf.x[30] as usize);
+    #[cfg(target_arch = "x86_64")]
+    let (fp, ip, ra) = (tf.rbp as usize, tf.rip as usize, 0);
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    {
+        let bt = backtrace::Backtrace::capture_trap(fp, ip, ra);
+        // Keep terminal output independent of DWARF/symbolication feature
+        // paths, whose formatting can need additional state or allocations.
+        khal::kprint_atomic!(
+            "cpu_id: {}, interrupted pc={ip:#x}, fp={fp:#x}\nBacktrace:\n",
+            cpu_id.as_usize()
+        );
+        if let Some(frames) = bt.raw_frames() {
+            for (index, frame) in frames.iter().enumerate() {
+                khal::kprint_atomic!("{index}: {:#x}\n", frame.adjust_ip());
+            }
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        let _ = tf;
+        khal::kprint_atomic!(
+            "[snapshot] cpu={} stack dump unsupported\n",
+            cpu_id.as_usize()
+        );
+    }
+}

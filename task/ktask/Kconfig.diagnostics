@@ -45,13 +45,14 @@ config KFEAT_SCHED_STAT
 config KFEAT_WATCHDOG_HARDLOCKUP
     bool "Watchdog hard lockup detection"
     depends on KFEAT_WATCHDOG
-    depends on MACHINE_AARCH64_QEMU
+    depends on MACHINE_AARCH64_QEMU || MACHINE_X86_64_QEMU
     depends on KFEAT_NMI
     help
       Enable the hard lockup watchdog backend. Requires NMI support (the
       source is selected together with NMI).  On AArch64 QEMU virt this is
-      currently implemented through the PMU-backed periodic NMI source and
-      global snapshot rendezvous.
+      implemented through the PMU-backed periodic NMI source. x86 uses native
+      NMI with a PMU or explicit SMP peer timer source. Reports collect available
+      CPU snapshots with bounded waits.
 
 config KFEAT_LOCK_STAT
     bool "Lock contention statistics (/proc/lock_stat)"

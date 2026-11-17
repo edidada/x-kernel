@@ -1751,3 +1751,24 @@ limit. A tick first polls an expired period, then charges the new period, so a
 window close is not consumed by the period rollover. When a window is open,
 every selectable member is parked before the next pick. Destroyed trackers are
 weak and retired by the next poll rather than held forever.
+## Terminal diagnostic snapshots
+
+`snapshot::TerminalSnapshot` supplies independent write-once frame storage for
+fatal multi-CPU diagnostics. A pinned CPU in IRQ/NMI context claims its slot,
+copies its active exception frame into `klazy::Once` and then lets the report
+coordinator publish readiness. Duplicate/nested collectors never wait on that
+initializer. Slots are not cleared or reused, so a late writer cannot corrupt a
+subsequent session or race a reader after partial collection times out.
+
+The coordinator retains every selected CPU's interrupted stack until output
+finishes, normally by parking responders until reset. `dump` acquires each
+selected slot's publication and only expands interrupted running stacks.
+It prints `NOT COLLECTED` for absent CPUs and avoids task metadata formatting,
+which can try ordinary IRQ locks. It does not walk non-running task
+contexts, which could still be changed by a CPU that did not stop. This is not
+a global scheduler-freeze or reclamation barrier. Ordinary sysrq snapshots
+continue to use their separate session and frame storage.
+
+The timer IRQ note hook normally stays short and non-blocking. A watchdog
+terminal report can use it to publish the interrupted frame and stop this CPU;
+that fatal path neither sleeps nor waits for scheduler/IRQ progress.

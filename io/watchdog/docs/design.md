@@ -1,19 +1,16 @@
-# io/watchdog — Soft and Hard Lockup Watchdog Design
+# Watchdog Design
 
-Kernel unit tests live in `ut-tests/` and are mounted from their original
-source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
-Enable `KFEAT_WATCHDOG=y` in the kernel configuration to include these tests.
+## Purpose and scope
 
-## Purpose
+`watchdog` detects stale per-CPU scheduler and interrupt heartbeats. Soft-lockup
+checks use timer IRQs and the Stop thread. Optional hard-lockup checks run from
+a periodic NMI source. The source's hardware programming remains in the platform
+backend behind `kplat::nm_irq::PeriodicNmiSourceIf`.
 
-The optional `workqueue-stall-check` feature declares `WorkqueueStallInspectorIf` through
-`kiface`. A linked workqueue provider implements task-context, warning-only backlog
-inspection. The per-CPU watchdog task invokes it before sleeping for four
-seconds. It does not depend on a concrete
-workqueue implementation. Queue backlog only produces warnings; the legacy fatal
-system-workqueue check is no longer registered. Soft/hard lockup checks are unchanged.
+The crate owns detection policy, the published per-CPU check list and fatal
+report coordination. It does not own interrupt-controller claims or PMU counters.
 
-`io/watchdog` provides X-Kernel's soft-lockup and hard-lockup detection:
+## Components
 
 - Soft lockup: each CPU's timer IRQ queues `stop_one_cpu_nowait` so the
   Stop thread updates a timestamp; the same callback checks whether that
@@ -21,163 +18,132 @@ system-workqueue check is no longer registered. Soft/hard lockup checks are unch
   the softlockup signal.
 - Hard lockup: NMI support (the `nmi` feature) periodically checks whether the local
   CPU's timer-IRQ heartbeat timestamp is older than the hard-lockup threshold.
-  A failed check triggers a global rendezvous, collects snapshots, and panics.
+  A failed check starts a bounded terminal report and stops the participating CPUs.
+- `src/init.rs` installs the timer IRQ hook, sampling timer, watchdog task and
+  optional periodic NMI callback on each initialized CPU.
+- `src/lockup_detection.rs` owns the cache-aligned per-CPU heartbeat state.
+- `src/watchdog_task.rs` publishes the local check list once before NMI arming.
+- `src/rendezvous.rs` coordinates a terminal best-effort multi-CPU report.
+- `src/rendezvous/state.rs` implements report admission and bounded polling using
+  atomics without architecture or clock dependencies.
+- `ktask::snapshot::TerminalSnapshot` owns the report's permanent copied frames.
 
-Dependencies: `khal` (NMI, per-CPU state, and time), `ktask` (tasks, timer callbacks,
-and snapshots), and `ktime_types`.
+## Execution contexts
 
-## Background
+| Entry | Context and contract |
+|-------|----------------------|
+| `init_primary`, `init_secondary` | Once on the pinned booting CPU after local scheduler/timer setup. |
+| Watchdog sampling timer | Local timer IRQ, ordinary IRQs masked; queue Stop work, check softlockup and rearm without sleeping. |
+| Timer IRQ note | Every local timer IRQ; refresh the hardlockup heartbeat. In an active fatal report, collect the current frame and park terminally. |
+| Stop-thread touch | Pinned Stop thread with IRQs masked; update the softlockup timestamp without sleeping. |
+| Watchdog task | Sleepable pinned kernel task. Optional workqueue inspection runs here, never in NMI. |
+| Periodic NMI | Check the immutable local task list or join an existing report. No allocation, normal console lock or scheduling. |
+| Fatal report coordinator | The first failing CPU's NMI, pinned with ordinary IRQs masked throughout collection, output and final stop. |
 
-The system may become unresponsive when interrupts remain masked or tasks are not
-scheduled for an extended period.
-Soft-lockup detection depends on scheduling and timers, which may themselves be affected.
-Hard-lockup detection uses an NMI source independent of ordinary IRQs and can still
-run when ordinary interrupts have stopped entirely.
-X-Kernel uses the PMU cycle counter as its NMI source through `kplat::PeriodicNmiSourceIf`;
-this crate is the NMI consumer.
+## Detection
 
-## Scope
+Softlockup means that this CPU's Stop-thread touch has not run for more than
+20 seconds even though timer IRQs continue. Each CPU retains a `ktask::Timer`;
+every four seconds its handler queues `stop_one_cpu_nowait`, checks the timestamp
+and rearms relative to handler completion. Softlockup reports print scheduler
+statistics and task backtraces, rate-limited to one per threshold interval.
 
-- `src/init.rs`: `init_primary`, `init_secondary`, `init_common`, `init_nmi_watchdog`, and `init_softlockup_detection`.
-- `src/lockup_detection.rs`: Per-CPU `LockupDetection` state, thresholds, and the `WatchdogTask` implementation.
-- `src/watchdog_task.rs`: The `WatchdogTask` trait, per-CPU task queues, and mutex deadlock checks.
-- `src/rendezvous.rs`: The global rendezvous state machine triggered by a failed check.
-- `src/lib.rs`: Exports.
+The initial hardlockup heartbeat is seeded during local watchdog initialization
+before source arming, so losing interrupts before the first timer IRQ is also
+detectable. Subsequent IRQs refresh it normally.
 
-## Architecture
+A separate pinned watchdog task sleeps for four seconds between optional
+workqueue-stall inspections. It does not update the softlockup timestamp.
 
-```text
-           Timer interrupt                         NMI (periodic PMU source)
-                  |                                           |
-        +---------+-------------------+                       |
-        v                             v                       v
- touch/check_softlockup           timer_tick          check_watchdog_tasks
- (timer → Stop thread)        (hard-lockup count)         (NMI context)
-        |                             |                       |
-        +-----------------------------+-----------------------+
-                                      |
-                                Failed check
-                                      |
-                  +-------------------+-----------------------+
-                  v                                           v
-       Soft lockup: log + dump                      Global rendezvous
-                                                    Initiating CPU collects
-                                                    all CPU snapshots -> panic
-```
+Hardlockup means that the latest local timer IRQ timestamp is more than ten
+seconds old. Every timer IRQ refreshes that heartbeat; the check uses monotonic
+wall time, not a count of PMU overflows or four-second sampling callbacks.
+The default NMI request is ten seconds; PMU backends translate it to a cycle
+budget, while the explicit x86 peer backend schedules another CPU's timer.
+Actual delivery cadence and independence are properties of the selected source.
 
-## Calling Constraints and Execution Context
+The local check list is mutable only during initialization. Release publication
+precedes NMI arming; NMI readers acquire publication before traversing the now
+immutable slice. Arming failure leaves the list published but excludes the CPU
+from the report's watched membership. An unavailable NMI mechanism or failed
+arming is logged explicitly.
 
-| Entry Point | Execution Context | Constraints |
-|-------------|-------------------|-------------|
-| `init_primary` / `init_secondary` | Primary / secondary CPU boot | Once per CPU. |
-| `init_nmi_watchdog` | Boot, with the NMI feature | Checks `khal::nmi::mode()`; logs and disables hard-lockup detection when it returns `None`. |
-| NMI callback registered through `enable_periodic_nmi` | NMI context | Only NMI-safe operations: atomics, snapshots, and `kprint_atomic!`, including lock-free argument formatting. Ordinary IRQ spinlocks are forbidden. |
-| Timer callback (`timer_tick` / soft-lockup check) | Timer interrupt, with IRQs disabled | Per-CPU atomic accesses. |
-| Timer callback queues `stop_one_cpu_nowait` | Timer interrupt, with IRQs disabled | Hands `touch_softlockup` to this CPU's Stop thread. Does not wait. |
-| Stop callback (`softlockup_fn`) | Per-CPU Stop thread, IRQs disabled | Updates the soft-lockup timestamp. Must not sleep. |
-| Watchdog task | One task pinned to each CPU | With `workqueue-stall-check`, inspects workqueue backlog, then sleeps for 4 seconds. It does not update the soft-lockup timestamp. |
+## Terminal report protocol
 
-## State Machines
-
-### Per-CPU Hard-Lockup Detection
-
-Every local timer IRQ stores the current monotonic time in `hard_timestamp`
-and sets `hard_timestamp_initialized`. On each NMI check, if the heartbeat has been
-initialized and is older than the hard-lockup threshold, the hard-lockup condition
-holds: `check_hardlockup` returns `true`.
-`WatchdogTask::check` negates this result, so a healthy task returns `true`.
-
-### Global Rendezvous
+The report is one-shot and has no reset or resource-reclamation path:
 
 ```text
-Idle      -- try_trigger (first failing CPU transitions atomically) --> Triggered
-Triggered -- mark_arrived in each CPU's NMI -----------------------> wait for all_arrived_mask
-Triggered -- initiating CPU collects/prints snapshots, mark_dump_done --> DumpDone
-DumpDone  -- initiating CPU panics (system stops) -----------------> terminal state
+Dormant -> elected owner, targets not yet published
+        -> collecting a frozen target set
+        -> closed with a final collected mask
+        -> output and terminal CPU stop
 ```
 
-`reset()` provides a path back to Idle.
-Its comment warns that other CPUs may still be spinning in NMI context, so callers
-must use it carefully.
+1. Only successfully armed CPUs register in `WATCHED_CPUS`. The first failed
+   check atomically installs its own CPU id as owner. That owner freezes the
+   registered mask and includes itself even if failure interrupted its arming
+   transaction before registration completed. Membership is not inferred from
+   firmware CPU count, and later initialization cannot extend the wait.
+2. The owner publishes targets with Release. Peers acquire that publication;
+   a peer observing election before targets are ready returns to the interrupted
+   path and can retry at its next timer IRQ or NMI. It never waits for setup.
+3. A per-CPU claim bit admits only the first entry. In particular, an NMI that
+   interrupts an ordinary timer-IRQ collector returns immediately rather than
+   parking the CPU before the interrupted collector can publish.
+4. Each admitted CPU quiesces its local periodic source, copies its current
+   exception frame into its dedicated `TerminalSnapshot` slot, then publishes
+   its ready bit with Release. Remote CPUs immediately enter `karch::stop_cpu`;
+   they do not wait for a dump-completion flag or resume normal execution.
+5. The owner waits for at most five seconds or 50,000,000 unsuccessful polls,
+   whichever limit is reached first. The finite poll budget still terminates
+   collection if the monotonic clock stops or regresses. Ordinary timer IRQs
+   let healthy idle CPUs participate without waiting a full PMU cycle budget.
+6. The owner closes new collection admission and acquires a final ready mask.
+   It prints target, collected and missing masks. CPUs that enter after close
+   park without collecting. An already admitted collector can finish late;
+   its immutable slot is not reused and is omitted if absent from the frozen mask.
+7. The owner prints the saved interrupted PC/FP and only the running stacks
+   selected by that mask. AArch64 uses saved ELR for the interrupted PC and LR
+   only as the unwinder's return-address fallback. Raw address output bypasses
+   optional in-kernel symbolication.
+   All other present CPUs are explicitly reported as `NOT COLLECTED`. It does
+   not look up or format task metadata (task-name formatting can try an IRQ
+   lock), and does not walk saved contexts of non-running tasks: an unresponsive
+   CPU could still migrate or execute such a task during partial collection.
+8. Output uses `kprint_atomic!`. After the final report marker the owner enters
+   `karch::stop_cpu` directly. The normal panic handler and platform halt hooks
+   can take ordinary console locks, so neither is invoked from this fatal path.
+   The result is a halt with power retained, not the previous panic/power-off.
 
-## Algorithms
+`TerminalSnapshot` is independent of ordinary sysrq snapshot sessions. An active
+ordinary snapshot cannot suppress a watchdog failure or have its frame slots
+cleared by a terminal report. Terminal slots use existing `klazy::Once` storage;
+there is no new unsafe publication cell.
 
-### Hard-Lockup Check on Each NMI
+## Concurrency and lifetime
 
-1. `check_watchdog_tasks()` scans the local CPU's queue (`HardLockupDetection` and
-   `MutexDeadlock`) and returns the task name when a check fails.
-2. On failure, if `ktask::snapshot::nmi_begin()` succeeds, call `rv::try_trigger()`.
-   The CPU that wins the atomic compare-and-swap from Idle to Triggered becomes
-   the initiating CPU.
-3. Each CPU calls `mark_arrived` and `nmi_collect_local()` in its own NMI context.
-4. After `wait_all_arrived_strong()`, the initiating CPU prints the failure,
-   calls `nmi_dump_all` and `mark_dump_done`, and panics.
-   Other CPUs spin while waiting for `is_dump_done`.
+Report ownership and each CPU's capture admission are monotonic. Acquiring the
+ready bitmap observes the frame published before its bit was set. The snapshot
+also checks each slot's own Acquire publication before reading it. Masked-out
+slots are never read. No global clear, `nmi_finish` or report reset follows a
+partial collection, so late writers cannot race reclamation or reuse.
 
-### Soft-Lockup Detection
+Participating CPUs retain their interrupted stacks until reset. Missing CPUs
+have not been proven stopped; a completed report is not a system-wide freeze or
+cleanup barrier. Normal-operation timer hooks remain short and non-blocking;
+only fatal-report participation enters the terminal stop path.
 
-- Each sample queues `stop_one_cpu_nowait` on this CPU. The Stop thread calls
-  `touch_softlockup`. The per-CPU `CpuStopWork` stays in `SOFTLOCKUP_STOP_WORK`
-  until that callback returns.
-- A pinned watchdog task still sleeps 4 seconds. With `workqueue-stall-check`
-  it inspects queue backlog. It does not update the softlockup timestamp.
-- Each CPU retains a `ktask::Timer<SoftlockupTimer>` in `SOFTLOCKUP_TIMER`,
-  allocated once during local initialization. The first sample is 4 seconds
-  later; the callback explicitly rearms on its owner CPU for completion time
-  plus 4 seconds. It does not chase missed samples or allocate timer storage.
-- On every sample, the timer callback calls `timer_tick()` and checks
-  `now - soft_timestamp > 20s`.
-  When the threshold is exceeded, it logs the failure and calls `dump_sched_stats`
-  and `dump_cpu_tasks`, with reports rate-limited by the threshold interval.
-- The separate `register_timer_irq_note` hook still counts every timer IRQ for
-  hard-lockup detection. Neither this migration nor delayed sampling changes
-  NMI registration or the hard-lockup policy.
-- Reinitializing a CPU's sampling owner panics. An out-of-range initial deadline
-  also panics; an out-of-range callback rearm logs and stops sampling instead.
+## Validation and limitations
 
-## Concurrency
+`tests/report-protocol` imports the production atomic protocol for host tests of
+concurrent ownership, sparse membership, nested entry, publication, late writers
+and stopped/regressing clocks. Kernel builds and watchdog unit tests validate
+integration through Makefile/Kconfig.
 
-- `LockupDetection` holds its private `LockupState` in
-  `karch::cache::CacheAligned`, replacing its local 64-byte alignment literal.
-  The shared policy isolates independently updated state; `AtomicU64` and
-  `AtomicBool` fields, not the wrapper, provide synchronization between NMIs,
-  timer interrupts and the watchdog task. The public type and methods remain
-  unchanged, and no allocation or lock is added.
-- `LockupDetection`'s task, IRQ, and NMI entry points take only shared
-  references; all state transitions go through atomic fields, so no overlapping
-  mutable reference is ever formed for the atomics.
-- The per-CPU watchdog task list is a one-time publication object: per-CPU
-  initialization exclusively writes the `Vec`, then publishes it with a
-  `Release` store once all registrations are complete. Periodic NMIs may only
-  traverse it after an `Acquire` observes publication, and only through a
-  shared slice.
-- The rendezvous uses global atomics (`PHASE`, `CAUSE_CPU`, and `ARRIVED_BITMAP`)
-  and spinning, without taking locks in NMI context.
-- NMI paths never acquire ordinary IRQ spinlocks, avoiding self-deadlock when a
-  pseudo-NMI preempts a lock holder on the same CPU.
-
-## Design Decisions
-
-- **Thresholds:** 20 seconds for soft lockups and 10 seconds for hard lockups.
-  The timer samples every 4 seconds and the Stop thread updates the timestamp,
-  so a starved lower-priority task is not a softlockup. Reports are limited to
-  one per threshold interval.
-- **Strong rendezvous without a timeout:** The initiating CPU waits for every CPU
-  before dumping snapshots, avoiding missing CPU snapshots.
-  If any CPU cannot enter NMI context, the wait is permanent; this is accepted
-  because the system is already unusable.
-- **Explicit degradation when NMI is unavailable:** Boot logs state that hard-lockup
-  detection is disabled, rather than failing silently.
-- **Snapshot reentry protection:** If `nmi_begin()` fails because another snapshot
-  is in progress, skip the current dump.
-- **Publish before arming NMI:** The task list is permanently read-only once
-  published; periodic NMIs are armed only after publication, and a failed arming
-  does not reopen the registration window.
-- **Soft-lockup report rate limit:** At most one report per threshold interval.
-
-## Drop and Resource Release
-
-Per-CPU state lives as long as the kernel and is not released at runtime.
-This includes the retained timer owners. Their handlers never access the
-owner slots and cannot drop or synchronously cancel their own delivery.
-`reset()` is used only when the rendezvous needs to be restarted.
+The owner requests prompt peer samples through the selected source. x86
+publishes per-target notification requests and sends native NMI IPIs; current
+AArch64 returns unavailable and observes the request at the next timer IRQ/NMI. The protocol accepts
+partial collection and is suitable for adding such notification later without
+making it a completion guarantee. The time/poll limits bound collection waits;
+backtrace formatting and hardware emergency output remain best effort and are
+not given a total execution-time guarantee.

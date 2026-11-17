@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 mod dump;
+mod terminal;
 
 use core::{
     cell::UnsafeCell,
@@ -11,6 +12,7 @@ use core::{
 
 use kcpu_id_map::{LogicalCpuId, for_each_present_logical_cpu};
 use khal::{context::TrapFrame, percpu::this_cpu_id};
+pub use terminal::TerminalSnapshot;
 
 struct SnapshotSlot(UnsafeCell<Option<TrapFrame>>);
 

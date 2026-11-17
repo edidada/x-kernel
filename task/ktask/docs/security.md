@@ -563,7 +563,12 @@ Invariants:
 2. Retirement closes admission; only zero readers permit moving Weak out.
    The value is moved before publishing EMPTY, so slot reuse cannot overwrite
    a borrowed Weak. Actual Weak Drop may occur on the final reader's CPU.
-3. Snapshot reads/writes obey session serialization (`begin` / `finish`).
+3. Ordinary snapshots use their existing session (`begin` / `finish`). Terminal
+   reports use separate `TerminalSnapshot` slots: atomic first-entry admission
+   allows one `klazy::Once` initializer per CPU, publication is acquired before
+   reading, and slots are never cleared or reused. The coordinator retains
+   selected CPUs' interrupted stacks until output completes. Partial terminal
+   dumps do not walk migratable saved task contexts or imply every CPU stopped.
 4. Owned timer storage is retained through callback cleanup. The core owns
    membership and routing; `ktask` preserves owner notification and IRQ context.
 5. `register_timer_irq_note` only stores a `'static fn()`. The timer IRQ
