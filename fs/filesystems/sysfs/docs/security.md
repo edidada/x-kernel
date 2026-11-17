@@ -141,10 +141,9 @@ payloads, or user credentials.
 - Keep all new driver-provided uevent values behind the shared uevent
   formatter's control-character sanitization.
 
-## Hotplug attributes
+## System view attributes
 
-Writable `cpuN/online` and `memoryN/online` attributes are `0644` and require
-`CAP_SYS_ADMIN` at write time. Read-only `present`, `possible`, `phys_index`,
-`state`, `block_size_bytes`, and CPU 0's `online` remain `0444`; making a sibling
-writable does not relax them. Writes accept exactly `0` or `1`; all policy and
-hardware validation is delegated to the hotplug state machine.
+`cpuN/{online,present,possible}`, `memoryN/{phys_index,state,online}`, and the
+global CPU/memory masks are all `0444`. The projection is read-only by design:
+there is no online write path, no hotplug state machine, and no userspace input
+that can change device presence or online state in this layer.

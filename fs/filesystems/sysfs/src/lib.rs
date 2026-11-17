@@ -114,7 +114,7 @@ impl DirectoryEntry {
 /// System devices have no major/minor number, so their attributes are
 /// synthesized from [`SystemDeviceState`] and written through the hotplug
 /// controller instead of a character device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SystemAttributeKind {
     CpuOnline,
     CpuPresent,
@@ -951,6 +951,9 @@ fn add_system_attribute(
         SystemAttributeKind::CpuGlobalPossible => "devices/system/cpu/possible".to_string(),
         SystemAttributeKind::MemoryGlobalOnline => "devices/system/memory/online".to_string(),
         SystemAttributeKind::MemoryGlobalPossible => "devices/system/memory/possible".to_string(),
+        SystemAttributeKind::MemoryBlockSizeBytes => {
+            "devices/system/memory/block_size_bytes".to_string()
+        }
         kind => {
             let Some(device) = device else {
                 return;
@@ -1022,6 +1025,9 @@ fn system_attribute_contents(
                 .map(|state| state.id.index()),
         )
         .into_bytes()),
+        SystemAttributeKind::MemoryBlockSizeBytes if device.is_none() => {
+            Ok(append_line(&alloc::format!("{MEMORY_BLOCK_SIZE_BYTES:x}")))
+        }
         kind => {
             let id = device.ok_or(VfsError::NoSuchDevice)?;
             let state = system_device_state(id).ok_or(VfsError::NoSuchDevice)?;
@@ -1072,6 +1078,12 @@ fn add_system_entries(tree: &mut BTreeMap<String, TreeEntry>, systems: &[SystemD
         tree,
         None,
         SystemAttributeKind::MemoryGlobalPossible,
+        READ_ONLY_PERMISSION,
+    );
+    add_system_attribute(
+        tree,
+        None,
+        SystemAttributeKind::MemoryBlockSizeBytes,
         READ_ONLY_PERMISSION,
     );
 

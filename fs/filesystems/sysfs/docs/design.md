@@ -116,7 +116,10 @@ For an input device the canonical object is:
 DRM uses `/sys/devices/<physical>/drm/cardN` with `dev`, `device`, `subsystem`,
 and `uevent`. Class and character-number entries are relative links to these
 canonical objects. `relative_symlink` computes links from source and target
-components, so link depth follows the actual paths.
+components, so link depth follows the actual paths. Each connector also gets a
+`class/drm/cardN-<connector>` link to its own directory, which carries `status`,
+`dpms`, `modes`, `enabled`, and raw `edid`; linking the connector to the card
+would hide those attributes.
 
 Every device directory also carries its own `uevent`. PCI devices report the
 `PCI_*` identity Linux publishes; platform devices (MMIO, firmware node, static)
@@ -202,14 +205,13 @@ tree update and its cache invalidation ordered against other device callbacks.
 ## System device projection
 
 `/sys/devices/system/{cpu,memory}` is synthesized from `kdevice`'s system
-device registry. Directories exist only for present devices, so a removal
-tombstone makes the directory disappear on rebuild. Per-CPU `online` is
-writable except for CPU 0, whose file is read-only `1`; `present` and
-`possible` are read-only. Memory blocks expose `phys_index`, `state`,
-`online` and `block_size_bytes`. The global `cpu/{online,possible}` files use
-cpulist formatting and the global memory files use a hex block bitmap.
+device registry. Directories exist only for present devices. All attributes are
+read-only: `cpuN/{online,present,possible}`, `memoryN/{phys_index,state,online}`,
+global `cpu/{online,possible}`, `memory/{online,possible}`, and
+`memory/block_size_bytes`. CPU sets use cpulist formatting and memory sets use
+Linux's hex block bitmap. This layer is a snapshot projection; state-changing
+hotplug is deliberately outside it.
 
 System devices have no major/minor number and no `/dev` node. Attributes are a
 separate `TreeEntry::SystemAttribute` variant carrying the device ID, kind and
-permission, because ordinary attributes are hard-wired read-only. The tree is
-rebuilt after every registry event and changed paths are invalidated.
+permission, because ordinary attributes are hard-wired read-only.

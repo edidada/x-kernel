@@ -340,7 +340,7 @@ fn system_projection_follows_present_devices_and_permissions() {
         "devices/system/memory/memory3/phys_index",
         "devices/system/memory/memory3/state",
         "devices/system/memory/memory3/online",
-        "devices/system/memory/memory3/block_size_bytes",
+        "devices/system/memory/block_size_bytes",
     ] {
         assert!(tree.contains_key(path), "missing {path}");
     }
@@ -355,8 +355,38 @@ fn system_projection_follows_present_devices_and_permissions() {
     assert_eq!(permission("devices/system/cpu/cpu1/present"), 0o444);
     assert_eq!(permission("devices/system/memory/memory3/state"), 0o444);
     assert_eq!(permission("devices/system/memory/memory3/online"), 0o444);
+    assert_eq!(permission("devices/system/memory/block_size_bytes"), 0o444);
 
     let after_removal = build_tree_with_systems(&BTreeMap::new(), &[], &[cpu0]);
     assert!(!after_removal.contains_key("devices/system/cpu/cpu1/online"));
     assert!(!after_removal.contains_key("devices/system/memory/memory3/online"));
+}
+
+
+#[def_test]
+fn system_projection_rebuild_refreshes_the_snapshot() {
+    let cpu0 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 0),
+        is_present: true,
+        is_online: true,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let cpu1 = SystemDeviceState {
+        id: SystemDeviceId::new(SystemClass::Cpu, 1),
+        is_present: true,
+        is_online: false,
+        is_going_offline: false,
+        physical_start_bytes: 0,
+        size_bytes: 0,
+    };
+    let mut projection = DeviceProjection::new();
+    projection.systems = alloc::vec![cpu0, cpu1];
+    projection.rebuild_tree();
+    assert!(projection.tree.contains_key("devices/system/cpu/cpu1/online"));
+
+    projection.systems = alloc::vec![cpu0];
+    projection.rebuild_tree();
+    assert!(!projection.tree.contains_key("devices/system/cpu/cpu1/online"));
 }
