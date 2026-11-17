@@ -50,7 +50,7 @@ use lazyinit::LazyInit;
 ///
 /// The names are the Linux `sysfs` directory names so that the projection can
 /// use them verbatim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SystemClass {
     /// A CPU described by the platform firmware (MADT/DT).
     Cpu,
@@ -80,7 +80,7 @@ impl SystemClass {
 /// later be installed again as a new lifecycle. Callers must therefore treat
 /// an ID as meaningful only while it is present: a stale snapshot must not be
 /// used to infer that a later device with the same ID is the original one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SystemDeviceId {
     class: SystemClass,
     index: u32,
@@ -107,7 +107,7 @@ impl SystemDeviceId {
 ///
 /// A snapshot is a value, not a live view: callers must not cache it across a
 /// hotplug operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemDeviceState {
     /// Identity this state belongs to.
     pub id: SystemDeviceId,
@@ -187,7 +187,7 @@ impl SystemDeviceDescriptor {
 }
 
 /// Kind of system-device lifecycle transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemDeviceEventKind {
     /// The device became present; its directory must appear.
     Added,
@@ -204,7 +204,7 @@ pub enum SystemDeviceEventKind {
 }
 
 /// One system-device lifecycle notification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemDeviceEvent {
     /// Transition that happened.
     pub kind: SystemDeviceEventKind,
