@@ -398,6 +398,10 @@ and the bounded Router queue. Each namespace starts with forwarding disabled;
 `/proc/sys/net/ipv4/ip_forward` controls it under the Router lock. Physical
 receive traffic still belongs to the initial stack.
 
+FORWARD inspects the route-selected datagram after TTL preparation and before
+fragmentation. Remaining fragments resume after that decision without repeating
+filter counters or TTL updates. Forwarded traffic bypasses local INPUT/OUTPUT.
+
 ### IPv4 Filter Table Model
 
 `netfilter/filter` stores IPv4 filtering policies as immutable ordered rules

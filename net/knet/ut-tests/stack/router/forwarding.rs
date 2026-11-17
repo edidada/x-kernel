@@ -2,13 +2,20 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, vec};
+use alloc::{string::String, sync::Arc, vec};
 
 use ksync::Mutex;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice};
+use crate::{
+    device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice},
+    netfilter::{
+        BaseMatch, Chain, FilterHook, FilterTable, InterfacePattern, Negated, Rule as FilterRule,
+        Target, Verdict,
+    },
+    stack::ingress::{IngressBatch, IngressProcessor},
+};
 
 type SentPackets = Arc<Mutex<Vec<(IpAddress, PacketBuf)>>>;
 
@@ -107,6 +114,32 @@ fn router() -> (Router, SentPackets) {
     (router, sent)
 }
 
+fn filter() -> FilterConfig {
+    let base = BaseMatch {
+        input_interface: Some(Negated::new(
+            InterfacePattern::exact(String::from("in0")).unwrap(),
+            false,
+        )),
+        output_interface: Some(Negated::new(
+            InterfacePattern::exact(String::from("out0")).unwrap(),
+            false,
+        )),
+        ..BaseMatch::default()
+    };
+    FilterConfig::new(
+        FilterTable::new(vec![
+            Chain::built_in(FilterHook::LocalIn, Verdict::Drop, vec![]),
+            Chain::built_in(
+                FilterHook::Forward,
+                Verdict::Accept,
+                vec![FilterRule::new(base, vec![], Target::Continue).unwrap()],
+            ),
+            Chain::built_in(FilterHook::LocalOut, Verdict::Drop, vec![]),
+        ])
+        .unwrap(),
+    )
+}
+
 fn packet(router: &Router, ttl: u8) -> PacketBuf {
     let bytes = ipv4::build_ipv4_packet(
         Ipv4Address::new(192, 0, 2, 7),
@@ -130,19 +163,40 @@ fn input(router: &Router, ttl: u8) -> Ipv4ForwardInput {
 }
 
 #[def_test]
-fn forward_batch_resumes_fragments_without_repeating_ttl_update() {
+fn forward_batch_counts_once_before_fragmentation_and_bypasses_local_hooks() {
     let (mut router, sent) = router();
-    let mut inputs = vec![input(&router, 64)];
+    let filter = filter();
+    let mut ingress = IngressProcessor::new();
+    ingress.update_local_ipv4_addrs(&[Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 1), 24).unwrap()]);
+    let mut batch = IngressBatch::new(1);
+    ingress.handle_rx_packets(
+        MonotonicInstant::ORIGIN,
+        &filter,
+        &mut vec![RxPacket::Network(packet(&router, 64))],
+        &mut batch,
+    );
+    assert!(batch.local.is_empty());
+    assert!(batch.control.is_empty());
+    assert_eq!(batch.forward.len(), 1);
+    assert_eq!(router.ipv4_forwarding(), 0);
     router.set_ipv4_forwarding(1);
-    router.enqueue_forward_packets(&mut inputs);
+    router.enqueue_forward_packets(&mut batch.forward);
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 0, &filter),
+        (0, true)
+    );
+    assert_eq!(
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (1, true)
     );
     assert_eq!(sent.lock().len(), 1);
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (1, false)
+    );
+    assert_eq!(
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
+        (0, false)
     );
     let sent = sent.lock();
     assert_eq!(sent.len(), 2);
@@ -158,11 +212,18 @@ fn forward_batch_resumes_fragments_without_repeating_ttl_update() {
             router.devices.device_id_by_name("out0").unwrap().ifindex()
         );
     }
+    let counters = filter.with_state(|state| state.collect_counters());
+    assert_eq!(counters[0].end.packets, 0);
+    assert_eq!(counters[2].end.packets, 0);
+    assert_eq!(counters[1].rules[0].packets, 1);
+    assert_eq!(counters[1].rules[0].bytes, 116);
+    assert_eq!(counters[1].end.packets, 1);
 }
 
 #[def_test]
 fn forward_queue_backpressure_and_cleanup_preserve_local_tx_capacity() {
     let (mut router, sent) = router();
+    let filter = filter();
     let mut packets = vec![input(&router, 64)];
     router.enqueue_forward_packets(&mut packets);
     assert!(packets.is_empty());
@@ -177,20 +238,26 @@ fn forward_queue_backpressure_and_cleanup_preserve_local_tx_capacity() {
     assert_eq!(router.ingress_capacity(), 0);
     assert_eq!(router.available_tx_packet_slots(), tx_capacity);
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (1, true)
     );
     assert_eq!(router.ingress_capacity(), 1);
     router.set_ipv4_forwarding(0);
     router.set_ipv4_forwarding(1);
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (0, false)
     );
     assert_eq!(sent.lock().len(), 1);
+    assert_eq!(
+        filter.with_state(|state| state.collect_counters())[1]
+            .end
+            .packets,
+        1
+    );
     router.enqueue_forward_packets(&mut vec![input(&router, 64)]);
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (1, true)
     );
     let output = router.devices.device_id_by_name("out0").unwrap();
@@ -199,8 +266,51 @@ fn forward_queue_backpressure_and_cleanup_preserve_local_tx_capacity() {
         Ipv4Cidr::new(Ipv4Address::new(203, 0, 113, 1), 24).unwrap(),
     );
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (0, false)
     );
     assert_eq!(sent.lock().len(), 2);
+}
+
+#[def_test]
+fn forward_drop_and_ttl_error_do_not_submit_transmission_packets() {
+    let (mut router, sent) = router();
+    router.set_ipv4_forwarding(1);
+    let drop_filter = FilterConfig::new(
+        FilterTable::new(vec![
+            Chain::built_in(FilterHook::LocalIn, Verdict::Accept, vec![]),
+            Chain::built_in(FilterHook::Forward, Verdict::Drop, vec![]),
+            Chain::built_in(FilterHook::LocalOut, Verdict::Accept, vec![]),
+        ])
+        .unwrap(),
+    );
+    router.enqueue_forward_packets(&mut vec![input(&router, 64)]);
+    assert_eq!(
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &drop_filter),
+        (1, false)
+    );
+    assert!(sent.lock().is_empty());
+    assert!(router.control_tx_queue.is_empty());
+    router.enqueue_forward_packets(&mut vec![input(&router, 1)]);
+    assert_eq!(
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &drop_filter),
+        (1, true)
+    );
+    assert!(sent.lock().is_empty());
+    let reply = router
+        .control_tx_queue
+        .front()
+        .unwrap()
+        .network_packet()
+        .unwrap();
+    let header = Ipv4Header::parse_input(reply).unwrap();
+    assert_eq!(header.src_addr(), Ipv4Address::new(192, 0, 2, 1));
+    assert_eq!(&reply[20..22], &[11, 0]);
+    assert_eq!(reply[28 + 8], 1);
+    assert_eq!(
+        drop_filter.with_state(|state| state.collect_counters())[1]
+            .end
+            .packets,
+        1
+    );
 }

@@ -131,7 +131,6 @@ impl Ipv4ForwardInput {
 }
 
 impl PreparedIpv4Forward {
-    #[cfg(unittest)]
     pub(crate) fn packet(&self) -> &PacketBuf {
         &self.packet
     }

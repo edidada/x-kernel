@@ -1283,7 +1283,7 @@ impl Router {
             {
                 self.next_tx_is_forward = false;
                 work_done += 1;
-                poll_next |= self.dispatch_ipv4_forward(timestamp);
+                poll_next |= self.dispatch_ipv4_forward(timestamp, filter);
                 continue;
             }
             let Some(mut packet) = self.pop_tx_packet() else {
@@ -1347,7 +1347,11 @@ impl Router {
         (work_done, poll_next || self.has_queued_tx_packets())
     }
 
-    fn dispatch_ipv4_forward(&mut self, timestamp: MonotonicInstant) -> bool {
+    fn dispatch_ipv4_forward(
+        &mut self,
+        timestamp: MonotonicInstant,
+        filter: &FilterConfig,
+    ) -> bool {
         if self.pending_forward.is_none() {
             let input = self
                 .forward_queue
@@ -1360,6 +1364,18 @@ impl Router {
                     return false;
                 }
             };
+            let Some(indev) = NetDeviceId::new(packet.packet().ifindex())
+                .and_then(|id| self.devices.get_by_id(id))
+            else {
+                return false;
+            };
+            let outdev = self
+                .devices
+                .get_by_id(route.device)
+                .expect("selected route device");
+            if !filter.accept_forward(packet.packet(), indev.name(), outdev.name()) {
+                return false;
+            }
             let Ok(packets) = packet.into_packets() else {
                 return false;
             };
