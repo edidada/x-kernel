@@ -16,6 +16,7 @@ struct RecordingControl {
     calls: AtomicUsize,
     is_failing: AtomicBool,
     requests: SpinNoPreempt<Vec<bool>>,
+    order: Arc<SpinNoPreempt<Vec<&'static str>>>,
 }
 
 impl RecordingControl {
@@ -24,6 +25,7 @@ impl RecordingControl {
             calls: AtomicUsize::new(0),
             is_failing: AtomicBool::new(false),
             requests: SpinNoPreempt::new(Vec::new()),
+            order: Arc::new(SpinNoPreempt::new(Vec::new())),
         }
     }
 
@@ -36,6 +38,7 @@ impl SystemDeviceControl for RecordingControl {
     fn set_online(&self, online: bool) -> KResult<()> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.requests.lock().push(online);
+        self.order.lock().push("control");
         if self.is_failing.load(Ordering::Relaxed) {
             return Err(KErrorKind::OperationNotSupported.into());
         }
@@ -112,11 +115,17 @@ fn offline_publishes_going_offline_before_the_control_runs() {
     let _guard = TEST_LOCK.lock();
     reset_system_devices_for_tests();
     let control = Arc::new(RecordingControl::new());
-    let id = install_cpu(2, control);
+    let id = install_cpu(2, control.clone());
     let observed = Arc::new(SpinNoPreempt::new(Vec::new()));
+    let order = control.order.clone();
     let sink = observed.clone();
     subscribe_system_device_events(Arc::new(move |event| {
         let is_going_offline = event.state.is_going_offline;
+        order.lock().push(match event.kind {
+            SystemDeviceEventKind::GoingOffline => "going",
+            SystemDeviceEventKind::Offline => "offline",
+            _ => "other",
+        });
         sink.lock().push((event.kind, is_going_offline));
     }));
 
@@ -127,6 +136,7 @@ fn offline_publishes_going_offline_before_the_control_runs() {
     assert!(events[0].1);
     assert_eq!(events[1].0, SystemDeviceEventKind::Offline);
     assert!(!events[1].1);
+    assert_eq!(*control.order.lock(), alloc::vec!["going", "control", "offline"]);
 }
 
 #[def_test]

@@ -328,7 +328,10 @@ fn system_projection_follows_present_devices_and_permissions() {
         physical_start_bytes: 3 * 128 * 1024 * 1024,
         size_bytes: 128 * 1024 * 1024,
     };
-    let tree = build_tree_with_systems(&BTreeMap::new(), &[], &[cpu0, cpu1, memory3]);
+    let mut projection = DeviceProjection::new();
+    projection.systems = alloc::vec![cpu0, cpu1, memory3];
+    projection.rebuild_tree();
+    let tree = &projection.tree;
 
     for path in [
         "devices/system/cpu",
@@ -357,9 +360,10 @@ fn system_projection_follows_present_devices_and_permissions() {
     assert_eq!(permission("devices/system/memory/memory3/online"), 0o444);
     assert_eq!(permission("devices/system/memory/block_size_bytes"), 0o444);
 
-    let after_removal = build_tree_with_systems(&BTreeMap::new(), &[], &[cpu0]);
-    assert!(!after_removal.contains_key("devices/system/cpu/cpu1/online"));
-    assert!(!after_removal.contains_key("devices/system/memory/memory3/online"));
+    projection.systems = alloc::vec![cpu0];
+    projection.rebuild_tree();
+    assert!(!projection.tree.contains_key("devices/system/cpu/cpu1/online"));
+    assert!(!projection.tree.contains_key("devices/system/memory/memory3/online"));
 }
 
 

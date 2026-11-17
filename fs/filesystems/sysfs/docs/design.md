@@ -119,7 +119,10 @@ canonical objects. `relative_symlink` computes links from source and target
 components, so link depth follows the actual paths. Each connector also gets a
 `class/drm/cardN-<connector>` link to its own directory, which carries `status`,
 `dpms`, `modes`, `enabled`, and raw `edid`; linking the connector to the card
-would hide those attributes.
+would hide those attributes. The class tree therefore contains `class/drm/cardN`
+for the card, `class/drm/cardN-<connector>` for each connector, and
+`class/drm/renderD<minor>` for the render minor; `dev/char/<major>:<minor>` links
+point back to the canonical device directories.
 
 Every device directory also carries its own `uevent`. PCI devices report the
 `PCI_*` identity Linux publishes; platform devices (MMIO, firmware node, static)
