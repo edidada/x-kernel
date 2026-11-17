@@ -539,8 +539,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // can requeue us. Fair schedulers snapshot lag for later enqueue PLACE_LAG.
         let (_, pull_if_empty) = self.inner.leave_and_publish(|s| s.block_current(now_ns));
 
-        // Mark the task as blocked, this has to be done before adding it to the wait queue
-        // while holding the lock of the wait queue.
+        // Mark the task as blocked before publishing it to any wait queue: the
+        // wake latch is consumed again below, so a wake that raced with this
+        // publication self-unblocks instead of being lost.
         debug_assert!(state.is_blocked());
         curr.set_state(state);
         // Pending-signal inspection serializes with the signal-state writer,
