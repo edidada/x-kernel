@@ -5,10 +5,15 @@
 #![no_std]
 #![no_main]
 mod guest_abi;
+mod guest_config;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use guest_abi::{call, nr};
-const CPU_COUNT: usize = env!("S3_TEST_CPUS").as_bytes()[0] as usize - b'0' as usize;
+const CPU_COUNT: usize = match env!("S3_TEST_CPUS").as_bytes() {
+    b"1" => 1,
+    b"4" => 4,
+    _ => 0,
+};
 fn sys(n: u64, a: u64, b: u64, c: u64) -> i64 {
     // SAFETY: all calls in this standalone probe use audited Linux syscall
     // numbers and live buffers with matching access. No operation retains a
@@ -201,6 +206,17 @@ extern "C" fn e2e_main() -> ! {
     text("E2E_ARCH ");
     text(guest_abi::ARCH);
     text("\n");
+    check(
+        CPU_COUNT == 1 || CPU_COUNT == 4,
+        "S3_TEST_CPUS must be 1 or 4",
+    );
+    let rounds = match guest_config::parse_rounds(env!("S3_TEST_ROUNDS")) {
+        Some(rounds) => rounds,
+        None => {
+            text("E2E_FAIL: S3_TEST_ROUNDS must be decimal 1..100\n");
+            exit(2);
+        }
+    };
     pin(0);
     // SAFETY: mmap receives a null hint, one page, anonymous shared RW flags
     // and no source buffer. The result is checked before forming any reference.
@@ -224,7 +240,7 @@ extern "C" fn e2e_main() -> ! {
     check(raw >= 0, "open raw disk");
     let mut original = [0u8; 512];
     read_sector(raw as u64, &mut original);
-    for cycle in 1..=env!("S3_TEST_ROUNDS").parse::<u64>().unwrap() {
+    for cycle in 1..=rounds {
         let mut counts = [0u64; 4];
         for cpu in 1..CPU_COUNT {
             counts[cpu] = shared.counts[cpu].load(Ordering::Acquire);

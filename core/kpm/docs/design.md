@@ -272,6 +272,9 @@ No real device is powered down and no firmware sleep is entered.
 
 `src/runtime.rs::suspend_guest` is the production `reboot(SW_SUSPEND)` route.
 It is separate from the retained UP integration APIs described above.
+It requires an initialized sleepable task context with IRQs enabled and no
+preemption-disabling guard or interrupt-like scope; otherwise it returns
+`BadState` before changing affinity, devices or task admission.
 The x86 backend currently accepts QEMU/SeaBIOS firmware and implemented device
 contracts only; other targets return `OperationNotSupported`. There is no
 `/sys/power/state` interface in this change.
@@ -299,6 +302,12 @@ and producers remain excluded. Only then are remote callbacks released and
 joined, original IOAPIC masks restored, normal work admitted, and ordinary tasks
 thawed. Original affinity is restored last. Hardware restoration failures are
 fatal rather than releasing execution against invalid state.
+
+The RTC estimator accepts at most 86400 seconds per transaction as a finite
+trust bound against a gross forward RTC edit. A longer real sleep also exceeds
+that policy: recovery still completes, but settlement returns `EIO` and injects
+no sleep compensation. The short QEMU scenarios do not establish correct
+accounting for sleeps longer than this bound.
 
 PM infrastructure exemptions are immutable pre-publication task properties
 owned by Stop/migration, softirq and RCU infrastructure constructors. Runtime

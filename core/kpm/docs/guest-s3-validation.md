@@ -295,3 +295,15 @@ those capabilities requires platform/firmware entry, wake context, CPU,
 interrupt, device and time restoration work beyond portable test code. No
 CPU wait, QMP stop/cont, unsupported return or normal guest shutdown is counted
 as a successful system suspend/resume.
+
+### Parameter-validation follow-up
+
+The standalone guest now validates CPU topology and parses cycle counts without
+panic, including when a caller invokes rustc directly and bypasses the shell's
+validation. The actual parser is compiled into a native host regression: two
+Rust tests cover accepted bounds and malformed, overflowing, signed, empty and
+out-of-range input. The host suite now has 18 Python tests. An intentionally
+compiled `S3_TEST_ROUNDS=not-a-number` guest was booted in real x86 QEMU and
+printed `E2E_FAIL: S3_TEST_ROUNDS must be decimal 1..100`, without panic and
+before any suspend request. Its failed run is retained as `invalid-rounds`;
+it is not counted as a positive sleep scenario.

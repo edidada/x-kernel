@@ -46,9 +46,9 @@ def metadata(arch):
         'qemu_version': version,
         'qemu_error': qemu_error,
         'test_sources_sha256': {
-            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in Path(__file__).parent.iterdir()
-            if path.suffix in ('.rs', '.py', '.sh') or path.name.endswith('defconfig')
+            str(path.relative_to(Path(__file__).parent)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in Path(__file__).parent.rglob('*')
+            if path.is_file() and (path.suffix in ('.rs', '.py', '.sh') or path.name.endswith('defconfig'))
         },
     }
 
