@@ -24,6 +24,7 @@ members = [
     "task/ktimer-core",
     "task/kbandwidth",
     "sync/krtmutex",
+    "sync/kwake",
     "tee/tee_crypto",
     "tee/xdice",
 ]

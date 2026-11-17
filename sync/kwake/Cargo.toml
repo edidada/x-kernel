@@ -1,0 +1,17 @@
+[package]
+name = "kwake"
+description = "Owned two-phase wake signaling and host delivery contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+intrusive-collections.workspace = true
+kalloc-types.workspace = true
+kerrno.workspace = true
+
+[lints]
+workspace = true

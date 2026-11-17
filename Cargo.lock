@@ -3756,6 +3756,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kwake"
+version = "0.3.0-dev"
+dependencies = [
+ "intrusive-collections",
+ "kalloc-types",
+ "kerrno",
+]
+
+[[package]]
 name = "kworkerpool_ng"
 version = "0.3.0-dev"
 dependencies = [
