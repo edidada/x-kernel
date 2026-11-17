@@ -1,4 +1,72 @@
-# Real guest S3 validation
+# Guest system suspend/resume validation
+
+## Architecture matrix and truthful support status
+
+The guest probe and host runner support `x86_64`, `aarch64`, and `riscv64`
+Linux syscall ABIs. This is test portability, not three implemented platform
+sleep backends. The production `kpm::suspend_guest` entry currently implements
+real system suspend only on x86 q35/SeaBIOS; the other targets return
+`EOPNOTSUPP` before freezing. A positive ARM64 or RISC-V scenario therefore
+fails today. Do not advertise a green three-architecture resume matrix until
+those platform implementations and their firmware have actually run it.
+
+```sh
+# Strict matrix: all three architectures, one/four CPUs, three rounds each.
+# Includes positive resume and negative refusal; x86 also tests VGA refusal.
+# Missing QEMU, build failure or unavailable backend fails, rather than skips.
+python3 scripts/pm/run_qemu_suspend_matrix.py --output /tmp/pm-matrix
+
+# Select an individual architecture and expected result explicitly.
+S3_TEST_ARCH=aarch64 S3_TEST_UNSUPPORTED=1 S3_TEST_ROUNDS=3 scripts/pm/run_qemu_s3.sh
+S3_TEST_ARCH=riscv64 S3_TEST_UNSUPPORTED=1 S3_TEST_ROUNDS=3 scripts/pm/run_qemu_s3.sh
+python3 scripts/pm/run_qemu_suspend_matrix.py --arches x86_64 --scenario resume --rounds 12
+```
+
+The matrix runs sequentially because each build replaces `.config`. Use an
+isolated worktree. Output directories must be empty; each case has independent
+logs, disk, provenance and verdicts. `matrix-result.json` and
+`matrix-junit.xml` are updated after every case. A partial matrix always has
+`complete=false` and `passed=false`. A refusal-only matrix can pass its negative
+assertions but always has `all_architectures_resumed=false`.
+
+Firmware/CPU overrides can be supplied explicitly as `S3_TEST_QEMU_ARGS` for
+an individual run, or `PM_QEMU_ARGS_AARCH64` / `PM_QEMU_ARGS_RISCV64` for the
+matrix (for example `-bios /path/to/fw_jump.elf`). The final QEMU command is
+recorded. The runner does not patch firmware, invent a sleep backend or use
+QMP stop/cont as a replacement. The installed emulator must implement the
+selected CPU model; XKMake normally selects Cortex-A76 on ARM64 TCG. For an
+older emulator, an explicit `-cpu cortex-a72` override changes the tested CPU
+profile and must be retained in the report.
+
+Every positive cycle must show the production task/queue freeze, device
+suspend, exact remote CPU acknowledgment count, platform entry, successful
+sleep accounting, and complete CPU/device/task recovery, in order between
+the userspace request and return. The seed enables INFO logs for this audit.
+Exact request/pass cycle IDs, alternating QMP SUSPEND/WAKEUP, the matching guest
+architecture, independent host clock checks, no reset/failure/QMP error, and
+the final persisted file are all required. Duplicate, missing or misordered
+events cannot pass merely because their total counts match.
+
+Negative cycles require each requested `EOPNOTSUPP`, continued remote process
+progress, timerfd delivery, nanosleep, unchanged raw block contents, and new
+file write/fsync plus a host-side persistence check. They must have zero
+platform sleep/wake events and no production freeze/entry stages. These tests
+validate safe rejection; they do not exercise device restoration or a firmware
+resume on unsupported platforms.
+
+Run all host tool regressions with:
+
+```sh
+python3 -m unittest discover -s scripts/pm -p 'test_*.py'
+```
+
+The protocol/matrix fixtures reject partial chains, duplicate cycle markers,
+wrong CPU counts, reordered stages, stop/cont substitutes, unpaired sleep
+events, resets, QMP errors, missing clock observations, and refusals presented
+as positive resumes. Controlled host fixtures are never evidence of real
+platform suspend.
+
+## Real x86 ACPI S3
 
 Run from the repository on a host with `qemu-system-x86_64`, the project Rust
 and x86 LinuxBoot build tools, Python 3 and e2fsprogs:

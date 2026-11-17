@@ -57,7 +57,7 @@ from pathlib import Path
 out = Path(os.environ['S3_OUTPUT_DIR'])
 (out / 'child.pid').write_text(str(os.getpid()))
 server = socket.socket(socket.AF_UNIX)
-server.bind(str(out / 'qmp.sock'))
+server.bind(os.environ['S3_QMP_SOCKET'])
 server.listen(1)
 conn, _ = server.accept()
 conn.sendall(b'{"QMP": {}}\\n')

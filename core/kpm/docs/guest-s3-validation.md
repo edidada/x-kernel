@@ -249,3 +249,49 @@ must remain excluded under the documented system transaction contract. Remote
 CPU timeout still joins already queued Stop work before reclaiming its storage.
 CI and AI review are tracked separately on each PR; local validation is not a
 claim that all remote CI jobs or reviews have passed.
+
+## Standard-distribution multi-architecture probe — 2026-11-17
+
+The test runner now has independent x86_64, AArch64 and RV64 Linux syscall
+entry/ELF startup implementations. The normal production kernel is used;
+there is no test-only platform suspend provider. The matrix requires both
+one- and four-present-CPU runs, exact cycle identities, production PM-stage
+ordering, alternating hardware SUSPEND/WAKEUP events, host clock comparisons
+and persisted disk contents. QMP errors, kernel panics, resets and incomplete
+matrices fail. Negative scenarios separately require repeated EOPNOTSUPP,
+remote process progress, timer delivery, raw reads and file/fsync persistence.
+
+The user constrained this validation to standard distribution QEMU/firmware.
+On this tree, `kpm::suspend_guest` still has only an x86 platform backend.
+ARM64 and RISC-V positive scenarios must therefore remain failed; their
+negative successes do not establish system-sleep or recovery support.
+
+Observed development-tree results, retained under
+`/home/greatwall/桌面/xkernel/validation/guest-pm-multiarch/`:
+
+| Profile | Actual result |
+| --- | --- |
+| x86 q35/SeaBIOS, distribution QEMU 4.2.1 | One CPU / 3 real S3 rounds and four CPUs / 12 real S3 rounds pass all production-stage, timing and persistence checks |
+| x86 matrix, one/four CPUs | Positive resume, firmware-S3-disabled refusal and VGA refusal exercised separately |
+| ARM64, distribution QEMU 4.2.1 Cortex-A72 | One/four CPUs / 3 refusals pass; a real positive request fails with EOPNOTSUPP |
+| ARM64, Debian QEMU 7.2.22 Cortex-A76 | One/four CPUs / 3 refusals pass; both positive scenarios fail with EOPNOTSUPP |
+| RV64, Debian QEMU 7.2.22 + distribution OpenSBI | One/four CPUs / 3 refusals pass; both positive scenarios fail with EOPNOTSUPP |
+| RV64, original distribution QEMU 4.2.1 | Kernel boot fails because its virt DT lacks the Goldfish RTC; this is retained as a failed attempt, not a skipped success |
+| Host protocol/matrix/cleanup regressions | 17 pass; controlled fixtures do not count as real hardware sleep |
+
+Debian QEMU and its runtime dependencies were extracted under `/tmp`, without
+system installation or source modification. Package SHA256 values were checked
+against the distribution package index; the download manifest is retained in
+the evidence directory. The RTC remains enabled on the successful RV64 boot.
+The old ARM emulator needs an explicit Cortex-A72 override; the newer standard
+emulator uses the normal Cortex-A76 profile. Per-case provenance records the
+source revision/status, probe input hashes, kernel ELF hash, resolved kernel
+configuration, emulator identity and full launch command. Results made before
+commit retain dirty-tree provenance rather than claiming a clean-head run.
+
+The required full matrix is deliberately not green: missing ARM64/RISC-V
+system-suspend backends remain visible as positive-case failures. Finishing
+those capabilities requires platform/firmware entry, wake context, CPU,
+interrupt, device and time restoration work beyond portable test code. No
+CPU wait, QMP stop/cont, unsupported return or normal guest shutdown is counted
+as a successful system suspend/resume.

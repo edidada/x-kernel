@@ -4,35 +4,11 @@
 
 #![no_std]
 #![no_main]
-use core::{
-    arch::{asm, global_asm},
-    sync::atomic::{AtomicU64, Ordering},
-};
+mod guest_abi;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use guest_abi::{call, nr};
 const CPU_COUNT: usize = env!("S3_TEST_CPUS").as_bytes()[0] as usize - b'0' as usize;
-global_asm!(
-    ".global _start",
-    "_start:",
-    "and rsp, -16",
-    "call e2e_main",
-    "ud2"
-);
-/// Invokes the x86-64 Linux syscall ABI without a userspace runtime.
-///
-/// # Safety
-/// Pointer arguments must cover the memory required by the selected syscall,
-/// remain live and obey its read/write aliasing contract until it returns.
-/// The process must have a valid userspace stack and Linux syscall entry.
-unsafe fn call(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> i64 {
-    let result: i64;
-    // SAFETY: the caller supplies syscall-specific memory and a live stack.
-    // Linux uses rax/rdi/rsi/rdx/r10/r8/r9; rcx and r11 are declared clobbered,
-    // and syscall returns on the same userspace stack without touching the red zone.
-    unsafe {
-        asm!("syscall",inlateout("rax") n=>result,in("rdi")a,in("rsi")b,in("rdx")c,
-        in("r10")d,in("r8")e,in("r9")f,lateout("rcx")_,lateout("r11")_,options(nostack));
-    }
-    result
-}
 fn sys(n: u64, a: u64, b: u64, c: u64) -> i64 {
     // SAFETY: all calls in this standalone probe use audited Linux syscall
     // numbers and live buffers with matching access. No operation retains a
@@ -40,7 +16,7 @@ fn sys(n: u64, a: u64, b: u64, c: u64) -> i64 {
     unsafe { call(n, a, b, c, 0, 0, 0) }
 }
 fn text(s: &str) {
-    sys(1, 1, s.as_ptr() as u64, s.len() as u64);
+    sys(nr::WRITE, 1, s.as_ptr() as u64, s.len() as u64);
 }
 fn number(mut n: u64) {
     let mut b = [0u8; 20];
@@ -53,10 +29,10 @@ fn number(mut n: u64) {
             break;
         }
     }
-    sys(1, 1, b[i..].as_ptr() as u64, (20 - i) as u64);
+    sys(nr::WRITE, 1, b[i..].as_ptr() as u64, (20 - i) as u64);
 }
 fn exit(code: u64) -> ! {
-    sys(60, code, 0, 0);
+    sys(nr::EXIT, code, 0, 0);
     loop {
         core::hint::spin_loop();
     }
@@ -72,7 +48,7 @@ fn check(ok: bool, stage: &str) {
 fn pin(cpu: u64) {
     let mask = 1u64 << cpu;
     check(
-        sys(203, 0, 8, (&mask as *const u64) as u64) == 0,
+        sys(nr::AFFINITY, 0, 8, (&mask as *const u64) as u64) == 0,
         "CPU affinity",
     );
 }
@@ -84,7 +60,7 @@ struct Timespec {
 fn clock(id: u64) -> u64 {
     let mut t = Timespec { i: 0, n: 0 };
     check(
-        sys(228, id, (&mut t as *mut Timespec) as u64, 0) == 0,
+        sys(nr::CLOCK, id, (&mut t as *mut Timespec) as u64, 0) == 0,
         "clock_gettime",
     );
     check(t.i >= 0 && t.n >= 0, "clock range");
@@ -96,7 +72,7 @@ struct TimerSpec {
     value: Timespec,
 }
 fn timer(id: u64, delay: u64) -> u64 {
-    let fd = sys(283, id, 0x800, 0);
+    let fd = sys(nr::TIMER_CREATE, id, 0x800, 0);
     check(fd >= 0, "timerfd_create");
     let deadline = clock(id) + delay;
     let value = TimerSpec {
@@ -111,7 +87,7 @@ fn timer(id: u64, delay: u64) -> u64 {
         // and immutably borrowed until timerfd_settime copies it; old_value is null.
         unsafe {
             call(
-                286,
+                nr::TIMER_SET,
                 fd as u64,
                 1,
                 (&value as *const TimerSpec) as u64,
@@ -126,7 +102,7 @@ fn timer(id: u64, delay: u64) -> u64 {
 }
 fn timer_count(fd: u64) -> i64 {
     let mut n = 0u64;
-    let result = sys(0, fd, (&mut n as *mut u64) as u64, 8);
+    let result = sys(nr::READ, fd, (&mut n as *mut u64) as u64, 8);
     if result == 8 {
         check(n > 0, "timer expiration count");
         n as i64
@@ -171,22 +147,64 @@ fn wait_counts(shared: &Shared, before: [u64; 4]) {
             return;
         }
         check(clock(1) - start < 5_000_000_000, "remote CPU progress");
-        sys(24, 0, 0, 0);
+        sys(nr::YIELD, 0, 0, 0);
     }
 }
 fn read_sector(fd: u64, buffer: &mut [u8; 512]) {
-    check(sys(8, fd, 0, 0) == 0, "raw disk seek");
+    check(sys(nr::SEEK, fd, 0, 0) == 0, "raw disk seek");
     check(
-        sys(0, fd, buffer.as_mut_ptr() as u64, 512) == 512,
+        sys(nr::READ, fd, buffer.as_mut_ptr() as u64, 512) == 512,
         "raw disk read",
     );
 }
+fn verify_io(raw: u64, original: &[u8; 512], cycle: u64) {
+    let delay = Timespec {
+        i: 0,
+        n: 100_000_000,
+    };
+    let sleep_start = clock(1);
+    check(
+        sys(nr::SLEEP, (&delay as *const Timespec) as u64, 0, 0) == 0,
+        "post-resume nanosleep",
+    );
+    check(clock(1) - sleep_start >= 100_000_000, "nanosleep deadline");
+    let mut after = [0u8; 512];
+    read_sector(raw, &mut after);
+    check(after == *original, "raw disk changed");
+    // SAFETY: the static NUL-terminated path remains valid during openat;
+    // create flags supply the initialized numeric mode and no output pointer.
+    let fd = unsafe {
+        call(
+            nr::OPEN,
+            (-100i64) as u64,
+            b"/pm-proof\0".as_ptr() as u64,
+            0x242,
+            0o600,
+            0,
+            0,
+        )
+    };
+    check(fd >= 0, "post-resume file create");
+    let data = [cycle as u8; 4096];
+    check(
+        sys(nr::WRITE, fd as u64, data.as_ptr() as u64, 4096) == 4096,
+        "post-resume file write",
+    );
+    check(
+        sys(nr::FSYNC, fd as u64, 0, 0) == 0,
+        "post-resume file fsync",
+    );
+    check(sys(nr::CLOSE, fd as u64, 0, 0) == 0, "file close");
+}
 #[unsafe(no_mangle)]
 extern "C" fn e2e_main() -> ! {
+    text("E2E_ARCH ");
+    text(guest_abi::ARCH);
+    text("\n");
     pin(0);
     // SAFETY: mmap receives a null hint, one page, anonymous shared RW flags
     // and no source buffer. The result is checked before forming any reference.
-    let shared_address = unsafe { call(9, 0, 4096, 3, 0x21, u64::MAX, 0) };
+    let shared_address = unsafe { call(nr::MMAP, 0, 4096, 3, 0x21, u64::MAX, 0) };
     check(shared_address > 0, "shared mmap");
     // SAFETY: successful anonymous mmap returns a page-aligned zeroed 4096-byte
     // region, larger than Shared. Zero represents each AtomicU64; all shared
@@ -194,7 +212,7 @@ extern "C" fn e2e_main() -> ! {
     let shared = unsafe { &*(shared_address as *const Shared) };
     let mut children = [0i64; 3];
     for cpu in 1..CPU_COUNT {
-        let pid = sys(57, 0, 0, 0);
+        let pid = guest_abi::fork();
         check(pid >= 0, "fork");
         if pid == 0 {
             child(cpu, shared);
@@ -202,7 +220,7 @@ extern "C" fn e2e_main() -> ! {
         children[cpu - 1] = pid;
     }
     wait_counts(shared, [0; 4]);
-    let raw = sys(257, (-100i64) as u64, b"/dev/vda\0".as_ptr() as u64, 0);
+    let raw = sys(nr::OPEN, (-100i64) as u64, b"/dev/vda\0".as_ptr() as u64, 0);
     check(raw >= 0, "open raw disk");
     let mut original = [0u8; 512];
     read_sector(raw as u64, &mut original);
@@ -219,14 +237,25 @@ extern "C" fn e2e_main() -> ! {
         text("E2E_CYCLE ");
         number(cycle);
         text(" REQUEST\n");
-        let result = sys(169, 0xfee1dead, 672274793, 0xd000fce2);
+        let result = sys(nr::REBOOT, 0xfee1dead, 672274793, 0xd000fce2);
         if option_env!("S3_TEST_UNSUPPORTED") == Some("1") {
             check(
                 result == -95,
                 "unsupported configuration must return EOPNOTSUPP",
             );
-            sys(3, mono_timer, 0, 0);
-            sys(3, boot_timer, 0, 0);
+            // Even a rejected request must leave event delivery usable.
+            let delay = Timespec {
+                i: 1,
+                n: 100_000_000,
+            };
+            check(
+                sys(nr::SLEEP, (&delay as *const Timespec) as u64, 0, 0) == 0,
+                "timer delivery after refused suspend",
+            );
+            check(timer_count(boot_timer) > 0, "BOOTTIME timer after refusal");
+            sys(nr::CLOSE, mono_timer, 0, 0);
+            sys(nr::CLOSE, boot_timer, 0, 0);
+            verify_io(raw as u64, &original, cycle);
             wait_counts(shared, counts);
             let mut after = [0u8; 512];
             read_sector(raw as u64, &mut after);
@@ -283,44 +312,11 @@ extern "C" fn e2e_main() -> ! {
                 clock(1) - timer_wait < 1_000_000_000,
                 "BOOTTIME timer not rescanned after wake",
             );
-            sys(24, 0, 0, 0);
+            sys(nr::YIELD, 0, 0, 0);
         }
-        sys(3, mono_timer, 0, 0);
-        sys(3, boot_timer, 0, 0);
-        let delay = Timespec {
-            i: 0,
-            n: 100_000_000,
-        };
-        let sleep_start = clock(1);
-        check(
-            sys(35, (&delay as *const Timespec) as u64, 0, 0) == 0,
-            "post-resume nanosleep",
-        );
-        check(clock(1) - sleep_start >= 100_000_000, "nanosleep deadline");
-        let mut after = [0u8; 512];
-        read_sector(raw as u64, &mut after);
-        check(after == original, "raw disk changed");
-        // SAFETY: the static NUL-terminated path remains valid during openat;
-        // create flags supply the initialized numeric mode and no output pointer.
-        let fd = unsafe {
-            call(
-                257,
-                (-100i64) as u64,
-                b"/pm-proof\0".as_ptr() as u64,
-                0x242,
-                0o600,
-                0,
-                0,
-            )
-        };
-        check(fd >= 0, "post-resume file create");
-        let data = [cycle as u8; 4096];
-        check(
-            sys(1, fd as u64, data.as_ptr() as u64, 4096) == 4096,
-            "post-resume file write",
-        );
-        check(sys(74, fd as u64, 0, 0) == 0, "post-resume file fsync");
-        check(sys(3, fd as u64, 0, 0) == 0, "file close");
+        sys(nr::CLOSE, mono_timer, 0, 0);
+        sys(nr::CLOSE, boot_timer, 0, 0);
+        verify_io(raw as u64, &original, cycle);
         wait_counts(shared, counts);
         text("E2E_CYCLE ");
         number(cycle);
@@ -335,12 +331,12 @@ extern "C" fn e2e_main() -> ! {
     for pid in children.into_iter().take(CPU_COUNT - 1) {
         let mut status = 0i32;
         check(
-            sys(61, pid as u64, (&mut status as *mut i32) as u64, 0) == pid,
+            sys(nr::WAIT, pid as u64, (&mut status as *mut i32) as u64, 0) == pid,
             "waitpid",
         );
         check(status == 0, "child status");
     }
-    sys(3, raw as u64, 0, 0);
+    sys(nr::CLOSE, raw as u64, 0, 0);
     if option_env!("S3_TEST_UNSUPPORTED") == Some("1") {
         text("E2E_REFUSAL_PASS\n");
     } else {

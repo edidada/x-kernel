@@ -4,18 +4,26 @@
 
 """Boot a userspace suspend probe and capture real QMP transitions."""
 import json
+import hashlib
 import os
 import re
 from pathlib import Path
 import signal
 import socket
 import subprocess
+import tempfile
 import time
+
+from evidence import protocol_checks
+from run_qemu_suspend_matrix import metadata
 
 OUT = Path(os.environ["S3_OUTPUT_DIR"]).resolve()
 REPO = Path(__file__).resolve().parents[2]
-QMP = OUT / 'qmp.sock'
+QMP_DIR = tempfile.TemporaryDirectory(prefix='xkernel-pm-qmp-')
+QMP = Path(QMP_DIR.name) / 'qmp.sock'
 QMP.unlink(missing_ok=True)
+ARCH = os.environ.get('S3_TEST_ARCH', 'x86_64')
+CPUS = int(os.environ.get('S3_TEST_CPUS', '4'))
 PREFIX = 'guest-e2e'
 for suffix in ('result.json', 'qmp-live.jsonl'):
     (OUT / f'{PREFIX}-{suffix}').unlink(missing_ok=True)
@@ -24,11 +32,12 @@ commands = ['make', 'justrun', 'ACCEL=n', 'SMP=' + os.environ.get('S3_TEST_CPUS'
             'XKMAKE_ARGS=--no-net --no-vsock',
             f'QEMU_ARGS=-no-reboot -qmp unix:{QMP},server=on,wait=off']
 commands[-1] += ' -no-shutdown -nic none'
-if os.environ.get('S3_TEST_VGA') != '1':
+if ARCH == 'x86_64' and os.environ.get('S3_TEST_VGA') != '1':
     commands[-1] += ' -vga none'
-if (os.environ.get('S3_TEST_UNSUPPORTED') == '1'
+if (ARCH == 'x86_64' and os.environ.get('S3_TEST_UNSUPPORTED') == '1'
         and os.environ.get('S3_TEST_VGA') != '1'):
     commands[-1] += ' -global ICH9-LPC.disable_s3=1'
+commands[-1] += ' ' + os.environ.get('S3_TEST_QEMU_ARGS', '')
 records = []
 cycle_starts = {}
 clock_checks = []
@@ -36,6 +45,25 @@ serial_lines_seen = 0
 # One-second CMOS quantization plus at most two 300 ms serial polling edges.
 # The remainder covers bounded marker transmission and clock sampling skew.
 clock_tolerance_ns = 2_000_000_000
+
+try:
+    provenance = metadata(ARCH)
+    provenance['inputs_sha256'] = {
+        str(path.relative_to(OUT)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (OUT / 'kernel.config', OUT / 'root/bin/sh') if path.exists()
+    }
+    target = Path(os.environ.get('TARGET_DIR', str(REPO / 'target')))
+    if not target.is_absolute():
+        target = REPO / target
+    kernel = target / 'xkmake' / ('kplat-' + ARCH) / 'release/kernel.elf'
+    provenance['kernel_elf_sha256'] = (hashlib.sha256(kernel.read_bytes()).hexdigest()
+                                       if kernel.exists() else None)
+    (OUT / f'{PREFIX}-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+except (OSError, subprocess.SubprocessError) as error:
+    # Retain the provenance failure; the launch's ordinary evidence path below
+    # still runs and writes its verdict instead of losing all diagnostics.
+    provenance = {'error': str(error)}
+    (OUT / f'{PREFIX}-provenance.json').write_text(json.dumps(provenance) + '\n')
 
 def observe_serial():
     global serial_lines_seen
@@ -60,12 +88,20 @@ def observe_serial():
             })
     serial_lines_seen = len(complete)
 
-failure = None
+failure = provenance.get('error') or provenance.get('qemu_error')
 proc = None
+
+def interrupted(_signal, _frame):
+    # An outer matrix timeout must run the inner launcher's finally cleanup;
+    # the QEMU/make child has its own process group.
+    raise RuntimeError('runner interrupted by host')
+
+signal.signal(signal.SIGTERM, interrupted)
 with (OUT / f'{PREFIX}-serial.log').open('w') as serial:
     sock = None
     try:
         proc = subprocess.Popen(commands, cwd=REPO, stdout=serial,
+                                env=dict(os.environ, S3_QMP_SOCKET=str(QMP)),
                                 stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as error:
         failure = str(error)
@@ -159,6 +195,7 @@ with (OUT / f'{PREFIX}-serial.log').open('w') as serial:
                 proc.wait()
         (OUT / f'{PREFIX}-qmp.json').write_text(json.dumps(records, indent=2) + '\n')
         QMP.unlink(missing_ok=True)
+        QMP_DIR.cleanup()
 observe_serial()
 (OUT / f'{PREFIX}-clock-checks.json').write_text(json.dumps(clock_checks, indent=2) + '\n')
 serial_text = (OUT / f'{PREFIX}-serial.log').read_text(errors='replace')
@@ -178,34 +215,28 @@ summary = {
                        and e.get('data', {}).get('reason') == 'guest-reset'
                        for e in records),
 }
-if os.environ.get('S3_TEST_UNSUPPORTED') != '1':
-    try:
-        persisted = subprocess.run(['debugfs', '-R', 'cat pm-proof', str(OUT / 'root.img')],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   check=False, timeout=10)
-        summary['disk_data_persisted'] = (persisted.returncode == 0
-                                          and persisted.stdout == bytes([rounds & 255]) * 4096)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        summary['disk_data_persisted'] = False
-        summary['error'] = summary['error'] or str(error)
-else:
-    summary['disk_data_persisted'] = None
-summary['passed'] = (summary['error'] is None
-                     and summary['make_exit_code'] == 0
-                     and summary['clock_compensation_matches_host']
-                     and summary['disk_data_persisted']
-                     and summary['e2e_completed']
-                     and not summary['guest_reset']
-                     and summary['suspend_count'] == rounds
-                     and summary['wakeup_count'] == rounds
-                     and summary['passed_cycles'] == rounds)
-if os.environ.get('S3_TEST_UNSUPPORTED') == '1':
-    summary['passed'] = (summary['error'] is None
-                         and summary['make_exit_code'] == 0
-                         and 'E2E_REFUSAL_PASS' in serial_text
-                         and summary['suspend_count'] == 0
-                         and summary['wakeup_count'] == 0
-                         and not summary['guest_reset'])
+try:
+    persisted = subprocess.run(['debugfs', '-R', 'cat pm-proof', str(OUT / 'root.img')],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               check=False, timeout=10)
+    summary['disk_data_persisted'] = (persisted.returncode == 0
+                                      and persisted.stdout == bytes([rounds & 255]) * 4096)
+except (OSError, subprocess.TimeoutExpired) as error:
+    summary['disk_data_persisted'] = False
+    summary['error'] = summary['error'] or str(error)
+refusal = os.environ.get('S3_TEST_UNSUPPORTED') == '1'
+unsupported = re.search(r'^E2E_REBOOT_ERROR 95$', serial_text, re.M) is not None
+if unsupported and not refusal:
+    summary['error'] = summary['error'] or 'guest returned EOPNOTSUPP; real system suspend/resume was not completed'
+checks = protocol_checks(serial_text, records, clock_checks, arch=ARCH, cpus=CPUS,
+                         rounds=rounds, refusal=refusal)
+summary.update(architecture=ARCH, cpus=CPUS, rounds=rounds,
+               scenario='unsupported-refusal' if refusal else 'system-suspend-resume',
+               unsupported=unsupported,
+               checks=checks, actual_suspend_resume=(not refusal and all(checks.values())),
+               launch_command=commands)
+summary['passed'] = (summary['error'] is None and summary['make_exit_code'] == 0
+                     and summary['disk_data_persisted'] and all(checks.values()))
 (OUT / f'{PREFIX}-result.json').write_text(json.dumps(summary, indent=2) + '\n')
 print(json.dumps(summary, indent=2))
 raise SystemExit(0 if summary['passed'] else 1)
