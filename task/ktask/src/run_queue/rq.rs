@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
 use ksched::{Decision, EnqueueKind, Nice, UpdateKind};
-use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
+use kspin::{BaseGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
 use super::get_run_queue;
@@ -508,7 +508,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     #[track_caller]
     pub(crate) fn blocked_resched(
         &mut self,
-        mut woke: SpinNoIrqGuard<'_, bool>,
+        latch: &crate::park::ParkLatch,
         state: TaskState,
         stop: impl FnOnce() -> bool,
     ) {
@@ -517,10 +517,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         let curr = &self.current_task;
         assert!(curr.is_running());
         assert!(!curr.is_idle());
-        // we must not block current task with preemption disabled.
-        // Current expected preempt count is 2 for `NoPreemptIrqSave` because we also hold
-        // the `woke` SpinNoIrqGuard lock here.
-        assert!(curr.can_preempt(2));
+        // We must not block current task with preemption or IRQs disabled.
+        // Only the caller's `NoPreemptIrqSave` guard is held: the wake latch is
+        // a lock-free atomic and never contributes a preempt count.
+        assert!(curr.can_preempt(1));
         assert!(!curr.rcu_reader.is_reading(), "blocking in RCU read scope");
         // CurrentTask slot + Scheduler.curr + caller clone (e.g. block_on).
         let strong = KtaskRef::strong_count(curr);
@@ -543,7 +543,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // which releases that lock before signal_task(). Once sleep is visible,
         // either that wake succeeds or this recheck supplies the wake. The
         // existing on_cpu protocol defers enqueue until switch-out completes.
-        if stop() {
+        // A waker that sampled `Running` before this state publication gave up
+        // on enqueueing, but it recorded the wake first; consuming the latch
+        // here turns that wake into a self-unblock instead of losing it. This
+        // replaces holding the latch as a lock across the block, which let a
+        // parker wait for a lock held by a waker waiting for that latch.
+        if stop() || latch.take() {
             // Placement can select a remote idle CPU, so deferred enqueue
             // must retain the reschedule request as well as the wake itself.
             super::select_wake_run_queue::<kspin::NoPreemptIrqSave>(curr).unblock_task_in_state(
@@ -552,8 +557,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 true,
             );
         }
-        *woke = false;
-        drop(woke);
 
         // Current task's state has been changed to `Blocked` and added to the wait queue.
         // Note that the state may have been set as `Ready` in `unblock_task()`,
