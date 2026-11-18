@@ -8,8 +8,9 @@ use alloc::{string::String, sync::Arc};
 
 use kvfs::{
     Dentry, FileSystemType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsError,
-    VfsResult, libfs::simple_statfs,
+    VfsResult, path::MAX_NAME_LEN,
 };
+use memaddr::PAGE_SIZE_4K;
 use p9::{P9Client, P9Transport};
 
 use super::inode::{V9fsInode, inode_init_from_attr};
@@ -66,6 +67,24 @@ pub fn mount(
     ))
 }
 
+/// Filesystem statistics for a server that does not implement `TSTATFS`.
+///
+/// Reports page-sized blocks and no capacity, so `df` shows the mount without
+/// inventing numbers the server never sent.
+fn unsupported_server_statfs(fs_type: u32) -> StatFs {
+    StatFs {
+        fs_type,
+        block_size: PAGE_SIZE_4K as u32,
+        blocks: 0,
+        blocks_free: 0,
+        blocks_available: 0,
+        file_count: 0,
+        free_file_count: 0,
+        name_length: MAX_NAME_LEN as u32,
+        fragment_size: 0,
+    }
+}
+
 struct V9fsSuperOperations;
 
 static V9FS_SUPER_OPERATIONS: V9fsSuperOperations = V9fsSuperOperations;
@@ -89,7 +108,7 @@ impl SuperBlockOperations for V9fsSuperOperations {
         let stats = match inode.statfs() {
             Ok(stats) => stats,
             Err(error) if error.canonicalize() == VfsError::Unsupported => {
-                return Ok(simple_statfs(V9FS_MAGIC));
+                return Ok(unsupported_server_statfs(V9FS_MAGIC));
             }
             Err(error) => return Err(error),
         };

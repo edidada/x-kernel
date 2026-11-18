@@ -128,8 +128,8 @@ impl FileOperations for V9fsInode {
 /// must return to fill it. `None` means the folio index overflows the offset.
 fn folio_window(file_size: u64, folio_index: u64) -> Option<(u64, usize)> {
     let offset = folio_index.checked_mul(PAGE_SIZE_4K as u64)?;
-    let expected = file_size.saturating_sub(offset).min(PAGE_SIZE_4K as u64);
-    Some((offset, expected as usize))
+    let expected_bytes = file_size.saturating_sub(offset).min(PAGE_SIZE_4K as u64);
+    Some((offset, expected_bytes as usize))
 }
 
 /// Serves page-cache folios for 9P regular files.
