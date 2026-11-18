@@ -67,7 +67,7 @@ pub struct Process {
     /// Exec-time auxiliary vector, flattened as `(type, value)` words with the
     /// trailing NULL entry last. Written once per exec, read by
     /// `prctl(PR_GET_AUXV)` and `/proc/<pid>/auxv` (Linux `mm->saved_aux`).
-    saved_aux: SpinNoIrq<Vec<u64>>,
+    saved_aux: SpinNoIrq<Arc<Vec<u64>>>,
     /// Fast-path gate for periodic CPU-timer checks.
     ///
     /// True while any CPU-time-driven timer (ITIMER_VIRTUAL, ITIMER_PROF,
@@ -431,7 +431,7 @@ impl Process {
             saved_aux: SpinNoIrq::new(
                 parent
                     .as_ref()
-                    .map_or_else(Vec::new, |parent| parent.saved_aux()),
+                    .map_or_else(|| Arc::new(Vec::new()), |parent| parent.saved_aux()),
             ),
             cpu_timers_armed: AtomicBool::new(false),
             lifecycle: ProcessLifecycleState::new(),

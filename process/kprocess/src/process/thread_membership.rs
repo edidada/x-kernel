@@ -571,12 +571,13 @@ impl Process {
 
     /// The exec-time auxiliary vector as flattened `(type, value)` words,
     /// trailing NULL last. Empty until the first exec commits it.
-    pub fn saved_aux(&self) -> Vec<u64> {
+    pub fn saved_aux(&self) -> Arc<Vec<u64>> {
         self.saved_aux.lock().clone()
     }
 
     /// Replaces the exec-time auxiliary vector.
     pub fn set_saved_aux(&self, saved_aux: Vec<u64>) {
+        let saved_aux = Arc::new(saved_aux);
         *self.saved_aux.lock() = saved_aux;
     }
 
