@@ -13,7 +13,7 @@
 //! node's compatible strings to a single alias, so by the time `probe_device`
 //! runs the concrete backend is only known from which driver matched.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use char_driver::CharDevice;
 use console_driver::{
@@ -21,6 +21,7 @@ use console_driver::{
     serial::{SerialPort, take_early_port},
 };
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+use driver_os_api::Clk;
 use kclass::publish_char;
 use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, FirmwareMatchSpec};
 #[cfg(any(feature = "serial-pl011", feature = "serial-ns16550-mmio"))]
@@ -28,7 +29,7 @@ use khal::mem::{PhysAddr, VirtAddr};
 
 #[cfg(any(feature = "serial-pl011", feature = "serial-ns16550-mmio"))]
 use crate::DeviceResourceExt as _;
-use crate::driver_registry::BoxedDriver;
+use crate::{driver_registry::BoxedDriver, resource::devm_consume_uart_clocks};
 
 /// Character-device wrapper around one per-instance UART port.
 struct SerialCharDev(Arc<SerialPort>);
@@ -55,6 +56,22 @@ impl CharDevice for SerialCharDev {
     fn write(&self, buf: &[u8]) -> DriverResult<usize> {
         self.0.write_data(buf);
         Ok(buf.len())
+    }
+}
+
+/// Per-binding driver data for MMIO UARTs: the connection clocks the node
+/// declared, acquired device-managed and enabled. Empty when the node
+/// declares no `clocks` or no provider has registered — firmware-configured
+/// ports run without the framework.
+#[derive(Default)]
+struct SerialData {
+    clocks: Vec<Clk>,
+}
+
+impl SerialData {
+    /// Diagnostics: the rates this binding enabled, for bring-up logs.
+    fn clock_rates(&self) -> Vec<u64> {
+        self.clocks.iter().map(|clk| clk.get_rate()).collect()
     }
 }
 
@@ -153,7 +170,7 @@ struct Pl011SerialDriver;
 
 #[cfg(feature = "serial-pl011")]
 impl DeviceDriver for Pl011SerialDriver {
-    type Data = ();
+    type Data = SerialData;
 
     fn name(&self) -> &'static str {
         "serial-pl011"
@@ -171,9 +188,16 @@ impl DeviceDriver for Pl011SerialDriver {
         &PL011
     }
 
-    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<SerialData> {
         let port = resolve_port(ctx, SerialKind::Pl011)?;
-        publish(ctx, port)
+        publish(ctx, port)?;
+        let data = SerialData {
+            clocks: devm_consume_uart_clocks(ctx)?,
+        };
+        if !data.clock_rates().is_empty() {
+            log::info!("serial-pl011: baud clocks acquired and enabled");
+        }
+        Ok(data)
     }
 }
 
@@ -196,7 +220,7 @@ struct Ns16550MmioSerialDriver;
 
 #[cfg(feature = "serial-ns16550-mmio")]
 impl DeviceDriver for Ns16550MmioSerialDriver {
-    type Data = ();
+    type Data = SerialData;
 
     fn name(&self) -> &'static str {
         "serial-ns16550-mmio"
@@ -214,9 +238,16 @@ impl DeviceDriver for Ns16550MmioSerialDriver {
         &NS16550_MMIO
     }
 
-    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<SerialData> {
         let port = resolve_port(ctx, SerialKind::Ns16550Mmio)?;
-        publish(ctx, port)
+        publish(ctx, port)?;
+        let data = SerialData {
+            clocks: devm_consume_uart_clocks(ctx)?,
+        };
+        if !data.clock_rates().is_empty() {
+            log::info!("serial-pl011: baud clock enabled");
+        }
+        Ok(data)
     }
 }
 
