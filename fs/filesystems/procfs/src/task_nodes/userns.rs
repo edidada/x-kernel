@@ -72,11 +72,25 @@ impl SimpleFileOps for IdMapFile {
             // extents are stored.
             text.push_str(&format!("{:10} {:10} {:10}\n", 0, 0, u32::MAX));
         } else {
+            let reader_ns = kprocess::current_cred().user_ns_arc().clone();
+            let parent = ns.parent().ok_or(VfsError::NotFound)?;
             for extent in self.kind.map(&ns) {
+                // `outside` is stored in parent-namespace coordinates. Linux
+                // renders it in the reader's namespace, not the parent's.
+                let global = match self.kind {
+                    IdMapKind::Uid => parent.map_uid_to_initial(extent.outside()),
+                    IdMapKind::Gid => parent.map_gid_to_initial(extent.outside()),
+                };
+                let outside = global
+                    .and_then(|id| match self.kind {
+                        IdMapKind::Uid => reader_ns.map_uid_from_initial(id),
+                        IdMapKind::Gid => reader_ns.map_gid_from_initial(id),
+                    })
+                    .unwrap_or(65_534);
                 text.push_str(&format!(
                     "{:10} {:10} {:10}\n",
                     extent.inside(),
-                    extent.outside(),
+                    outside,
                     extent.count()
                 ));
             }

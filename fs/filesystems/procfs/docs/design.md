@@ -453,7 +453,7 @@ subsystems is possible; Linux avoids it with one global nsfs inode space.
 A shared namespace-inode registry is a prerequisite for nsfs-style magic
 symlinks and bind-mount identity.
 
-Namespace files pin their namespace object at lookup for every type, the way
+Namespace files for `ns/net` pin their namespace object at lookup, the way
 nsfs does: the dentry refers to the namespace, not to the task, so a bind mount
 of `/proc/<pid>/ns/<type>` still opens and can be handed to `setns(2)` after
 the task that created it exited. Container runtimes rely on that ordering — a

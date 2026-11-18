@@ -187,7 +187,8 @@ pub(crate) fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
 /// Set the supplementary group IDs of the current process.
 pub(crate) fn sys_setgroups(size: i32, list: UserConstPtr<Gid>) -> KResult<isize> {
     debug!("sys_setgroups <= size: {size}");
-    if !kprocess::current_cred().has_cap(kcred::CAP_SETGID) {
+    let cred = kprocess::current_cred();
+    if !cred.has_cap_in(cred.user_ns(), kcred::CAP_SETGID) {
         return Err(KError::OperationNotPermitted);
     }
 

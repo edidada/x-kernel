@@ -338,10 +338,14 @@ fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
         .ok_or(VfsError::InvalidInput)
 }
 
-fn proc_self_target() -> VfsResult<String> {
+fn proc_self_target(observer_ns: Option<&Arc<PidNamespace>>) -> VfsResult<String> {
     let task = current();
     let thread = task.try_as_thread().ok_or(VfsError::NotFound)?;
-    Ok(thread.process().pid().to_string())
+    let process = thread.process();
+    let pid = observer_ns
+        .and_then(|ns| process.number_in_namespace(ns))
+        .unwrap_or_else(|| process.pid());
+    Ok(pid.to_string())
 }
 
 fn maps_permissions(flags: MappingFlags) -> [u8; 4] {
@@ -1655,22 +1659,39 @@ impl SimpleDirOps for ThreadDir {
                     super::userns::SetgroupsFile::new(task_weak.clone()),
                 ),
             ),
-            "auxv" => lookup.file(
-                name,
-                SimpleFile::new_regular(fs.clone(), {
-                    let task_weak = task_weak.clone();
-                    move || {
-                        let task = upgrade_task(&task_weak)?;
-                        let words = task.as_thread().process().saved_aux();
-                        let mut bytes =
-                            Vec::with_capacity(words.len() * core::mem::size_of::<u64>());
-                        for word in words.iter() {
-                            bytes.extend_from_slice(&word.to_ne_bytes());
-                        }
-                        Ok(bytes)
-                    }
-                }),
-            ),
+            "auxv" => {
+                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
+                let owner = task.as_thread().real_cred();
+                lookup.file(
+                    name,
+                    SimpleFile::new_snapshot_with_owner(
+                        fs.clone(),
+                        NodePermission::OWNER_READ,
+                        owner.euid(),
+                        owner.egid(),
+                        {
+                            let task_weak = task_weak.clone();
+                            move || {
+                                let task = upgrade_task(&task_weak)?;
+                                if let Some(caller) = ktask::current().try_as_thread() {
+                                    kprocess::ptrace::check_read_fs_creds_access(
+                                        caller,
+                                        task.as_thread(),
+                                    )
+                                    .map_err(|_| VfsError::PermissionDenied)?;
+                                }
+                                let words = task.as_thread().process().saved_aux();
+                                let mut bytes =
+                                    Vec::with_capacity(words.len() * core::mem::size_of::<u64>());
+                                for word in words.iter() {
+                                    bytes.extend_from_slice(&word.to_ne_bytes());
+                                }
+                                Ok(bytes)
+                            }
+                        },
+                    ),
+                )
+            }
             "cmdline" => lookup.file(
                 name,
                 SimpleFile::new_regular(fs.clone(), {
@@ -1806,7 +1827,10 @@ impl SimpleDirOps for ProcFsHandler {
         if name == "self" {
             return lookup.file(
                 name,
-                SimpleFile::new(self.fs.clone(), NodeType::Symlink, proc_self_target),
+                SimpleFile::new(self.fs.clone(), NodeType::Symlink, {
+                    let observer_ns = self.observer_ns.clone();
+                    move || proc_self_target(observer_ns.as_ref())
+                }),
             );
         }
 
