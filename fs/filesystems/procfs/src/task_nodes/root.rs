@@ -1643,9 +1643,11 @@ impl SimpleDirOps for ThreadDir {
                 let (uid, gid) = {
                     let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
                     owner.map_or((0, 0), |owner| {
+                        let uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
+                        let gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
                         (
-                            kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc()).as_raw(),
-                            kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc()).as_raw(),
+                            if uid.is_invalid() { 0 } else { uid.as_raw() },
+                            if gid.is_invalid() { 0 } else { gid.as_raw() },
                         )
                     })
                 };
@@ -1661,9 +1663,11 @@ impl SimpleDirOps for ThreadDir {
                 let (uid, gid) = {
                     let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
                     owner.map_or((0, 0), |owner| {
+                        let uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
+                        let gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
                         (
-                            kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc()).as_raw(),
-                            kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc()).as_raw(),
+                            if uid.is_invalid() { 0 } else { uid.as_raw() },
+                            if gid.is_invalid() { 0 } else { gid.as_raw() },
                         )
                     })
                 };
@@ -1679,9 +1683,11 @@ impl SimpleDirOps for ThreadDir {
                 let (uid, gid) = {
                     let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
                     owner.map_or((0, 0), |owner| {
+                        let uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
+                        let gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
                         (
-                            kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc()).as_raw(),
-                            kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc()).as_raw(),
+                            if uid.is_invalid() { 0 } else { uid.as_raw() },
+                            if gid.is_invalid() { 0 } else { gid.as_raw() },
                         )
                     })
                 };
