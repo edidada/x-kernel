@@ -61,7 +61,7 @@ pipeline {
         stage('Prepare') {
             steps {
                 script {
-                    withFloatingCiDocker {
+                    withFloatingCiDocker('prepare') {
                         // Replay builds lose Gitee webhook env; restore before checkout/description.
                         restoreReplayGiteeEnv()
                         currentBuild.description = env.giteePullRequestIid?.trim()
@@ -131,7 +131,7 @@ pipeline {
     post {
         always {
             script {
-                withFloatingCiDocker {
+                withFloatingCiDocker('post') {
                     initializeCiWorkspace()
                     restoreCiPostMetaFromStash()
                     restoreStashedArchCiOutputs()
@@ -191,19 +191,50 @@ def ciBuilderImage() {
     return params.CI_BUILDER_IMAGE?.trim() ?: 'yeanwang/x-kernel-builder:v3.2'
 }
 
-def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
+/**
+ * Deterministic per-build target volume name: xkernel-target-<jobslug>-b<BUILD>-<scope>.
+ * Named volumes keep the old anonymous-volume isolation (fresh per container, never
+ * shared across builds) while staying enumerable, so node hygiene can reclaim them.
+ */
+def ciJobSlug() {
+    def raw = env.JOB_NAME?.trim() ?: 'ci'
+    def slug = raw.replaceAll('[^A-Za-z0-9_.-]', '-').replaceAll('^[^A-Za-z0-9]+', '')
+    if (slug.length() > 60) {
+        slug = slug.substring(0, 60)
+    }
+    slug = slug.replaceAll('[^A-Za-z0-9]+$', '')
+    return slug ?: 'ci'
+}
+
+def ciTargetVolumePrefix() {
+    return "xkernel-target-${ciJobSlug()}-b${env.BUILD_NUMBER}-"
+}
+
+def ciTargetVolumeName(String scope) {
+    return "${ciTargetVolumePrefix()}${scope}"
+}
+
+def ciBuilderDockerArgs(String scope, String seccompProfile = 'unconfined') {
     // Docker Workflow tokenizes this argument string; quote the agent workspace path.
     def seccompOption = "seccomp=${seccompProfile}".replace('\\', '\\\\').replace('"', '\\"')
     return '--dns 223.5.5.5 ' +
         // Older hosts charge concurrent io_uring queues to the shared UID's memlock budget.
         '--ulimit memlock=67108864:67108864 ' +
-        '--mount type=volume,dst=/xkernel-target ' +
+        "--mount type=volume,src=${ciTargetVolumeName(scope)},dst=/xkernel-target " +
         '--mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo ' +
         // Keep Rustup temporary files and toolchains on the same filesystem.
         '--mount type=volume,src=xkernel-rustup-home-v6,dst=/usr/local/rustup ' +
         '--mount type=volume,src=xkernel-rootfs-cache-v3,dst=/xkernel-cache/rootfs ' +
         '--device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 ' +
+        // Node hygiene only ever reaps docker objects carrying the x-kernel-ci label.
+        "--label x-kernel-ci=true --label x-kernel-ci.job=${ciJobSlug()} " +
+        "--label x-kernel-ci.build=${env.BUILD_NUMBER} --label x-kernel-ci.scope=${scope} " +
         "--security-opt \"${seccompOption}\" --security-opt no-new-privileges=true"
+}
+
+/** Worst-case headroom for concurrent CI containers (~20 GiB peak each) on one host. */
+def ciNodeMinFreeGb() {
+    return 100
 }
 
 def ciSourceStashName() {
@@ -230,17 +261,133 @@ def cleanCiNodeWorkspace() {
     cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
 }
 
-def withFloatingCiDocker(Closure body) {
-    node(floatingGuestAgentLabel()) {
+/**
+ * Host-side node hygiene, run before any builder container starts. It only ever
+ * touches docker objects this CI owns: containers labeled `x-kernel-ci=true` and
+ * volumes named `xkernel-target-<jobslug>-b<build>-*`. Compile hosts are shared
+ * with other teams, so `docker volume prune` and unscoped rm are forbidden.
+ * Set `_CI_HYGIENE_DRY_RUN=1` in the agent environment to print actions instead of reaping.
+ */
+def ciNodeHygieneScript() {
+    return '''#!/bin/bash
+set -euo pipefail
+
+dry_run="${_CI_HYGIENE_DRY_RUN:-0}"
+label_key='x-kernel-ci'
+volume_prefix="${CI_TARGET_VOLUME_PREFIX:?CI_TARGET_VOLUME_PREFIX is required}"
+min_free_gb="${CI_NODE_MIN_FREE_GB:-100}"
+scope="${CI_NODE_SCOPE:-unknown}"
+
+run_cmd() {
+    if [ "$dry_run" = '1' ]; then
+        echo "[dry-run] would run: $*"
+    else
+        "$@" >/dev/null
+    fi
+}
+
+echo "CI node hygiene on ${NODE_NAME:-$(hostname)} (scope=${scope} dry_run=${dry_run})"
+
+# 1) Terminal CI containers left by killed or aborted runs (they pin target volumes).
+for c in $(docker ps -aq --filter "label=${label_key}=true" --filter status=exited --filter status=dead); do
+    echo "reaping exited CI container $(docker inspect --format '{{.Name}} {{.Config.Labels}}' "$c" 2>/dev/null || echo "$c")"
+    run_cmd docker rm -f "$c" || true
+done
+
+# 2) CI containers still running long past the 90-minute pipeline timeout.
+now_epoch="$(date +%s)"
+for c in $(docker ps -q --filter "label=${label_key}=true" --filter status=running); do
+    started_at="$(docker inspect --format '{{.State.StartedAt}}' "$c" 2>/dev/null || true)"
+    [ -n "$started_at" ] && [ "$started_at" != '0001-01-01T00:00:00Z' ] || continue
+    started_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo "$now_epoch")"
+    if [ $(( now_epoch - started_epoch )) -gt 86400 ]; then
+        echo "reaping stale running CI container $(docker inspect --format '{{.Name}}' "$c" 2>/dev/null || echo "$c")"
+        run_cmd docker rm -f "$c" || true
+    fi
+done
+
+# 3) This job's target volumes no container references (any state protects them).
+volume_names="$(docker volume ls -q | { grep -E "^${volume_prefix}" || true; })"
+for v in $volume_names; do
+    if [ -z "$(docker ps -aq --filter "volume=$v")" ]; then
+        echo "reaping unreferenced CI volume $v"
+        run_cmd docker volume rm "$v" || true
+    fi
+done
+
+# 4) Capacity gate on the Docker data root (the filesystem that holds all volumes).
+docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+avail_kb="$(df -Pk "$docker_root" | awk 'NR==2 {print $4}')"
+required_kb=$(( min_free_gb * 1024 * 1024 ))
+echo "docker root ${docker_root}: ${avail_kb} KiB free (gate ${required_kb} KiB)"
+if [ "${avail_kb:-0}" -lt "$required_kb" ]; then
+    echo "node preflight failed: less than ${min_free_gb} GiB free on ${docker_root}" >&2
+    df -h "$docker_root" >&2 || true
+    exit 1
+fi
+echo "CI node hygiene done"
+'''
+}
+
+def ciNodePreflight(String scope) {
+    def rc = -1
+    withEnv([
+        "CI_NODE_SCOPE=${scope}",
+        "CI_TARGET_VOLUME_PREFIX=${ciTargetVolumePrefix()}",
+        "CI_NODE_MIN_FREE_GB=${ciNodeMinFreeGb()}",
+    ]) {
+        rc = sh(returnStatus: true, label: 'CI node preflight (orphan reclaim + disk gate)',
+                script: ciNodeHygieneScript())
+    }
+    if (rc != 0) {
+        def msg = "编译机节点预检失败(scope=${scope}, node=${env.NODE_NAME}, rc=${rc}):" +
+            '宿主 docker 卫生脚本执行异常或磁盘可用空间低于阈值,属基础设施问题,与 PR 代码无关。' +
+            '请稍后 rerun;持续失败请通知维护者检查编译机 /var/lib/docker 所在分区。'
+        recordCiMetaIssue(msg)
+        error(msg)
+    }
+}
+
+/** inside() tears the container down without `docker rm -v`, so drop the named volume here. */
+def reclaimCiTargetVolume(String scope) {
+    sh(returnStatus: true, label: 'Reclaim CI target volume',
+       script: "docker volume rm '${ciTargetVolumeName(scope)}' >/dev/null 2>&1 || true")
+}
+
+/**
+ * Single owner of the CI node lifecycle: enter node → host-side preflight →
+ * optional host prep → builder container on a named target volume → finally
+ * volume reclaim + workspace cleanup. Every stage body runs inside this wrapper;
+ * use withFloatingCiDocker / withArchCiAgent rather than calling it directly.
+ */
+def withCiBuilderNode(Map opts, Closure body) {
+    node(opts.label) {
         try {
-            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs()) {
-                withCiRootWs(pwd()) {
+            ciNodePreflight(opts.scope)
+            opts.hostPrep?.call()
+            def rootWs = pwd()
+            // The ARM builder's host kernel misreports io_uring polls on signalfd.
+            // Select by node, since the floating riscv64 leg can also run there;
+            // arch legs run hostPrep (unstash) first, so the profile file exists.
+            def seccompProfile = 'unconfined'
+            if (opts.archLeg && env.NODE_NAME == nativeGuestAgentLabels().aarch64) {
+                seccompProfile = "${rootWs}/.ci/source/scripts/ci/no-io-uring-seccomp.json"
+            }
+            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs(opts.scope, seccompProfile)) {
+                withCiRootWs(rootWs) {
                     body.call()
                 }
             }
         } finally {
+            reclaimCiTargetVolume(opts.scope)
             cleanCiNodeWorkspace()
         }
+    }
+}
+
+def withFloatingCiDocker(String scope, Closure body) {
+    withCiBuilderNode(label: floatingGuestAgentLabel(), scope: scope, archLeg: false) {
+        body.call()
     }
 }
 
@@ -341,23 +488,12 @@ install -d -m 0755 .ci/work .ci/gitee/manifests .ci/stage-logs
 }
 
 def withArchCiAgent(String arch, Closure body) {
-    node(guestAgentLabelForArch(arch)) {
-        try {
-            prepareArchCiWorkspace(arch)
-            def legRootWs = pwd()
-            // The ARM builder's host kernel misreports io_uring polls on signalfd.
-            // Select by node, since the floating riscv64 leg can also run there.
-            def seccompProfile = env.NODE_NAME == nativeGuestAgentLabels().aarch64
-                ? "${legRootWs}/.ci/source/scripts/ci/no-io-uring-seccomp.json"
-                : 'unconfined'
-            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs(seccompProfile)) {
-                withCiRootWs(legRootWs) {
-                    body.call()
-                }
-            }
-        } finally {
-            cleanCiNodeWorkspace()
-        }
+    withCiBuilderNode(
+        label: guestAgentLabelForArch(arch),
+        scope: arch,
+        archLeg: true,
+        hostPrep: { prepareArchCiWorkspace(arch) }) {
+        body.call()
     }
 }
 
