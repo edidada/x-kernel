@@ -447,9 +447,8 @@ lives in `sys/kernel/log_filter` (format described in security.md); the value do
 is X-Kernel-private and *not* Linux's inverted `console_loglevel`.
 
 `/proc/<pid>/ns/<type>` inode numbers come from per-subsystem ID allocators
-(the `kcred` namespace allocator for mnt/net/ipc/uts/cgroup, the
-`kidentity` PID-namespace counter for pid, and the fixed initial user
-namespace for user). These counters are independent, so a collision across
+(the `kcred` namespace allocator for mnt/net/ipc/uts/cgroup and user, and the
+`kidentity` PID-namespace counter for pid). These counters are independent, so a collision across
 subsystems is possible; Linux avoids it with one global nsfs inode space.
 A shared namespace-inode registry is a prerequisite for nsfs-style magic
 symlinks and bind-mount identity.

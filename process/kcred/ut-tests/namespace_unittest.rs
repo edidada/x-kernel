@@ -46,7 +46,10 @@ fn id_map_extent_rejects_empty_and_wrapping_ranges() {
         LinuxError::from(IdMapExtent::new(0, 2, u32::MAX).unwrap_err()),
         LinuxError::EINVAL
     );
-    assert!(IdMapExtent::new(u32::MAX, 0, 1).is_ok());
+    assert_eq!(
+        LinuxError::from(IdMapExtent::new(u32::MAX, 0, 1).unwrap_err()),
+        LinuxError::EINVAL
+    );
 }
 
 #[def_test]

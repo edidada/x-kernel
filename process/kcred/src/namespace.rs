@@ -85,8 +85,8 @@ impl IdMapExtent {
     /// remain 32-bit.
     pub fn new(inside: u32, outside: u32, count: u32) -> KResult<Self> {
         if count == 0
-            || u64::from(inside) + u64::from(count) > (1u64 << 32)
-            || u64::from(outside) + u64::from(count) > (1u64 << 32)
+            || u64::from(inside) + u64::from(count) >= (1u64 << 32)
+            || u64::from(outside) + u64::from(count) >= (1u64 << 32)
         {
             return Err(KError::InvalidInput);
         }
@@ -461,11 +461,17 @@ impl UserNamespace {
                 MapKind::Gid => parent.map_gid_to_initial(extents[0].outside()),
             };
             let writer_id = self.writer_id_in_initial(kind, writer);
-            let is_owner_self_map = matches!(
-                (owner, mapped, writer_id),
-                (Some(owner), Some(mapped), Some(writer_id))
-                    if owner == mapped && owner == writer_id
-            );
+            let is_owner_self_map = match kind {
+                MapKind::Uid => matches!(
+                    (owner, mapped, writer_id),
+                    (Some(owner), Some(mapped), Some(writer_id))
+                        if owner == mapped && owner == writer_id
+                ),
+                // A GID map is authorized by the writer's own EGID, not by
+                // the namespace creator's UID; comparing UID to GID would
+                // require uid == gid.
+                MapKind::Gid => mapped.is_some() && mapped == writer_id,
+            };
             if kind == MapKind::Uid && is_owner_self_map {
                 return true;
             }

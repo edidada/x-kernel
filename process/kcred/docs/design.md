@@ -46,22 +46,24 @@ This document covers the entire crate, including its namespace module and tests.
 `credentials` and `namespace` are private modules. The root exports `Cred`,
 `Uid`, `Gid`, `INVALID_UID`, `INVALID_GID`, `is_valid_uid`, `is_valid_gid`,
 `CapSet`, `CapSets`, the `CAP_*` constants including `CAP_LAST_CAP` and
-`CAP_FS_MASK`, `NamespaceId`, `UserNamespace`, `initial_cred`, and
-`initial_user_namespace`; there are no publicly named submodules or exported
+`CAP_FS_MASK`, `NamespaceId`, `UserNamespace`, `IdMapExtent`,
+`ID_MAP_MAX_EXTENTS`, `initial_cred`, and `initial_user_namespace`; there are no publicly named submodules or exported
 macros. Securebits themselves remain crate-private and are exposed to user space
 only through the `prctl(2)` adapter.
 
 The crate is `no_std` and always uses `alloc` for `Arc` and `Vec`.
-Its workspace dependencies are `bitflags`, `kerrno`, `klazy`, and `unittest`.
+Its workspace dependencies are `bitflags`, `kerrno`, `klazy`, `kspin`, and
+`unittest`.
 `kerrno::KResult`/`KError` provide transition results without another error type.
 `klazy::Once` publishes the two initial singletons. The crate has no dependency
 on `kprocess`, `ksyscall`, or `kvfs`, and no build script or optional alloc feature.
 
 ## Objects and interface roles
 
-`Cred` has private `ruid/euid/suid/fsuid: Uid` and `rgid/egid/sgid/fsgid: Gid`
-fields, a sorted `supplementary_groups: Arc<[Gid]>`, `capabilities: CapSets`,
-`cap_ambient: CapSet`, `cap_bounding: CapSet`, and `securebits: SecureBits`.
+`Cred` has private `ruid/euid/suid/fsuid: Uid`, `rgid/egid/sgid/fsgid: Gid`,
+`user_ns: Arc<UserNamespace>`, a sorted `supplementary_groups: Arc<[Gid]>`,
+`capabilities: CapSets`, `cap_ambient: CapSet`, `cap_bounding: CapSet`, and
+`securebits: SecureBits`.
 The private layout keeps direct field mutation and capability validation within
 the credential model.
 `CapSets` also keeps its three sets private behind getters so callers cannot

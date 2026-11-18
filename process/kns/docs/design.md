@@ -19,8 +19,9 @@ namespace semantics to `kcred`, and cgroup hierarchy/controller state to
 ## Scope and architecture
 
 `src/lib.rs` exports modules `error`, `ipc`, `net`, `nsfd`, `nsproxy`, `pid`,
-`time`, `types`, and `uts`. It re-exports `CgroupNamespace`, `NamespaceId`,
-`UserNamespace`, `MntNamespace`, and `PidNamespace` from their owner crates.
+`plan`, `time`, `types`, and `uts`. It re-exports `CgroupNamespace`,
+`NamespaceId`, `UserNamespace`, `MntNamespace`, `PidNamespace`, and
+`NamespacePlan` from their owner crates.
 
 ```text
 process runtime -> Arc<NsProxy>
@@ -130,12 +131,14 @@ shared. The function does not install the result into a running process.
 `NsProxy::prepare_unshare` performs all Linux checks and returns a
 `PreparedUnshare`, so the commit phase only installs precomputed state:
 
-1. NEWUSER/NEWCGROUP/NEWTIME are rejected with `Unsupported`
-   (`EOPNOTSUPP`) — never pseudo-isolation. NEWNET is accepted: it creates a
-   fresh `NetNamespace` identity and the syscall path materializes its
-   protocol stack with `knet::netns::ensure_stack`.
-2. Any `NEW*` flag requires `UnshareContext::privileged` (CAP_SYS_ADMIN in the
-   absence of user namespaces); plain `CLONE_FS`/`CLONE_FILES` do not.
+1. NEWUSER creates a child user namespace and installs it in the caller's
+   credential; NEWNET creates a fresh `NetNamespace` identity and the syscall
+   path materializes its protocol stack with `knet::netns::ensure_stack`.
+   NEWCGROUP remains unsupported.
+2. Namespace creation is authorized through `UnshareContext::cred`;
+   `NEWUSER` needs no capability in the parent, while the other `NEW*` flags
+   require `CAP_SYS_ADMIN` in the applicable user namespace. Plain
+   `CLONE_FS`/`CLONE_FILES` do not.
 3. `NEWNS` while the `fs_struct` is shared and `CLONE_FS` was not requested is
    `InvalidArgument` (`EINVAL`), matching Linux `check_fs_flag()`.
 4. `NEWNS` clones the mount tree at the current root/pwd and builds a private
@@ -150,8 +153,8 @@ is requested, so callers never need the explicit bit; the `check_fs_flag`
 rejection above remains as defense for direct `prepare_unshare` callers.
 
 `NsProxy::with_namespace` builds a proxy with one namespace slot swapped,
-used by `setns(2)`. User/Cgroup slots are rejected as `Unsupported`
-("pseudo-isolation" guard); a Net slot swaps in the target `NetNamespace`
+used by `setns(2)`. User switches are committed through the credential path;
+a Net slot swaps in the target `NetNamespace`
 and the syscall path materializes its protocol stack via
 `knet::netns::ensure_stack`. Socket creation, netlink dumps and the listen
 table still resolve through knet's global singletons — per-namespace

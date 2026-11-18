@@ -242,10 +242,10 @@ registered wakeups rather than polling or a timer.
 - Use noncreating accessors when checking TEE cleanup, and release observers
   before testing reclamation. Tests must not supply the cleanup they verify.
 
-- cgroup/namespace flags may leave the `ENOSYS` list only when fully
-  implemented (currently `CLONE_NEWCGROUP`/`CLONE_NEWUSER`/
-  `CLONE_NEWTIME`); adapters do not create a second membership or
-  namespace-view state.
+- namespace flags may leave the `ENOSYS` list only when fully implemented;
+  `CLONE_NEWUSER` and `CLONE_NEWTIME` are now implemented, while
+  `CLONE_NEWCGROUP` remains unsupported. Adapters do not create a second
+  membership or namespace-view state.
 - `unshare`/`setns` never create a fake namespace switch: unsupported kinds
   stay `EOPNOTSUPP`/`ENOSYS`, never a reference swap.
 - Does a new syscall implementation only adapt the ABI instead of copying

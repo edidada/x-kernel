@@ -1379,27 +1379,27 @@ fn test_chown_setid_cleanup_matches_linux() {
 
     // chown_common() excludes directories from set-ID cleanup entirely.
     assert_eq!(
-        Path::chown_mode(directory(0o6666), 100, None, &owner).bits(),
+        Path::chown_mode(directory(0o6666), 100, None, &owner, owner.user_ns_arc()).bits(),
         0o6666
     );
 
     // Set-UID is always cleared for non-directories. Without a GID argument,
     // set-GID depends only on the old GID, group-execute, and CAP_FSETID.
     assert_eq!(
-        Path::chown_mode(regular(0o6666), 100, None, &owner).bits(),
+        Path::chown_mode(regular(0o6666), 100, None, &owner, owner.user_ns_arc()).bits(),
         0o2666
     );
     assert_eq!(
-        Path::chown_mode(regular(0o2666), 100, None, &owner).bits(),
+        Path::chown_mode(regular(0o2666), 100, None, &owner, owner.user_ns_arc()).bits(),
         0o2666
     );
     // A pre-chown non-member group or group-execute clears set-GID.
     assert_eq!(
-        Path::chown_mode(regular(0o2666), 200, None, &owner).bits(),
+        Path::chown_mode(regular(0o2666), 200, None, &owner, owner.user_ns_arc()).bits(),
         0o666
     );
     assert_eq!(
-        Path::chown_mode(regular(0o2670), 100, None, &owner).bits(),
+        Path::chown_mode(regular(0o2670), 100, None, &owner, owner.user_ns_arc()).bits(),
         0o670
     );
 
@@ -1411,7 +1411,7 @@ fn test_chown_setid_cleanup_matches_linux() {
         .set_capabilities(kcred::CapSets::new(set, set, kcred::CapSet::EMPTY))
         .unwrap();
     assert_eq!(
-        Path::chown_mode(regular(0o6666), 100, None, &fsetid).bits(),
+        Path::chown_mode(regular(0o6666), 100, None, &fsetid, fsetid.user_ns_arc()).bits(),
         0o2666
     );
 }

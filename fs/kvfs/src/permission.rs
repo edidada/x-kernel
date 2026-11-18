@@ -72,9 +72,15 @@ fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred
         }
     }
 
-    let is_allowed = if cred.fsuid() == metadata.uid {
+    let fsuid = crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc());
+    let fsgid = crate::kid::Kgid::from_inside(cred.fsgid(), cred.user_ns_arc());
+    let in_group = fsgid.as_raw() == metadata.gid
+        || cred.supplementary_groups().iter().any(|gid| {
+            crate::kid::Kgid::from_inside(*gid, cred.user_ns_arc()).as_raw() == metadata.gid
+        });
+    let is_allowed = if fsuid.as_raw() == metadata.uid {
         owner_allows(mode, permission)
-    } else if cred.in_group(metadata.gid) {
+    } else if in_group {
         group_allows(mode, permission)
     } else {
         other_allows(mode, permission)

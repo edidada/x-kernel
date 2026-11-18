@@ -1665,7 +1665,13 @@ impl Path {
     /// repeats that check against the updated inode. Apply the same condition
     /// only on a generated mode change: a GID-only chown that leaves both
     /// set-ID bits untouched does not pass through the mode path.
-    fn chown_mode(mode: Umode, old_gid: u32, new_gid: Option<u32>, cred: &Cred) -> NodePermission {
+    fn chown_mode(
+        mode: Umode,
+        old_gid: u32,
+        new_gid: Option<crate::kid::Kgid>,
+        cred: &Cred,
+        caller_ns: &Arc<kcred::UserNamespace>,
+    ) -> NodePermission {
         let permission = mode.permission();
         if mode.node_type() == NodeType::Directory {
             return permission;
@@ -1674,17 +1680,30 @@ impl Path {
         let mut result = permission;
         result.remove(NodePermission::SET_UID);
         if permission.contains(NodePermission::SET_GID) {
-            let old_group_ok = cred.has_cap(kcred::CAP_FSETID) || cred.in_group(old_gid);
+            let old_group_ok = cred.has_cap_in(caller_ns, kcred::CAP_FSETID)
+                || Self::fsgid_in_group(cred, caller_ns, old_gid);
             if permission.contains(NodePermission::GROUP_EXEC) || !old_group_ok {
                 result.remove(NodePermission::SET_GID);
             }
         }
         if result.bits() != permission.bits()
-            && new_gid.is_some_and(|gid| !cred.has_cap(kcred::CAP_FSETID) && !cred.in_group(gid))
+            && new_gid.is_some_and(|gid| {
+                !cred.has_cap_in(caller_ns, kcred::CAP_FSETID)
+                    && !Self::fsgid_in_group(cred, caller_ns, gid.as_raw())
+            })
         {
             result.remove(NodePermission::SET_GID);
         }
         result
+    }
+
+    fn fsgid_in_group(cred: &Cred, ns: &Arc<kcred::UserNamespace>, global_gid: u32) -> bool {
+        let fsgid = crate::kid::Kgid::from_inside(cred.fsgid(), ns);
+        fsgid.as_raw() == global_gid
+            || cred
+                .supplementary_groups()
+                .iter()
+                .any(|gid| crate::kid::Kgid::from_inside(*gid, ns).as_raw() == global_gid)
     }
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
@@ -1706,7 +1725,7 @@ impl Path {
         if uid_kuid.is_some_and(crate::kid::Kuid::is_invalid)
             || gid_kgid.is_some_and(crate::kid::Kgid::is_invalid)
         {
-            return Err(VfsError::from(kerrno::LinuxError::EOVERFLOW));
+            return Err(VfsError::from(kerrno::LinuxError::EINVAL));
         }
 
         // Stored IDs are global values; compare the caller's filesystem ID
@@ -1721,14 +1740,19 @@ impl Path {
         }) {
             return Err(VfsError::OperationNotPermitted);
         }
-        if gid.is_some_and(|gid| {
-            !can_chown && (!is_owner || (gid != metadata.gid && !cred.in_group(gid)))
+        let new_gid_in_group =
+            gid_kgid.is_some_and(|gid| Self::fsgid_in_group(cred, &caller_ns, gid.as_raw()));
+        if gid.is_some_and(|_| {
+            !can_chown
+                && (!is_owner
+                    || (gid_kgid != Some(crate::kid::Kgid::from_raw(metadata.gid))
+                        && !new_gid_in_group))
         }) {
             return Err(VfsError::OperationNotPermitted);
         }
 
-        let new_gid = gid.unwrap_or(metadata.gid);
-        let mode = Self::chown_mode(metadata.mode, metadata.gid, gid, cred);
+        let new_gid = gid_kgid.map_or(metadata.gid, crate::kid::Kgid::as_raw);
+        let mode = Self::chown_mode(metadata.mode, metadata.gid, gid_kgid, cred, &caller_ns);
         // Linux `chown_common()` turns the set-ID cleanup into an `ATTR_MODE`
         // update, and `setattr_prepare()` authorizes that generated mode change
         // through inode ownership or effective `CAP_FOWNER` — not through
@@ -1757,7 +1781,8 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
         let inode_ns = self.dentry.user_namespace();
-        if cred.fsuid() != metadata.uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
+        let fsuid = crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc());
+        if fsuid.as_raw() != metadata.uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
             return Err(VfsError::OperationNotPermitted);
         }
         if mode.contains(NodePermission::SET_GID)
