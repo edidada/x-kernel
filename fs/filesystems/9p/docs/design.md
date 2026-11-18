@@ -67,6 +67,10 @@ Linux keeps the lookup fid in dentry private data. KVFS currently has no dentry-
 keeps the same unopened fid in `V9fsInode`. This is the minimal structural difference needed to preserve object identity; no
 path cache or second-layer fid wrapper is added for it.
 
+`options.rs` parses the legacy mount data of a v9fs mount (`msize=`, `cache=`, `debug=`) into
+`V9fsMountOptions`. It is a pure parser: `mount` does not consume it yet, so the negotiated
+`msize` and the caching behaviour are unchanged.
+
 ## Calling Constraints / Execution Context
 
 Mount, lookup, namespace operations, I/O and the release of the last fid reference all wait synchronously on the transport, and may only run in

@@ -12,6 +12,8 @@ mod dir;
 mod file;
 mod fs;
 mod inode;
+mod options;
 mod util;
 
 pub use fs::mount;
+pub use options::{V9fsCacheMode, V9fsMountOptions};
