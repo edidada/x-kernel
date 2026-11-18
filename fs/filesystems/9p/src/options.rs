@@ -113,12 +113,18 @@ impl V9fsMountOptions {
     }
 }
 
-/// Rounds `size_bytes` down to a multiple of `align_bytes`, which must be a
-/// power of two.
+/// Rounds `size_bytes` down to a multiple of `align_bytes`.
+///
+/// # Panics
+///
+/// Panics when `align_bytes` is not a non-zero power of two.
 const fn align_down_bytes(size_bytes: usize, align_bytes: usize) -> usize {
-    debug_assert!(align_bytes.is_power_of_two());
-    let offset_mask = align_bytes - 1;
-    size_bytes & !offset_mask
+    assert!(
+        align_bytes.is_power_of_two(),
+        "alignment must be a non-zero power of two"
+    );
+    let offset_in_block = size_bytes & (align_bytes - 1);
+    size_bytes - offset_in_block
 }
 
 /// Splits legacy `mount(2)` data into its comma-separated options.
