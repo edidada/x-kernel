@@ -229,6 +229,26 @@ impl SimpleFile {
         )
     }
 
+    /// Creates a regular file with explicit mode and global owner.
+    pub fn new_regular_with_owner(
+        fs: Arc<SimpleFs>,
+        permission: NodePermission,
+        uid: u32,
+        gid: u32,
+        ops: impl SimpleFileOps,
+    ) -> Arc<Self> {
+        let ops: Arc<dyn SimpleFileOps> = Arc::new(ops);
+        Self::new_with_options_owner(
+            fs,
+            NodeType::RegularFile,
+            permission,
+            uid,
+            gid,
+            ops.clone(),
+            Arc::new(GeneratedFileOperations(ops)),
+        )
+    }
+
     /// Creates a regular file with an explicit permission mode.
     pub fn new_regular_with_permission(
         fs: Arc<SimpleFs>,

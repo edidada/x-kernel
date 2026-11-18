@@ -1638,40 +1638,72 @@ impl SimpleDirOps for ThreadDir {
                     ),
                 ))
             }
-            "uid_map" => lookup.file(
-                name,
-                SimpleFile::new_regular_with_permission(
+            "uid_map" => lookup.file(name, {
+                let (uid, gid) = {
+                    let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
+                    owner.map_or((0, 0), |owner| {
+                        (
+                            kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc()).as_raw(),
+                            kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc()).as_raw(),
+                        )
+                    })
+                };
+                SimpleFile::new_regular_with_owner(
                     fs.clone(),
                     NodePermission::from_bits_truncate(0o644),
+                    uid,
+                    gid,
                     super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Uid),
-                ),
-            ),
-            "gid_map" => lookup.file(
-                name,
-                SimpleFile::new_regular_with_permission(
+                )
+            }),
+            "gid_map" => lookup.file(name, {
+                let (uid, gid) = {
+                    let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
+                    owner.map_or((0, 0), |owner| {
+                        (
+                            kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc()).as_raw(),
+                            kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc()).as_raw(),
+                        )
+                    })
+                };
+                SimpleFile::new_regular_with_owner(
                     fs.clone(),
                     NodePermission::from_bits_truncate(0o644),
+                    uid,
+                    gid,
                     super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Gid),
-                ),
-            ),
-            "setgroups" => lookup.file(
-                name,
-                SimpleFile::new_regular_with_permission(
+                )
+            }),
+            "setgroups" => lookup.file(name, {
+                let (uid, gid) = {
+                    let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
+                    owner.map_or((0, 0), |owner| {
+                        (
+                            kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc()).as_raw(),
+                            kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc()).as_raw(),
+                        )
+                    })
+                };
+                SimpleFile::new_regular_with_owner(
                     fs.clone(),
                     NodePermission::from_bits_truncate(0o644),
+                    uid,
+                    gid,
                     super::userns::SetgroupsFile::new(task_weak.clone()),
-                ),
-            ),
+                )
+            }),
             "auxv" => {
                 let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
                 let owner = task.as_thread().real_cred();
+                let owner_uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
+                let owner_gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
                 lookup.file(
                     name,
                     SimpleFile::new_snapshot_with_owner(
                         fs.clone(),
                         NodePermission::OWNER_READ,
-                        owner.euid(),
-                        owner.egid(),
+                        owner_uid.as_raw(),
+                        owner_gid.as_raw(),
                         {
                             let task_weak = task_weak.clone();
                             move || {
