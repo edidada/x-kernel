@@ -156,9 +156,30 @@ pub fn init_drivers() {
 
     let _registry = discover_unified();
 
+    #[cfg(feature = "clk")]
+    clk_late_init();
+
     log_class_summary();
     log_device_core_summary();
     log_device_ownership_summary();
+}
+
+/// Clock-framework late init, the `late_initcall(clk_disable_unused)`
+/// analogue: the probe storm is complete, so clocks with no consumer are
+/// bootloader leftovers and get gated; the summary mirrors Linux debugfs
+/// `clk_summary` at debug level for bring-up.
+#[cfg(feature = "clk")]
+fn clk_late_init() {
+    kclk::clk_disable_unused();
+    for entry in kclk::clk_summary() {
+        log::debug!(
+            "clk: {:<30} {:>12} Hz  prepare={} enable={}",
+            entry.name,
+            entry.rate,
+            entry.counts.0,
+            entry.counts.1
+        );
+    }
 }
 
 /// Snapshot the current long-lived device topology from the driver core.
