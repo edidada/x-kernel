@@ -342,9 +342,10 @@ fn proc_self_target(observer_ns: Option<&Arc<PidNamespace>>) -> VfsResult<String
     let task = current();
     let thread = task.try_as_thread().ok_or(VfsError::NotFound)?;
     let process = thread.process();
-    let pid = observer_ns
-        .and_then(|ns| process.number_in_namespace(ns))
-        .unwrap_or_else(|| process.pid());
+    let pid = match observer_ns {
+        Some(ns) => process.number_in_namespace(ns).ok_or(VfsError::NotFound)?,
+        None => process.pid(),
+    };
     Ok(pid.to_string())
 }
 
