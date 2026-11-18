@@ -195,11 +195,11 @@ allocation is not a memory-ordering/publication protocol.
 ## Decisions, lifecycle, and limitations
 
 Unsupported clone flags fail explicitly instead of silently claiming isolation.
-Net namespaces are now created and entered (identity plus a private knet stack
-containing loopback and `127.0.0.1/8`); user and cgroup namespaces remain
-rejected because their credential and hierarchy tables are not isolated, and
-net *data-plane* routing (socket registry, listen table, netlink views) remains
-global as a documented follow-up rather than a rejected case.
+Net and user namespaces are created and entered. Net carries a private knet
+stack (loopback and `127.0.0.1/8`); user namespaces carry credential and
+idmap state. Cgroup namespaces remain rejected because the cgroup hierarchy
+view is not isolated. Net *data-plane* routing (socket registry, listen table,
+netlink views) remains global as a documented follow-up.
 `NamespaceFsContext` makes mount-copy versus shared-filesystem conflicts visible
 in the API. Credential and active-PID roles are not folded into `NsProxy`.
 
@@ -214,13 +214,11 @@ while any fd or bundle references it.
 Non-goals and increments (explicitly out of scope, recorded because they echo
 the tgoskits gaps):
 
-- **NEWUSER/NEWCGROUP/NEWTIME isolation**: the object types exist and
-  NsFd/procfs expose them, but switching user/cgroup references without
-  isolating the underlying credential/cgroup tables is rejected. User
-  namespaces additionally need `uid_map`/`gid_map` chown and mount permission
-  downgrade semantics. Net is no longer in this group: its identity and
-  lifecycle are implemented (see the net namespace lifecycle section), while
-  net *data-plane* routing stays global in knet as the documented follow-up.
+- **NEWCGROUP isolation**: the object type exists and NsFd/procfs expose it,
+  but switching the cgroup reference without isolating the underlying
+  hierarchy view is rejected. User and time namespaces are implemented with
+  credential/idmap and offset state; net *data-plane* routing stays global in
+  knet as the documented follow-up.
 - **fs-sharing counting**: the shared-`fs_struct` (`NEWNS` without `CLONE_FS`)
   check counts both the caller's published threads and other processes that
   adopted the same context through `CLONE_FS`; kernel threads do not own a
