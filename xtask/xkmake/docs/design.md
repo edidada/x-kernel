@@ -395,6 +395,16 @@ target, platform and bundle path, so the Makefile does not need to re-parse `.co
    only when its sources, `Cargo.lock` or the toolchain change.
    `CARGO_TARGET_DIR` also reaches the library build that `dylint_testing`
    runs from the tests, which otherwise lands in `tools/lints/target`.
+   The library build names the host with `--target`, so the library lands
+   in `<target>/tools/lints/<host>/release`: a `[build] target` set for the
+   kernel in a Cargo configuration file (such as the personal
+   `.cargo/.config.toml` that `.cargo/config.toml` includes) would
+   otherwise apply, and a kernel target cannot produce the `cdylib`.
+   Removing `CARGO_BUILD_TARGET` does not clear that setting. The
+   self-test keeps Cargo's default layout because `dylint_testing` builds
+   the library again with a plain `cargo build` and loads it from
+   `<target-dir>/debug`; with `build.target` configured it fails before
+   building, naming the setting.
 3. The cfgs the lints see (`k_plat_name`, `unittest`) belong to the
    kernel crates and still come from the configuration. Scans of different
    configurations share `<target>/dylint`; Cargo keeps separate artifacts

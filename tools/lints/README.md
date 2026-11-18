@@ -56,6 +56,13 @@ relink would re-check them all. It is rebuilt when its sources,
 `Cargo.lock` or the toolchain change. `make dylint_test` uses the same
 target directory.
 
+The library is a host `cdylib`; the build passes the host triple with
+`--target`, so a `[build] target` for the kernel in a personal
+`.cargo/.config.toml` does not reach it. `make dylint_test` cannot honour
+such a setting: `dylint_testing` rebuilds the library with a plain
+`cargo build` and loads it from `<target>/debug`, so the self-test stops
+with an error naming the setting until it is removed.
+
 The first local run builds the Dylint driver into `$DYLINT_DRIVER_PATH`
 (default `~/.dylint_drivers`). The CI image sets `DYLINT_DRIVER_PATH` to a
 driver prebuilt for the pinned toolchain.

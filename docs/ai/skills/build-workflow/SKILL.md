@@ -68,7 +68,11 @@ runs the lint's UI tests. The first run builds the Dylint driver and can take
 a few minutes; later runs are incremental. The lint library is built
 without the kernel configuration's rustflags, so scanning another
 configuration (`UNITTEST=y`, lock statistics) does not rebuild it or
-re-check every crate. `make dylint FACTS_OUT=<dir>` also
+re-check every crate. It is built for the host triple even when a personal
+`.cargo/.config.toml` sets `[build] target`; `make dylint_test` refuses to
+run under that setting (see `tools/lints/README.md`), and plain `cargo`
+commands in the repository, such as the xtask tests, also follow it.
+`make dylint FACTS_OUT=<dir>` also
 exports the compiler's code facts (call graph, items, unsafe and atomic sites)
 for the review code index and packs them into `<dir>`; see
 `tools/lints/README.md`. Install the pinned tools with

@@ -156,7 +156,9 @@ fn probe_tools(
         let host = rustc_host(&toolchain)?;
         ensure_dylint_tools()?;
         ensure_rustc_dev(&toolchain)?;
-        if !args.self_test {
+        if args.self_test {
+            ensure_no_configured_target(&toolchain, lint_dir)?;
+        } else {
             ensure_target(&toolchain, context.config.target())?;
         }
         Ok(host)
@@ -196,20 +198,16 @@ fn build_and_scan(
     facts: Option<&FactsRun>,
 ) -> std::result::Result<(), ScanError> {
     let driver_path = prepare_driver_path(context).map_err(ScanError::Setup)?;
-    let lint_manifest = lint_dir.join("Cargo.toml");
     let lint_target_dir = context.target_dir.join("tools/lints");
     let mut lint = Process::new("cargo", context.dry_run, context.verbosity);
     lint.current_dir(lint_dir)
-        .arg(format!("+{toolchain}"))
-        .arg(if args.self_test { "test" } else { "build" })
-        .arg("--locked");
-    if !args.self_test {
-        lint.arg("--release");
-    }
-    lint.arg("--manifest-path")
-        .arg(&lint_manifest)
-        .arg("--target-dir")
-        .arg(&lint_target_dir);
+        .args(lint_build_args(LintBuildOptions {
+            toolchain,
+            self_test: args.self_test,
+            manifest: &lint_dir.join("Cargo.toml"),
+            target_dir: &lint_target_dir,
+            host,
+        }));
     sanitize_env(&mut lint);
     pin_lint_build_env(&mut lint, &lint_target_dir);
     set_host_tools(&mut lint, host);
@@ -328,6 +326,43 @@ fn probe_host(is_dry_run: bool, probe: impl FnOnce() -> Result<String>) -> Resul
     } else {
         probe()
     }
+}
+
+struct LintBuildOptions<'a> {
+    toolchain: &'a str,
+    self_test: bool,
+    manifest: &'a Path,
+    target_dir: &'a Path,
+    host: &'a str,
+}
+
+/// Arguments of the lint library build (`cargo build`) or its self-test
+/// (`cargo test`), run from `tools/lints`.
+///
+/// The library is a host `cdylib`, but Cargo in `tools/lints` reads the
+/// repository's `.cargo/config.toml` and the personal `.cargo/.config.toml`
+/// it includes; a `[build] target` there names a kernel target, which cannot
+/// produce a `cdylib`. Removing `CARGO_BUILD_TARGET` does not clear that
+/// setting, so the build names the host explicitly and the library lands in
+/// `<target-dir>/<host>/release`. The self-test keeps Cargo's default layout:
+/// `dylint_testing` builds the library again from the tests and loads it
+/// from `<target-dir>/debug`, which an explicit target would move.
+fn lint_build_args(options: LintBuildOptions<'_>) -> Vec<String> {
+    let mut args = vec![format!("+{}", options.toolchain)];
+    if options.self_test {
+        args.push("test".into());
+    } else {
+        args.extend(["build".into(), "--release".into()]);
+        args.extend(["--target".into(), options.host.into()]);
+    }
+    args.extend([
+        "--locked".into(),
+        "--manifest-path".into(),
+        options.manifest.display().to_string(),
+        "--target-dir".into(),
+        options.target_dir.display().to_string(),
+    ]);
+    args
 }
 
 struct ScanOptions<'a> {
@@ -678,10 +713,52 @@ fn ensure_target(toolchain: &str, target: &str) -> Result<()> {
     Ok(())
 }
 
+/// The library built by [`lint_build_args`]: the explicit host target puts
+/// it under `<target-dir>/<host>/release`.
+/// Fails the self-test early when a Cargo configuration file sets
+/// `build.target` for `tools/lints`, typically the personal
+/// `.cargo/.config.toml`.
+///
+/// `dylint_testing` runs a plain `cargo build` of the library from the tests
+/// and loads the result from `<target-dir>/debug`. With a configured target
+/// that build fails (a kernel target cannot produce a `cdylib`), and naming
+/// the host instead would move the result out of that directory, so the
+/// self-test cannot run under such a setting.
+fn ensure_no_configured_target(toolchain: &str, lint_dir: &Path) -> Result<()> {
+    let mut command = Command::new("cargo");
+    command.current_dir(lint_dir).args([
+        &format!("+{toolchain}"),
+        "-Zunstable-options",
+        "config",
+        "get",
+        "--format",
+        "json-value",
+        "build.target",
+    ]);
+    for name in SANITIZED_ENV {
+        command.env_remove(name);
+    }
+    let output = command.output().map_err(|source| Error::Spawn {
+        program: "cargo config get".into(),
+        source,
+    })?;
+    // `cargo config get` exits non-zero when the key is not set.
+    if !output.status.success() {
+        return Ok(());
+    }
+    Err(Error::Message(format!(
+        "a Cargo configuration file sets build.target = {} for tools/lints (for example \
+         .cargo/.config.toml); dylint_testing builds the lint library from the tests in Cargo's \
+         default host layout, so remove that setting while running the Dylint self-test",
+        String::from_utf8_lossy(&output.stdout).trim()
+    )))
+}
+
 fn lint_library_path(target_dir: &Path, toolchain: &str, host: &str) -> PathBuf {
     let prefix = std::env::consts::DLL_PREFIX;
     let suffix = std::env::consts::DLL_SUFFIX;
     target_dir
+        .join(host)
         .join("release")
         .join(format!("{prefix}{LINT_LIB}@{toolchain}-{host}{suffix}"))
 }
@@ -725,10 +802,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        DRY_RUN_HOST,
-        CargoMetadata, CargoPackage, CargoUnit, CargoUnitDependency, ScanOptions, UnitGraph,
-        application_package, fix_feature_flags, lint_library_path, package_features, parse_host,
-        parse_toolchain, probe_host, scan_args, select_fix_packages,
+        CargoMetadata, CargoPackage, CargoUnit, CargoUnitDependency, DRY_RUN_HOST,
+        LintBuildOptions, ScanOptions, UnitGraph, application_package, fix_feature_flags,
+        lint_build_args, lint_library_path, package_features, parse_host, parse_toolchain,
+        probe_host, scan_args, select_fix_packages,
     };
 
     fn unit(id: &str, features: &[&str], dependencies: &[usize]) -> CargoUnit {
@@ -903,6 +980,52 @@ mod tests {
         assert!(parse_host("rustc 1.96.0-nightly\n").is_err());
     }
 
+    fn lint_build(self_test: bool) -> Vec<String> {
+        lint_build_args(LintBuildOptions {
+            toolchain: "nightly-2026-03-08",
+            self_test,
+            manifest: Path::new("tools/lints/Cargo.toml"),
+            target_dir: Path::new("target/tools/lints"),
+            host: "x86_64-unknown-linux-gnu",
+        })
+    }
+
+    #[test]
+    fn lint_library_build_names_the_host_target() {
+        // A `[build] target` in a Cargo configuration file must not reach the
+        // host `cdylib`; only an explicit `--target` overrides it.
+        let args = lint_build(false);
+        assert_eq!(
+            args,
+            [
+                "+nightly-2026-03-08",
+                "build",
+                "--release",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--locked",
+                "--manifest-path",
+                "tools/lints/Cargo.toml",
+                "--target-dir",
+                "target/tools/lints",
+            ]
+        );
+        let library = lint_library_path(
+            Path::new("target/tools/lints"),
+            "nightly-2026-03-08",
+            "x86_64-unknown-linux-gnu",
+        );
+        assert!(library.starts_with("target/tools/lints/x86_64-unknown-linux-gnu/release"));
+    }
+
+    #[test]
+    fn lint_self_test_keeps_the_default_layout() {
+        // `dylint_testing` loads the library from `<target-dir>/debug`.
+        let args = lint_build(true);
+        assert_eq!(args[1], "test");
+        assert!(!args.iter().any(|arg| arg == "--target"));
+    }
+
     #[test]
     fn uses_dylint_link_library_name() {
         let path = lint_library_path(
@@ -911,7 +1034,7 @@ mod tests {
             "x86_64-unknown-linux-gnu",
         );
         let expected = format!(
-            "target/tools/lints/release/{}xkernel_lints@\
+            "target/tools/lints/x86_64-unknown-linux-gnu/release/{}xkernel_lints@\
              nightly-2026-03-08-x86_64-unknown-linux-gnu{}",
             std::env::consts::DLL_PREFIX,
             std::env::consts::DLL_SUFFIX
