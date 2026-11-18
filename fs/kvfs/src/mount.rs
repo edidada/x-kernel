@@ -1359,7 +1359,10 @@ impl Path {
 
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
-        if cred.fsuid() != inode.metadata().uid && !cred.has_cap_fowner() {
+        let inode_ns = self.dentry.user_namespace();
+        let fsuid = crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc());
+        if fsuid.as_raw() != inode.metadata().uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER)
+        {
             return Err(VfsError::OperationNotPermitted);
         }
         let _namespace_guard = inode.lock_namespace_exclusive();

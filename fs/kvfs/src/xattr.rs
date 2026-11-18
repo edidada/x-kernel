@@ -198,8 +198,9 @@ fn check_xattr_permission(
                 let metadata = inode.metadata();
                 if matches!(access, XattrAccess::Write)
                     && metadata.mode.permission().contains(NodePermission::STICKY)
-                    && cred.fsuid() != metadata.uid
-                    && !cred.has_cap(kcred::CAP_FOWNER)
+                    && crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc()).as_raw()
+                        != metadata.uid
+                    && !cred.has_cap_fowner()
                 {
                     return Err(VfsError::OperationNotPermitted);
                 }

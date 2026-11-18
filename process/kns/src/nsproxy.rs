@@ -380,9 +380,12 @@ impl NsProxy {
                 .clone()
                 .unwrap_or_else(|| self.cgroup_ns.clone()),
             time_ns: if replace_active_time {
+                // A new child enters the time namespace selected for children,
+                // which differs from the caller's active namespace after
+                // unshare(CLONE_NEWTIME).
                 child_time_ns
                     .clone()
-                    .unwrap_or_else(|| self.time_ns.clone())
+                    .unwrap_or_else(|| self.time_ns_for_children.clone())
             } else {
                 self.time_ns.clone()
             },
