@@ -74,30 +74,11 @@ fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred
 
     let fsuid = crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc());
     let fsgid = crate::kid::Kgid::from_inside(cred.fsgid(), cred.user_ns_arc());
-    // A process in a fresh userns has no map yet, so projection returns
-    // INVALID. Its numeric IDs are still the creator's parent-namespace IDs;
-    // compare them so the namespace's own control files remain accessible.
-    let fsuid_raw = if fsuid.is_invalid() {
-        cred.fsuid()
-    } else {
-        fsuid.as_raw()
-    };
-    let fsgid_raw = if fsgid.is_invalid() {
-        cred.fsgid()
-    } else {
-        fsgid.as_raw()
-    };
-    let in_group = fsgid_raw == metadata.gid
+    let in_group = fsgid.as_raw() == metadata.gid
         || cred.supplementary_groups().iter().any(|gid| {
-            let projected = crate::kid::Kgid::from_inside(*gid, cred.user_ns_arc());
-            let raw = if projected.is_invalid() {
-                *gid
-            } else {
-                projected.as_raw()
-            };
-            raw == metadata.gid
+            crate::kid::Kgid::from_inside(*gid, cred.user_ns_arc()).as_raw() == metadata.gid
         });
-    let is_allowed = if fsuid_raw == metadata.uid {
+    let is_allowed = if fsuid.as_raw() == metadata.uid {
         owner_allows(mode, permission)
     } else if in_group {
         group_allows(mode, permission)
