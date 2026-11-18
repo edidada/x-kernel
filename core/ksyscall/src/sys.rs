@@ -238,8 +238,7 @@ pub(crate) fn sys_syslog(action: i32, buf: UserPtr<u8>, len: i32) -> KResult<isi
 
 /// Sets the hostname in the calling process's UTS namespace.
 pub(crate) fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
-    let cred = kprocess::current_cred();
-    if !cred.has_cap_in(cred.user_ns(), kcred::CAP_SYS_ADMIN) {
+    if !kprocess::current_cred().has_cap(kcred::CAP_SYS_ADMIN) {
         return Err(KError::OperationNotPermitted);
     }
     if len > MAX_HOSTNAME_LEN {

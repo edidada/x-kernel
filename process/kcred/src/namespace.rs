@@ -511,13 +511,10 @@ impl UserNamespace {
     fn writer_id_in_initial(&self, kind: MapKind, writer: &Cred) -> Option<Uid> {
         let parent = self.parent.as_ref()?;
         if !core::ptr::eq(writer.user_ns(), self) {
-            // A credential's IDs are already stored in initial-namespace
-            // coordinates; mapping them through the writer namespace again
-            // would apply the map twice.
-            return Some(match kind {
-                MapKind::Uid => writer.euid(),
-                MapKind::Gid => writer.egid(),
-            });
+            return match kind {
+                MapKind::Uid => writer.user_ns().map_uid_to_initial(writer.euid()),
+                MapKind::Gid => writer.user_ns().map_gid_to_initial(writer.egid()),
+            };
         }
         let mapped = match kind {
             MapKind::Uid => self.map_uid_to_initial(writer.euid()),
