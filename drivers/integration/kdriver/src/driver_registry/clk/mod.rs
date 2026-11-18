@@ -19,7 +19,7 @@ pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistr
 }
 
 /// The production fixed-clock driver, for the unittest chain regressions.
-#[cfg(feature = "clk-fixed")]
+#[cfg(all(feature = "clk-fixed", unittest))]
 pub(crate) fn fixed_clock_driver() -> crate::driver_registry::BoxedDriver {
     fixed_clock::descriptor()
 }

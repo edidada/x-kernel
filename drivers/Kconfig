@@ -177,8 +177,17 @@ endmenu # Drivers Basic Configuration
 
 menu "Device Drivers"
 
+config KFEAT_CLK
+    bool "Common clock framework (kclk)"
+    default n
+    help
+      Pull in the kclk common clock framework: drivers may consume device
+      tree `clocks` connections through the clock capability contract, and
+      the late-init pass gates clocks with no consumer.
+
 config KFEAT_CLK_FIXED
     bool "Fixed-clock DT clock providers (kclk)"
+    depends on KFEAT_CLK
     default n
     help
       Publish device-tree `fixed-clock` nodes into the kclk common clock

@@ -53,4 +53,5 @@ PHYS_BUS_OFFSET=0x0
 TASK_STACK_SIZE=0x40000
 
 # Clock framework providers (kclk)
+KFEAT_CLK=y
 KFEAT_CLK_FIXED=y
