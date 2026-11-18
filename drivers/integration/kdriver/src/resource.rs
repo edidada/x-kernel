@@ -8,18 +8,21 @@
 //! module keeps the driver orchestration crate's `DriverResult` boundary while
 //! acquiring resources through the OS-neutral `driver_os_api` API.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::ptr::NonNull;
 
 use driver_base::{DriverError, DriverResult};
 use driver_os_api::{
-    DmaSpec, IrqHandler as DevIrqHandler, IrqResource, IrqThreadHandler as DevIrqThreadHandler,
-    MmioClaim, MmioRegion, ResError,
+    Clk, DmaSpec, IrqHandler as DevIrqHandler, IrqResource,
+    IrqThreadHandler as DevIrqThreadHandler, MmioClaim, MmioRegion, ResError,
 };
-use driver_os_api_xkernel::XKernelResourceProvider;
+use driver_os_api_xkernel::{XKernelClockOp, XKernelResourceProvider};
 use kdevice::ProbeContext;
 
 static XKERNEL_RESOURCE_PROVIDER: XKernelResourceProvider = XKernelResourceProvider::new();
+
+/// Framework-owned clock op: the capability adapter over the `kclk` registry.
+static XKERNEL_CLOCK_OP: XKernelClockOp = XKernelClockOp;
 
 pub(crate) fn resource_provider() -> &'static XKernelResourceProvider {
     &XKERNEL_RESOURCE_PROVIDER
@@ -37,6 +40,46 @@ pub(crate) fn map_res_err(err: ResError) -> DriverError {
         ResError::Busy | ResError::AlreadyExists => DriverError::ResourceBusy,
         ResError::Unsupported => DriverError::Unsupported,
     }
+}
+
+/// Consume the connection clocks a UART node declares.
+///
+/// Recognised connection names are the two the UART bindings use
+/// (`uartclk` for the baud clock, `apb_pclk` for the bus clock); each one
+/// found is acquired device-managed and enabled. A node without `clocks`
+/// consumes nothing, and a provider that has not registered yet degrades to
+/// "no clocks" rather than failing the probe — firmware-configured ports
+/// run fine without the framework, and the clock connection is an
+/// optimization/ownership upgrade, not a functional dependency.
+///
+/// Returns the acquired references; the caller keeps them in its driver
+/// data so they stay registered until the binding is retired.
+pub(crate) fn devm_consume_uart_clocks(ctx: &ProbeContext<'_>) -> DriverResult<Vec<Clk>> {
+    let Some(node) = ctx.device().firmware_node() else {
+        return Ok(Vec::new());
+    };
+
+    let mut clks = Vec::new();
+    for name in ["uartclk", "apb_pclk"] {
+        let Ok(Some(spec)) = of::clocks::resolve_by_name(&node, name) else {
+            continue;
+        };
+        match devm_clk_get(ctx, spec.provider_id, spec.index) {
+            Ok(clk) => {
+                clk.prepare_enable().map_err(map_res_err)?;
+                clks.push(clk);
+            }
+            // Provider missing: keep the port working without clocks.
+            Err(ResError::NotFound) => continue,
+            Err(error) => return Err(map_res_err(error)),
+        }
+    }
+    Ok(clks)
+}
+
+/// Acquire one clock connection device-managed.
+fn devm_clk_get(ctx: &ProbeContext<'_>, provider_id: u32, index: u32) -> Result<Clk, ResError> {
+    kdevice::device::managed::devm_clk_get_with_provider(&XKERNEL_CLOCK_OP, ctx, provider_id, index)
 }
 
 /// Claim a physical MMIO range through the framework-owned provider.
