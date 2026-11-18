@@ -55,7 +55,7 @@ namespace references.
 | T-01 | False namespace isolation | High | Caller requests unsupported NEW flags | `clone_for_child`/`prepare_unshare` validate every requested namespace; user-namespace switches install the matching credential; ID-only types do not prove manager isolation. Net switching is now supported at the lifecycle layer: the swap installs the target `NetNamespace` and `knet` materializes a private protocol stack (loopback + `127.0.0.1/8`), while socket creation, netlink and the listen table still resolve through knet's global singletons — data-plane isolation remains a follow-up, so the residual risk is that a net namespace provides identity and lifecycle only, not traffic isolation. Syscall policy and consumer state must be audited separately. |
 | T-02 | Wrong root/pwd after mount copy | High | NEWNS is combined with shared filesystem state or paths are not retargeted | Shared state returns `InvalidFlagCombination`; `prepare_unshare` checks `fs_shared_with_others` + `CLONE_FS`; private copy uses KVFS retargeting and paired `replace_root_and_pwd`. Caller must supply initialized paths. |
 | T-03 | UTS buffer overrun | High | Name length is 65 or greater | Setters return `NameTooLong` before mutation; safe copying and zero-filled arrays retain termination. |
-| T-04 | Unauthorized hostname/namespace changes | High | Unprivileged request reaches trusted APIs | Authorization is external (syscall layer passes `UnshareContext::privileged`); these APIs check data/flag consistency, not caller credentials. |
+| T-04 | Unauthorized hostname/namespace changes | High | Unprivileged request reaches trusted APIs | Authorization is external (syscall layer passes `UnshareContext::cred`); these APIs check data/flag consistency and namespace ownership, not ambient caller credentials. |
 | T-05 | Misinterpreted hostname text | Low | Name contains NUL or non-UTF-8 bytes | Stored bytes are preserved and slice reads stop at NUL; consumers must handle bytes rather than assume ASCII or full-string round trips. |
 | T-06 | Namespace ID collision | Medium | External `NamespaceId` counter wraps | No local wrap prevention; IDs are metadata, not a substitute for live object identity and authorization. |
 | T-07 | Stale namespace fd after process exit | Medium | `NsFd` from a bound procfs file opened after the owner exited | procfs nodes upgrade a weak task reference and fail with `ESRCH`; the `NsFd` fd itself pins the namespace, so the same-fd pattern stays valid. Bind-after-exit requires a registry (documented non-goal). |
@@ -65,7 +65,7 @@ namespace references.
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1-4) | Handling |
 |---|---|---|---|---|---|---|
-| F-01 | Unsupported clone | Unimplemented namespace bit | Typed error | Child creation rejected | 3 | Caller translates `Unimplemented` to its ABI. |
+| F-01 | Unsupported clone | Unsupported namespace bit or invalid combination | Typed error | Child creation rejected | 3 | Caller translates the typed namespace error to its ABI. |
 | F-02 | Mount clone fails | KVFS copy/retarget error | `CloneNsError::Mount`/`UnshareError::Mount` | No child bundle or unshare | 3 | Preserve underlying `VfsError`. |
 | F-03 | Premature initial construction | VFS mount namespace absent | `expect` panic | Process boot fails | 2 | Initialize VFS before `new_initial`. |
 | F-04 | Private paths absent | NEWNS on uninitialized `FsStruct` | Root/pwd reader panic | Clone fails fatally | 2 | Construct a mounted private context first. |

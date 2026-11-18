@@ -114,11 +114,11 @@ and reuses `CgroupNamespace::initial`. Independent explicit-mount bundles still
 share the initial cgroup hierarchy so boot mounts and PID 1 do not acquire
 separate system roots.
 
-`clone_for_child` rejects NEWUSER, NEWCGROUP, and NEWTIME with
-`Unimplemented`: creating a namespace object that only changes an ID without
-isolating the underlying tables would be pseudo-isolation. NEWNET is
-supported — the child receives a fresh `NetNamespace` identity whose protocol
-stack is materialized by `knet::netns::ensure_stack` on the clone path. With NEWNS it
+`clone_for_child` supports NEWUSER, NEWTIME and NEWNET. A child receives the
+new user namespace in its credential, a fresh `NetNamespace` whose protocol
+stack is materialized by `knet::netns::ensure_stack`, and the selected time
+namespace. NEWCGROUP remains rejected because the cgroup hierarchy view is not
+isolated. With NEWNS it
 rejects `NamespaceFsContext::Shared`; otherwise it snapshots root/pwd, calls
 KVFS `clone_with_root_and_pwd`, retargets the private `FsStruct` as a pair, and
 retains the new mount namespace. NEWUTS copies both names into a new identity;

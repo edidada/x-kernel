@@ -98,7 +98,7 @@ fn do_mount(
     // mount(2) requires `CAP_SYS_ADMIN` in the initial user namespace, and
     // all x-kernel mount operations (bind, remount, private, tmpfs) mutate
     // the process-wide mount namespace.
-    if !cred.has_sys_admin() {
+    if !cred.has_cap_in(cred.user_ns(), kcred::CAP_SYS_ADMIN) {
         return Err(KError::OperationNotPermitted);
     }
     let target = lookup_mount_path(process, dir_name, cred)?;
@@ -249,7 +249,7 @@ fn lookup_mount_path_in(fs: &FsStruct, name: &str, cred: &kcred::Cred) -> KResul
 /// mount API (`mount_api`) so `fsopen`/`fsconfig`/`fsmount`/`move_mount` enforce
 /// the same authority as legacy `mount(2)`.
 pub(crate) fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
-    if cred.has_sys_admin() {
+    if cred.has_cap_in(cred.user_ns(), kcred::CAP_SYS_ADMIN) {
         Ok(())
     } else {
         Err(KError::OperationNotPermitted)
