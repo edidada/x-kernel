@@ -1643,12 +1643,25 @@ impl SimpleDirOps for ThreadDir {
                 let (uid, gid) = {
                     let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
                     owner.map_or((0, 0), |owner| {
-                        let uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
-                        let gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
-                        (
-                            if uid.is_invalid() { 0 } else { uid.as_raw() },
-                            if gid.is_invalid() { 0 } else { gid.as_raw() },
-                        )
+                        let ns = owner.user_ns_arc();
+                        let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
+                        let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
+                        let parent = ns.parent();
+                        let uid = if uid.is_invalid() {
+                            parent
+                                .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
+                                .unwrap_or(0)
+                        } else {
+                            uid.as_raw()
+                        };
+                        let gid = if gid.is_invalid() {
+                            parent
+                                .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
+                                .unwrap_or(0)
+                        } else {
+                            gid.as_raw()
+                        };
+                        (uid, gid)
                     })
                 };
                 SimpleFile::new_regular_with_owner(
@@ -1663,12 +1676,25 @@ impl SimpleDirOps for ThreadDir {
                 let (uid, gid) = {
                     let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
                     owner.map_or((0, 0), |owner| {
-                        let uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
-                        let gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
-                        (
-                            if uid.is_invalid() { 0 } else { uid.as_raw() },
-                            if gid.is_invalid() { 0 } else { gid.as_raw() },
-                        )
+                        let ns = owner.user_ns_arc();
+                        let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
+                        let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
+                        let parent = ns.parent();
+                        let uid = if uid.is_invalid() {
+                            parent
+                                .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
+                                .unwrap_or(0)
+                        } else {
+                            uid.as_raw()
+                        };
+                        let gid = if gid.is_invalid() {
+                            parent
+                                .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
+                                .unwrap_or(0)
+                        } else {
+                            gid.as_raw()
+                        };
+                        (uid, gid)
                     })
                 };
                 SimpleFile::new_regular_with_owner(
@@ -1683,12 +1709,25 @@ impl SimpleDirOps for ThreadDir {
                 let (uid, gid) = {
                     let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
                     owner.map_or((0, 0), |owner| {
-                        let uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
-                        let gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
-                        (
-                            if uid.is_invalid() { 0 } else { uid.as_raw() },
-                            if gid.is_invalid() { 0 } else { gid.as_raw() },
-                        )
+                        let ns = owner.user_ns_arc();
+                        let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
+                        let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
+                        let parent = ns.parent();
+                        let uid = if uid.is_invalid() {
+                            parent
+                                .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
+                                .unwrap_or(0)
+                        } else {
+                            uid.as_raw()
+                        };
+                        let gid = if gid.is_invalid() {
+                            parent
+                                .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
+                                .unwrap_or(0)
+                        } else {
+                            gid.as_raw()
+                        };
+                        (uid, gid)
                     })
                 };
                 SimpleFile::new_regular_with_owner(
