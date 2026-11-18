@@ -1666,7 +1666,7 @@ impl SimpleDirOps for ThreadDir {
                 };
                 SimpleFile::new_regular_with_owner(
                     fs.clone(),
-                    NodePermission::from_bits_truncate(0o644),
+                    NodePermission::from_bits_truncate(0o666),
                     uid,
                     gid,
                     super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Uid),
@@ -1699,7 +1699,7 @@ impl SimpleDirOps for ThreadDir {
                 };
                 SimpleFile::new_regular_with_owner(
                     fs.clone(),
-                    NodePermission::from_bits_truncate(0o644),
+                    NodePermission::from_bits_truncate(0o666),
                     uid,
                     gid,
                     super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Gid),
@@ -1732,7 +1732,7 @@ impl SimpleDirOps for ThreadDir {
                 };
                 SimpleFile::new_regular_with_owner(
                     fs.clone(),
-                    NodePermission::from_bits_truncate(0o644),
+                    NodePermission::from_bits_truncate(0o666),
                     uid,
                     gid,
                     super::userns::SetgroupsFile::new(task_weak.clone()),
