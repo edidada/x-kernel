@@ -409,7 +409,11 @@ impl Cred {
     /// capability. Real, saved and filesystem IDs do not grant authority, and
     /// capability numbers above [`CAP_LAST_CAP`] are never reported as held.
     pub fn has_cap(&self, cap: u32) -> bool {
-        self.capabilities.has_effective(cap)
+        // Generic callers gate global resources (initial-namespace inodes,
+        // devices, sysctls). A capability held in a nested user namespace is
+        // not authority there; namespace-aware callers use `has_cap_in`.
+        core::ptr::eq(&*self.user_ns, &*crate::initial_user_namespace())
+            && self.capabilities.has_effective(cap)
     }
 
     /// Returns the user namespace this credential is interpreted in.
@@ -437,7 +441,7 @@ impl Cred {
         let mut namespace = target_ns;
         loop {
             if core::ptr::eq(namespace, own_ns) {
-                return self.has_cap(cap);
+                return self.capabilities.has_effective(cap);
             }
             // A target that is not a strict descendant of the caller's
             // namespace cannot be administered from here.

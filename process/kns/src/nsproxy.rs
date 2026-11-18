@@ -127,6 +127,11 @@ impl PreparedUnshare {
         self.new_fs.as_ref()
     }
 
+    /// Returns the user namespace to install in the caller's credential.
+    pub fn user_ns(&self) -> Option<&alloc::sync::Arc<UserNamespace>> {
+        self.user_ns.as_ref()
+    }
+
     /// Returns whether the commit must also unshare the file-descriptor table.
     pub fn unshare_files(&self) -> bool {
         self.unshare_files

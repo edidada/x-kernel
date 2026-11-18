@@ -62,6 +62,16 @@ fn unshare_flag_set(flags: u64, multithreaded: bool) -> KResult<(NamespaceFlags,
         return Err(KError::InvalidInput);
     }
     let namespaces = NamespaceFlags::from_bits_truncate(flags);
+    if namespaces.contains(NamespaceFlags::NEWUSER) {
+        // Linux implies CLONE_THREAD|CLONE_FS for NEWUSER and rejects the
+        // request from a multithreaded caller.
+        if multithreaded {
+            return Err(KError::InvalidInput);
+        }
+        let detach_fs = true;
+        let detach_files = flags & CLONE_FILES as u64 != 0;
+        return Ok((namespaces, detach_fs, detach_files));
+    }
     let detach_fs = flags & CLONE_FS as u64 != 0 || namespaces.contains(NamespaceFlags::NEWNS);
     let detach_files = flags & CLONE_FILES as u64 != 0;
     Ok((namespaces, detach_fs, detach_files))

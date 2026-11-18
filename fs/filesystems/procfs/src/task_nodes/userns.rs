@@ -6,7 +6,7 @@
 
 use alloc::{borrow::Cow, format, string::String, vec::Vec};
 
-use kcred::{CAP_SYS_ADMIN, IdMapExtent, UserNamespace};
+use kcred::{CAP_SETGID, CAP_SYS_ADMIN, IdMapExtent, UserNamespace};
 use kprocess::AsThread;
 use ktask::WeakKtaskRef;
 use kvfs::{SimpleFileOps, VfsError, VfsFile, VfsResult};
@@ -142,7 +142,11 @@ impl SimpleFileOps for SetgroupsFile {
         // task that vanished after open therefore reports ESRCH even for
         // malformed input.
         let task = upgrade_task(&self.task)?;
-        let ns = task.as_thread().real_cred().user_ns_arc().clone();
+        let cred = task.as_thread().real_cred();
+        let ns = cred.user_ns_arc().clone();
+        if !cred.has_cap_in(&ns, CAP_SETGID) {
+            return Err(VfsError::OperationNotPermitted);
+        }
         if offset != 0 || data.len() >= MAX_SETGROUPS_WRITE {
             return Err(VfsError::InvalidInput);
         }

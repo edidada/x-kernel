@@ -1455,6 +1455,7 @@ impl SimpleDirOps for ThreadDir {
                 "uid_map",
                 "gid_map",
                 "setgroups",
+                "auxv",
                 "cmdline",
                 "comm",
                 "exe",
@@ -1654,6 +1655,22 @@ impl SimpleDirOps for ThreadDir {
                     super::userns::SetgroupsFile::new(task_weak.clone()),
                 ),
             ),
+            "auxv" => lookup.file(
+                name,
+                SimpleFile::new_regular(fs.clone(), {
+                    let task_weak = task_weak.clone();
+                    move || {
+                        let task = upgrade_task(&task_weak)?;
+                        let words = task.as_thread().process().saved_aux();
+                        let mut bytes =
+                            Vec::with_capacity(words.len() * core::mem::size_of::<u64>());
+                        for word in words.iter() {
+                            bytes.extend_from_slice(&word.to_ne_bytes());
+                        }
+                        Ok(bytes)
+                    }
+                }),
+            ),
             "cmdline" => lookup.file(
                 name,
                 SimpleFile::new_regular(fs.clone(), {
@@ -1773,7 +1790,14 @@ impl SimpleDirOps for ProcFsHandler {
         Ok(KBox::new(
             procfs::visible_processes_in_namespace(self.observer_ns.as_ref())
                 .into_iter()
-                .map(|process| Cow::Owned(process.pid().to_string()))
+                .map(|process| {
+                    let pid = self
+                        .observer_ns
+                        .as_ref()
+                        .and_then(|ns| process.number_in_namespace(ns))
+                        .unwrap_or_else(|| process.pid());
+                    Cow::Owned(pid.to_string())
+                })
                 .chain([Cow::Borrowed("self")]),
         )?)
     }

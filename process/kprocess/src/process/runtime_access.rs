@@ -395,7 +395,13 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime is gone.
     pub fn apply_prepared_unshare(&self, prepared: kns::PreparedUnshare) -> KResult<()> {
         let runtime = self.runtime()?;
+        let user_ns = prepared.user_ns().cloned();
         let (nsproxy, new_fs, _) = prepared.into_parts();
+        if let Some(user_ns) = user_ns {
+            let thread = crate::current_user_thread();
+            let cred = thread.prepare_creds().with_user_namespace(user_ns);
+            thread.commit_creds(cred);
+        }
         runtime.set_nsproxy(nsproxy);
         if let Some(new_fs) = new_fs {
             runtime.set_fs_context(Arc::new(Mutex::new(new_fs)));

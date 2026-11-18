@@ -545,6 +545,11 @@ impl CloneRequest {
         if ns.contains(CloneFlags::NEWNS | CloneFlags::FS) {
             return Err(KError::from(LinuxError::EINVAL));
         }
+        // A new user namespace must own a private fs_struct; sharing the
+        // parent's would leave the mount view owned by the old namespace.
+        if ns.contains(CloneFlags::NEWUSER | CloneFlags::FS) {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
 
         // CLONE_NEWIPC | CLONE_SYSVSEM is invalid
         if ns.contains(CloneFlags::NEWIPC | CloneFlags::SYSVSEM) {
