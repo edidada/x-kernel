@@ -372,7 +372,7 @@ done
 now_epoch="$(date +%s)"
 for c in $(docker ps -q --filter "label=${label_key}=true" --filter status=running); do
     started_at="$(docker inspect --format '{{.State.StartedAt}}' "$c" 2>/dev/null || true)"
-    [ -n "$started_at" ] && [ "$started_at" != '0001-01-01T00:00:00Z' ] || continue
+    if [ -z "$started_at" ] || [ "$started_at" = '0001-01-01T00:00:00Z' ]; then continue; fi
     started_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo "$now_epoch")"
     if [ $(( now_epoch - started_epoch )) -gt 86400 ]; then
         echo "reaping stale running CI container $(docker inspect --format '{{.Name}}' "$c" 2>/dev/null || echo "$c")"
