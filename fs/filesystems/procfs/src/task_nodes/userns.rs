@@ -149,16 +149,17 @@ impl SimpleFileOps for SetgroupsFile {
         Ok(Cow::Owned(text.as_bytes().to_vec()))
     }
 
-    fn write(&self, _file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
+    fn write(&self, file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
         const MAX_SETGROUPS_WRITE: usize = 8;
 
         // The pid file resolves its task before the write callback in Linux; a
         // task that vanished after open therefore reports ESRCH even for
         // malformed input.
         let task = upgrade_task(&self.task)?;
-        let cred = task.as_thread().real_cred();
-        let ns = cred.user_ns_arc().clone();
-        if !cred.has_cap_in(&ns, CAP_SETGID) {
+        let target_cred = task.as_thread().real_cred();
+        let ns = target_cred.user_ns_arc().clone();
+        let opener = file.cred();
+        if !opener.has_cap_in(&ns, CAP_SETGID) {
             return Err(VfsError::OperationNotPermitted);
         }
         if offset != 0 || data.len() >= MAX_SETGROUPS_WRITE {
