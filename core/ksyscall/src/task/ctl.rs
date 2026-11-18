@@ -268,10 +268,15 @@ pub(crate) fn sys_prctl(
             if arg4 != 0 || arg5 != 0 {
                 return Err(KError::InvalidInput);
             }
+            // Linux `mm->saved_auxv` is a fixed `AT_VECTOR_SIZE` array. The
+            // syscall reports that full size even when the live vector is
+            // shorter, and zero-fills the unused tail.
+            const AT_VECTOR_SIZE: usize = 44;
             let auxv = kprocess::current_user_process().saved_aux();
-            let mut bytes = alloc::vec::Vec::with_capacity(auxv.len() * size_of::<u64>());
-            for word in &auxv {
-                bytes.extend_from_slice(&word.to_ne_bytes());
+            let mut bytes = alloc::vec![0u8; AT_VECTOR_SIZE * size_of::<u64>()];
+            for (index, word) in auxv.iter().take(AT_VECTOR_SIZE).enumerate() {
+                bytes[index * size_of::<u64>()..(index + 1) * size_of::<u64>()]
+                    .copy_from_slice(&word.to_ne_bytes());
             }
             let copy_len = arg3.min(bytes.len());
             if copy_len != 0 {

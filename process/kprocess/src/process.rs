@@ -428,7 +428,11 @@ impl Process {
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             exec_gate: exec_gate::ExecGate::new(),
             pdeath_signal: AtomicU32::new(0),
-            saved_aux: SpinNoIrq::new(Vec::new()),
+            saved_aux: SpinNoIrq::new(
+                parent
+                    .as_ref()
+                    .map_or_else(Vec::new, |parent| parent.saved_aux()),
+            ),
             cpu_timers_armed: AtomicBool::new(false),
             lifecycle: ProcessLifecycleState::new(),
             child_subreaper: AtomicBool::new(false),

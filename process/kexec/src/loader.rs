@@ -716,7 +716,6 @@ fn initial_aux_vector(
         // the `times(2)` clock tick rate. Advertise a baseline HWCAP2 until
         // the architecture HAL exposes a separate bitmap.
         AuxEntry::new(AuxType::HWCAP2, 0),
-        AuxEntry::new(AuxType::CLKTCK, 100),
     ];
     if let Some(interpreter_bias) = layout.interpreter_bias() {
         auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));

@@ -111,7 +111,7 @@ After robust-list and `clear_child_tid` access, `finish_thread_exit` atomically
 reserves the sole last-thread cleanup role and retires the TID. Only a successful
 final-member removal returns true; a repeat cannot run process cleanup again.
 The named `exit_tee` stage then runs after the exit mark and CPU accounting,
-outside the membership lock and before mm, TEE runtime, fs and namespace detach.
+outside the membership lock and before mm, TEE runtime and fs detach; namespace ownership is retained through the zombie window and released at reap.
 It may sleep while exchanging `ReleaseOwner`, using the current user runtime
 and filesystem context without global TID lookup, user memory or process file
 descriptors. Transport failure is logged, local TEE handles are cleared, and
