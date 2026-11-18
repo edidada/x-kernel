@@ -50,7 +50,6 @@ pipeline {
         RUSTUP_DIST_SERVER = 'https://rsproxy.cn'
         RUSTUP_UPDATE_ROOT = 'https://rsproxy.cn/rustup'
         PYTHONUNBUFFERED = '1'
-        TARGET_DIR = '/xkernel-target'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
         ROOTFS_VARIANT = 'xkernel-glibc'
         ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'rootfs-v20261120'}"
@@ -67,50 +66,7 @@ pipeline {
                         currentBuild.description = env.giteePullRequestIid?.trim()
                             ? "PR#${env.giteePullRequestIid}"
                             : "${env.DEFAULT_BRANCH} (manual)"
-                        def prepareError = null
-                        def prepareSucceeded = false
-                        try {
-                            runCiStage(sourceStageName(), ciFailureDetail(sourceStageName()), false) {
-                                initializeCiWorkspace()
-                                prepareSource()
-                                // Create parallel Check Run placeholders first (earlier → lower on Gitee PR).
-                                giteeStartParallelCheckRuns()
-                                giteeStartCheckRun(sourceStageName())
-                            }
-                            runCiStage(setupStageName(), ciFailureDetail(setupStageName())) {
-                                checkBuildEnvironment()
-                            }
-                            runCiStage(rustfmtStageName(), ciFailureDetail(rustfmtStageName())) {
-                                runRustfmt()
-                            }
-                            prepareSucceeded = true
-                        } catch (e) {
-                            prepareError = e
-                        } finally {
-                            if (prepareSucceeded) {
-                                try {
-                                    beginPrepareStashStage(prepareSourceStashStageName())
-                                    stashCiSourceSnapshot()
-                                    completePrepareStashOutcome(prepareSourceStashStageName())
-                                } catch (stashErr) {
-                                    echo "Source snapshot stash failed: ${stashErr.message}"
-                                    completePrepareStashOutcome(prepareSourceStashStageName(), stashErr)
-                                    prepareError = prepareError ?: stashErr
-                                }
-                            }
-                            try {
-                                beginPrepareStashStage(preparePostMetaStashStageName())
-                                stashCiPostMeta()
-                                completePrepareStashOutcome(preparePostMetaStashStageName())
-                            } catch (stashErr) {
-                                echo "Post meta stash failed: ${stashErr.message}"
-                                completePrepareStashOutcome(preparePostMetaStashStageName(), stashErr)
-                                prepareError = prepareError ?: stashErr
-                            }
-                        }
-                        if (prepareError != null) {
-                            throw prepareError
-                        }
+                        runPrepareStages()
                     }
                 }
             }
@@ -139,6 +95,58 @@ pipeline {
                 }
             }
         }
+    }
+}
+
+/**
+ * Prepare orchestration: checkout and gate stages first, then best-effort
+ * stashes for the arch legs and Post. A stage failure never suppresses the
+ * stashes; the first failure (stage or stash) is rethrown at the end.
+ */
+def runPrepareStages() {
+    def prepareError = null
+    def prepareSucceeded = false
+    try {
+        runCiStage(sourceStageName(), ciFailureDetail(sourceStageName()), false) {
+            initializeCiWorkspace()
+            prepareSource()
+            // Create parallel Check Run placeholders first (earlier → lower on Gitee PR).
+            giteeStartParallelCheckRuns()
+            giteeStartCheckRun(sourceStageName())
+        }
+        runCiStage(setupStageName(), ciFailureDetail(setupStageName())) {
+            checkBuildEnvironment()
+        }
+        runCiStage(rustfmtStageName(), ciFailureDetail(rustfmtStageName())) {
+            runRustfmt()
+        }
+        prepareSucceeded = true
+    } catch (e) {
+        prepareError = e
+    } finally {
+        if (prepareSucceeded) {
+            try {
+                beginPrepareStashStage(prepareSourceStashStageName())
+                stashCiSourceSnapshot()
+                completePrepareStashOutcome(prepareSourceStashStageName())
+            } catch (stashErr) {
+                echo "Source snapshot stash failed: ${stashErr.message}"
+                completePrepareStashOutcome(prepareSourceStashStageName(), stashErr)
+                prepareError = prepareError ?: stashErr
+            }
+        }
+        try {
+            beginPrepareStashStage(preparePostMetaStashStageName())
+            stashCiPostMeta()
+            completePrepareStashOutcome(preparePostMetaStashStageName())
+        } catch (stashErr) {
+            echo "Post meta stash failed: ${stashErr.message}"
+            completePrepareStashOutcome(preparePostMetaStashStageName(), stashErr)
+            prepareError = prepareError ?: stashErr
+        }
+    }
+    if (prepareError != null) {
+        throw prepareError
     }
 }
 
@@ -251,7 +259,9 @@ def ciArchOutputStashName(String arch) {
 
 def withCiRootWs(String rootWs, Closure body) {
     def harnessRoot = "${rootWs}/.ci/rootfs-harness"
-    withEnv(["ROOT_WS=${rootWs}", "HARNESS_ROOTFS_DIR=${harnessRoot}",
+    // TARGET_DIR is a path inside the builder container, so it is injected here
+    // (every body enters through this wrapper) rather than in the top-level env block.
+    withEnv(["ROOT_WS=${rootWs}", "TARGET_DIR=${ciTargetRoot()}", "HARNESS_ROOTFS_DIR=${harnessRoot}",
              "ROOTFS_LATEST_FILE=${harnessRoot}/rootfs/releases/${env.ROOTFS_RELEASE_TAG}.json"]) {
         body.call()
     }
@@ -547,11 +557,8 @@ def prepareRootfsCacheForArch(String arch, String stageName) {
     dir(env.HARNESS_ROOTFS_DIR) {
         gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH, true)
     }
-    sh label: "Prepare rootfs cache ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-'${ciSourceDir()}/scripts/ci/prepare_rootfs_cache.sh' '${arch}'
-"""
+    ciSh(stageName, "Prepare rootfs cache ${arch}",
+        "'${ciSourceDir()}/scripts/ci/prepare_rootfs_cache.sh' '${arch}'")
 }
 
 def rootWorkspace() {
@@ -906,13 +913,11 @@ def ciParallelBranchesForStages(List stageSpecs) {
 }
 
 def ensureArchLegToolchains(String archLabel, String stageName) {
-    sh label: "Ensure toolchains on ${archLabel} leg", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+    ciSh(stageName, "Ensure toolchains on ${archLabel} leg", """
 cd '${ciSourceDir()}'
 flock -x /usr/local/rustup/toolchains/.jenkins-install.lock \\
   scripts/ci/check_build_environment.sh --leg '${archLabel}'
-"""
+""")
 }
 
 def runCiArchLeg(String archLabel) {
@@ -1055,40 +1060,33 @@ def finishArchOutputCollection(String archLabel) {
 def checkBuildEnvironment() {
     initStageLog(setupStageName())
     withCleanSourceWorkspace('env-check') {
-        sh label: 'Install rustfmt toolchain', script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(setupStageName())}
-flock -x /usr/local/rustup/toolchains/.jenkins-install.lock \
+        ciSh(setupStageName(), 'Install rustfmt toolchain', """
+flock -x /usr/local/rustup/toolchains/.jenkins-install.lock \\
   scripts/ci/check_build_environment.sh --fmt
-"""
+""")
     }
 }
 
 def runRustfmt() {
     initStageLog(rustfmtStageName())
     withCleanSourceWorkspace('rustfmt') {
-        sh label: 'Check Rust formatting', script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(rustfmtStageName())}
-cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
-"""
+        ciSh(rustfmtStageName(), 'Check Rust formatting',
+            "cargo +\"${AUX_RUST_TOOLCHAIN}\" fmt --all --check")
     }
 }
 
 def runClippyAndBuild(String platform, String defconfigPath) {
     def stageName = "Build Check: ${platform}"
     initStageLog(stageName)
-    def buildTargetDir = "/xkernel-target/build-${platform}"
+    def buildTargetDir = targetDirForBuild(platform)
     withCleanSourceWorkspace("clippy-build-${platform}") {
         withEnv(["TARGET_DIR=${buildTargetDir}"]) {
-            sh label: "Clippy and build ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+            ciSh(stageName, "Clippy and build ${platform}", """
 cp ${defconfigPath} .config
 make defconfig
 make clippy
 stdbuf -oL -eL make build
-"""
+""")
         }
     }
 }
@@ -1104,7 +1102,7 @@ def factsCommitArg() {
 
 def runDylintCheck(String stageName, String platform, String defconfigPath, boolean lockStat) {
     initStageLog(stageName)
-    def dylintTargetDir = "/xkernel-target/dylint-${platform}"
+    def dylintTargetDir = targetDirForDylint(platform)
     def factsDir = "${rootWorkspace()}/${factsArtifactRoot()}/${platform}"
     // A pull request records its merge base with the target branch, which the
     // Source stage fetched into the snapshot.
@@ -1141,9 +1139,7 @@ make dylint
                 "_CI_FACTS_DIR=${factsDir}",
                 "_CI_FACTS_BASE_REF=${factsBaseRef}",
             ]) {
-                sh label: "Dylint check ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+                ciSh(stageName, "Dylint check ${platform}", """
 facts_early_failure() {
     if [ ! -f "\${_CI_FACTS_DIR}/status.json" ]; then
         mkdir -p "\${_CI_FACTS_DIR}"
@@ -1162,7 +1158,7 @@ make defconfig
 make dylint_test
 make dylint FACTS_OUT="\${_CI_FACTS_DIR}" \
     XKMAKE_ARGS="${factsCommitArg()}\${facts_base:+ --facts-base \${facts_base}}"
-${unittestScan}${lockStatScan}"""
+${unittestScan}${lockStatScan}""")
             }
         }
     } finally {
@@ -1193,15 +1189,13 @@ def runBuildArtifact(String arch) {
 
     withCleanSourceWorkspace("build-artifact-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
-            sh label: "Clippy and build ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+            ciSh(stageName, "Clippy and build ${platform}", """
 cp platforms/${platform}/qemu_defconfig .config
 make defconfig
 ${vendorCheck}
 make clippy
 stdbuf -oL -eL make build
-"""
+""")
             publishKernelArtifact(artifactNameForNormal(arch), platform)
         }
     }
@@ -1215,14 +1209,12 @@ def runUnittestBuildArtifact(String arch) {
 
     withCleanSourceWorkspace("build-artifact-${arch}-unittest") {
         withEnv(["TARGET_DIR=${unittestTargetDir}", coverageEnableEnv()]) {
-            sh label: "Build unittest artifact ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+            ciSh(stageName, "Build unittest artifact ${platform}", """
 cp platforms/${platform}/qemu_defconfig .config
 scripts/ci/prepare_unittest_config.sh .config
 make defconfig
 stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n build
-"""
+""")
             publishKernelArtifact(artifactNameForUnittest(arch), platform)
         }
     }
@@ -1244,13 +1236,10 @@ def runRuntimeTests(String arch) {
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",
                          "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
-                         "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}-gnu-dynamic",
+                         "GUEST_CASES_TARGET_DIR=${targetDirForGuestCases(arch)}",
                          "JOBS=${env.HARNESS_JOBS}"]) {
-                    sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-stdbuf -oL -eL make ci-test run
-"""
+                    ciSh(stageName, "Run starry-test-harness ${arch}",
+                        'stdbuf -oL -eL make ci-test run')
                 }
             }
         }
@@ -1290,12 +1279,10 @@ def runDocStage(String arch) {
 
     withCleanSourceWorkspace("doc-${arch}") {
         withEnv(["TARGET_DIR=${docTargetDir}"]) {
-            sh label: "Prepare config for docs ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+            ciSh(stageName, "Prepare config for docs ${arch}", """
 cp ${defconfigFor(arch)} .config
 make defconfig
-"""
+""")
             runDocs(stageName)
             copyDocArtifactsToWorkspace(docTargetDir, arch)
         }
@@ -1347,11 +1334,7 @@ done
 }
 
 def runDocs(String stageName) {
-    sh label: 'Generate Rust docs', script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-make doc
-"""
+    ciSh(stageName, 'Generate Rust docs', 'make doc')
 }
 
 def copyDocArtifactsToWorkspace(String targetDir, String arch) {
@@ -1559,15 +1542,13 @@ git reset --quiet --hard "${remote_ref}"
 }
 
 def deleteOldCiComments() {
-    if (!env.giteePullRequestIid?.trim()) return
+    def ctx = giteePrContext()
+    if (!ctx) return
     try {
-        def prNumber = env.giteePullRequestIid
-        def namespace = env.giteeTargetNamespace ?: 'openkylin'
-        def repo = env.giteeTargetRepoName ?: 'x-kernel'
         withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
             def ids = sh(label: 'Find old Gitee CI comments', script: """#!/bin/bash
 curl -sS --max-time 15 \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/comments?page=1&per_page=100' \
+  'https://gitee.com/api/v5/repos/${ctx.namespace}/${ctx.repo}/pulls/${ctx.pr}/comments?page=1&per_page=100' \
   --data-urlencode "access_token=\${GITEE_TOKEN}" | \
   python3 -c "
 import json, sys
@@ -1587,7 +1568,7 @@ for c in comments:
                     if (commentId?.trim()) {
                         sh(label: 'Delete old Gitee CI comment', script: """#!/bin/bash
 curl -sS --max-time 10 -X DELETE \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/comments/${commentId.trim()}' \
+  'https://gitee.com/api/v5/repos/${ctx.namespace}/${ctx.repo}/pulls/comments/${commentId.trim()}' \
   --data-urlencode "access_token=\${GITEE_TOKEN}" || true
 """)
                         echo "Deleted old CI comment #${commentId.trim()}"
@@ -1598,6 +1579,19 @@ curl -sS --max-time 10 -X DELETE \
     } catch (e) {
         echo "deleteOldCiComments skipped: ${e.message}"
     }
+}
+
+/** Gitee PR coordinates for API calls; null when this is not a PR build. */
+def giteePrContext() {
+    def pr = env.giteePullRequestIid?.trim()
+    if (!pr) {
+        return null
+    }
+    return [
+        pr: pr,
+        namespace: env.giteeTargetNamespace?.trim() ?: 'openkylin',
+        repo: env.giteeTargetRepoName?.trim() ?: 'x-kernel',
+    ]
 }
 
 def notifyGiteePullRequest(String message) {
@@ -1629,20 +1623,37 @@ def archForPlatform(String platform) {
     error("Unsupported platform: ${platform}")
 }
 
+/** Container-local build output root: the /xkernel-target volume mount point. */
+def ciTargetRoot() {
+    return '/xkernel-target'
+}
+
+def targetDirForBuild(String platform) {
+    return "${ciTargetRoot()}/build-${platform}"
+}
+
+def targetDirForDylint(String platform) {
+    return "${ciTargetRoot()}/dylint-${platform}"
+}
+
+def targetDirForGuestCases(String arch) {
+    return "${ciTargetRoot()}/guest-cases-${arch}-gnu-dynamic"
+}
+
 def targetDirForArch(String arch) {
-    return "/xkernel-target/runtime-${arch}"
+    return "${ciTargetRoot()}/runtime-${arch}"
 }
 
 def targetDirForUnittest(String arch) {
-    return "/xkernel-target/unittest-${arch}"
+    return "${ciTargetRoot()}/unittest-${arch}"
 }
 
 def targetDirForDoc(String arch) {
-    return "/xkernel-target/doc-${arch}"
+    return "${ciTargetRoot()}/doc-${arch}"
 }
 
 def ciArtifactRoot() {
-    return "/xkernel-target/ci-artifacts"
+    return "${ciTargetRoot()}/ci-artifacts"
 }
 
 def artifactNameForNormal(String arch) {
@@ -1918,15 +1929,14 @@ def giteeCheck(String action, String stageName = null, Map ciResults = null, Map
         return
     }
 
-    def namespace = env.giteeTargetNamespace ?: 'openkylin'
-    def repo = env.giteeTargetRepoName ?: 'x-kernel'
-    def prDbArg = env.giteePullRequestId?.trim() ? "--pr-db-id ${env.giteePullRequestId.trim()}" : "--pr ${env.giteePullRequestIid}"
+    def ctx = giteePrContext()
+    def prDbArg = env.giteePullRequestId?.trim() ? "--pr-db-id ${env.giteePullRequestId.trim()}" : "--pr ${ctx.pr}"
 
     def manifest = [
         action: action,
         stage_name: stageName,
-        owner: namespace,
-        repo: repo,
+        owner: ctx.namespace,
+        repo: ctx.repo,
         head_sha: headSha,
         pr_db_id: env.giteePullRequestId?.trim(),
         pr_iid: env.giteePullRequestIid?.trim(),
@@ -1948,8 +1958,8 @@ def giteeCheck(String action, String stageName = null, Map ciResults = null, Map
             sh(label: 'Update Gitee check run', script: """#!/bin/bash
 set -euo pipefail
 python3 '${scriptPath}' \\
-  --owner '${namespace}' \\
-  --repo '${repo}' \\
+  --owner '${ctx.namespace}' \\
+  --repo '${ctx.repo}' \\
   --jenkins-manifest '${manifestFile}' \\
   ${prDbArg} \\
   --details-url '${env.BUILD_URL ?: ''}' || {
@@ -1988,15 +1998,13 @@ def giteeReorderSequentialCheckRuns(Map ciResults, Map failedStageLogs = [:]) {
 }
 
 def giteePrApi(String method, String endpoint, String label, String extraArgs) {
-    if (!env.giteePullRequestIid?.trim()) return
+    def ctx = giteePrContext()
+    if (!ctx) return
     try {
-        def prNumber = env.giteePullRequestIid
-        def namespace = env.giteeTargetNamespace ?: 'openkylin'
-        def repo = env.giteeTargetRepoName ?: 'x-kernel'
         withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
             sh(label: "Update Gitee PR test ${label}", script: """#!/bin/bash
 resp=\$(curl -sS -w '\\n%{http_code}' --max-time 15 -X ${method} \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/${endpoint}' \
+  'https://gitee.com/api/v5/repos/${ctx.namespace}/${ctx.repo}/pulls/${ctx.pr}/${endpoint}' \
   --data-urlencode "access_token=\${GITEE_TOKEN}" ${extraArgs} 2>&1) || true
 code=\$(echo "\$resp" | tail -1)
 echo "Gitee test ${label}: HTTP \$code"
@@ -2049,11 +2057,8 @@ def runTeeStorageTest(String arch) {
                  "TEE_TEST_BINS=${testBins.join(' ')}",
                  "SKIP_KERNEL_BUILD=1"]) {
             restoreKernelArtifact(artifactNameForNormal(arch))
-            sh label: "Run TEE tests ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-scripts/ci/run_tee_storage_test.sh '${arch}'
-"""
+            ciSh(stageName, "Run TEE tests ${arch}",
+                "scripts/ci/run_tee_storage_test.sh '${arch}'")
         }
 
         def logText = readFile("${stageWorkspace}/tee-test-output.log")
@@ -2185,6 +2190,19 @@ def stageLogTeeLine(String stageName) {
     def logFile = stageLogFile(stageName)
     def filter = stageLogAnsiFilterPipe()
     return "exec > >(${filter} | tee -a '${logFile}') 2>&1"
+}
+
+/**
+ * sh step for stage bodies: prepends the shebang, strict mode and the stage-log
+ * tee line to the caller's script. Blocks that manage those parts themselves
+ * (set +e, returnStdout/returnStatus, or no stage log) keep calling sh directly.
+ */
+def ciSh(String stageName, String label, String script) {
+    sh label: label, script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+${script.trim()}
+"""
 }
 
 def readStageLogFile(String path) {
