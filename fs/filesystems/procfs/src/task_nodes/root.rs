@@ -1640,22 +1640,25 @@ impl SimpleDirOps for ThreadDir {
             }
             "uid_map" => lookup.file(
                 name,
-                SimpleFile::new_regular(
+                SimpleFile::new_regular_with_permission(
                     fs.clone(),
+                    NodePermission::from_bits_truncate(0o644),
                     super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Uid),
                 ),
             ),
             "gid_map" => lookup.file(
                 name,
-                SimpleFile::new_regular(
+                SimpleFile::new_regular_with_permission(
                     fs.clone(),
+                    NodePermission::from_bits_truncate(0o644),
                     super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Gid),
                 ),
             ),
             "setgroups" => lookup.file(
                 name,
-                SimpleFile::new_regular(
+                SimpleFile::new_regular_with_permission(
                     fs.clone(),
+                    NodePermission::from_bits_truncate(0o644),
                     super::userns::SetgroupsFile::new(task_weak.clone()),
                 ),
             ),
