@@ -77,7 +77,10 @@ deepest common ancestor that holds a projection for the identity. An observer
 inside the identity's namespace hierarchy always sees a number (the root
 projection is the terminal fallback); an observer rooted in an unrelated
 namespace tree receives `None`. This mirrors Linux `struct pid`/`upid` lookup
-semantics without storing a raw PID integer in observers.
+semantics without storing a raw PID integer in observers. `projections()` is
+the bulk companion: it yields every `(namespace id, number)` pair so the
+process publication table can build its namespaced lookup index without
+walking the namespace chain per query.
 
 ## Lifecycle state machine
 

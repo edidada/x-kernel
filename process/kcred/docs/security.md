@@ -8,7 +8,7 @@ modules are excluded. The crate has no unsafe blocks, unsafe functions/traits/im
 pointer operations, FFI, assembly, hardware registers, DMA, or boot metadata.
 Its risks are authorization and identity consistency rather than an internal
 raw-memory boundary. Dependency internals remain the responsibility of `alloc`,
-`klazy`, `bitflags`, and `kerrno`.
+`klazy`, `bitflags`, `kerrno`, and `kspin` (the map-state lock).
 
 Protected assets are `Cred`'s real/effective/saved/filesystem UID/GID fields,
 its sorted `Arc<[Gid]>` supplementary groups, the effective/permitted/inheritable
@@ -53,10 +53,13 @@ decide which task a PID names.
 
 ## Authorization and state invariants
 
-Authorization is capability-based: `Cred::has_cap` tests only the effective set,
-and the convenience predicates (`has_sys_admin`, `has_sys_resource`,
-`has_sys_tty_config`, `has_cap_chown`, `has_cap_fowner`) delegate to it. Real,
-saved and filesystem IDs never grant capability authority. The effective set is
+Authorization is capability-based: `Cred::has_cap` tests the effective set only
+when the credential is in the initial user namespace (the global `capable()`
+form); `Cred::has_cap_in(target_ns, cap)` performs the Linux `cap_capable()`
+ancestor/owner walk, and the convenience predicates (`has_sys_admin`,
+`has_sys_resource`, `has_sys_tty_config`, `has_cap_chown`, `has_cap_fowner`)
+delegate to the global form. Real, saved and filesystem IDs never grant
+capability authority. The effective set is
 bounded by the permitted set, and `capset` transitions are validated by
 `CapSets::validate_transition` before mutation. The transition validator also
 keeps the inheritable set within the old inheritable set union the bounding set;

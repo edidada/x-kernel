@@ -161,10 +161,11 @@ retains init identity; orphan reparenting reserves an init relation slot.
   an exec leader takeover, or lost its tid to reuse therefore reports `-1`
   instead of a stale or recycled number. Process identities translate through
   their per-namespace projections (`0` when the observer has none). Thread
-  identities are allocated root-only, so the kernel names a thread by its root
-  tid (`gettid(2)`, the `clone3` return value); that number is reported to a
-  reader in the thread's namespace or an ancestor of it, while a reader below
-  or beside that branch gets `0`, matching `pid_nr_ns`.
+  identities are allocated in the process's active PID namespace, so they carry
+  the same namespace/ancestor projections as the leader; `gettid(2)` and the
+  `clone3` return value use the root number, while `/proc/<pid>/task/<tid>/stat`
+  renders the observer-namespace projection (or `0` when there is none),
+  matching `pid_nr_ns`.
 - `procfs` namespace view: `try_current_user_process` resolves the mounting user
   process without panicking for kernel tasks; `visible_processes_in_namespace`
   and `process_task_in_namespace` resolve `/proc` entries in an observer PID
@@ -724,7 +725,9 @@ not expose the retired leader.
 
 This retention scheme relies on the current runtime identity allocator, not on
 the probability of TID reuse. `Thread::prepare_thread_clone` calls
-`allocate_thread_task_number`, which delegates to `kidentity`'s root namespace.
+`allocate_thread_task_number(&process.active_pid_namespace())`, which delegates
+to `kidentity::PidHandle::allocate_in` for the active namespace and its
+ancestors.
 Its checked monotonic `fetch_update` returns `WouldBlock` at exhaustion; dropping
 a handle does not recycle a number and the counter never wraps. The fixed-number
 replacement fixture deliberately bypasses allocation to test stale Weak identity

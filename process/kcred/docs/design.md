@@ -81,8 +81,10 @@ borrow state; mutation requires exclusive `&mut Cred` access.
 Callers use constructors to create trusted credentials, checked setters to apply
 identity policy, and `prepare` to obtain independently mutable values.
 Construction and group replacement deliberately do not authorize publication.
-`Cred::root` delegates to `Cred::new(0, 0)`; `initial_cred` initializes and clones
-a shared `Arc<Cred>`. It is not a current-task lookup.
+`Cred::root` calls `root_in_user_namespace(initial_user_namespace())`, which
+builds through `new_in_user_namespace(0, 0, user_ns)` and installs the
+full-privileged capability sets; `initial_cred` initializes and clones a shared
+`Arc<Cred>`. It is not a current-task lookup.
 
 `for_access` clones a credential and substitutes filesystem IDs with real IDs.
 Unless `SECURE_NO_SETUID_FIXUP` is set, it also applies Linux's access-override
@@ -108,7 +110,7 @@ operation-specific policy; identity alone is not permission.
 `SpinNoPreempt<UserNamespaceMapState>` holding the UID map, GID map, and
 `setgroups_allowed`. `UserNamespace::new_child(parent, owner_euid, owner_egid,
 parent_could_setfcap)` implements Linux `create_user_ns()`: it enforces the
-32-level nesting bound (`ENOSPC`), rejects an owner whose euid/egid has no
+Linux nesting check (`parent.level > 32`, `ENOSPC`), rejects an owner whose euid/egid has no
 mapping in the parent (`EPERM`), starts with empty maps, and inherits the
 parent's `setgroups` policy. `initial_user_namespace()` returns the implicit
 identity-mapped root; its policy is immutable.

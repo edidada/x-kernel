@@ -117,10 +117,13 @@ return `OVERFLOW_ID` (65534) when the reader has no mapping.
 This establishes a trust boundary between the caller's namespace view and the
 globally stored identity. The superblock records the mounting task's user
 namespace as `s_user_ns` (`SuperBlock::init_user_ns`), and
-`Dentry::user_namespace` exposes it. Capability checks on inode operations use
+`Dentry::user_namespace` exposes it. Ownership-changing inode operations
+(`chown`, `chmod`, sticky deletion, fileattr/xattr) evaluate capabilities in
 that namespace, not the caller's and not `init_user_ns`; a caller that does not
-hold the capability in the inode's owner namespace cannot use it to reown or
-modify the inode. `MntNamespace::clone_with_root_and_pwd_in` binds the new
+hold the capability in the inode's owner namespace cannot reown or modify the
+inode. Generic DAC instead follows Linux `capable_wrt_inode_uidgid()`: the
+capability is checked in the caller's user namespace and the inode's uid/gid
+must be mapped there. `MntNamespace::clone_with_root_and_pwd_in` binds the new
 namespace as owner when `CLONE_NEWNS|CLONE_NEWUSER` is combined, so a container
 cannot inherit authority over a host-owned superblock by mounting a clone.
 Internally all owner/group comparisons and map lookups use global values; no
@@ -128,11 +131,13 @@ projection is stored in the inode.
 
 ## Namespace-aware inode authorization
 
-`chown`, `chmod`, sticky-directory deletion, fileattr/xattr writes, and DAC
-checks evaluate capabilities with `has_cap_in` against the inode's
-`s_user_ns` (Linux `capable_wrt_inode_uidgid`). In particular, `CAP_CHOWN`,
-`CAP_FOWNER`, and `CAP_FSETID` are namespace-scoped; the sticky-directory
-exemption uses `CAP_FOWNER` in the directory inode's namespace. Owner/group
+`chown`, `chmod`, sticky-directory deletion, and fileattr/xattr writes evaluate
+capabilities with `has_cap_in` against the inode's `s_user_ns` (Linux
+`inode_owner_or_capable`/`capable_wrt_inode_uidgid` for ownership operations).
+In particular, `CAP_CHOWN`, `CAP_FOWNER`, and `CAP_FSETID` are namespace-scoped;
+the sticky-directory exemption uses `CAP_FOWNER` in the directory inode's
+namespace. Generic read/write/execute DAC uses the caller's user namespace plus
+the mapped-ID condition described above, not `s_user_ns`. Owner/group
 tests compare the caller's global `fsuid`/`fsgid` and projected supplementary
 groups with the stored inode IDs, so an unmapped caller ID cannot claim
 ownership by numeric coincidence. Unmapped `chown` targets are rejected before

@@ -31,8 +31,10 @@ Existing fd-table detach ordering and other allocations are not changed.
 
 ## Clone Entry Preparation
 
-Clone prepares its user entry with KERNEL after flag, namespace capability and
-exit-signal validation, but before process or sibling-thread preparation. This
+Clone prepares its user entry with KERNEL after flag and exit-signal validation,
+but before process or sibling-thread preparation. Namespace capability
+authorization now happens during `prepare_process_fork` through
+`kns::NamespacePlan::build`, after the optional new user namespace exists. This
 is sleepable syscall task context with no cgroup transaction or reclaim-dependent
 lock held. The current-task/thread handles retain owners, not lock guards.
 NoMemory propagates before child identities and relationships are created.

@@ -29,11 +29,12 @@ owner UIDs select the owner class; both creator and current owner GIDs select th
 group class through `Cred::in_group`, which tests the filesystem GID and
 supplementary groups (not the effective GID). The requested bits are folded as
 `(flag >> 6) | (flag >> 3) | flag`, so a raw `msgget` mode such as `0666` requires
-both read and write. A denial is overridden only by effective `CAP_IPC_OWNER`;
-UID zero alone grants nothing.
+both read and write. A denial is overridden only by `CAP_IPC_OWNER` held in the
+queue's owning user namespace (or an ancestor); UID zero alone grants nothing.
 
 Queue control has a separate Linux check: effective UID must equal the current
-owner or creator, or the caller must hold effective `CAP_SYS_ADMIN`. In
+owner or creator, or the caller must hold `CAP_SYS_ADMIN` in the queue's owning
+user namespace (or an ancestor). In
 particular `CAP_IPC_OWNER` overrides read/write access but not `IPC_SET` or
 `IPC_RMID`. Linux's `ksys_msgctl()` copies an `IPC_SET` buffer before resolving
 the queue or running `ipcctl_obtain_check()`; this crate preserves that order, so

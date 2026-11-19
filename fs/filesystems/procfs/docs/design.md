@@ -252,7 +252,7 @@ The value is the `pid_nr_ns` view: the process's number in the reading task's
 active PID namespace, and `0` when it has no projection there. This is the
 `fdinfo` reader's view; the procfs instance itself captures the mounting task's
 active PID namespace as `observer_ns`, and `/proc/<pid>` directory names,
-lookup, `/proc/self`, `status`, and `stat` use that mount namespace instead. A
+lookup, `/proc/self`, `status`, and `stat` use that PID namespace instead. A
 kernel-task reader has no active namespace and falls back to the internal
 number instead of panicking. A pidfd reports `-1` only once its process has been
 reaped: Linux computes the number while the pid still has a task attached
@@ -438,7 +438,9 @@ MM has no resident-page accounting, so `VmRSS` is omitted and `stat.rss` is a
 positional `0` placeholder, not a measurement. `Mems_allowed*` are fixed
 single-node values, not a rendering of Linux's `MAX_NUMNODES`-wide mask. Status
 samples each subsystem in sequence and does not promise a global atomic
-snapshot. Non-cgroup namespace identities remain placeholders. Mount reporting
+snapshot. Namespace inode numbers come from each owning subsystem's allocator
+(PID, user, mount, net, IPC, UTS and cgroup); they are not globally coordinated,
+so numbers from different subsystems can collide. Mount reporting
 uses synthetic device identities and is not a globally frozen namespace
 snapshot. `printk` keeps its historical
 single-value contract: it reads the console default level as a number in
