@@ -241,6 +241,7 @@ struct Ns16550IoPortSerialDriver;
 #[cfg(feature = "serial-ns16550-ioport")]
 impl DeviceDriver for Ns16550IoPortSerialDriver {
     type Data = ();
+
     fn supports_suspend(&self) -> bool {
         true
     }

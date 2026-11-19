@@ -46,6 +46,7 @@ struct PciHostDriver;
 
 impl DeviceDriver for PciHostDriver {
     type Data = ();
+
     // ECAM remains mapped throughout QEMU S3. Endpoint BAR/decode/bus-master
     // state is retained and restored by PowerDevices, not this synthetic node.
     fn supports_suspend(&self) -> bool {

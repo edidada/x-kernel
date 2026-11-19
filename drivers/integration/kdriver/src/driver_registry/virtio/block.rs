@@ -30,9 +30,11 @@ impl<H: VirtIoHal + 'static, T: Transport + 'static> BlockActivationOps for Virt
     fn suspend(&self) -> DriverResult<()> {
         VirtIoBlkDev::suspend(self)
     }
+
     fn resume(&self) -> DriverResult<()> {
         VirtIoBlkDev::resume(self)
     }
+
     fn begin_close(&self, notification: Arc<dyn block::completion::BlockSignals>) {
         VirtIoBlkDev::begin_close(self, notification)
     }
