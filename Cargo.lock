@@ -3517,6 +3517,7 @@ dependencies = [
 name = "ktime"
 version = "0.3.0-dev"
 dependencies = [
+ "kbuild_config",
  "khal",
  "kiface-time-api",
  "klazy",
@@ -5622,6 +5623,7 @@ dependencies = [
 name = "sysfs"
 version = "0.3.0-dev"
 dependencies = [
+ "block",
  "kalloc-types",
  "kcpu_id_map",
  "kdevice",
@@ -5630,6 +5632,7 @@ dependencies = [
  "khal",
  "klazy",
  "ksync",
+ "ktime_types",
  "kvfs",
  "lazyinit",
  "macros",
