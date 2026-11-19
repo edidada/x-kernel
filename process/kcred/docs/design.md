@@ -13,18 +13,25 @@ The crate does not locate a current task, commit credentials, authorize file
 access, read syscall pointers, or load executable metadata. `kprocess` owns task
 credential snapshots and publication; `ksyscall` translates wire arguments and
 applies syscall-target policy; `kvfs` consumes explicit credentials for
-discretionary access checks. Capability authority is the effective set:
-`Cred::has_cap` is the primitive, and named predicates such as
-`has_sys_admin` and `has_sys_tty_config` are thin aliases for it. Set-ID
-transitions test `CAP_SETUID`/`CAP_SETGID`; filesystem access checks in `kvfs`
-test `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH`. The namespace types do not scope
-capability sets.
+discretionary access checks. Capability authority is namespace-scoped:
+`Cred::has_cap_in(target_ns, cap)` implements Linux `cap_capable()` by walking
+the target namespace's parent chain, granting a namespace owner authority over
+its direct child, and consulting the caller's effective set only in its own
+namespace. `Cred::has_cap` is the global `capable()` form: it requires the
+credential to be in the initial user namespace and reports the effective set
+there. Named predicates such as `has_sys_admin` and `has_sys_tty_config` alias
+`has_cap`. Set-ID transitions test `CAP_SETUID`/`CAP_SETGID`; filesystem access
+checks in `kvfs` test `CAP_DAC_OVERRIDE`/`CAP_DAC_READ_SEARCH` and evaluate
+inode capabilities with `has_cap_in` against the inode's `s_user_ns`.
 
 ```text
 ksyscall -> kprocess: prepare / commit task snapshot
+                 |                  ^
+                 v                  |
+               kcred <--- kns: namespace construction + has_cap_in
+                 ^
                  |
-                 v
-               kcred <--- kvfs: inspect explicit &Cred
+               kvfs: inspect explicit &Cred / inode s_user_ns
 ```
 
 ## Source and dependency scope
@@ -39,7 +46,7 @@ This document covers the entire crate, including its namespace module and tests.
 | `src/credentials/model.rs` | `Cred` storage, queries, capability and ID transitions |
 | `src/credentials/user.rs`, `src/credentials/group.rs` | `Uid` and `Gid`, both `u32` aliases, `INVALID_UID`/`INVALID_GID` sentinels, and `is_valid_uid`/`is_valid_gid` predicates |
 | `src/credentials/securebits.rs` | Crate-private `SecureBits` bitflags |
-| `src/namespace.rs` | IDs, namespace parentage and initial namespace |
+| `src/namespace.rs` | IDs, namespace parentage, `UserNamespace` construction, UID/GID maps, `setgroups` policy, and the map-state lock |
 | `ut-tests/kcred_unittest.rs`, `ut-tests/namespace_unittest.rs` | Credential and namespace tests under `cfg(unittest)` |
 | `Cargo.toml` | Dependency declarations; no crate-specific features |
 
@@ -96,9 +103,38 @@ conditions. `has_scheduler_capability_over` similarly requires an effective
 `kprocess` and `ksyscall` compose these predicates with same-thread-group and
 operation-specific policy; identity alone is not permission.
 
-`UserNamespace` stores `id: NamespaceId` and `parent: Option<Arc<UserNamespace>>`.
-Only the initial namespace can currently be constructed through public APIs;
-its parent is `None`. There is no child constructor or ID-mapping operation.
+`UserNamespace` stores `id: NamespaceId`, `parent: Option<Arc<UserNamespace>>`,
+`level`, `owner_euid`, `parent_could_setfcap`, and a
+`SpinNoPreempt<UserNamespaceMapState>` holding the UID map, GID map, and
+`setgroups_allowed`. `UserNamespace::new_child(parent, owner_euid, owner_egid,
+parent_could_setfcap)` implements Linux `create_user_ns()`: it enforces the
+32-level nesting bound (`ENOSPC`), rejects an owner whose euid/egid has no
+mapping in the parent (`EPERM`), starts with empty maps, and inherits the
+parent's `setgroups` policy. `initial_user_namespace()` returns the implicit
+identity-mapped root; its policy is immutable.
+
+`write_uid_map`/`write_gid_map` implement Linux `new_idmap_permitted()`: maps are
+write-once, must stay inside the parent map, require `CAP_SYS_ADMIN` in the
+target namespace plus either the owner self-map shortcut or the corresponding
+`CAP_SETUID`/`CAP_SETGID` in the parent, and a UID mapping that includes parent
+UID 0 additionally requires `CAP_SETFCAP` (or a creator that held it).
+`set_setgroups_allowed` implements the one-way `allow`/`deny` file; the initial
+namespace rejects `deny`. `map_*_to_initial`, `map_*_from_initial`, and the
+parent-relative variants expose the coordinate translations used at syscall and
+procfs boundaries. `has_uid_map`/`has_gid_map`/`is_ready` report map readiness.
+
+Namespace-facing public interfaces fall into four groups. Capability queries:
+`Cred::has_cap_in`, `user_ns`, `user_ns_arc`. Credential namespace transitions:
+`with_user_namespace`, `root_in_user_namespace`, `new_in_user_namespace`.
+Namespace construction and maps: `UserNamespace::new_child`,
+`write_uid_map`/`write_gid_map`, `set_setgroups_allowed`,
+`setgroups_allowed`, `has_uid_map`/`has_gid_map`/`is_ready`,
+`map_*_to_initial`/`map_*_from_initial`, and the parent-relative variants.
+Consumers are `kns` (plan construction and `has_cap_in` authorization),
+`ksyscall` (map/setgroups writes and credential transitions), `kvfs` (inode
+`s_user_ns` checks), and procfs (map rendering). Call direction is from those
+owners into `kcred`; `kcred` never calls back into them.
+
 `NamespaceId::new` and its `Default` implementation allocate numeric identities;
 `as_u64` and `Display` expose their value. `Clone`, equality and hashing operate
 on that value. The counter starts at one and wraps without exhaustion handling.
@@ -273,6 +309,11 @@ that first access is IRQ-safe simply because it does not sleep.
 their fields; there is no unsafe trait implementation. Independent prepared
 values can be mutated concurrently; one mutable value still requires exclusive
 access. Task-level credential replacement is synchronized by `kprocess` locks.
+`UserNamespace::map_state` uses `kspin::SpinNoPreempt`, not `SpinNoIrq`: map
+reads/writes and capability walks run in task/syscall/procfs context only, so
+preemption is masked but local IRQs stay enabled. Map operations therefore must
+not run in IRQ context, but they are not IRQ-safe locks either; callers may not
+block while holding the guard.
 
 ## Decisions, limits, and cleanup
 

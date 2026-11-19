@@ -79,11 +79,12 @@ This crate chooses typed errors, not errno. It has no retry/rollback manager
 beyond ownership cleanup of partially constructed values. Allocation follows the
 kernel allocator policy. Hostname/domainname and namespace IDs may reveal system
 identity to consumers; this crate does not log them or handle other user payload.
-User/capability, namespace-FD policy, net isolation, and full user/cgroup
-namespace switching are external or documented non-goals; IPC/net/time payloads
-are not owned here. `unshare` supports NEWUSER/NEWTIME and NEWNET; NEWCGROUP remains unsupported.
-NET materializes a private protocol stack through `knet` (data-plane routing
-stays global for now, see T-01).
+User/capability, namespace-FD policy, and net isolation are external or
+documented non-goals; IPC/net/time payloads and cgroup controller state are not
+owned here. `unshare`/`clone` accept all `CLONE_NEW*` flags; user namespaces carry
+credential and idmap state, cgroup namespaces carry a view rooted at the caller's
+current cgroup, and NET materializes a private protocol stack through `knet`
+(data-plane routing stays global for now, see T-01).
 
 ## Audit checklist
 
@@ -92,7 +93,9 @@ stays global for now, see T-01).
 - Preserve private, initialized filesystem context for NEWNS.
 - Keep UTS bounds, one-allocation borrowing, and byte semantics aligned.
 - Preserve the single initial cgroup hierarchy reference.
-- Ensure `setns` rejects User/Cgroup swaps rather than switching references;
-  a Net swap is supported and materializes the target namespace's protocol
+- Authorize `setns` per namespace type against the target namespace's owner
+  user namespace. User swaps install the matching credential transition in the
+  syscall layer; cgroup swaps into the current view are a no-op and a real
+  switch uses the namespace's view; Net swaps materialize the target protocol
   stack (see T-01 for its data-plane residual risk).
 - Define owner, locks, authorization, and cleanup when adding namespace state.

@@ -108,23 +108,37 @@ initialized.
 
 ## Construction and clone flow
 
+`NamespacePlan::build(flags, parent, cred, fs_context, current_cgroup)` is the
+single construction entry shared by `clone(2)`, `clone3(2)`, and `unshare(2)`.
+It is provided by `kns`; the syscall layer supplies the decoded flags, the
+caller's `Arc<Cred>`, an optional private `FsStruct`, and the caller's current
+cgroup. It returns a `NamespacePlan` holding the freshly created namespaces (or
+`None` for an unselected flag) or an `UnshareError` (`NotPermitted`,
+`InvalidArgument`, `NoSpace`, `Mount`). The process layer then commits the plan
+into a child `NsProxy` or `unshare`'s `PreparedUnshare`; `plan.rs` never
+installs a namespace into a running process itself.
+
 `new_initial` caches a bundle with `Once`. The explicit-mount constructor
 creates fresh UTS/IPC/net/time objects, shares the global root PID namespace,
 and reuses `CgroupNamespace::initial`. Independent explicit-mount bundles still
 share the initial cgroup hierarchy so boot mounts and PID 1 do not acquire
 separate system roots.
 
-`clone_for_child` supports NEWUSER, NEWTIME and NEWNET. A child receives the
-new user namespace in its credential, a fresh `NetNamespace` whose protocol
-stack is materialized by `knet::netns::ensure_stack`, and the selected time
-namespace. NEWCGROUP remains rejected because the cgroup hierarchy view is not
-isolated. With NEWNS it
-rejects `NamespaceFsContext::Shared`; otherwise it snapshots root/pwd, calls
-KVFS `clone_with_root_and_pwd`, retargets the private `FsStruct` as a pair, and
-retains the new mount namespace. NEWUTS copies both names into a new identity;
-NEWIPC creates a new namespace ID; NEWPID creates a child `PidNamespace`
-nested below the parent's `pid_ns_for_children`. Unselected references are
-shared. The function does not install the result into a running process.
+`clone_for_child` handles every `CLONE_NEW*` flag through `NamespacePlan`.
+`CLONE_NEWUSER` creates the child user namespace first; it becomes the owner of
+the sibling namespaces and is installed in the child credential. Without
+`CLONE_NEWUSER`, the caller's existing user namespace owns them, and creating
+any other namespace requires `has_cap_in(caller_ns, CAP_SYS_ADMIN)`. A child
+receives a fresh `NetNamespace` whose protocol stack is materialized by
+`knet::netns::ensure_stack`, the selected time namespace, and a cgroup namespace
+rooted at the caller's current cgroup. With NEWNS it rejects
+`NamespaceFsContext::Shared`; otherwise it snapshots root/pwd, calls KVFS
+`clone_with_root_and_pwd_in(..., owner)`, retargets the private `FsStruct` as a
+pair, and retains the new mount namespace. NEWUTS copies both names into a new
+identity; NEWIPC creates a new namespace ID; NEWPID creates a child
+`PidNamespace` nested below the parent's `pid_ns_for_children`. Unselected
+references are shared. The function does not install the result into a running
+process.
 
 ## unshare two-phase protocol
 
@@ -134,10 +148,12 @@ shared. The function does not install the result into a running process.
 1. NEWUSER creates a child user namespace and installs it in the caller's
    credential; NEWNET creates a fresh `NetNamespace` identity and the syscall
    path materializes its protocol stack with `knet::netns::ensure_stack`.
-   NEWCGROUP remains unsupported.
+   NEWCGROUP creates a view rooted at `UnshareContext::current_cgroup`;
+   NEWPID/NEWUTS/NEWIPC/NEWNS/NEWTIME follow the same plan.
 2. Namespace creation is authorized through `UnshareContext::cred`;
    `NEWUSER` needs no capability in the parent, while the other `NEW*` flags
-   require `CAP_SYS_ADMIN` in the applicable user namespace. Plain
+   require `has_cap_in(caller_user_ns, CAP_SYS_ADMIN)`. The new user namespace
+   (when requested) becomes the owner of every sibling namespace. Plain
    `CLONE_FS`/`CLONE_FILES` do not.
 3. `NEWNS` while the `fs_struct` is shared and `CLONE_FS` was not requested is
    `InvalidArgument` (`EINVAL`), matching Linux `check_fs_flag()`.
@@ -164,14 +180,18 @@ but not yet data-plane isolation.
 
 ## setns semantics
 
-`setns(2)` in `core/ksyscall` requires effective `CAP_SYS_ADMIN` (standing in
-for Linux's per-type install checks) and resolves an fd through two channels:
+`setns(2)` in `core/ksyscall` authorizes each requested namespace type against
+the target namespace's owner user namespace (Linux's per-type install checks)
+and resolves an fd through two channels:
 
 - `NsFd` channel: `nstype` must be zero or match the fd's namespace type
-  (`EINVAL` otherwise).
+  (`EINVAL` otherwise). User swaps install the matching credential transition;
+  mount swaps require `CAP_SYS_CHROOT`+`CAP_SYS_ADMIN`; time swaps reject a
+  multithreaded caller with `EUSERS`; entering the current cgroup namespace is a
+  successful no-op.
 - `PidFd` channel (Linux 5.8+): `nstype` is an OR-combination mask; every
-  requested slot is validated against the pidfd's live process, and
-  unsupported kinds answer `EOPNOTSUPP` before anything commits.
+  requested slot is validated against the pidfd's live process after the ptrace
+  read check, and unknown bits fail with `EINVAL` before anything commits.
 
 Both channels build the replacement proxy with `with_namespace` (the pidfd
 channel once per requested slot) and commit through `Process::apply_setns`;
@@ -194,12 +214,15 @@ allocation is not a memory-ordering/publication protocol.
 
 ## Decisions, lifecycle, and limitations
 
-Unsupported clone flags fail explicitly instead of silently claiming isolation.
-Net and user namespaces are created and entered. Net carries a private knet
-stack (loopback and `127.0.0.1/8`); user namespaces carry credential and
-idmap state. Cgroup namespaces remain rejected because the cgroup hierarchy
-view is not isolated. Net *data-plane* routing (socket registry, listen table,
-netlink views) remains global as a documented follow-up.
+Invalid or conflicting clone flags fail explicitly instead of silently claiming
+isolation. Net, user, time, and cgroup namespaces are created and entered. Net
+carries a private knet stack (loopback and `127.0.0.1/8`); user namespaces carry
+credential and idmap state; cgroup namespaces carry a view rooted at the
+caller's current cgroup, consumed by `cgroup2fs` and `/proc/<pid>/cgroup`.
+Cgroup controller state and membership accounting remain in `kcgroup`; the
+namespace does not fork the hierarchy. Net *data-plane* routing (socket
+registry, listen table, netlink views) remains global as a documented
+follow-up.
 `NamespaceFsContext` makes mount-copy versus shared-filesystem conflicts visible
 in the API. Credential and active-PID roles are not folded into `NsProxy`.
 
@@ -214,22 +237,24 @@ while any fd or bundle references it.
 Non-goals and increments (explicitly out of scope, recorded because they echo
 the tgoskits gaps):
 
-- **NEWCGROUP isolation**: the object type exists and NsFd/procfs expose it,
-  but switching the cgroup reference without isolating the underlying
-  hierarchy view is rejected. User and time namespaces are implemented with
-  credential/idmap and offset state; net *data-plane* routing stays global in
-  knet as the documented follow-up.
+- **Cgroup view scope**: `NEWCGROUP` creates a real `CgroupNamespace` view
+  rooted at the caller's current cgroup; `cgroup2fs` and `/proc/<pid>/cgroup`
+  consume it. Controller state and cgroup membership accounting remain owned by
+  `kcgroup`; the namespace does not fork the hierarchy. User and time namespaces
+  are implemented with credential/idmap and offset state; net *data-plane*
+  routing stays global in knet as the documented follow-up.
 - **fs-sharing counting**: the shared-`fs_struct` (`NEWNS` without `CLONE_FS`)
   check counts both the caller's published threads and other processes that
   adopted the same context through `CLONE_FS`; kernel threads do not own a
   filesystem context.
-- **setns PID reachability**: the syscall boundary enforces effective
-  `CAP_SYS_ADMIN` and Linux's `pidns_install` ancestor rule — the target PID
-  namespace must be the caller's active namespace or one of its descendants —
-  which also keeps plain-fork allocation keyed on `pid_ns_for_children`
-  resolvable in the caller's namespace. User namespaces are not implemented,
-  so one capability gate stands in for Linux's per-target owner-namespace
-  `CAP_SYS_ADMIN` checks.
+- **setns authorization**: each `setns` channel authorizes against the target
+  namespace's owner user namespace, matching Linux's per-type install checks.
+  `NsFd::User` also installs the matching credential transition; mount swaps
+  require `CAP_SYS_CHROOT`+`CAP_SYS_ADMIN`; time swaps reject a multithreaded
+  caller with `EUSERS`; cgroup swaps into the current view are a no-op. The PID
+  install rule still requires the target to be the caller's active namespace or
+  a descendant (`pidns_install`), which keeps plain-fork allocation keyed on
+  `pid_ns_for_children` resolvable in the caller's namespace.
 - **bind-mount lifecycle**: namespace files keep identity in their inode and
   can be bound, but re-opening a bound file after the owning process exits
   fails with `ESRCH`; a namespace registry (nsfs-style) is needed for the

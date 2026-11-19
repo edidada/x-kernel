@@ -249,10 +249,12 @@ ignored_mask:...` line per live watch, using the instance's watch snapshot.
 
 A pidfd appends Linux's `Pid:` line for glibc/systemd pidfd-to-pid resolution.
 The value is the `pid_nr_ns` view: the process's number in the reading task's
-active PID namespace, and `0` when it has no projection there. This procfs does
-not model a per-mount PID namespace, so the reader's namespace stands in for
-the procfs instance's; a kernel-task reader has none and falls back to the
-internal number instead of panicking. A pidfd reports `-1` only once its process has been
+active PID namespace, and `0` when it has no projection there. This is the
+`fdinfo` reader's view; the procfs instance itself captures the mounting task's
+active PID namespace as `observer_ns`, and `/proc/<pid>` directory names,
+lookup, `/proc/self`, `status`, and `stat` use that mount namespace instead. A
+kernel-task reader has no active namespace and falls back to the internal
+number instead of panicking. A pidfd reports `-1` only once its process has been
 reaped: Linux computes the number while the pid still has a task attached
 (`pid_has_task`), which includes an exited child that has not been waited for,
 so a waitable zombie keeps naming its pid and only the reaped state reads as
@@ -287,8 +289,9 @@ credential `Arc` releases its read lock before formatting. The existing
 `SeqFile` buffer generates one status record on first read, then serves its
 remaining bytes across short reads. A zero-offset read regenerates the record;
 opening alone does not capture credentials. No procfs credential cache is added,
-and unrelated fields are not a globally atomic task snapshot. Current `kcred` IDs belong
-to the initial user namespace; reader-namespace ID translation is not implemented.
+and unrelated fields are not a globally atomic task snapshot. Stored credential IDs are in initial-user-namespace coordinates; the `status`
+formatter projects `Uid:`/`Gid:` through `Kuid::to_inside`/`Kgid::to_inside`
+into the reader's user namespace and renders unmapped IDs as 65534.
 
 `status` uses the shared `kcpu_id_map::text` formatter for
 `Cpus_allowed`/`Cpus_allowed_list`, with a domain sampled once per status record;
