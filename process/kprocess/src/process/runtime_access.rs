@@ -212,7 +212,11 @@ impl Process {
     /// Records a weak reference to the runtime owned by this process.
     pub(crate) fn set_runtime_ref(&self, runtime: &Arc<ProcessRuntime>) {
         if let Some(nsproxy) = runtime.nsproxy() {
-            *self.retained_nsproxy.lock() = Some(nsproxy);
+            let mut retained = self.retained_nsproxy.lock();
+            let previous = retained.take();
+            *retained = Some(nsproxy);
+            drop(retained);
+            drop(previous);
         }
         *self.runtime_ref.lock() = Some(Arc::downgrade(runtime));
     }
@@ -224,7 +228,16 @@ impl Process {
 
     /// Replaces the retained namespace owner after a namespace switch.
     pub(crate) fn set_retained_nsproxy(&self, nsproxy: Option<Arc<kns::NsProxy>>) {
-        *self.retained_nsproxy.lock() = nsproxy;
+        let mut retained = self.retained_nsproxy.lock();
+        let previous = retained.take();
+        *retained = nsproxy;
+        drop(retained);
+        drop(previous);
+    }
+
+    /// Takes the retained namespace owner out of the lock for teardown.
+    fn take_retained_nsproxy(&self) -> Option<Arc<kns::NsProxy>> {
+        self.retained_nsproxy.lock().take()
     }
 
     /// Returns the current task's IPC namespace while its owner is attached.
@@ -969,7 +982,9 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
     /// reachable.
     pub fn exit_namespaces(&self) -> KResult<()> {
-        self.set_retained_nsproxy(None);
+        // Drop the retained owner (and run nsproxy teardown) outside the lock.
+        let nsproxy = self.take_retained_nsproxy();
+        drop(nsproxy);
         if let Some(runtime) = self.runtime_ref() {
             runtime.exit_namespaces();
         }

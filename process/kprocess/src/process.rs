@@ -28,7 +28,7 @@ pub use exit::{
 use intrusive_collections::LinkedList;
 use kidentity::{PidHandle, PidNamespace};
 use ksignal::Signo;
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use ksync::{Mutex, MutexGuard};
 use lazyinit::LazyInit;
 pub use runtime_access::{LiveAddressSpace, ProcessExecUpdate};
@@ -120,7 +120,7 @@ pub struct Process {
     /// unreaped zombie keep serving `/proc/<pid>/ns/*` after the last Thread
     /// (and thus `ProcessRuntime`) is destroyed. `exit_namespaces` clears it
     /// at reap.
-    retained_nsproxy: SpinNoIrq<Option<Arc<kns::NsProxy>>>,
+    retained_nsproxy: SpinNoPreempt<Option<Arc<kns::NsProxy>>>,
     /// Published PID slot, retained so exit/reap can retire visibility without
     /// taking the publication table lock inside `process_domain`.
     pid_publication_slot: SpinNoIrq<Option<Weak<PublishedProcessSlot>>>,
@@ -462,7 +462,7 @@ impl Process {
             visible_parent: AtomicU32::new(visible_parent),
             group_membership,
             runtime_ref: SpinNoIrq::new(None),
-            retained_nsproxy: SpinNoIrq::new(None),
+            retained_nsproxy: SpinNoPreempt::new(None),
             pid_publication_slot: SpinNoIrq::new(None),
         })
     }
