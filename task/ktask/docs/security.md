@@ -1,5 +1,21 @@
 # ktask — Security and reliability
 
+## CPU parking and PM infrastructure tasks
+
+The unsafe `TaskInner::with_pm_infrastructure` in `src/task.rs` bypasses
+cooperative freeze acknowledgement. Callers may mark only unpublished kernel
+infrastructure whose execution is governed by CPU parking. User tasks and
+ordinary kernel work must participate in cooperative freezing. PM must keep
+resources used by the marked task available until its CPU acknowledges parking
+and restore them before releasing the CPU. Recovery must not require a lock
+the task could hold while parked.
+
+In `src/softirqd.rs`, IRQ and device resources stay available until the CPU
+Stop callback excludes softirq execution. PM restores them before CPU release
+without acquiring locks retained by the daemon. In `src/stop_machine.rs`,
+the pinned Stop thread owns the CPU rendezvous and runs its callbacks with
+interrupts disabled. Recovery must not acquire resources held by that thread.
+
 ## Fair PELT ownership
 
 Remote wake placement removes retained Fair history under the source RQ and
