@@ -346,6 +346,10 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     init_cpu_services();
 
+    if let Err(error) = kdma::init_streaming_pool() {
+        warn!("DMA streaming pool preparation failed ({error:?}); streaming mappings unavailable");
+    }
+
     #[cfg(all(unittest, feature = "smp"))]
     self::mp::tests_startup_order::record_service_barrier(cpu_id);
 

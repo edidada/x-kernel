@@ -28,9 +28,9 @@ temporary grants are confined to the bounce pool.
   TLSF. Driver buffers are never directly device-visible on the mapping
   path, bounding the blast radius of a mis-programmed device to the
   pool. Its TLSF control block is const-initialized in the global DMA
-  allocator. First use registers coherent backing memory in place under
+  allocator. Boot preparation registers coherent backing memory in place under
   the same lock; failed coherent allocation leaves the pool uninitialized
-  and retryable. No runtime path constructs or moves the large control
+  and retryable during explicit preparation. No runtime path constructs or moves the large control
   block on the caller's stack, including IRQ-exit softirqs on an idle stack.
 - **Platform hooks** (`kplat::dma::prepare`/`release`): called with
   page-granular ranges for share/unshare bookkeeping; a hook failure
@@ -71,7 +71,7 @@ each with `# Safety` sections and `SAFETY:` comments:
 - `deallocate_dma_memory(dma, layout)` — matching release; the layout
   must match the allocation.
 - `map_dma_buffer(buffer, direction)` — stages the buffer through the
-  bounce pool for every direction, so RX data is also initialized in the
+  bounce pool for every direction, preserving RX initialization state in the
   bounce copy. Caller obligations: buffer stays live and exclusively
   owned until `unmap_dma_buffer`, device access stops before unmap.
 - `unmap_dma_buffer(dma_addr, buffer, direction)` — exact-once, matching
@@ -81,8 +81,8 @@ each with `# Safety` sections and `SAFETY:` comments:
   obligations: exact live mapping, cancelled once, device never received
   the address.
 - Internal blocks: `NonNull::new_unchecked` on freshly allocated (never
-  null) pages; `copy_nonoverlapping` between distinct live regions of
-  caller-declared length; TLSF pool deallocation with a containment
+  null) pages; the bounce module owns `copy_nonoverlapping` between distinct
+  live regions after matching slice lengths; TLSF pool deallocation with a containment
   assert.
 
 ## Protected Resources
@@ -94,13 +94,9 @@ each with `# Safety` sections and `SAFETY:` comments:
   allocation with its call site and rejects duplicate records; mismatched
   frees are detected and skipped rather than corrupting the allocator.
 - Page-table attributes: coherent pages are mapped
-  `READ | WRITE | UNCACHED | SHARED`; on release the flags are restored and
-  every CPU's uncached translation is invalidated before the pages return to
-  the general allocator, so cached-vs-coherent aliasing cannot occur. The
-  provider detaches the remote invalidation, the page release is deferred
-  into that completion, and the public wrapper completes both after releasing
-  the allocator `SpinNoIrq`, so contenders that are spinning with interrupts
-  disabled can acknowledge the shootdown.
+  `READ | WRITE | UNCACHED | SHARED`; on release the flags are restored
+  before the pages return to the DMA allocator, so cached-vs-coherent
+  aliasing cannot occur.
 
 ## Invariants
 
@@ -121,16 +117,16 @@ each with `# Safety` sections and `SAFETY:` comments:
 |----|--------|--------|---------|------------------|
 | T-01 | Driver exposes a coherent bus address to a device that must not read it | Medium — kernel data disclosure to a device | Caller violates the `# Safety` contract | Contract documentation; allocation is the only path to device-reachable memory and is explicit. Residual risk accepted at the driver trust level. |
 | T-02 | Device DMA targeting memory outside its grant | High — kernel memory corruption | Mis-programmed device or descriptor | Coherent grants are page-exact (bounce grants are byte-granular TLSF sub-allocations sharing the pool) and devices only learn the bounce/coherent addresses the driver programmed; cannot defend against arbitrary device DMA (no IOMMU here) — recorded as the core residual risk of the crate. |
-| T-03 | Double map / mismatched unmap by a driver | Medium — aliasing or allocator corruption | Driver bookkeeping bugs | Public `map_dma_buffer` (`io/kdma/src/lib.rs`) rejects a duplicate bus address via the `active_mappings` lookup in `DmaAllocator::map_dma_buffer` (`io/kdma/src/dma.rs`, `contains_key` check → `AllocError::InvalidInput`); public `unmap_dma_buffer` panics on a `remove()` miss in `DmaAllocator::unmap_dma_buffer` and `assert_eq!`s the recorded length; `bounce_pool::BouncePool::deallocate` (`io/kdma/src/bounce_pool.rs`) asserts pool containment. |
+| T-03 | Double map / mismatched unmap by a driver | Medium — aliasing or allocator corruption | Driver bookkeeping bugs | Public `map_dma_buffer` (`io/kdma/src/lib.rs`) rejects a duplicate bus address via the `active_mappings` lookup in `DmaAllocator::reserve_mapping` (`io/kdma/src/dma.rs`, `contains_key` check → `AllocError::InvalidInput`); public `unmap_dma_buffer` panics on a `remove()` miss in `DmaAllocator::take_mapping` and `assert_eq!`s the recorded length; `bounce_pool::BouncePool::deallocate` (`io/kdma/src/bounce_pool.rs`) asserts pool containment. |
 | T-04 | Bounce buffer retention after unmap failure | Low — stale kernel data readable by device | Caller forgets to unmap before dropping | RAII does not span map/unmap; the `active_mappings` table (`DmaAllocator.active_mappings`, keyed by bus address) keeps every leaked mapping enumerable, and the `dma-trace` feature (`trace_coherent_alloc`/`trace_coherent_free` in `src/dma.rs`) logs allocation sites and flags duplicate or mismatched coherent frees so leaks can be located in trace builds. |
-| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore or shootdown failure ignored | Pages stay allocated if platform release, attribute restoration, or remote invalidation fails. Repeated failures can exhaust DMA memory. |
+| T-05 | Uncached mapping left cached on free | Medium — cache-coherency corruption on reuse | Attribute-restore failure ignored | Release/restore failures are logged and the pages are quarantined; they are not returned even to the DMA-only pool. |
 
 ## Failure Modes
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | Page allocation or flag update fails | `AllocError::NoMemory` | Driver init/probe fails | 3 | Checked allocation; pages returned on the failure path. |
-| F-02 | Platform `prepare`/`release` hook fails | `NoMemory` on alloc; release logs and retains pages | Share/unshare accounting skew on TEE platforms | 3 | Allocation aborts; release cannot roll back and is logged. |
+| F-01 | Page allocation or flag update fails | `AllocError::NoMemory` | Driver init/probe fails | 3 | Checked allocation; privately owned pages are retained if a mapping transition fails, preventing unsafe reuse. |
+| F-02 | Platform `prepare`/`release` hook fails | `NoMemory` on alloc; release logs and continues | Share/unshare accounting skew on TEE platforms | 3 | Allocation aborts; failed release is logged and pages are quarantined. |
 | F-03 | Zero-length map request | `AllocError::InvalidInput` | Caller fixes the request | 4 | Explicit input validation. |
 | F-04 | Unmap of an inactive address | Panic | Kernel aborts the offending path | 2 | Contract violation — loud failure preferred over silent corruption. |
 
@@ -150,3 +146,25 @@ each with `# Safety` sections and `SAFETY:` comments:
 - Attribute updates remain page-granular and paired with platform hooks.
 - The `active_mappings` map remains the only place bus addresses are
   handed out for temporary mappings.
+
+## DMA metadata and TLB completion
+
+Coherent allocation/free and pool preparation require sleepable task context
+and do not hold DMA metadata or MMIO registry spinlocks across TLB waits. Streaming copies,
+TLSF and active mapping records keep the existing IRQ-safe serialization.
+Missing-pool preparation is attempted only after unlocking and only by a
+sleepable caller. The pool is fixed after publication.
+
+The raw DMA32 allocation remains private until mapping and platform preparation
+complete. Release errors retain the original allocation; successful release
+restores Normal attributes synchronously before raw deallocation. There is no
+TLB-failure return or extra reference-count protocol.
+
+A failed coherent release retains both its pages and dma-trace identity. The
+initial free validation does not consume the trace record; successful release
+and attribute restoration precede removal from trace and unittest bookkeeping.
+
+An unpublished coherent allocation whose Coherent transition fails attempts a
+Normal-mode restore before returning its backing. Failure of that restore keeps
+the pages quarantined. The synchronous `release_after_restore` boundary gates
+both physical reuse and successful-free bookkeeping, including dma-trace.

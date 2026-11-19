@@ -155,10 +155,11 @@ cfg_if! {
                 let capability: Arc<dyn DeviceDma> = Arc::new(
                     XKernelDeviceDma::new(info).map_err(map_dma_config_error)?,
                 );
-                // SAFETY: `XKernelDeviceDma` documents allocation, mapping and
-                // release as legal in ordinary IRQ context and never NMI. The
-                // RNG completion runs in hard IRQ and only releases mappings;
-                // queue/request allocation happens in this probe context. The
+                // SAFETY: XKernelDeviceDma streaming map/unmap use prepared
+                // backing under the IRQ-safe RNG request lock. Coherent queue
+                // allocation occurs in this sleepable probe; queue destruction
+                // remains a task-context teardown obligation. Hard IRQ completion
+                // only releases streaming mappings, never coherent backing. The
                 // capability is exclusive to this device and stays alive through
                 // every retained `DeviceDmaBackend` clone. The identity-window
                 // check above satisfies the adapter's requirement that the

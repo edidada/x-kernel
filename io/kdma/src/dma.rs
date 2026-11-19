@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::btree_map::BTreeMap, vec::Vec};
+use alloc::collections::btree_map::BTreeMap;
 #[cfg(feature = "dma-trace")]
 use core::panic::Location;
 use core::{alloc::Layout, ptr::NonNull};
@@ -10,7 +10,7 @@ use core::{alloc::Layout, ptr::NonNull};
 use alloc_engine::{AllocError, AllocResult};
 use kalloc::{UsageKind, global_allocator};
 use khal::mem::v2p;
-use kiface_mm_api::{DmaMappingCompletion, DmaMappingIf, DmaMappingMode};
+use kiface_mm_api::{DmaMappingIf, DmaMappingMode};
 use kspin::{SpinNoIrq, static_lock};
 use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
@@ -26,9 +26,6 @@ static_lock! {
 }
 
 pub(crate) struct DmaAllocator {
-    /// Detached kernel invalidations produced by mode changes while this
-    /// allocator was locked. The public wrappers drain them after unlocking.
-    pending_completions: Vec<DmaMappingCompletion>,
     bounce_pool: BouncePool,
     active_mappings: BTreeMap<u64, BounceMapping>,
     #[cfg(feature = "dma-trace")]
@@ -72,10 +69,168 @@ struct CoherentAllocation {
     site: TraceSite,
 }
 
+fn can_change_dma_mapping() -> bool {
+    karch::local_irq_enabled()
+        && !kiface_irq_context_api::InterruptContextIf::is_in_interrupt_context()
+        && kiface_task_api::TaskBlockingContextIf::is_sleepable_context()
+}
+
+/// Allocate arbitrary number of bytes. Returns the left bound of the
+/// allocated region.
+///
+/// DMA memory is allocated in page granularity so page-table attributes and
+/// platform share/unshare hooks remain balanced for every allocation.
+///
+/// The returned allocation is private until its caller publishes it to a device.
+#[track_caller]
+pub(crate) fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
+    alloc_coherent_pages(layout)
+}
+
+#[track_caller]
+fn alloc_coherent_pages(layout: Layout) -> AllocResult<DmaInfo> {
+    if !can_change_dma_mapping() {
+        return Err(AllocError::InvalidInput);
+    }
+    let num_pages = layout_pages(&layout);
+    let vaddr_raw = global_allocator().alloc_dma_pages(
+        num_pages,
+        PAGE_SIZE_4K.max(layout.align()),
+        UsageKind::Dma,
+    )?;
+    let vaddr = va!(vaddr_raw);
+    if let Err(error) = update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent) {
+        // The device has not seen this allocation. Preserve mainline's rollback:
+        // return pages only if restoring their normal mapping also succeeds.
+        restore_and_release(vaddr_raw, num_pages);
+        return Err(error);
+    }
+    prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
+    let dma_info = DmaInfo {
+        // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
+        // and therefore cannot be null.
+        cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
+        bus_addr: v2b(vaddr),
+    };
+    {
+        let mut allocator = ALLOCATOR.lock();
+        allocator.trace_coherent_alloc(dma_info, num_pages);
+        #[cfg(unittest)]
+        allocator.test_coherent_allocs.insert(
+            dma_info.cpu_addr.as_ptr() as usize,
+            num_pages * PAGE_SIZE_4K,
+        );
+    }
+    Ok(dma_info)
+}
+
+fn update_mapping_mode(vaddr: VirtAddr, num_pages: usize, mode: DmaMappingMode) -> AllocResult<()> {
+    let expand_size = num_pages * PAGE_SIZE_4K;
+    let completion = DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
+        error!("change table flag fail");
+        AllocError::NoMemory
+    })?;
+    if let Some(completion) = completion
+        && !completion.complete()
+    {
+        error!("DMA mapping invalidation did not complete");
+        return Err(AllocError::NoMemory);
+    }
+    Ok(())
+}
+
+fn prepare_platform_dma(paddr: PhysAddr, size: usize) -> AllocResult<()> {
+    kplat::dma::prepare(paddr.as_usize(), size).map_err(|_| {
+        error!("platform dma prepare failed");
+        AllocError::NoMemory
+    })
+}
+
+fn release_platform_dma(paddr: PhysAddr, size: usize) -> AllocResult<()> {
+    kplat::dma::release(paddr.as_usize(), size).map_err(|_| {
+        error!("platform dma release failed");
+        AllocError::NoMemory
+    })
+}
+
+/// Gives back the allocated region to the byte allocator.
+///
+/// # Safety
+///
+/// `dma` must come from a prior successful [`allocate_dma_memory`] call on
+/// this allocator, and `layout` must exactly match that allocation.
+#[track_caller]
+pub(crate) unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
+    if !can_change_dma_mapping() {
+        error!("coherent DMA release requires sleepable task context; retaining pages");
+        return;
+    }
+    debug_assert!(layout.size() != 0);
+    debug_assert!(
+        (dma.cpu_addr.as_ptr() as usize).is_multiple_of(PAGE_SIZE_4K.max(layout.align()))
+    );
+    let num_pages = layout_pages(&layout);
+    // Address and geometry are cheap to check. Exact allocation identity follows
+    // from the unsafe caller contract; no second owner registry is maintained.
+    if !ALLOCATOR.lock().validate_coherent_free(dma, num_pages) {
+        return;
+    }
+    let virt_raw = dma.cpu_addr.as_ptr() as usize;
+    let size = num_pages * PAGE_SIZE_4K;
+    let vaddr = va!(virt_raw);
+
+    let restore = release_platform_dma(v2p(vaddr), size)
+        .and_then(|()| update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal));
+    if release_after_restore(restore, || {
+        #[cfg(any(feature = "dma-trace", unittest))]
+        {
+            let mut allocator = ALLOCATOR.lock();
+            #[cfg(feature = "dma-trace")]
+            allocator.trace_coherent_free(dma);
+            #[cfg(unittest)]
+            allocator.test_coherent_allocs.remove(&virt_raw);
+        }
+        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+    })
+    .is_err()
+    {
+        error!(
+            "quarantining DMA pages after failed release: vaddr={:?}, pages={}",
+            vaddr, num_pages
+        );
+    }
+}
+
+/// Prepares the shared pool without holding metadata across mapping changes.
+pub(crate) fn ensure_bounce_pool() -> AllocResult<()> {
+    if !can_change_dma_mapping() {
+        return Err(AllocError::InvalidInput);
+    }
+    if ALLOCATOR.lock().bounce_pool.is_initialized() {
+        return Ok(());
+    }
+    let layout = layout_for_pages(DMA_BOUNCE_POOL_PAGES);
+    let dma = alloc_coherent_pages(layout)?;
+    let is_installed = {
+        let mut allocator = ALLOCATOR.lock();
+        if allocator.bounce_pool.is_initialized() {
+            false
+        } else {
+            allocator.bounce_pool.initialize(dma, bounce_pool_size());
+            true
+        }
+    };
+    if !is_installed {
+        // SAFETY: this candidate was never published or handed to a device,
+        // and the layout is exactly the one used for its allocation.
+        unsafe { deallocate_dma_memory(dma, layout) };
+    }
+    Ok(())
+}
+
 impl DmaAllocator {
     pub(crate) const fn new() -> Self {
         Self {
-            pending_completions: Vec::new(),
             bounce_pool: BouncePool::new(),
             active_mappings: BTreeMap::new(),
             #[cfg(feature = "dma-trace")]
@@ -85,116 +240,17 @@ impl DmaAllocator {
         }
     }
 
-    /// Allocate privately, then publish the address only after invalidation and
-    /// platform preparation succeed. No allocator lock spans the shootdown.
-    #[track_caller]
-    pub(crate) fn alloc_coherent_pages(layout: Layout) -> AllocResult<DmaInfo> {
-        let num_pages = layout_pages(&layout);
-        let vaddr_raw = global_allocator().alloc_dma_pages(
-            num_pages,
-            PAGE_SIZE_4K.max(layout.align()),
-            UsageKind::Dma,
-        )?;
-        let vaddr = va!(vaddr_raw);
-        let mapping = Self::update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent);
-        if let Err(error) = confirm_mapping(mapping) {
-            // The platform has not seen these pages. Attempt a normal-mode
-            // restore; a second failure leaves them out of circulation.
-            Self::restore_and_release(vaddr_raw, num_pages);
-            return Err(error);
-        }
-        let mut allocator = ALLOCATOR.lock();
-        allocator.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
-        let dma_info = DmaInfo {
-            // SAFETY: the allocator returned the start of a live kernel allocation.
-            cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
-            bus_addr: v2b(vaddr),
-        };
-        allocator.trace_coherent_alloc(dma_info, num_pages);
-        #[cfg(unittest)]
-        allocator
-            .test_coherent_allocs
-            .insert(vaddr_raw, num_pages * PAGE_SIZE_4K);
-        Ok(dma_info)
-    }
-
-    fn restore_and_release(virt_raw: usize, num_pages: usize) {
-        let restore = Self::update_mapping_mode(va!(virt_raw), num_pages, DmaMappingMode::Normal);
-        if confirm_mapping(restore).is_ok() {
-            global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
-        }
-    }
-
-    /// Applies one mapping mode and returns the invalidation the provider
-    /// detached from its lock, if it did not complete it in place.
-    fn update_mapping_mode(
-        vaddr: VirtAddr,
-        num_pages: usize,
-        mode: DmaMappingMode,
-    ) -> AllocResult<Option<DmaMappingCompletion>> {
-        let expand_size = num_pages * PAGE_SIZE_4K;
-        DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
-            error!("change table flag fail");
-            AllocError::NoMemory
-        })
-    }
-
-    /// Takes the detached invalidations accumulated under this lock.
-    pub(crate) fn take_completions(&mut self) -> Vec<DmaMappingCompletion> {
-        core::mem::take(&mut self.pending_completions)
-    }
-
-    fn prepare_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::prepare(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma prepare failed");
-            AllocError::NoMemory
-        })
-    }
-
-    fn release_platform_dma(&mut self, paddr: PhysAddr, size: usize) -> AllocResult<()> {
-        kplat::dma::release(paddr.as_usize(), size).map_err(|_| {
-            error!("platform dma release failed");
-            AllocError::NoMemory
-        })
-    }
-
-    /// Gives back the allocated region to the byte allocator.
-    ///
-    /// # Safety
-    ///
-    /// `dma` must come from a prior successful [`allocate_dma_memory`] call on
-    /// this allocator, and `layout` must exactly match that allocation.
-    #[track_caller]
-    pub(crate) unsafe fn deallocate_dma_memory(&mut self, dma: DmaInfo, layout: Layout) {
-        let num_pages = layout_pages(&layout);
-        if !self.trace_coherent_free(dma, num_pages) {
-            return;
-        }
-        #[cfg(unittest)]
-        self.test_coherent_allocs
-            .remove(&(dma.cpu_addr.as_ptr() as usize));
-        let virt_raw = dma.cpu_addr.as_ptr() as usize;
-        let size = num_pages * PAGE_SIZE_4K;
-        let vaddr = va!(virt_raw);
-
-        if self.release_platform_dma(v2p(vaddr), size).is_err() {
-            return;
-        }
-        let restore = Self::update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
-        if let Some(completion) = release_after_restore(restore, move || {
-            global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
-        }) {
-            self.pending_completions.push(completion);
-        }
-    }
-
     /// Returns a read-only snapshot of in-use DMA resources for test baselines.
     #[cfg(unittest)]
     pub(crate) fn test_stats(&self) -> DmaTestStats {
         let (bounce_used_bytes, bounce_total_bytes) = self.bounce_pool.test_used_total_bytes();
         DmaTestStats {
             active_mappings: self.active_mappings.len(),
-            active_mapping_bytes: self.active_mappings.values().map(|m| m.len).sum(),
+            active_mapping_bytes: self
+                .active_mappings
+                .values()
+                .map(|mapping| mapping.len)
+                .sum(),
             bounce_used_bytes,
             bounce_total_bytes,
             coherent_allocations: self.test_coherent_allocs.len(),
@@ -222,7 +278,7 @@ impl DmaAllocator {
         }
 
         fence(Ordering::SeqCst);
-        let (dma_info, layout) = self.bounce_pool.allocate(len)?;
+        let (dma_info, layout) = self.alloc_bounce_buffer(len)?;
 
         // Stage the current bytes for every direction, including DeviceToDriver.
         // The device's writes still overwrite them, but a mapping that is
@@ -340,28 +396,20 @@ impl DmaAllocator {
         self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
     }
 
+    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
+        let pool = self.bounce_pool_mut()?;
+        pool.allocate(len)
+    }
+
     fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
         self.bounce_pool.deallocate(cpu_addr, layout);
     }
 
-    pub(crate) fn ensure_bounce_pool() -> AllocResult<()> {
-        if ALLOCATOR.lock().bounce_pool.is_initialized() {
-            return Ok(());
+    fn bounce_pool_mut(&mut self) -> AllocResult<&mut BouncePool> {
+        if !self.bounce_pool.is_initialized() {
+            return Err(AllocError::NotInitialized);
         }
-        let layout = layout_for_pages(DMA_BOUNCE_POOL_PAGES);
-        let candidate = Self::alloc_coherent_pages(layout);
-        let mut allocator = ALLOCATOR.lock();
-        if !allocator.bounce_pool.is_initialized() {
-            allocator
-                .bounce_pool
-                .initialize(candidate?, bounce_pool_size());
-        } else if let Ok(extra) = candidate {
-            drop(allocator);
-            // SAFETY: another CPU installed its backing first. This private
-            // allocation was never published, and the layout is unchanged.
-            unsafe { crate::deallocate_dma_memory(extra, layout) };
-        }
-        Ok(())
+        Ok(&mut self.bounce_pool)
     }
 
     #[cfg(feature = "dma-trace")]
@@ -399,7 +447,7 @@ impl DmaAllocator {
 
     #[cfg(feature = "dma-trace")]
     #[track_caller]
-    fn trace_coherent_free(&mut self, dma: DmaInfo, num_pages: usize) -> bool {
+    fn validate_coherent_free(&self, dma: DmaInfo, num_pages: usize) -> bool {
         let cpu_addr = dma.cpu_addr.as_ptr() as usize;
         let site = TraceSite::caller();
 
@@ -419,7 +467,6 @@ impl DmaAllocator {
                 );
                 return false;
             }
-            self.coherent_allocs.remove(&cpu_addr);
             return true;
         }
 
@@ -457,8 +504,14 @@ impl DmaAllocator {
     }
 
     #[cfg(not(feature = "dma-trace"))]
-    fn trace_coherent_free(&mut self, _dma: DmaInfo, _num_pages: usize) -> bool {
+    fn validate_coherent_free(&self, _dma: DmaInfo, _num_pages: usize) -> bool {
         true
+    }
+
+    #[cfg(feature = "dma-trace")]
+    fn trace_coherent_free(&mut self, dma: DmaInfo) {
+        self.coherent_allocs
+            .remove(&(dma.cpu_addr.as_ptr() as usize));
     }
 }
 
@@ -501,35 +554,26 @@ fn layout_for_pages(num_pages: usize) -> Layout {
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }
 
-/// Return pages to the allocator only after every required invalidation succeeds.
-/// The caller drains deferred work outside the DMA allocator lock.
-fn release_after_restore(
-    restore: AllocResult<Option<DmaMappingCompletion>>,
-    release: impl FnOnce() + Send + 'static,
-) -> Option<DmaMappingCompletion> {
-    match restore {
-        Ok(Some(flush)) => Some(DmaMappingCompletion::new(move || {
-            if !flush.complete() {
-                return false;
-            }
-            release();
-            true
-        })),
-        Ok(None) => {
-            release();
-            None
-        }
-        Err(_) => None,
+/// Normal-mode restoration includes synchronous TLB completion. Failed
+/// preparation never authorizes either bookkeeping removal or physical reuse.
+fn release_after_restore(restore: AllocResult<()>, release: impl FnOnce()) -> AllocResult<()> {
+    restore?;
+    release();
+    Ok(())
+}
+
+fn restore_and_release(virt_raw: usize, num_pages: usize) {
+    let restore = update_mapping_mode(va!(virt_raw), num_pages, DmaMappingMode::Normal);
+    if release_after_restore(restore, || {
+        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+    })
+    .is_err()
+    {
+        error!(
+            "quarantining DMA pages after failed allocation rollback: vaddr={:#x}",
+            virt_raw
+        );
     }
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/coherent_release.rs");
-
-/// The allocation path may expose the bus address only on success.
-fn confirm_mapping(mapping: AllocResult<Option<DmaMappingCompletion>>) -> AllocResult<()> {
-    if mapping?.is_some_and(|flush| !flush.complete()) {
-        error!("DMA mapping change did not confirm remote TLB invalidation");
-        return Err(AllocError::NoMemory);
-    }
-    Ok(())
-}
