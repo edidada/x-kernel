@@ -358,6 +358,16 @@ impl PidHandle {
             .nr
     }
 
+    /// Iterates the `(namespace id, number)` projections carried by this
+    /// handle.
+    ///
+    /// The process publication table uses these to index namespaced PID
+    /// lookups without rescanning every process or translating through the
+    /// namespace chain on each lookup.
+    pub fn projections(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.numbers.iter().map(|upid| (upid.ns.id(), upid.nr))
+    }
+
     /// Returns the number visible in `ns`, if present.
     ///
     /// A different root namespace deliberately receives the root projection too;

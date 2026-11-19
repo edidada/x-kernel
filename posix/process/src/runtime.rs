@@ -613,6 +613,15 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
         if let Err(err) = process.exit_fs() {
             error!("exit_fs on process exit failed: {err:?}");
         }
+        // Regression guard for the zombie-namespace contract: the socket etc.
+        // Checked by unit tests that drive `do_exit()`; re-adding
+        // `exit_namespaces()` here makes the still-unreaped identity lose the
+        // `/proc/<pid>/ns/*` view that container runtimes pin.
+        #[cfg(unittest)]
+        assert!(
+            process.mnt_ns().is_ok(),
+            "do_exit must retain namespaces until wait_reap::release_zombie_namespaces"
+        );
         // Namespace release is deferred to reap, like Linux release_task():
         // an unreaped zombie must keep serving /proc/<pid>/ns/* so runtimes
         // can pin the container init's namespaces.

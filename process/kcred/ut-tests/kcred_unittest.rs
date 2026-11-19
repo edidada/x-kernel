@@ -9,8 +9,8 @@ use unittest::def_test;
 
 use crate::{
     CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_LAST_CAP, CAP_SETPCAP, CAP_SETUID, CAP_SYS_ADMIN,
-    CAP_SYS_NICE, CAP_SYS_PTRACE, CapSet, CapSets, Cred, INVALID_GID, INVALID_UID,
-    PtraceAccessMode, initial_cred,
+    CAP_SYS_NICE, CAP_SYS_PTRACE, CapSet, CapSets, Cred, INVALID_GID, INVALID_UID, IdMapExtent,
+    PtraceAccessMode, UserNamespace, initial_cred, initial_user_namespace,
 };
 
 fn cap(capability: u32) -> CapSet {
@@ -90,6 +90,33 @@ fn root_euid_predicate_ignores_the_filesystem_uid() {
     credentials.set_fsuid(0);
     assert_eq!(credentials.fsuid(), 0);
     assert!(!credentials.has_root_euid());
+}
+
+#[def_test]
+fn root_euid_is_global_root_not_namespace_root() {
+    let parent = initial_user_namespace();
+    let child = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
+    let writer = Cred::root();
+    child
+        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+    child
+        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+
+    // Linux `test_perm()` compares `GLOBAL_ROOT_UID`: a task that entered a
+    // child namespace keeps global euid 0 and still satisfies it.
+    assert!(
+        Cred::new(0, 0)
+            .with_user_namespace(child.clone())
+            .has_root_euid()
+    );
+    // The child's own root maps to global 1000 and is not global root.
+    assert!(
+        !Cred::new(1000, 1000)
+            .with_user_namespace(child)
+            .has_root_euid()
+    );
 }
 
 #[def_test]

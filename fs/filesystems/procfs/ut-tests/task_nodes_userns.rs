@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+use kcred::{Cred, IdMapExtent, UserNamespace, initial_user_namespace};
+use unittest::{assert_eq, def_test};
+
+use super::{IdMapKind, render_id_map};
+
+#[def_test]
+fn id_map_reader_inside_target_sees_parent_coordinates() {
+    let initial = initial_user_namespace();
+    let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
+    child
+        .write_uid_map(&Cred::root(), alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+
+    // A reader inside the target namespace must see the parent coordinate
+    // (1000), not the target-local coordinate (0). This mirrors Linux
+    // `uid_m_show`'s `lower_ns == ns` parent substitution.
+    let inside = render_id_map(IdMapKind::Uid, &child, &child);
+    assert_eq!(inside.split_whitespace().nth(1), Some("1000"));
+
+    // A reader outside the target sees the same parent coordinate.
+    let outside = render_id_map(IdMapKind::Uid, &child, &initial);
+    assert_eq!(outside.split_whitespace().nth(1), Some("1000"));
+
+    // Sanity: the inside column stays the target-local start.
+    assert_eq!(inside.split_whitespace().next(), Some("0"));
+}
+
+#[def_test]
+fn id_map_renders_overflow_for_unmapped_reader() {
+    let initial = initial_user_namespace();
+    let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
+    child
+        .write_uid_map(&Cred::root(), alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+    let sibling = UserNamespace::new_child(&initial, 2000, 2000, false).unwrap();
+
+    // The sibling cannot translate global 1000; Linux renders 65534.
+    let rendered = render_id_map(IdMapKind::Uid, &child, &sibling);
+    assert_eq!(rendered.split_whitespace().nth(1), Some("65534"));
+}

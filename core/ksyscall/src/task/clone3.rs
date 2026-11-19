@@ -111,11 +111,12 @@ pub(crate) fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KRe
         .set_tls(kargs.tls as usize)
         .set_pidfd(kargs.pidfd as usize);
 
+    // Linux only interprets `cgroup` when CLONE_INTO_CGROUP is set; a
+    // non-zero field without the flag is ignored (`copy_clone_args_from_user`
+    // validates it only under the flag). Do not reject it with EINVAL.
     if flags.contains(CloneFlags::INTO_CGROUP) {
         let target = clone_cgroup_target(kargs.cgroup)?;
         req.set_cgroup_target(target);
-    } else if kargs.cgroup != 0 {
-        return Err(KError::InvalidInput);
     }
 
     req.do_clone(uctx)

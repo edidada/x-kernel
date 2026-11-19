@@ -2001,8 +2001,10 @@ impl Path {
         }
 
         // Linux `__check_sticky()` exempts the victim owner, the directory
-        // owner, and `CAP_FOWNER`.
-        if cred.has_cap(kcred::CAP_FOWNER)
+        // owner, and `CAP_FOWNER` held in the directory inode's user namespace
+        // (`capable_wrt_inode_uidgid`), not in the initial namespace.
+        let dir_ns = self.dentry.user_namespace();
+        if cred.has_cap_in(&dir_ns, kcred::CAP_FOWNER)
             || cred.fsuid() == dir.uid
             || cred.fsuid() == victim.metadata().uid
         {

@@ -247,8 +247,18 @@ fn lookup_mount_path_in(fs: &FsStruct, name: &str, cred: &kcred::Cred) -> KResul
 /// mount API (`mount_api`) so `fsopen`/`fsconfig`/`fsmount`/`move_mount` enforce
 /// the same authority as legacy `mount(2)`.
 pub(crate) fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
-    let namespace = kprocess::current_user_process().mnt_ns()?;
-    if cred.has_cap_in(namespace.user_ns(), kcred::CAP_SYS_ADMIN) {
+    // Mount syscalls always run on a user thread. The `None` branch keeps
+    // kernel-only fixtures (and any future kernel caller) from panicking in
+    // `current_user_process`; kernel tasks are trusted, so the global
+    // `capable()` form is the fallback.
+    let allowed = match kprocess::try_current_user_process() {
+        Some(process) => {
+            let namespace = process.mnt_ns()?;
+            cred.has_cap_in(namespace.user_ns(), kcred::CAP_SYS_ADMIN)
+        }
+        None => cred.has_cap(kcred::CAP_SYS_ADMIN),
+    };
+    if allowed {
         Ok(())
     } else {
         Err(KError::OperationNotPermitted)

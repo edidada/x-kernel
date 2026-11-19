@@ -14,7 +14,7 @@ use super::{Kgid, Kuid, OVERFLOW_ID};
 /// Builds `parent -> child` with `1000..1001` mapped to child `0..1`.
 fn child_namespace() -> Arc<UserNamespace> {
     let parent = initial_user_namespace();
-    let namespace = UserNamespace::new_child(&parent, 1000, false).unwrap();
+    let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = kcred::Cred::new(1000, 1000).with_user_namespace(namespace.clone());
     namespace
         .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])

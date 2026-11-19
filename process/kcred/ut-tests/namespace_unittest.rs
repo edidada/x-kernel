@@ -7,6 +7,8 @@ use alloc::sync::Arc;
 use kerrno::LinuxError;
 use unittest::{assert, assert_eq, def_test};
 
+use crate::{CapSet, CapSets};
+
 use super::*;
 
 #[def_test]
@@ -55,7 +57,7 @@ fn id_map_extent_rejects_empty_and_wrapping_ranges() {
 #[def_test]
 fn unprivileged_child_can_write_its_own_single_extent_maps() {
     let parent = initial_user_namespace();
-    let namespace = UserNamespace::new_child(&parent, 1000, false).unwrap();
+    let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = Cred::new(1000, 1000).with_user_namespace(namespace.clone());
 
     assert!(!namespace.is_ready());
@@ -92,7 +94,7 @@ fn unprivileged_child_can_write_its_own_single_extent_maps() {
 #[def_test]
 fn id_map_is_write_once_per_kind() {
     let parent = initial_user_namespace();
-    let namespace = UserNamespace::new_child(&parent, 1000, false).unwrap();
+    let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = Cred::new(1000, 1000).with_user_namespace(namespace.clone());
     let extent = IdMapExtent::new(0, 1000, 1).unwrap();
 
@@ -133,7 +135,7 @@ fn id_map_is_write_once_per_kind() {
 #[def_test]
 fn id_map_validation_rejects_overlapping_extents() {
     let parent = initial_user_namespace();
-    let namespace = UserNamespace::new_child(&parent, 1000, false).unwrap();
+    let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = Cred::new(1000, 1000).with_user_namespace(namespace.clone());
 
     assert_eq!(
@@ -156,7 +158,7 @@ fn id_map_validation_rejects_overlapping_extents() {
 #[def_test]
 fn setgroups_state_machine_matches_linux() {
     let parent = initial_user_namespace();
-    let namespace = UserNamespace::new_child(&parent, 1000, false).unwrap();
+    let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
 
     assert!(namespace.setgroups_allowed());
     namespace.set_setgroups_allowed(false).unwrap();
@@ -167,7 +169,7 @@ fn setgroups_state_machine_matches_linux() {
         LinuxError::EPERM
     );
 
-    let mapped = UserNamespace::new_child(&parent, 1000, false).unwrap();
+    let mapped = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = Cred::root();
     mapped
         .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
@@ -179,9 +181,23 @@ fn setgroups_state_machine_matches_linux() {
 }
 
 #[def_test]
+fn initial_namespace_setgroups_policy_is_immutable() {
+    let initial = initial_user_namespace();
+    assert!(initial.setgroups_allowed());
+    assert_eq!(
+        LinuxError::from(initial.set_setgroups_allowed(false).unwrap_err()),
+        LinuxError::EPERM
+    );
+    assert!(initial.setgroups_allowed());
+    // `allow` stays idempotent; the fix must not freeze the policy in the
+    // permissive direction.
+    initial.set_setgroups_allowed(true).unwrap();
+}
+
+#[def_test]
 fn mapping_host_root_requires_setfcap() {
     let parent = initial_user_namespace();
-    let namespace = UserNamespace::new_child(&parent, 1000, false).unwrap();
+    let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let owner = Cred::new(1000, 1000).with_user_namespace(namespace.clone());
     let root_extent = IdMapExtent::new(0, 0, 1).unwrap();
 
@@ -200,13 +216,43 @@ fn mapping_host_root_requires_setfcap() {
         .unwrap();
 }
 
+#[def_test]
+fn mapping_host_root_requires_setfcap_independently() {
+    // A writer with CAP_SYS_ADMIN and CAP_SETUID in the parent but without
+    // CAP_SETFCAP: without `root_map_is_permitted` the CAP_SETUID fallback
+    // would accept the mapping, so this assertion pins the root-map rule.
+    let namespace = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false)
+        .unwrap();
+    let mut writer = Cred::root();
+    let caps = CapSet::from_bits((1 << CAP_SYS_ADMIN) | (1 << CAP_SETUID));
+    writer
+        .set_capabilities(CapSets::new(caps, caps, CapSet::EMPTY))
+        .unwrap();
+    assert_eq!(
+        LinuxError::from(
+            namespace
+                .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+                .unwrap_err()
+        ),
+        LinuxError::EPERM
+    );
+    assert!(!namespace.has_uid_map());
+
+    // The same mapping is accepted with CAP_SETFCAP.
+    let privileged = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false)
+        .unwrap();
+    privileged
+        .write_uid_map(&Cred::root(), alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+        .unwrap();
+}
+
 #[expect(
     clippy::unwrap_used,
     reason = "CG-021-no-panic-on-reachable-failure: test fixture: the parent map is built from \
               constants that the user-namespace API accepts"
 )]
 fn parent_namespace_with_map() -> Arc<UserNamespace> {
-    let parent = UserNamespace::new_child(&initial_user_namespace(), 1000, false).unwrap();
+    let parent = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false).unwrap();
     let writer = Cred::root();
     parent
         .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
@@ -220,7 +266,9 @@ fn parent_namespace_with_map() -> Arc<UserNamespace> {
 #[def_test]
 fn nested_map_must_be_covered_by_the_parent_map() {
     let parent = parent_namespace_with_map();
-    let namespace = UserNamespace::new_child(&parent, 0, false).unwrap();
+    // The owner ID is in initial-namespace coordinates; the parent maps
+    // global 1000 to local 0.
+    let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = Cred::root();
 
     assert!(!parent.maps_range_to_parent(MapKind::Uid, 1, 1));
@@ -243,17 +291,24 @@ fn nested_map_must_be_covered_by_the_parent_map() {
 #[def_test]
 fn nested_maps_are_translated_through_every_ancestor() {
     let writer = Cred::root();
-    let first = UserNamespace::new_child(&initial_user_namespace(), 5, false).unwrap();
+    let first = UserNamespace::new_child(&initial_user_namespace(), 5, 5, false).unwrap();
     first
         .write_uid_map(&writer, alloc::vec![IdMapExtent::new(5, 100, 1).unwrap()])
         .unwrap();
+    first
+        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(5, 100, 1).unwrap()])
+        .unwrap();
 
-    let second = UserNamespace::new_child(&first, 7, false).unwrap();
+    // The owner is global 100, which `first` maps to local 5.
+    let second = UserNamespace::new_child(&first, 100, 100, false).unwrap();
     second
         .write_uid_map(&writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
         .unwrap();
+    second
+        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
+        .unwrap();
 
-    let third = UserNamespace::new_child(&second, 9, false).unwrap();
+    let third = UserNamespace::new_child(&second, 100, 100, false).unwrap();
     assert!(second.maps_range_to_parent(MapKind::Uid, 7, 1));
     assert!(!second.maps_range_to_parent(MapKind::Uid, 8, 1));
     assert_eq!(
@@ -280,7 +335,7 @@ fn namespace_owner_administers_its_direct_child() {
     let initial = initial_user_namespace();
     // The owner of a child namespace has all capabilities over it when acting
     // from the direct parent (Linux `cap_capable` rule 1).
-    let child = UserNamespace::new_child(&initial, 1000, false).unwrap();
+    let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
     let owner = Cred::new(1000, 1000);
     assert!(owner.has_cap_in(&child, CAP_SYS_ADMIN));
     assert!(owner.has_cap_in(&child, CAP_SETUID));
@@ -294,8 +349,15 @@ fn namespace_owner_administers_its_direct_child() {
 #[def_test]
 fn capabilities_never_flow_toward_ancestors() {
     let initial = initial_user_namespace();
-    let child = UserNamespace::new_child(&initial, 1000, false).unwrap();
-    let grandchild = UserNamespace::new_child(&child, 0, false).unwrap();
+    let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
+    let writer = Cred::root();
+    child
+        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+    child
+        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+    let grandchild = UserNamespace::new_child(&child, 1000, 1000, false).unwrap();
 
     // A credential in the child namespace cannot administer the parent, even
     // though the child namespace is fully privileged inside itself.
@@ -303,7 +365,7 @@ fn capabilities_never_flow_toward_ancestors() {
     assert!(!child_root.has_cap_in(&initial, CAP_SYS_ADMIN));
 
     // Nor can it administer an unrelated sibling.
-    let sibling = UserNamespace::new_child(&initial, 2000, false).unwrap();
+    let sibling = UserNamespace::new_child(&initial, 2000, 2000, false).unwrap();
     assert!(!child_root.has_cap_in(&sibling, CAP_SYS_ADMIN));
 
     // It does hold authority over its own descendants.
@@ -313,9 +375,16 @@ fn capabilities_never_flow_toward_ancestors() {
 #[def_test]
 fn grandchild_owner_grant_requires_the_direct_parent() {
     let initial = initial_user_namespace();
-    let child = UserNamespace::new_child(&initial, 1000, false).unwrap();
-    // UID 0 in the child creates the grandchild.
-    let grandchild = UserNamespace::new_child(&child, 0, false).unwrap();
+    let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
+    let writer = Cred::root();
+    child
+        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+    child
+        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+    // Global UID 1000 (local 0 in the child) creates the grandchild.
+    let grandchild = UserNamespace::new_child(&child, 1000, 1000, false).unwrap();
 
     // The grandchild's owner grant is evaluated from its direct parent (the
     // child namespace), where the owner's credential lives.
@@ -334,13 +403,21 @@ fn grandchild_owner_grant_requires_the_direct_parent() {
 #[def_test]
 fn namespace_nesting_is_capped_at_linux_depth() {
     let mut namespace = initial_user_namespace();
-    for _ in 0..33 {
-        namespace = UserNamespace::new_child(&namespace, 0, false).unwrap();
+    let writer = Cred::root();
+    for _ in 0..32 {
+        let child = UserNamespace::new_child(&namespace, 0, 0, false).unwrap();
+        child
+            .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+            .unwrap();
+        child
+            .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+            .unwrap();
+        namespace = child;
     }
-    // Level 34 is beyond Linux's `parent->level > 32` limit.
+    // Linux rejects a child of a level-32 namespace.
     assert_eq!(
         LinuxError::from(
-            UserNamespace::new_child(&namespace, 0, false)
+            UserNamespace::new_child(&namespace, 0, 0, false)
                 .unwrap_err()
         ),
         LinuxError::ENOSPC

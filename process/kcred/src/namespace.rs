@@ -16,7 +16,7 @@ use core::ptr;
 
 use kerrno::{KError, KResult, LinuxError};
 use klazy::Once;
-use kspin::SpinNoIrq;
+use kspin::SpinNoPreempt;
 
 use crate::{
     Cred, Gid, Uid,
@@ -202,7 +202,7 @@ pub struct UserNamespace {
     /// was created. Linux consults this when the creator later maps parent UID
     /// 0 into the namespace (`verify_root_map()`).
     parent_could_setfcap: bool,
-    map_state: SpinNoIrq<UserNamespaceMapState>,
+    map_state: SpinNoPreempt<UserNamespaceMapState>,
 }
 
 impl core::fmt::Debug for UserNamespace {
@@ -226,7 +226,7 @@ impl UserNamespace {
             level: 0,
             owner_euid: 0,
             parent_could_setfcap: false,
-            map_state: SpinNoIrq::new(UserNamespaceMapState {
+            map_state: SpinNoPreempt::new(UserNamespaceMapState {
                 setgroups_allowed: true,
                 ..UserNamespaceMapState::default()
             }),
@@ -246,12 +246,21 @@ impl UserNamespace {
     pub fn new_child(
         parent: &alloc::sync::Arc<Self>,
         owner_euid: Uid,
+        owner_egid: Gid,
         parent_could_setfcap: bool,
     ) -> KResult<alloc::sync::Arc<Self>> {
         // Linux `create_user_ns`: nesting is capped at 32 levels below the
         // initial namespace and exhaustion reports ENOSPC.
-        if parent.level > 32 {
+        if parent.level >= 32 {
             return Err(KError::from(LinuxError::ENOSPC));
+        }
+        // Linux also rejects a creator whose euid/egid has no mapping in the
+        // parent namespace; otherwise the new owner could never be translated
+        // back to the initial namespace.
+        if parent.map_uid_from_initial(owner_euid).is_none()
+            || parent.map_gid_from_initial(owner_egid).is_none()
+        {
+            return Err(KError::OperationNotPermitted);
         }
         let setgroups_allowed = parent.setgroups_allowed();
         Ok(alloc::sync::Arc::new(Self {
@@ -260,7 +269,7 @@ impl UserNamespace {
             level: parent.level + 1,
             owner_euid,
             parent_could_setfcap,
-            map_state: SpinNoIrq::new(UserNamespaceMapState {
+            map_state: SpinNoPreempt::new(UserNamespaceMapState {
                 setgroups_allowed,
                 ..UserNamespaceMapState::default()
             }),

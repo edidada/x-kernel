@@ -154,15 +154,10 @@ impl TaskStatus {
         let process = thread.process();
         let (mut stat, masks) = TaskStat::sample_thread(task);
         let tgid = if let Some(ns) = observer_ns {
-            let pid = process
+            stat.project_pid_namespace(process, ns);
+            process
                 .number_in_namespace(ns)
-                .unwrap_or_else(|| process.pid());
-            stat.pid = pid;
-            stat.ppid = process
-                .parent()
-                .and_then(|parent| parent.number_in_namespace(ns))
-                .unwrap_or(0);
-            pid
+                .unwrap_or_else(|| process.pid())
         } else {
             process.pid()
         };
@@ -1530,11 +1525,7 @@ impl SimpleDirOps for ThreadDir {
                         let task = upgrade_task(&task_weak)?;
                         let mut stat = TaskStat::from_thread(&task);
                         if let Some(ns) = observer_ns.as_ref() {
-                            stat.pid = task
-                                .as_thread()
-                                .process()
-                                .number_in_namespace(ns)
-                                .unwrap_or(stat.pid);
+                            stat.project_pid_namespace(task.as_thread().process(), ns);
                         }
                         Ok(format!("{stat}").into_bytes())
                     }

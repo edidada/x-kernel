@@ -54,10 +54,7 @@ pub fn process_task_in_namespace(
     let Some(observer_ns) = observer_ns else {
         return process_task(pid);
     };
-    let process = lookup::published_processes()
-        .into_iter()
-        .find(|process| process.number_in_namespace(observer_ns) == Some(pid))
-        .ok_or(KError::NoSuchProcess)?;
+    let process = lookup::published_process_in_namespace(pid, observer_ns)?;
     lookup::representative_task_for_process(&process).map_err(|_| KError::NoSuchProcess)
 }
 

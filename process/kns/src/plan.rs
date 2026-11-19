@@ -15,6 +15,7 @@ use alloc::sync::Arc;
 use fs_context::FsStruct;
 use kcgroup::{Cgroup, CgroupNamespace};
 use kcred::{CAP_SETFCAP, CAP_SYS_ADMIN, Cred, UserNamespace};
+use kerrno::LinuxError;
 use kvfs::MntNamespace;
 
 use crate::{
@@ -90,9 +91,16 @@ impl NamespacePlan {
                 UserNamespace::new_child(
                     cred.user_ns_arc(),
                     cred.euid(),
+                    cred.egid(),
                     cred.has_cap_in(cred.user_ns(), CAP_SETFCAP),
                 )
-                .map_err(|_| UnshareError::NoSpace)?,
+                .map_err(|error| {
+                    if LinuxError::from(error) == LinuxError::ENOSPC {
+                        UnshareError::NoSpace
+                    } else {
+                        UnshareError::NotPermitted
+                    }
+                })?,
             )
         } else {
             None

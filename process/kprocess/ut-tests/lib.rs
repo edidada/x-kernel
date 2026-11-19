@@ -2899,6 +2899,47 @@ fn test_thread_pidfd_fdinfo_reports_its_own_tid() {
 }
 
 #[def_test(user, serial)]
+fn test_namespaced_process_lookup_uses_namespace_index() {
+    let init = ensure_init();
+    let root_ns = init.active_pid_namespace();
+    let child_ns = kidentity::PidNamespace::new_child(&root_ns);
+    let leader_number = kidentity::PidHandle::allocate_in(&child_ns).unwrap();
+    let process = init.fork_with_task_number(leader_number, Some(ksignal::Signo::SIGCHLD));
+    let leader_task = publish_test_thread(&process, process.pid());
+
+    // The child has local number 1 in `child_ns`; the lookup must hit the
+    // publication index and return the same process identity.
+    let resolved = crate::procfs::process_task_in_namespace(1, Some(&child_ns)).unwrap();
+    assert!(Arc::ptr_eq(resolved.as_thread().process(), &process));
+
+    // `/proc/<pid>/stat` projection: the leader is 1 in the child namespace,
+    // while the parent, process group and session leaders live outside it and
+    // therefore have no projection (Linux `pid_nr_ns` renders 0).
+    let mut stat = crate::TaskStat::from_thread(&leader_task);
+    stat.project_pid_namespace(&process, &child_ns);
+    assert_eq!(stat.pid, 1);
+    assert_eq!(stat.ppid, 0);
+    assert_eq!(stat.pgrp, 0);
+    assert_eq!(stat.session, 0);
+
+    // A root-namespace lookup still resolves by the global number.
+    let root_resolved =
+        crate::procfs::process_task_in_namespace(process.pid(), Some(&root_ns)).unwrap();
+    assert!(Arc::ptr_eq(root_resolved.as_thread().process(), &process));
+
+    // An unrelated sibling namespace has no number 1 for this process.
+    let other_ns = kidentity::PidNamespace::new_child(&root_ns);
+    assert!(crate::procfs::process_task_in_namespace(1, Some(&other_ns)).is_err());
+
+    assert!(process.exit_thread(&leader_task, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    let _ = process_publication().unpublish_process_if_matches(&process);
+    drop(leader_task);
+    process_publication().cleanup();
+}
+
+#[def_test(user, serial)]
 fn test_process_migration_reconciles_a_prepared_sibling_at_publication() {
     let process = ensure_init().fork(1742);
     let leader_task = publish_test_thread(&process, process.pid());

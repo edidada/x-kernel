@@ -406,9 +406,10 @@ impl NsProxy {
     /// Unlike `unshare(CLONE_NEWTIME)`, `setns(CLONE_NEWTIME)` moves the caller
     /// into the target namespace as well as selecting it for future children.
     ///
-    /// User namespaces are owned by credentials rather than by this bundle, so
-    /// `User` leaves every field here unchanged; the syscall layer installs the
-    /// matching credential transition together with this proxy.
+    /// The user namespace is owned by credentials rather than by this bundle,
+    /// so this method leaves every field here unchanged for it; the syscall
+    /// layer installs the matching credential transition together with this
+    /// proxy.
     pub fn with_namespace(&self, replacement: &NsFd) -> Result<Arc<Self>, UnshareError> {
         let mnt_ns = match replacement {
             NsFd::Mnt(ns) => ns.clone(),

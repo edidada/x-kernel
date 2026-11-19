@@ -156,6 +156,12 @@ impl Process {
         self.leader_task_number.number_in(observer_ns)
     }
 
+    /// Iterates the leader handle's `(namespace id, number)` projections for
+    /// the publication index.
+    pub(crate) fn pid_projections(&self) -> impl Iterator<Item = (u64, Pid)> + '_ {
+        self.leader_task_number.projections()
+    }
+
     /// Returns the parent's PID as seen in this process's active PID
     /// namespace, or `None` when the parent has no number there — Linux
     /// `pid_nr_ns` semantics: a `CLONE_NEWPID` child's parent holds no
@@ -411,8 +417,8 @@ impl Process {
         let pid = leader_task_number.root_nr();
         let group = parent.as_ref().map_or_else(
             || {
-                let session = Session::new(pid);
-                ProcessGroup::new(pid, &session)
+                let session = Session::new(pid, leader_task_number.clone());
+                ProcessGroup::new(pid, &session, leader_task_number.clone())
             },
             |p| p.group(),
         );

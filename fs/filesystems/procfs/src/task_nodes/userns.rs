@@ -4,7 +4,7 @@
 
 //! User-namespace projection files: `uid_map`, `gid_map`, and `setgroups`.
 
-use alloc::{borrow::Cow, format, string::String, vec::Vec};
+use alloc::{borrow::Cow, format, string::String, sync::Arc, vec::Vec};
 
 use kcred::{CAP_SETGID, CAP_SYS_ADMIN, IdMapExtent, UserNamespace};
 use kprocess::AsThread;
@@ -61,41 +61,63 @@ impl IdMapFile {
     }
 }
 
+/// Renders one `uid_map`/`gid_map` view.
+///
+/// `outside` extents are stored in the parent namespace's coordinates. Linux
+/// `uid_m_show`/`gid_m_show` normally render them in the reader's namespace,
+/// but a reader inside the target namespace substitutes the parent namespace
+/// (`if lower_ns == ns && lower_ns->parent`), so it sees parent coordinates
+/// rather than the target's own inside IDs.
+fn render_id_map(
+    kind: IdMapKind,
+    ns: &Arc<UserNamespace>,
+    reader_ns: &Arc<UserNamespace>,
+) -> String {
+    let mut text = String::new();
+    if ns.parent().is_none() {
+        // The initial namespace has an implicit identity map. Rendering the
+        // full range keeps `/proc/1/uid_map` equal to Linux even though no
+        // extents are stored.
+        text.push_str(&format!("{:10} {:10} {:10}\n", 0, 0, u32::MAX));
+        return text;
+    }
+    let Some(parent) = ns.parent() else {
+        return text;
+    };
+    let lower_ns = if Arc::ptr_eq(reader_ns, ns) {
+        parent
+    } else {
+        reader_ns
+    };
+    for extent in kind.map(ns) {
+        let global = match kind {
+            IdMapKind::Uid => parent.map_uid_to_initial(extent.outside()),
+            IdMapKind::Gid => parent.map_gid_to_initial(extent.outside()),
+        };
+        let outside = global
+            .and_then(|id| match kind {
+                IdMapKind::Uid => lower_ns.map_uid_from_initial(id),
+                IdMapKind::Gid => lower_ns.map_gid_from_initial(id),
+            })
+            .unwrap_or(65_534);
+        text.push_str(&format!(
+            "{:10} {:10} {:10}\n",
+            extent.inside(),
+            outside,
+            extent.count()
+        ));
+    }
+    text
+}
+
 impl SimpleFileOps for IdMapFile {
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
         let task = upgrade_task(&self.task)?;
         let ns = task.as_thread().real_cred().user_ns_arc().clone();
-        let mut text = String::new();
-        if ns.parent().is_none() {
-            // The initial namespace has an implicit identity map. Rendering the
-            // full range keeps `/proc/1/uid_map` equal to Linux even though no
-            // extents are stored.
-            text.push_str(&format!("{:10} {:10} {:10}\n", 0, 0, u32::MAX));
-        } else {
-            let reader_ns = kprocess::current_cred().user_ns_arc().clone();
-            let parent = ns.parent().ok_or(VfsError::NotFound)?;
-            for extent in self.kind.map(&ns) {
-                // `outside` is stored in parent-namespace coordinates. Linux
-                // renders it in the reader's namespace, not the parent's.
-                let global = match self.kind {
-                    IdMapKind::Uid => parent.map_uid_to_initial(extent.outside()),
-                    IdMapKind::Gid => parent.map_gid_to_initial(extent.outside()),
-                };
-                let outside = global
-                    .and_then(|id| match self.kind {
-                        IdMapKind::Uid => reader_ns.map_uid_from_initial(id),
-                        IdMapKind::Gid => reader_ns.map_gid_from_initial(id),
-                    })
-                    .unwrap_or(65_534);
-                text.push_str(&format!(
-                    "{:10} {:10} {:10}\n",
-                    extent.inside(),
-                    outside,
-                    extent.count()
-                ));
-            }
-        }
-        Ok(Cow::Owned(text.into_bytes()))
+        let reader_ns = kprocess::current_cred().user_ns_arc().clone();
+        Ok(Cow::Owned(
+            render_id_map(self.kind, &ns, &reader_ns).into_bytes(),
+        ))
     }
 
     fn write(&self, file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
@@ -211,3 +233,5 @@ fn parse_id(field: Option<&str>) -> VfsResult<u32> {
     }
     field.parse::<u32>().map_err(|_| VfsError::InvalidInput)
 }
+
+unittest::path_mod_test!(tests_userns, "../../ut-tests/task_nodes_userns.rs");
