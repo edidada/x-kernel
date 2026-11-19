@@ -204,13 +204,14 @@ pub(crate) fn sys_setfsuid(uid: Uid) -> KResult<isize> {
     let old_fsuid = old.fsuid();
     if uid != NO_CHANGE_ID {
         let mut new = old.prepare();
-        let uid = uid_to_global(&new, uid)?;
-        new.set_fsuid(uid);
-        if new.fsuid() != old_fsuid {
-            current.commit_creds(new);
+        if let Ok(uid) = uid_to_global(&new, uid) {
+            new.set_fsuid(uid);
+            if new.fsuid() != old_fsuid {
+                current.commit_creds(new);
+            }
         }
     }
-    Ok(old_fsuid as isize)
+    Ok(uid_to_local(&old, old_fsuid) as isize)
 }
 
 /// Set the filesystem group ID of the current process.
@@ -221,13 +222,14 @@ pub(crate) fn sys_setfsgid(gid: Gid) -> KResult<isize> {
     let old_fsgid = old.fsgid();
     if gid != NO_CHANGE_ID {
         let mut new = old.prepare();
-        let gid = gid_to_global(&new, gid)?;
-        new.set_fsgid(gid);
-        if new.fsgid() != old_fsgid {
-            current.commit_creds(new);
+        if let Ok(gid) = gid_to_global(&new, gid) {
+            new.set_fsgid(gid);
+            if new.fsgid() != old_fsgid {
+                current.commit_creds(new);
+            }
         }
     }
-    Ok(old_fsgid as isize)
+    Ok(gid_to_local(&old, old_fsgid) as isize)
 }
 
 /// Get the supplementary group IDs of the current process.
