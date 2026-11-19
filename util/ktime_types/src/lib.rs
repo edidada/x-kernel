@@ -15,14 +15,17 @@
 #![deny(unsafe_code)]
 
 mod clock_id;
+mod cputime;
 mod frequency;
 mod instant;
 mod span;
 mod system_time;
+mod time_spec;
 mod timestamp;
 mod units;
 
 pub use clock_id::ClockId;
+pub use cputime::TaskCputime;
 pub use frequency::Frequency;
 pub use instant::{
     Boottime, BoottimeInstant, Instant, Monotonic, MonotonicInstant, ProcessCpu, ProcessCpuInstant,
@@ -30,6 +33,7 @@ pub use instant::{
 };
 pub use span::TimeSpan;
 pub use system_time::{SystemTime, SystemTimeError};
+pub use time_spec::TimeSpec;
 pub use timestamp::TimestampLimits;
 pub use units::{
     MICROS_PER_SEC, MILLIS_PER_SEC, NANOS_PER_MICROS, NANOS_PER_MILLIS, NANOS_PER_SEC,

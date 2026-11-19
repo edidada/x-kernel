@@ -45,13 +45,15 @@ kfd resources / kvfs / device and pipe implementations
 
 | Boundary | Entry examples | Risk source |
 |------|----------|----------|
-| User path strings | `openat`, `linkat`, `statx`, `mount` | Null pointers, strings not NUL-terminated, over-long strings, path traversal, symbolic link loops |
+| User path strings | `openat`, `linkat`, `statx`, `mount`, `move_mount` | Null pointers, strings not NUL-terminated, over-long strings, path traversal, symbolic link loops |
 | mount data byte page | `mount(..., data)` | Bad pointers, crossing into unreadable pages, binary content, and malicious or unknown options interpreted by the specific filesystem |
+| New mount API inputs | `fsopen`, `fsconfig`, `fsmount`, `move_mount`, `open_tree`, `mount_setattr` | Unregistered fs type, unknown commands/flags/`MOUNT_ATTR_*` bits, missing superblock, non-empty `from_path`, undersized `mount_attr`, unprivileged caller (`CAP_SYS_ADMIN` for all but the non-cloning `open_tree`) |
 | User read/write buffers | `read`, `write`, `readlinkat`, `getdents64`, `statfs` | Bad addresses, short buffers, cross-page access failures, malformed kernel information written back |
 | xattr names and values | `set/get/list/remove*xattr` | Missing NUL terminator, over-long name/value/list, non-UTF-8 suffix, short output buffers, namespace privilege violations |
 | User iovec | `readv`, `writev`, `preadv2`, `pwritev2` | Too many iovecs, range overflow, wrong read/write direction |
 | fd numbers | Almost all fd syscalls | Closed fds, type mismatch, fd reuse, confusion of `CLOEXEC`/non-blocking flags |
 | Current process state | `chdir`, `openat`, `close_range` | Process resource lock, fs_struct updates, umask and current directory semantics |
+| Mount namespace (new API) | `open_tree`, `mount_setattr` | Cloning or re-attribute a subtree before `CAP_SYS_ADMIN`; `O_PATH` vs read access; unknown `MOUNT_ATTR_*` bits |
 | VFS magic link | `/proc/self/fd/<fd>`, `/proc/<pid>/fd/<fd>` | Cross-process fd access, target process exit, concurrent fd table changes, no-follow policy |
 | VFS/device objects | `open`, `ioctl`, `mount`, `syncfs` | Device-specific ioctls, terminal objects, mount flags, differences between filesystem implementations |
 | FIEMAP variable-length output | `ioctl(FS_IOC_FIEMAP)` | User-declared extent count, address of the array after the header, block mappings returned by the backend |
@@ -63,7 +65,6 @@ This crate does not directly access MMIO, PIO, DMA, firmware tables or architect
 
 | Location | Call path | Purpose | Invariant / safety rationale |
 |------|----------|------|-------------------|
-| `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> iterate_dir sink -> DirBuffer::write_entry` | Write directory entries into a temporary `Vec<u8>` according to the `linux_dirent64` ABI | The record length is computed and `remaining_space >= len` is checked before writing; `entry_ptr` lies within the allocated range of the `Vec`; the record length is rounded up to `align_of::<linux_dirent64>()`, but the byte buffer does not guarantee struct alignment at arbitrary offsets, so the header is written with `write_unaligned`; the name copy length comes from `name.as_bytes().len()`; a trailing NUL is written; after writing, `offset` only advances within the checked range. |
 | `UserRead`/`UserWrite` implementations of `ioctl.rs::FiemapHeader` | `sys_ioctl(FS_IOC_FIEMAP)` | Copy the Linux FIEMAP header | The `repr(C)` structure contains only integers, the trailing explicit `reserved` covers the ABI alignment, and any bit pattern is valid; every byte belongs to an initialized field |
 | `UserWrite` implementation of `ioctl.rs::FiemapExtent` | FIEMAP writer output | Copy a Linux FIEMAP extent | All ABI reserved regions of the `repr(C)` structure are covered by explicit integer arrays and zeroed on every output, so there is no uninitialized padding |
 | `UserRead`/`UserWrite` implementations of `ioctl.rs::Fsxattr` | File-attribute ioctl | Copies the file-attribute ABI | `repr(C)` integers and explicit byte arrays cover all fields; reserved fields are zeroed on output |
@@ -91,13 +92,47 @@ A short capacity returns `ERANGE` before any write, including when a NULL addres
 The regression tests use a separate process's `FsStruct` and mappings managed by `TestUserArray`,
 and check that a short buffer is not written, that normal output does not go past the end of the path, and the error return for an unmapped address.
 
+### New mount API input validation
+
+The new mount API (`mount_api.rs`) validates every user-controlled branch before touching namespace state.
+Five entries enforce `CAP_SYS_ADMIN` via `require_mount_privilege` (the same authority as legacy `mount(2)`);
+`open_tree` requires it only on its cloning branch, because Linux calls `may_mount()` only for `detached`
+(see that entry below). The legacy `mount` entry is described in its own row above:
+
+- `fsopen`: `flags & !FSOPEN_CLOEXEC != 0` → `InvalidInput`; the fs type name is bounded by `PATH_MAX` and must be
+  registered (`kvfs::get_filesystem_type`), otherwise `NoSuchDevice`. The fs-context fd is an `anon_inodefs` anonymous inode.
+- `fsconfig`: unknown `cmd` → `InvalidInput`; `FSCONFIG_CMD_CREATE` is rejected with `InvalidInput` once a superblock already
+  exists; the `source` key is stored as the mount source (not folded into the option string). Key/value strings are bounded by `PATH_MAX`.
+- `fsmount`: `flags & !FSMOUNT_CLOEXEC != 0` → `InvalidInput`; the context must already hold a superblock, otherwise `InvalidInput`.
+- `move_mount`: `flags & !MOVE_MOUNT_F_EMPTY_PATH != 0` → `InvalidInput`; a non-empty `from_path` → `InvalidInput`
+  (only detached `fsmount` mounts are supported). The target path is resolved before the `fsmount` mount is consumed, so a
+  failed lookup leaves the descriptor reusable; a failed attach restores the mount instead of spending the fd.
+- `open_tree`: the flag word admits exactly `OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_RECURSIVE |
+  AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT`, and `AT_RECURSIVE` without `OPEN_TREE_CLONE` is `InvalidInput` — the same word and
+  the same rejection as `SYSCALL_DEFINE3(open_tree)`. `OPEN_TREE_CLONE` (the only branch that clones a subtree) requires
+  `CAP_SYS_ADMIN`; the non-cloning form does not, matching Linux, where only the `detached` branch calls `may_mount()`.
+  The descriptor is opened `O_PATH`, so it names the mount without granting read access to what it covers.
+- `mount_setattr`: the flag word admits only `AT_EMPTY_PATH | AT_RECURSIVE | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT`
+  (Linux rejects anything else); `usize` above `PAGE_SIZE_4K` is `E2BIG` and one below `MOUNT_ATTR_SIZE_VER0` (32) is
+  `InvalidInput`; bytes past the published struct must be zero (`E2BIG`), so a caller relying on a field this kernel does not
+  implement is refused instead of having its request truncated. An `attr_set`/`attr_clr` bit outside
+  `MOUNT_SETATTR_VALID_FLAGS` is `InvalidInput` rather than a silently ignored request.
+  `check_mount_attr_atime` applies the field's enum semantics: `MOUNT_ATTR__ATIME` must be all-or-nothing in `attr_clr`, an
+  atime value in `attr_set` requires the group in `attr_clr`, and only RELATIME/NOATIME/STRICTATIME are representable, so a
+  combination such as `NOATIME | STRICTATIME` is `InvalidInput` rather than being applied as relatime. `propagation` admits the
+  four `MS_*` propagation flags, at most one per call. `MOUNT_ATTR_IDMAP` follows `build_mount_idmapped` exactly: clearing an
+  idmap or an oversized descriptor is `InvalidInput`, an unresolvable descriptor is `BadFileDescriptor`, and a descriptor that
+  resolves is `InvalidInput` because no descriptor in this kernel names a user namespace - so the request is refused at the same
+  points Linux refuses it, rather than with an `EOPNOTSUPP` of its own. The whole call requires `CAP_SYS_ADMIN`, as `may_mount()` gates it in `SYSCALL_DEFINE5(mount_setattr)`.
+
 ## Memory Safety Invariants
 
 1. **User memory is accessed only through wrapper types**:
    Syscall entries read and write user addresses using `UserConstPtr`, `UserPtr`, `VmBytes`, `VmBytesMut`
    and `IoVectorBuf`, and never dereference user pointers directly.
-2. **User output is first built in a temporary kernel buffer**:
-   `getdents64` first writes into a `DirBuffer`, then copies it to user space through `write_vm_slice`.
+2. **Directory output uses bounded checked copies**:
+   `getdents64` copies records through `UserPtr` without using the user capacity
+   as an allocation size. A fault preserves earlier completed records.
 3. **fd objects are held through `Arc<dyn FileLike>`**:
    An object obtained from fd lookup is kept alive by its reference count for the duration of the current operation.
 4. **Type-dependent operations downcast and validate first**:
@@ -111,7 +146,7 @@ and check that a short buffer is not written, that normal output does not go pas
    fd-to-fd copying has the VFS update the kernel-side offset, which is then written back through `UserPtr`.
 6. **Temporary ABI structures must not leak uninitialized memory**:
    `statfs` explicitly initializes all fields with a safe struct literal, and `f_spare` is zero;
-   the temporary `Vec` of `getdents64` starts zeroed, and directory entry records explicitly write the trailing NUL.
+   `getdents64` writes initialized fields, names and NUL bytes, leaving padding untouched.
 7. **FIEMAP variable-length output must use checked arithmetic**:
    `fm_extent_count` is first bounded by the Linux UAPI total byte limit, and the header address, the array byte count and each entry's
    offset all use `checked_add`/`checked_mul`; the reserved fields of every output extent are explicitly zeroed.
@@ -225,7 +260,7 @@ and avoid calling complex VFS/device operations that may access the same resourc
 | ID | Threat Description | Boundary | Impact Level | Trigger Condition | Mitigation |
 |------|----------|------|----------|----------|----------|
 | T-01 | Bad user pointer causes kernel out-of-bounds read/write | User path/buffer/iovec | High | Directly dereferencing a user address or ignoring copy errors | Uniformly use `UserPtr`, `UserConstPtr`, `VmBytes`, `IoVectorBuf` and propagate `KResult` |
-| T-02 | `getdents64` writes a directory entry past the temporary buffer | User output buffer / ABI layout | High | Record length miscomputed or remaining space unchecked | `DirBuffer::write_entry` checks space first, and the record length is aligned per the ABI |
+| T-02 | `getdents64` count causes kernel OOM or record overflow | User output / ABI | High | Treating user capacity as an allocation size, or advancing before copy succeeds | Allocation-free per-entry copies, aligned capacity checks and checked address arithmetic |
 | T-03 | `statfs` leaks uninitialized kernel stack data to user space | User output buffer / ABI layout | High | C ABI struct padding uninitialized | `statfs` initializes all fields including `f_spare` with a struct literal; the four supported 64-bit ABI layouts have no implicit padding, and the layout and copyout must be rechecked when the ABI changes |
 | T-04 | `/proc/<pid>/fd/<fd>` magic-link bypasses normal path resolution to access objects it should not | VFS magic-link | High | procfs follow does not preserve fd lifetime or lacks a permission model | The procfs fd entry holds the target object via an fd snapshot; follow to a non-VFS target returns unsupported; the cross-process permission policy still needs tightening |
 | T-05 | `O_NOFOLLOW` ignored, so a symlink or magic-link is followed | Path flags | High | open/at flags not passed to the resolution layer | The syscall layer uniformly converts flags to `LookupFlags`, and `kvfs::namei` handles final/non-final symlinks and magic-links per `LookupIntent` |

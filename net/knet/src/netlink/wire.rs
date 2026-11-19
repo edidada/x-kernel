@@ -66,6 +66,7 @@ pub(crate) mod route {
     pub(crate) const SCOPE_UNIVERSE: u8 = 0;
     pub(crate) const SCOPE_LINK: u8 = 253;
     pub(crate) const SCOPE_HOST: u8 = 254;
+    #[cfg(unittest)]
     pub(crate) const SCOPE_NOWHERE: u8 = 255;
     pub(crate) const TYPE_UNICAST: u8 = 1;
     pub(crate) const TYPE_LOCAL: u8 = 2;
@@ -145,8 +146,8 @@ pub(crate) mod neigh {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct NlMsgHeader {
     pub(super) len: u32,
     pub(super) msg_type: u16,
@@ -194,8 +195,8 @@ impl NlMsgHeader {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct IfInfoMsg {
     pub(super) family: u8,
     pub(super) pad: u8,
@@ -232,8 +233,8 @@ impl IfInfoMsg {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct IfAddrMsg {
     pub(super) family: u8,
     pub(super) prefix_len: u8,
@@ -267,8 +268,8 @@ impl IfAddrMsg {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct RtMsg {
     pub(super) family: u8,
     pub(super) dst_len: u8,
@@ -314,8 +315,8 @@ impl RtMsg {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct NdMsg {
     pub(super) family: u8,
     pub(super) pad1: u8,

@@ -1,5 +1,34 @@
 # kruntime — Design Document
 
+## Unit-test task entries
+
+Direct task constructors in the runtime fixtures transfer PreparedTaskEntry
+owners. Ordinary preparation uses KERNEL before activation and outside reader
+scopes and IRQ guards. Early SMP startup probes use NOWAIT before AP publication.
+RCU service producers, owned-record replacement helpers and competitors created
+while a fixture reader is retained use NOWAIT: reclaim must not wait for that
+fixture's coordinator. Concurrent observer groups are fully prepared before
+activation. The TLB fixture uses new_kthread_with_entry to retain its root PID.
+Indirect spawn wrappers and production worker creation are outside this batch.
+
+## RCU Benchmark Owners
+
+All RCU benchmark tasks use PreparedTaskEntry rather than the legacy boxed
+closure constructor. The coordinator prepares complete concurrent groups before
+activation, including auxiliary readers and competitors. Fallible preparation
+returns to the runner's failure boundary while every task in that group is still
+unactivated. Already completed sequential rounds remain joined. Task stacks and
+scheduler bookkeeping are not made fallible by this change.
+
+Release-only callback, backlog and latency records use KBox owners prepared
+with KERNEL permissions in unlocked, reclaim-safe sleepable task context.
+The batch fixture reserves storage before constructing its live-counted record;
+an injected reservation failure verifies that accounting and references remain
+unchanged. Raw transfer and recovery stay paired with KBox. Failed preparation
+cannot produce a successful batch or complete latency distribution. Backlog
+owners are all prepared before activating the blocking reader. See
+`benches/rcu/README.md` for the release-only validation and measurement limits.
+
 ## Network Startup Owners
 
 Late-init task context calls the fallible `knet::init_network`. Device owners
@@ -669,6 +698,19 @@ Release/Acquire handshake keeps the old reader alive across withdrawal and
 same-key publication; callback drain happens only after reader exit. This
 checks retained identity, successor lookup and eventual reclamation without
 requiring the writer to wait for IRQ delivery on the reader CPU.
+
+## Unit-test allocation ownership
+
+Unit-test callback owners use `KBox` with `NOWAIT` allocation so preparation
+also remains valid in IRQ/preemption-excluded fixtures and does not introduce
+reclaim into lock-held scenarios. Raw ownership transfers and cancellation or
+post-grace-period recovery use the same KBox allocation, including nonzero
+callback offsets and reposting. Allocation accounting retains a real 64-byte
+KBox control allocation under the IRQ guard; it still reaches the counted
+kernel heap path. Locally retained Work and DelayedWork fixtures use stack
+pinning and finish their existing synchronous drains before scope exit. The
+private page-metadata allocator remains heap-owned to avoid increasing kernel
+test stack requirements.
 
 ## System power management
 

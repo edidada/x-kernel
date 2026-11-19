@@ -5,13 +5,13 @@
 use alloc::sync::Arc;
 use core::sync::atomic::AtomicUsize;
 
-use kalloc_types::AllocFlags;
+use kalloc_types::{AllocFlags, KBox};
 use khal::{
     paging::{MappingFlags, PageSize, PagingError},
     trap::PageFaultFlags,
 };
 use ksync::Mutex;
-use memaddr::{PAGE_SIZE_4K, VirtAddr};
+use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
 use unittest::def_test;
 use vmobj::{
     FileObjectId, MappingView, MappingViewId, MappingViewKind, MappingViewRange,
@@ -112,6 +112,39 @@ fn backend_fault_completion_runs_prepared_hook_and_preserves_oom_outcome() {
 fn new_test_aspace() -> AddrSpace {
     AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)
         .expect("test address space should be constructible")
+}
+
+#[def_test]
+fn linear_mapping_defers_its_kernel_invalidation() {
+    let mut aspace = new_test_aspace();
+    let start = VirtAddr::from(0x1000usize);
+    let paddr = PhysAddr::from(0x20_0000usize);
+
+    // Architectures whose page-table metadata needs no invalidation for an
+    // invalid-to-valid mapping (aarch64's fresh-map fence) publish the PTE
+    // without a deferred flush; the others must defer it.
+    let map_deferred = aspace
+        .map_linear_deferred(
+            start,
+            paddr,
+            PAGE_SIZE_4K,
+            MappingFlags::READ | MappingFlags::WRITE,
+        )
+        .expect("linear mapping should succeed");
+    // The PTE is published before the remote shootdown completes.
+    assert!(aspace.page_table().query(start).is_ok());
+    if let Some(deferred) = map_deferred {
+        assert_eq!(deferred.complete(), Ok(()));
+    }
+
+    // Removing a valid translation always needs an invalidation, so every
+    // architecture must defer the unmap.
+    let deferred = aspace
+        .unmap_linear_deferred(start, PAGE_SIZE_4K)
+        .expect("linear unmap should succeed")
+        .expect("a kernel unmap should defer its invalidation");
+    assert!(aspace.page_table().query(start).is_err());
+    assert_eq!(deferred.complete(), Ok(()));
 }
 
 fn map_shared(
@@ -265,6 +298,100 @@ fn private_fork_after_vma_split_keeps_child_cow_object_offset() {
         .lock()
         .handle_page_fault(second_page, PageFaultFlags::WRITE)
         .is_resolved());
+}
+
+#[def_test]
+fn fork_and_unmap_across_vmas_with_holes_preserves_remaining_mappings() {
+    let start = VirtAddr::from_usize(0x70_0000);
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let mut parent =
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8).expect("allocate parent address space");
+    // Three mappings with holes between them, so an unmapping request spans
+    // partial VMAs at both ends, a whole VMA, and the holes in between.
+    for page in [0, 3, 6] {
+        let address = start + page * PAGE_SIZE_4K;
+        parent
+            .map(
+                address,
+                PAGE_SIZE_4K * 2,
+                flags,
+                false,
+                VmRuntimeRef::new_anon_private(address, PageSize::Size4K),
+            )
+            .expect("map private range");
+    }
+
+    let child = parent.try_clone().expect("fork spanning VMAs");
+    parent
+        .unmap(start + PAGE_SIZE_4K, PAGE_SIZE_4K * 6)
+        .expect("unmap across VMAs and holes");
+
+    for page in 0..8 {
+        let address = start + page * PAGE_SIZE_4K;
+        assert_eq!(
+            parent.find_vma(address).is_some(),
+            page == 0 || page == 7,
+            "parent page {page}"
+        );
+        assert_eq!(
+            child.lock().find_vma(address).is_some(),
+            page != 2 && page != 5,
+            "child page {page}"
+        );
+    }
+}
+
+#[def_test]
+fn unmap_entirely_inside_a_hole_leaves_the_neighbouring_mappings() {
+    let start = VirtAddr::from_usize(0x70_0000);
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let mut parent =
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8).expect("allocate parent address space");
+    parent
+        .map(
+            start,
+            PAGE_SIZE_4K * 2,
+            flags,
+            false,
+            VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+        )
+        .expect("map the lower range");
+    let upper = start + PAGE_SIZE_4K * 6;
+    parent
+        .map(
+            upper,
+            PAGE_SIZE_4K * 2,
+            flags,
+            false,
+            VmRuntimeRef::new_anon_private(upper, PageSize::Size4K),
+        )
+        .expect("map the upper range");
+
+    // The request is shorter than the hole it sits in, so the next VMA starts
+    // beyond its end address. Unmapping it touches no mapping at all.
+    let hole = start + PAGE_SIZE_4K * 3;
+    parent
+        .unmap(hole, PAGE_SIZE_4K)
+        .expect("unmap a hole without neighbours in range");
+
+    assert_eq!(
+        parent
+            .find_vma(start + PAGE_SIZE_4K)
+            .map(|vma| vma.start())
+            .unwrap_or_else(|| VirtAddr::from_usize(0)),
+        start
+    );
+    assert_eq!(
+        parent
+            .find_vma(upper + PAGE_SIZE_4K)
+            .map(|vma| vma.start())
+            .unwrap_or_else(|| VirtAddr::from_usize(0)),
+        upper
+    );
+    assert!(
+        parent.find_vma(hole).is_none(),
+        "the hole stays unmapped"
+    );
 }
 
 #[def_test]
@@ -685,6 +812,122 @@ fn test_move_pages_preserves_contents_and_clears_source_mapping() {
 }
 
 #[def_test]
+fn sparse_move_preserves_holes_and_physical_identities() {
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let last_offset = PAGE_SIZE_4K * 7;
+    for address in [src, src + last_offset] {
+        map_shared(&mut aspace, address.as_usize(), PAGE_SIZE_4K, flags);
+    }
+    let first = aspace.pgtbl.query(src).unwrap();
+    let last = aspace.pgtbl.query(src + last_offset).unwrap();
+    aspace.move_pages(src, dst, PAGE_SIZE_4K * 8, PageSize::Size4K).unwrap();
+    assert_eq!(aspace.pgtbl.query(dst).unwrap(), first);
+    assert_eq!(aspace.pgtbl.query(dst + last_offset).unwrap(), last);
+    for offset in [0, PAGE_SIZE_4K, last_offset] {
+        assert!(matches!(aspace.pgtbl.query(src + offset), Err(PagingError::NotMapped)));
+    }
+    assert!(matches!(aspace.pgtbl.query(dst + PAGE_SIZE_4K), Err(PagingError::NotMapped)));
+}
+
+#[def_test]
+fn sparse_move_conflict_rolls_back_only_prepared_destinations() {
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let last_offset = PAGE_SIZE_4K * 2;
+    for address in [src, src + last_offset, dst + last_offset] {
+        map_shared(&mut aspace, address.as_usize(), PAGE_SIZE_4K, flags);
+    }
+    let first = aspace.pgtbl.query(src).unwrap();
+    let last = aspace.pgtbl.query(src + last_offset).unwrap();
+    let conflict = aspace.pgtbl.query(dst + last_offset).unwrap();
+    assert_eq!(
+        aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(aspace.pgtbl.query(src).unwrap(), first);
+    assert_eq!(aspace.pgtbl.query(src + last_offset).unwrap(), last);
+    assert_eq!(aspace.pgtbl.query(dst + last_offset).unwrap(), conflict);
+    for address in [src + PAGE_SIZE_4K, dst, dst + PAGE_SIZE_4K] {
+        assert!(matches!(aspace.pgtbl.query(address), Err(PagingError::NotMapped)));
+    }
+}
+
+#[def_test(serial)]
+fn move_pages_keeps_managed_storage_after_source_retirement() {
+    use kalloc::{UsageKind, alloc_page_ref, global_allocator};
+
+    let before = global_allocator().usages().get(UsageKind::PageCache);
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let page = alloc_page_ref(UsageKind::PageCache).unwrap();
+    let paddr = page.phys_addr();
+    let mut edit = aspace.pgtbl.modify();
+    // The source PTE is the sole physical owner, as after cache/token detachment.
+    edit.map(src, page, MappingFlags::READ).unwrap();
+    edit.try_finish().unwrap();
+    drop(edit);
+
+    aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K).unwrap();
+    assert!(matches!(aspace.pgtbl.query(src), Err(PagingError::NotMapped)));
+    assert!(matches!(aspace.pgtbl.query(dst + PAGE_SIZE_4K), Err(PagingError::NotMapped)));
+    assert_eq!(aspace.pgtbl.query(dst).unwrap().0, paddr);
+    assert_eq!(
+        global_allocator().usages().get(UsageKind::PageCache),
+        before + PAGE_SIZE_4K,
+        "the destination must own storage after the source hold retires"
+    );
+    let mut edit = aspace.pgtbl.modify();
+    edit.unmap(dst).unwrap();
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before + PAGE_SIZE_4K);
+    edit.try_finish().unwrap();
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
+}
+
+#[def_test(serial)]
+fn move_pages_conflict_retires_managed_destinations_without_consuming_sources() {
+    use kalloc::{UsageKind, alloc_page_ref, global_allocator};
+
+    let before = global_allocator().usages().get(UsageKind::PageCache);
+    let mut aspace = new_test_aspace();
+    let src = VirtAddr::from(0x2000usize);
+    let dst = VirtAddr::from(0x20000usize);
+    let offset = PAGE_SIZE_4K * 2;
+    let mut edit = aspace.pgtbl.modify();
+    for address in [src, src + offset, dst + offset] {
+        edit.map(address, alloc_page_ref(UsageKind::PageCache).unwrap(), MappingFlags::READ).unwrap();
+    }
+    edit.try_finish().unwrap();
+    drop(edit);
+    let first = aspace.pgtbl.query_entry(src).unwrap();
+    let last = aspace.pgtbl.query_entry(src + offset).unwrap();
+    let conflict = aspace.pgtbl.query_entry(dst + offset).unwrap();
+
+    assert_eq!(
+        aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(aspace.pgtbl.query_entry(src).unwrap(), first);
+    assert_eq!(aspace.pgtbl.query_entry(src + offset).unwrap(), last);
+    assert_eq!(aspace.pgtbl.query_entry(dst + offset).unwrap(), conflict);
+    assert!(matches!(aspace.pgtbl.query(dst), Err(PagingError::NotMapped)));
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before + PAGE_SIZE_4K * 3);
+    let mut edit = aspace.pgtbl.modify();
+    // If rollback consumed a source hold or leaked the prepared alias, final
+    // retirement would either underflow or leave an allocated page behind.
+    for address in [src, src + offset, dst + offset] {
+        edit.unmap(address).unwrap();
+    }
+    edit.try_finish().unwrap();
+    assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
+}
+
+#[def_test]
 fn map_with_max_flags_allows_protection_raise_within_may_permissions() {
     let start = VirtAddr::from_usize(0x4000);
     let current = MappingFlags::USER;
@@ -844,16 +1087,22 @@ fn mm_pin_does_not_keep_user_mappings_alive_after_last_user_release() {
 }
 
 #[def_test]
-fn clear_tolerates_zapped_linear_mapping() {
+fn clear_removes_present_and_zapped_linear_mappings() {
     let start = VirtAddr::from_usize(0x4000);
+    let present = start + 2 * PAGE_SIZE_4K;
     let flags = MappingFlags::READ | MappingFlags::EXECUTE | MappingFlags::USER;
     let frame = crate::backend::alloc_frame(true, PageSize::Size4K).expect("allocate linear frame");
+    let present_frame =
+        crate::backend::alloc_frame(true, PageSize::Size4K).expect("allocate second linear frame");
     let mut aspace =
-        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 2).expect("allocate test address space");
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 3).expect("allocate test address space");
 
     aspace
         .map_linear(start, frame, PAGE_SIZE_4K, flags)
         .expect("map linear page");
+    aspace
+        .map_linear(present, present_frame, PAGE_SIZE_4K, flags)
+        .expect("map second linear page");
     assert!(aspace.page_table().query(start).is_ok());
     aspace
         .invalidate_present(start, PAGE_SIZE_4K)
@@ -864,7 +1113,11 @@ fn clear_tolerates_zapped_linear_mapping() {
     );
 
     aspace.clear();
+    assert!(aspace.find_vma(start).is_none());
+    assert!(aspace.find_vma(present).is_none());
+    assert_eq!(aspace.page_table().query(present), Err(PagingError::NotMapped));
     crate::backend::dealloc_frame(frame, PageSize::Size4K);
+    crate::backend::dealloc_frame(present_frame, PageSize::Size4K);
 }
 
 #[def_test]
@@ -878,7 +1131,7 @@ fn synchronous_invalidation_is_complete_after_mm_destruction() {
 // No PTEs are needed: these fixtures exercise VMA ownership and sync dispatch.
 struct MsyncTestRuntime {
     backing: crate::VmBackingInfo,
-    sync: alloc::boxed::Box<dyn Fn(core::ops::Range<u64>) -> KResult + Send + Sync>,
+    sync: KBox<dyn Fn(core::ops::Range<u64>) -> KResult + Send + Sync>,
 }
 
 impl crate::VmRuntimeOps for MsyncTestRuntime {
@@ -968,7 +1221,7 @@ fn map_msync_file(
     );
     let runtime = Arc::new(MsyncTestRuntime {
         backing,
-        sync: alloc::boxed::Box::new(sync),
+        sync: KBox::new_nowait(sync).unwrap(),
     });
     let runtime = if shared {
         VmRuntimeRef::new_file_shared(runtime)
@@ -1160,4 +1413,162 @@ fn msync_releases_the_last_file_reference_before_relocking_for_the_next_vma() {
         Ok(())
     );
     assert_eq!(releases.load(Ordering::Relaxed), 1);
+}
+
+#[def_test(serial)]
+fn default_overcommit_rejects_oversized_private_commitments_but_preserves_lazy_noreserve() {
+    let baseline = crate::committed_pages();
+    let size = (kalloc::global_allocator().total_pages() + 1) * PAGE_SIZE_4K;
+    let start = VirtAddr::from_usize(0x1000);
+    let mut space = AddrSpace::new_empty_kernel(start, size + PAGE_SIZE_4K).unwrap();
+    let writable = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    assert_eq!(
+        space.map(start, size, writable, false, runtime),
+        Err(KError::NoMemory)
+    );
+    assert!(space.find_vma(start).is_none());
+    assert_eq!(crate::committed_pages(), baseline);
+
+    // Read-only reservations do not promise private COW backing yet.
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    space
+        .map_with_max_flags(
+            start,
+            size,
+            writable - MappingFlags::WRITE,
+            writable,
+            false,
+            runtime,
+        )
+        .unwrap();
+    assert_eq!(space.protect(start, size, writable), Err(KError::NoMemory));
+    assert!(
+        !space
+            .find_vma(start)
+            .unwrap()
+            .flags()
+            .contains(MappingFlags::WRITE)
+    );
+    space.clear();
+
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    let vma = VmArea::new(
+        start,
+        size,
+        writable,
+        writable,
+        runtime.backing_info(),
+        0,
+        None,
+    )
+    .with_noreserve(true);
+    space.map_runtime_vma(vma, false, runtime).unwrap();
+    assert!(space.pgtbl.query(start).is_err());
+    assert_eq!(crate::committed_pages(), baseline);
+    space.clear();
+    assert_eq!(crate::committed_pages(), baseline);
+
+    // Individually admissible growth may create a VMA larger than RAM;
+    // a new fork or DONTUNMAP commitment must still be admitted separately.
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    space
+        .map(start, PAGE_SIZE_4K, writable, false, runtime)
+        .unwrap();
+    space.extend_area(start, size - PAGE_SIZE_4K).unwrap();
+    assert_eq!(crate::committed_pages(), baseline + size / PAGE_SIZE_4K);
+    assert!(matches!(space.try_clone(), Err(KError::NoMemory)));
+    let source = space.resolve_mremap_source(start, size).unwrap();
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    assert!(matches!(
+        source.fresh_mapping(size, &runtime),
+        Err(KError::NoMemory)
+    ));
+    assert_eq!(space.find_vma(start).unwrap().size(), size);
+    space.clear();
+    assert_eq!(crate::committed_pages(), baseline);
+}
+
+#[def_test(serial)]
+fn private_commitments_follow_protection_splits_fork_and_partial_unmap() {
+    let baseline = crate::committed_pages();
+    let mut space = new_test_aspace();
+    let start = space.base();
+    let writable = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    space
+        .map_with_max_flags(
+            start,
+            3 * PAGE_SIZE_4K,
+            writable - MappingFlags::WRITE,
+            writable,
+            false,
+            runtime,
+        )
+        .unwrap();
+    space
+        .protect(start + PAGE_SIZE_4K, PAGE_SIZE_4K, writable)
+        .unwrap();
+    assert_eq!(crate::committed_pages(), baseline + 1);
+    space
+        .protect(
+            start + PAGE_SIZE_4K,
+            PAGE_SIZE_4K,
+            writable - MappingFlags::WRITE,
+        )
+        .unwrap();
+    assert_eq!(crate::committed_pages(), baseline + 1);
+    let child = space.try_clone().unwrap();
+    assert_eq!(crate::committed_pages(), baseline + 2);
+    space.unmap(start + PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap();
+    assert_eq!(crate::committed_pages(), baseline + 1);
+    drop(child);
+    space.clear();
+    assert_eq!(crate::committed_pages(), baseline);
+}
+
+#[def_test(serial)]
+fn private_commitments_transfer_on_remap_and_rollback_on_destination_conflict() {
+    let baseline = crate::committed_pages();
+    let owner = Arc::new(Mutex::new(new_test_aspace()));
+    let mut space = owner.lock();
+    let start = space.base();
+    let writable = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    space
+        .map(start, 2 * PAGE_SIZE_4K, writable, false, runtime)
+        .unwrap();
+    let source = space
+        .resolve_mremap_source(start, 2 * PAGE_SIZE_4K)
+        .unwrap();
+    assert_eq!(
+        space.relocate_mapping(
+            &source,
+            start + PAGE_SIZE_4K,
+            3 * PAGE_SIZE_4K,
+            false,
+            &owner
+        ),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(crate::committed_pages(), baseline + 2);
+    let target = start + 8 * PAGE_SIZE_4K;
+    let conflict = VmRuntimeRef::new_anon_private(target, PageSize::Size4K);
+    space
+        .map(target, PAGE_SIZE_4K, writable, false, conflict)
+        .unwrap();
+    assert_eq!(
+        space.relocate_mapping(&source, target, 3 * PAGE_SIZE_4K, false, &owner),
+        Err(KError::AlreadyExists)
+    );
+    assert_eq!(crate::committed_pages(), baseline + 3);
+    space.unmap(target, PAGE_SIZE_4K).unwrap();
+    space
+        .relocate_mapping(&source, target, 3 * PAGE_SIZE_4K, false, &owner)
+        .unwrap();
+    assert_eq!(crate::committed_pages(), baseline + 3);
+    space.unmap(target + PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap();
+    assert_eq!(crate::committed_pages(), baseline + 2);
+    space.clear();
+    assert_eq!(crate::committed_pages(), baseline);
 }

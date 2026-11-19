@@ -13,7 +13,7 @@ use ktime_types::MonotonicInstant;
 mod ethernet;
 mod id;
 mod loopback;
-mod net_rx;
+pub(crate) mod net_rx;
 mod registry;
 
 pub(crate) use ethernet::*;
@@ -170,7 +170,7 @@ pub(crate) enum RxPoll {
     Empty,
     /// One frame or deferred packet was consumed by the budgeted receive step.
     /// Ethernet ARP handling and dropped frames yield `None`.
-    Consumed(Option<PacketBuf>),
+    Consumed(Option<net_rx::RxPacket>),
 }
 
 /// Trait implemented by network device backends.
@@ -193,7 +193,13 @@ pub(crate) trait NetDevice: Send + Sync {
     fn link_send_snapshot(&self) -> LinkSendSnapshot;
 
     /// Device-model ID for driver-backed devices.
+    #[cfg(unittest)]
     fn device_id(&self) -> Option<kdevice::DeviceId> {
+        None
+    }
+
+    /// Exact class publication identity for driver-backed devices.
+    fn publication_id(&self) -> Option<kdevice::PublicationId> {
         None
     }
 
@@ -234,7 +240,8 @@ pub(crate) trait NetDevice: Send + Sync {
     /// The Router calls this in task context. Implementations may allocate and
     /// callers must not invoke it from hardirq, softirq, or BH-disabled context.
     ///
-    /// `source_addr` is the source parsed by the Router before dispatch.
+    /// `source_addr` supplies the local sender for neighbor resolution. It does
+    /// not replace the source address in a forwarded packet's header.
     /// Returns `true` when the send made RX ready, typically after a
     /// successful loopback enqueue. Returns `false` when it did not:
     /// Ethernet TX, or a drop such as link down, over-MTU, or a full

@@ -55,7 +55,6 @@ pipeline {
         ROOTFS_VARIANT = 'xkernel-glibc'
         ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'rootfs-v20261111'}"
         HARNESS_JOBS = '2'
-        STARRY_ACCEL = 'n'
     }
 
     stages {
@@ -63,6 +62,8 @@ pipeline {
             steps {
                 script {
                     withFloatingCiDocker {
+                        // Replay builds lose Gitee webhook env; restore before checkout/description.
+                        restoreReplayGiteeEnv()
                         currentBuild.description = env.giteePullRequestIid?.trim()
                             ? "PR#${env.giteePullRequestIid}"
                             : "${env.DEFAULT_BRANCH} (manual)"
@@ -977,11 +978,11 @@ def runDylintCheck(String stageName, String platform, String defconfigPath, bool
         factsBaseRef = "${remote}/${env.giteeTargetBranch ?: env.DEFAULT_BRANCH}"
     }
     // cfg(unittest) alone does not select optional test-only Cargo dependencies.
-    // Keep the normal graph scan and cover the unittest graph on AArch64 too.
-    def unittestScan = platform == 'kplat-aarch64' ? """
+    // Keep the normal graph scan and cover the unittest graph on both platforms.
+    def unittestScan = """
 make UNITTEST=y clippy
 make UNITTEST=y dylint
-""" : ''
+"""
     // Lock statistics switch static_lock! to its registering proc macro and
     // compile the stats lock paths; no other CI configuration enables them.
     def lockStatScan = lockStat ? """

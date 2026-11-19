@@ -16,7 +16,7 @@ use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange, va};
 use crate::kernel_layout;
 
 /// Error returned by runtime device IO mapping helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IoMapError {
     InvalidRange,
     MappingFailed,
@@ -34,7 +34,7 @@ impl From<IoMapError> for kerrno::KError {
 }
 
 /// A registered device MMIO region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceRegion {
     pub paddr: PhysAddr,
     pub size: usize,
@@ -46,7 +46,7 @@ pub struct DeviceRegion {
 pub type DeviceRegionIter = alloc::vec::IntoIter<DeviceRegion>;
 
 /// Lifetime policy of a registered MMIO region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegionRefs {
     /// Statically owned region (fixed/boot mapping). Never auto-unmapped.
     Pinned,
@@ -55,7 +55,7 @@ enum RegionRefs {
 }
 
 /// Internal registry entry pairing a region with its lifetime policy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct RegionEntry {
     region: DeviceRegion,
     refs: RegionRefs,
@@ -152,19 +152,14 @@ pub fn iomap_device(
         .find_free_area(hint, span, limit, memaddr::PAGE_SIZE_4K)
         .ok_or(IoMapError::NoMemory)?;
 
-    kernel_aspace
-        .map_linear(
+    let deferred = kernel_aspace
+        .map_linear_deferred(
             mapped_start,
             start,
             span,
             MappingFlags::READ | MappingFlags::WRITE | MappingFlags::DEVICE,
         )
         .map_err(|_| IoMapError::MappingFailed)?;
-    // TLB shootdown is already handled by `PageTableMut::finish()`:
-    // `map_linear` → `Backend::map` → `pgtbl.modify()` creates a
-    // `PageTableMut`, whose `Drop` calls `finish()` →
-    // `flush_tlb_all_cpus()` (kernel page table), which does a local
-    // flush + IPI broadcast to all online CPUs.
 
     let region = DeviceRegion {
         paddr: start,
@@ -177,6 +172,17 @@ pub fn iomap_device(
         region,
         refs: RegionRefs::Counted(1),
     });
+    drop(regions);
+    drop(kernel_aspace);
+    // The PTE changes are already published. Complete the remote invalidation
+    // after releasing both IRQ-disabled locks: a CPU contending for either lock
+    // would otherwise spin with interrupts disabled and could never answer the
+    // shootdown IPI.
+    if let Some(deferred) = deferred
+        && let Err(err) = deferred.complete()
+    {
+        error!("iomap TLB invalidation did not complete: {:?}", err);
+    }
     Ok(mapped_start + paddr.align_offset_4k())
 }
 
@@ -213,12 +219,19 @@ pub fn iounmap(vaddr: VirtAddr) -> Result<(), IoMapError> {
     };
     drop(regions);
 
-    kernel_layout()
-        .lock()
-        .unmap(base, entry.region.size)
-        .map_err(|_| IoMapError::MappingFailed)?;
-    // TLB shootdown already handled by `PageTableMut::finish()` via
-    // `MmSpace::unmap` → `Backend::unmap` → `pgtbl.modify()` → `Drop`.
+    let deferred = {
+        let mut kernel_aspace = kernel_layout().lock();
+        kernel_aspace
+            .unmap_linear_deferred(base, entry.region.size)
+            .map_err(|_| IoMapError::MappingFailed)?
+    };
+    // Complete the remote invalidation after releasing the IRQ-disabled kernel
+    // address-space lock so contending CPUs can answer the shootdown IPI.
+    if let Some(deferred) = deferred
+        && let Err(err) = deferred.complete()
+    {
+        error!("iounmap TLB invalidation did not complete: {:?}", err);
+    }
     Ok(())
 }
 

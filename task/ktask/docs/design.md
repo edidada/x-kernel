@@ -1,5 +1,98 @@
 # ktask — Design
 
+## Prepared unit-test entries
+
+Direct unit-test task constructors transfer PreparedTaskEntry owners rather
+than allocating legacy boxed closures. new_kthread_with_entry preserves the
+root PID identity of new_kthread; PID-less fixtures use the existing prepared
+constructor. Entry preparation precedes PID allocation and task publication.
+The legacy closure constructors and spawn wrappers remain unchanged.
+
+Ordinary fixtures prepare with KERNEL in sleepable, reclaim-safe task context.
+Freezer helpers use NOWAIT under their serialization/admission gates; PI workers
+use NOWAIT because their callers can hold an RtMutex. Scheduler helpers used
+under exclusion guards, the BH-disabled preparation fixture and the abandoned
+RCU reader's sentinel also use NOWAIT. Entry flags do not grant those callers
+permission to sleep or change the existing stack/bookkeeping allocations.
+
+## Fair PELT wake migration
+
+PELT state and arithmetic belong to ksched. Existing scheduler entries update
+the history while holding the owning RQ lock; ktask keeps no duplicate PELT
+clock. Periodic balancing publishes advisory load/count samples; spawn and
+wake placement still use their previous metrics.
+
+Before a Wake publish changes CPU ownership, `publish_task` visits the old
+owner with `with_owner_sched` and calls `detach_blocked_pelt`. That guard ends
+before the destination scheduler lock is taken. Sleeping history is thereby
+removed once even if affinity rejects the destination and publication retries.
+Same-CPU wake remains attached, and ready migration already detaches through
+dequeue/steal or migrate_current. New task publication needs no old-owner query.
+
+## Periodic Fair balancing
+
+On SMP, `run_queue/fair_balance.rs` registers `SoftirqVec::Sched` once during primary
+RQ bring-up. A due periodic accounting tick requests the softirq only after
+accounting the interrupted task. It does not run remote scans in hardirq or
+change the schedule-deadline preemption rules. The initial interval is 16 ms,
+with a CPU-dependent initial phase; unsuccessful passes double the interval
+up to 128 ms, and successful pulls restore 16 ms. Actual requests follow the
+configured tick granularity; delayed periods are coalesced.
+
+Policy-mutation exits publish two independent atomic hints under the RQ lock:
+Fair `load_avg` and the number of Fair ready-tree waiters. Remote readers may
+observe mixed or stale hints; these only nominate source CPUs. A source with
+no Fair waiter is skipped even if its blocked history is large. The destination
+refreshes its local queue before searching, so an idle CPU's stale blocked
+history does not prevent filling an otherwise unused CPU. An empty Fair RQ
+on a CPU running a higher class is not treated as an idle CPU.
+
+Each pass tries at most two source queues and pulls at most one task. Source
+selection scans rotating batches of at most 32 CPUs and tests candidates in
+round-robin order against weighted load. Its cursor advances beyond each
+attempted source, so heavier pinned queues cannot hide lighter eligible donors.
+Idle-CPU kicks have a separate rotating cursor that advances beyond each
+chosen target, so an affinity-incompatible idle CPU cannot hide other idle
+CPUs. Source and idle searches cannot consume each other's scan windows.
+Each locked source scan visits at most 32 Fair tree entries, retaining a
+deadline-key cursor to continue beyond pinned/rejected prefixes. Candidates
+must be Ready, off-CPU, allowed on the destination and not cgroup-parked.
+Higher classes do not veto Fair migration: a sole Fair waiter behind an RT
+runner can be exported, and an RT-running CPU may receive Fair migrate-in.
+RT/Deadline/Stop tasks themselves are never selected by this path.
+
+For an actually idle destination, filling the CPU takes precedence over load
+history. Otherwise a candidate must reduce the absolute weighted-load gap:
+`abs(source_load - destination_load - 2 * task_load)`. The improvement must
+exceed `max((source_load + destination_load) / 32, 1)`. Source ranking also
+requires a gap exceeding `max(source_load / 16, 1)`. Relative margins preserve
+balancing for small nice weights, while rejecting equal-load exchanges and
+overshoot. A 32 ms queue participation cooldown limits repeated migration.
+This is an equal-capacity, flat Fair policy: RT/DL/IRQ utilization, frequency
+invariance, NUMA/cache domains and asymmetric CPU capacity are not modeled.
+In particular, current higher-class execution is not used as a substitute
+for measuring how much CPU capacity remains available to Fair.
+
+The source advances its clock and rechecks task PELT and migration benefit
+under its scheduler lock. It saves lag and detaches PELT before returning the
+owner. Only after releasing that lock does destination `publish_task` check
+affinity and move CPU ownership. Rejection routes the retained task through
+`migrate_entry(MigrateIn)`; success consumes the returned decision with `kick`.
+No two scheduler locks overlap. Late remote wakes may invalidate a load
+comparison; this is best-effort balancing, not an atomic two-queue transaction.
+
+Idle CPUs stop the periodic tick. A CPU with Fair waiters therefore requests
+one idle CPU's balance pass through a coalesced flag and the existing fixed
+reschedule IPI. The IPI consumes the flag and raises Sched softirq without
+locking or accounting an RQ. Failed notification clears the flag for retry on
+a subsequent pass. No additional periodic timer or callback allocation is
+introduced. Softirq actions remain non-sleeping; only individual RQ holds
+mask IRQs. Existing about-to-idle pulling remains independent of this policy.
+`/proc/sched_stat` adds `fair_balance_runs`, `fair_balance_pull` and `fair_balance_kick`.
+Deterministic selection tests are in ksched and ktask's
+`ut-tests/run_queue/fair_balance.rs`; throughput and latency need separate guest
+workloads under matching platform and CPU-count settings.
+
 ## Priority inheritance
 
 `pi::TaskPiHost` binds `krtmutex` to `KtaskRef` and the `PiTaskNode` embedded
@@ -269,6 +362,7 @@ task/ktask/
 │   │   ├── rq.rs              # leave / pick / switch / kick
 │   │   ├── placement.rs       # spawn / wake CPU choice (no remote sched lock)
 │   │   ├── ownership.rs       # cpu_id and nr_running / nr_home
+│   │   ├── fair_balance.rs         # periodic Fair pulls and idle-CPU kicks
 │   │   ├── idle_pull.rs       # steal a Ready !on_cpu waiter onto an idle CPU
 │   │   ├── migrate.rs         # affinity: migrate_current / migrate_entry
 │   │   └── stats.rs           # sched_stat counters and /proc text
@@ -294,7 +388,8 @@ task/ktask/
 `set_task_nice`. CPU choice lives in
 `placement.rs` because it reads each CPU's `nr_running` / `nr_home`; `ksched`
 holds one RQ lock and never sees remote load. `rq.rs` owns local leave / pick /
-switch. `idle_pull.rs` steals across CPUs. `migrate.rs` only moves a task after
+switch. `idle_pull.rs` steals when about to idle; `fair_balance.rs` implements
+periodic Fair pulls and idle-CPU kicks. `migrate.rs` only moves a task after
 an affinity change.
 
 `kworkerpool_ng` uses `ktask` for pinned task creation, prepared waits and
@@ -453,8 +548,9 @@ entries:
   is restored and the call returns `false`. A ready off-CPU task is dequeued
   and `migrate_entry`'d. The caller does not `switch_to` on the remote CPU.
 - `init_percpu_helpers` runs once per CPU after the timer IRQ handler is
-  registered and before local IRQs are enabled. Activating Stop can preempt
-  the bring-up task immediately; `task_entry` then enables IRQs.
+  registered and before local IRQs are enabled. It starts the periodic tick
+  for a busy boot task, then activates Stop, which can immediately preempt the
+  bring-up task; `task_entry` then enables IRQs.
 - `stop_one_cpu` requires sleepable task context and does not return until
   the callback has run and `notify_one` has finished writing the stack
   completion. The callback runs on the target CPU with IRQs disabled and
@@ -486,6 +582,39 @@ not reentrant under a held RQ guard.
   `init_secondary`.
 - Blocked wake versus `on_cpu` uses the Dekker handshake in the SMP section
   below.
+
+### Lock order
+
+Scheduler code has one allowed nesting direction and no cycles:
+
+```
+run queue lock  ->  bandwidth registry (TRACKED, MEMBERS)  ->  task state atomics
+```
+
+- **The registry is never taken the other way round.** `bandwidth.rs` never
+  acquires a run-queue lock, and it never holds `TRACKED` while touching
+  `MEMBERS` or while calling `resume_group` / `park_group`. Both registry locks
+  are leaf locks over short `Vec` scans.
+- **Accounting points run under the run-queue lock** (`blocked_resched`,
+  `account_sched_tick`). Their locks must therefore be leaves: `poll_trackers`
+  releases `TRACKED` before touching `MEMBERS` and before `resume_group`
+  mutates task state, and registration never nests the two. Waiting for a leaf
+  registry lock is bounded and safe; waiting for a lock that another CPU holds
+  while it waits for a run queue is not.
+- **The rollover path allocates only when a window actually closes**, so the
+  common accounting path stays allocation-free.
+- **Wake latches are never locks.** `park::ParkLatch` is a lock-free
+  `AtomicBool` (`record` / `take`). A parker consumes it before publishing
+  `Blocked`, publishes the state, then consumes it once more: a waker that
+  sampled a stale `Running` state and gave up still left its wake recorded, so
+  the second consume turns it into a self-unblock instead of a lost wake.
+  Holding a spinlock-shaped latch across `blocked_resched` made the parker wait
+  for locks held by wakers that needed that latch (#IKVT98), so the latch must
+  not contribute a preempt count and must not be held across the switch.
+- A CPU that spins here with IRQs disabled cannot be observed by the soft
+  lockup watchdog (its timer interrupt is masked) and the hard lockup backend is
+  currently aarch64-only, so x86_64 hangs silently. Capture such a hang with an
+  external debugger or the QEMU monitor (`info registers`) instead.
 
 ## Creation and publication
 
@@ -634,13 +763,19 @@ above; timer repair neither owns that state nor adds a periodic wake tick.
 ### Hardware timer drive and dynamic schedule timer
 
 `ktask` owns all hardware timer-drive logic. `kruntime` only registers the
-clock interrupt vector; the handler calls `ktask::on_timer_fire()`. Schedule
-and owned timers share a per-CPU oneshot device and arbitrate by absolute-ns
-deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
+clock interrupt vector; the handler calls `ktask::on_timer_fire()`. The
+periodic tick, schedule deadline and owned timers share a per-CPU oneshot
+device and arbitrate by absolute-ns deadline:
 
 1. The IRQ entry first calls the `register_timer_irq_note` hook (watchdog
-   hardlock heartbeat counts any timer IRQ, not only the 4s sample), then
-   charges the current task with `update_current(elapsed_ns)` from
+   hardlock heartbeat counts any timer IRQ, not only the 4s sample). The
+   due periodic tick runs the user-runtime accounting hook and requests the
+   current runtime's deferred timer work; other timer IRQs do not account CPU
+   time. The tick's user/system classification comes from
+   `khal::context::active_exception_user_mode()`, which reads the interrupted
+   exception frame's privilege level on the owning CPU; with no active frame
+   published it falls back to kernel/system context. The handler charges the
+   current task from
    `now - last_accounted_ns` (idle runtime is not charged; resched is
    requested only when the request is exhausted). The schedule deadline
    stays armed while idle when a class still reports a future event, so a
@@ -648,8 +783,9 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
    slot then runs
    Linux `entity_tick` / `check_preempt_tick`: `need_resched` is set only
    when pick would change (eligible NEXT_BUDDY or an earlier deadline).
-   Owned timer IRQs only account, so a later-deadline WF_SYNC wakee is not
-   immediately pulled back. An ineligible buddy is armed until eligible by
+   Periodic and owned timer IRQs only account unless the independent schedule
+   deadline is also due, so a later-deadline WF_SYNC wakee is not immediately
+   pulled back. An ineligible buddy is armed until eligible by
    `next_preemption_ns`; other waiters are not polled every 10 µs. A failed
    IRQ-tail probe still returns immediately.
 2. Due owned timers run outside timer/runqueue locks, with IRQs disabled.
@@ -658,11 +794,17 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
    `NEXT_SCHED_DEADLINE_NS`, then `rearm_local_timer` to
 
 ```text
-min(next_sched_deadline?, prepared_service_deadline?)
+min(next_sched_deadline?, next_periodic_tick?, prepared_service_deadline?)
 ```
 
-   If both sources are empty, `disarm_timer()` runs. Stale/expired IRQs only
-   catch up accounting and rearm; they do not loop catch-up ticks.
+   If all sources are empty, `disarm_timer()` runs. The periodic tick uses
+   `TICKS_PER_SECOND` with Linux `TICK_NSEC` rounding, stays armed for a busy
+   runner and stops on idle. A switch between busy tasks preserves its phase;
+   an idle-to-busy switch starts the next phase-aligned tick. A late tick is
+   delivered once and forwarded past `now`, rather than replaying missed ticks
+   against the task that happens to be current. Its CPU-local deadline plays
+   the `tick_sched` role without allocating or starting an owned timer under
+   scheduler exclusion. IRQ and migration exclusion protect the slot.
 
    The schedule slot is written from the class view (`next_event_ns()`), not
    from the runner alone: all four writers — `request_resched_on`,
@@ -674,11 +816,11 @@ min(next_sched_deadline?, prepared_service_deadline?)
    event. The idle class reports no runner event of its own, so nothing is
    armed on behalf of the runner itself.
 
-   With `sched_stat`, IRQs are classified from the schedule slot and prepared
-   dispatch result. The existing diagnostic field names remain
+   With `sched_stat`, IRQs are classified from the schedule and periodic slots
+   and the prepared dispatch result. The existing diagnostic field names remain
    (`timer_irq_sched` / `timer_irq_soft` / `timer_irq_periodic` /
-   `timer_irq_stale`); `timer_irq_periodic` stays zero because that source was
-   removed. The `soft` name denotes owned timer delivery, not softirq execution.
+   `timer_irq_stale`). The `soft` name denotes owned timer delivery, not
+   softirq execution.
 
 Schedule deadlines are written by `program_sched_deadline`, matching Linux
 `hrtick_start`: a positive relative delay is floored at 10 µs. When
@@ -941,8 +1083,8 @@ to their callers.
 - After waking `interrupt_waker`, `TaskInner::interrupt()` calls
   `kick_running_task()` if the task is still `on_cpu`: local `need_resched`
   under `preempt`, remote IPI always (`kfeat/smp` also enables IPI). Signal
-  delivery to a task running in user mode must take this path; a NOHZ lone
-  runner has no periodic tick fallback.
+  delivery to a task running in user mode must take this path rather than rely
+  on a later timer tick.
 - `WaitQueue` wraps `event_listener` wait/notify and supports timeout and
   predicate wait. Both predicate variants recheck the condition after registering
   the listener so a notification between the first check and registration cannot
@@ -1087,8 +1229,8 @@ ordinary IRQ before worker submission, without inline Task destruction.
   the interrupted task. The IRQ-exit tail (`wake_softirqd` after both depths
   are zero) can still leak it; see the limit above. The returned
   `WakeRunQueueRef` carries that bool to the EEVDF sync mark.
-- There is no periodic balancer. Besides affinity and the wake SIS above,
-  an about-to-idle CPU does a Linux-style idle-pull: steal one
+- Periodic Fair balancing runs in Sched softirq (see above). Besides that,
+  affinity and wake SIS, an about-to-idle CPU does an idle-pull: steal one
   **Ready && `!on_cpu`** waiter from a CPU with `nr_running >= 2`, through
   source `steal_ready_task` (internal `remove_task`, PLACE_LAG) then local
   `enqueue_task`. Lock only src, then dest enqueue, so dest-then-src cannot
@@ -1101,9 +1243,8 @@ ordinary IRQ before worker submission, without inline Task destruction.
   next wake goes home if prev is idle, otherwise seeks idle again.
   Spawn / `activate_task` / affinity migrate-in still use `find_idlest_cpu`.
 - `add_task` always `kick` after first enqueue (local `need_resched` plus
-  timer re-arm; remote IPI). A dynamic timer is already disarmed for a lone
-  task; a busy home cannot rely on a nonexistent periodic tick to discover a
-  new peer later.
+  timer re-arm; remote IPI). A lone runner may have no schedule deadline; the
+  accounting tick does not replace wakeup preemption.
 - EEVDF (`ksched`) matches Linux `pick_eevdf` / `place_entity`:
   - Wake `PLACE_LAG`: `vruntime = V - lag` (lag first inflated by `(W+w)/W`).
     Deadline uses the **full request** (`vd = ve + r/w`, request in ns,
@@ -1342,7 +1483,8 @@ One file holding placement, switch, affinity, and counters would tangle
 SMP rules with local leave/pick once class placement (for example RT
 pin-home) is added. After the split, `placement.rs` only reads per-CPU load
 heuristics; `rq.rs` only leave/pick/switches on the already-chosen RQ;
-`idle_pull.rs` steals across CPUs; `migrate.rs` only moves a task after a
+`idle_pull.rs` handles about-to-idle steals; `fair_balance.rs` handles periodic
+Fair pulls and idle-CPU kicks; `migrate.rs` only moves a task after a
 mask change. External entries and lock order are unchanged.
 
 ### Why per-CPU run queues
@@ -1498,8 +1640,8 @@ trigger calls `dump_sched_stats()` for allocation-free base output.
   single global queue.
 - **Overload**: class algorithms (`ksched`) and the block model share the
   load. `ktask` places spawn / affinity migrate-in with `find_idlest_cpu`
-  and idle-pulls one Ready `!on_cpu` waiter when about to idle. There is no
-  periodic load-balance daemon.
+  and idle-pulls one Ready `!on_cpu` waiter when about to idle. Periodic Fair
+  load balancing runs in Sched softirq, with coalesced IPI kicks for idle CPUs.
 
 ## Scheduler trace state
 
@@ -1548,7 +1690,7 @@ rendezvous, device PM, wake source or sleep-accounting path is introduced.
 
 This follows the separation of Linux tick_suspend_local/tick_resume_local and
 clock-event tick-resume from clocksource timekeeping. It does not import Linux
-periodic ticks, broadcast timers or CPU-hotplug machinery. The guest regressions
+broadcast timers or CPU-hotplug machinery. The guest regressions
 in ut-tests/timer_suspend.rs include independent state-machine cases and scoped
 initialized-CPU fixtures. The fixtures restore events and cancel test timers
 before releasing IRQ/preemption guards, without time injection or latency
@@ -1633,8 +1775,9 @@ On successful cleanup it first removes freeze requests and thaws old tasks,
 then detaches the deferred activation list and reopens admission. Deferred tasks
 re-enter normal admission before enqueue, so a subsequent freeze can retain them
 again. No allocation or callback occurs while modifying list links; registration
-and list ownership use the project intrusive list. The pending strong owner is
-released on activation, including when callers dropped every external reference.
+and list ownership use an `Arc` adapter over `intrusive_collections::LinkedList`.
+The pending strong owner is released on activation, including when callers
+dropped every external reference.
 
 This corresponds to the task preparation responsibilities of Linux v6.12
 `kernel/power/process.c` (`freeze_processes`, `freeze_kernel_threads`, thaw),
@@ -1678,6 +1821,21 @@ Existing callback-boundary, cancellation, idle-wait and manager-stop tests also
 execute on SMP. A switch observer asserts that confirmation has not been
 published on the outgoing stack; a staged completion test checks stale-round
 identity. None of these fixtures powers down CPUs or changes global clocks.
+
+## Cgroup CPU controls
+
+`UserTaskRuntime` exposes the live cgroup `cpu.weight` and `Bandwidth`
+tracker. The task samples weight at activation and reapplies it after a
+process-wide cgroup migration; a task forked or moved into a group therefore
+does not keep the scheduler-default nice value.
+
+`cpu.max` runtime is charged by `run_queue::bandwidth` on scheduler account
+points. Trackers and weak member references are registered lazily; an atomic
+live count skips the registry lock entirely when no task is under a bandwidth
+limit. A tick first polls an expired period, then charges the new period, so a
+window close is not consumed by the period rollover. When a window is open,
+every selectable member is parked before the next pick. Destroyed trackers are
+weak and retired by the next poll rather than held forever.
 
 ## Reversible CPU preparation and freezer-aware futures
 

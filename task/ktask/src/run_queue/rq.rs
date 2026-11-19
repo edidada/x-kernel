@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
 use ksched::{Decision, EnqueueKind, Nice, UpdateKind};
-use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
+use kspin::{BaseGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
 use super::get_run_queue;
@@ -33,7 +33,10 @@ use super::stats::{sched_stat_cpu, sched_stat_inc};
 use super::{CurrentRunQueueRef, KRunQueueRef, PREV_TASK, RunQueue, WakeEnqueue};
 use crate::{
     KtaskRef, Scheduler, TaskInner,
-    api::{current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer},
+    api::{
+        current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer,
+        refresh_periodic_tick,
+    },
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
@@ -237,7 +240,13 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 .resched;
             (elapsed, should_preempt)
         };
-        self.apply_runtime_account_side_effects(elapsed, is_idle, should_preempt);
+        let cgroup_throttled =
+            super::bandwidth::account_current(&self.current_task, elapsed, now_ns, is_idle);
+        self.apply_runtime_account_side_effects(
+            elapsed,
+            is_idle,
+            should_preempt || cgroup_throttled,
+        );
     }
 
     fn apply_runtime_account_side_effects(
@@ -474,7 +483,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///
     /// # Caller obligations
     ///
-    /// 1. The caller must hold the wait-queue / waker lock represented by `woke`.
+    /// 1. The caller owns the wake latch (`latch`) and must have consumed it
+    ///    before publishing `Blocked`; the latch is a lock-free atomic, so no
+    ///    wait-queue / waker lock is held across this call.
     /// 2. The current task must be running and must not be idle.
     /// 3. The caller must keep an **extra** [`KtaskRef`] to the current task across
     ///    the context switch. The into_raw current slot, `Scheduler.curr`, and
@@ -483,7 +494,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///    requeue, so that clone keeps the task alive until the wait queue
     ///    takes over. Do not drop the clone thinking the current slot counts
     ///    as the extra ref.
-    /// 4. The wait-queue lock is released inside this function before rescheduling.
+    /// 4. The wake latch is consumed again inside this function before the
+    ///    reschedule, and a wake recorded in that window self-unblocks the task;
+    ///    no wait-queue lock is taken or released here.
     /// 5. `stop` runs after Blocked publication. It must not sleep, allocate,
     ///    panic, or acquire scheduler/wake-latch locks. Its state writers release
     ///    their predicate lock before task wakeup.
@@ -499,7 +512,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     #[track_caller]
     pub(crate) fn blocked_resched(
         &mut self,
-        mut woke: SpinNoIrqGuard<'_, bool>,
+        latch: &crate::park::ParkLatch,
         state: TaskState,
         stop: impl FnOnce() -> bool,
     ) {
@@ -508,10 +521,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         let curr = &self.current_task;
         assert!(curr.is_running());
         assert!(!curr.is_idle());
-        // we must not block current task with preemption disabled.
-        // Current expected preempt count is 2 for `NoPreemptIrqSave` because we also hold
-        // the `woke` SpinNoIrqGuard lock here.
-        assert!(curr.can_preempt(2));
+        // We must not block current task with preemption or IRQs disabled.
+        // Only the caller's `NoPreemptIrqSave` guard is held: the wake latch is
+        // a lock-free atomic and never contributes a preempt count.
+        assert!(curr.can_preempt(1));
         assert!(!curr.rcu_reader.is_reading(), "blocking in RCU read scope");
         // CurrentTask slot + Scheduler.curr + caller clone (e.g. block_on).
         let strong = KtaskRef::strong_count(curr);
@@ -526,15 +539,21 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // can requeue us. Fair schedulers snapshot lag for later enqueue PLACE_LAG.
         let (_, pull_if_empty) = self.inner.leave_and_publish(|s| s.block_current(now_ns));
 
-        // Mark the task as blocked, this has to be done before adding it to the wait queue
-        // while holding the lock of the wait queue.
+        // Mark the task as blocked before publishing it to any wait queue: the
+        // wake latch is consumed again below, so a wake that raced with this
+        // publication self-unblocks instead of being lost.
         debug_assert!(state.is_blocked());
         curr.set_state(state);
         // Pending-signal inspection serializes with the signal-state writer,
         // which releases that lock before signal_task(). Once sleep is visible,
         // either that wake succeeds or this recheck supplies the wake. The
         // existing on_cpu protocol defers enqueue until switch-out completes.
-        if stop() {
+        // A waker that sampled `Running` before this state publication gave up
+        // on enqueueing, but it recorded the wake first; consuming the latch
+        // here turns that wake into a self-unblock instead of losing it. This
+        // replaces holding the latch as a lock across the block, which let a
+        // parker wait for a lock held by a waker waiting for that latch.
+        if stop() || latch.take() {
             // Placement can select a remote idle CPU, so deferred enqueue
             // must retain the reschedule request as well as the wake itself.
             super::select_wake_run_queue::<kspin::NoPreemptIrqSave>(curr).unblock_task_in_state(
@@ -543,8 +562,6 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 true,
             );
         }
-        *woke = false;
-        drop(woke);
 
         // Current task's state has been changed to `Blocked` and added to the wait queue.
         // Note that the state may have been set as `Ready` in `unblock_task()`,
@@ -579,6 +596,8 @@ impl RunQueue {
             nr_home: AtomicUsize::new(0),
             #[cfg(feature = "smp")]
             rt_preempt_rank: AtomicU8::new(0),
+            #[cfg(feature = "smp")]
+            balance: super::fair_balance::BalanceState::new(),
         }
     }
 
@@ -626,6 +645,7 @@ impl RunQueue {
             if publish_rank {
                 self.rt_preempt_rank
                     .store(sched.rt_preempt_rank(), Ordering::Relaxed);
+                self.balance.publish(sched.fair_balance_stats());
             }
         }
         #[cfg(not(feature = "smp"))]
@@ -733,6 +753,12 @@ impl RunQueue {
         kind: EnqueueKind,
         now_ns: u64,
     ) -> Result<Decision, KtaskRef> {
+        // Blocked histories stay on their old queue until wake placement.
+        // Remove them before taking the destination lock, preserving RQ order.
+        #[cfg(feature = "smp")]
+        if matches!(kind, EnqueueKind::Wake { .. }) && task.cpu_id() != self.cpu_id {
+            with_owner_sched(&task, |sched| sched.detach_blocked_pelt(&task, now_ns));
+        }
         let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
         self.with_sched_rank(|s| {
             // Entity lock after the RQ lock. `cpu_id` changes here, still
@@ -934,6 +960,7 @@ impl RunQueue {
             // `refresh_sched_deadline`), so the class view is taken
             // unconditionally.
             let next_rel = rq.with_sched(|s| s.next_event_ns());
+            refresh_periodic_tick(!next.is_idle(), now);
             // Immediate requests must arm pending on the *incoming* task: at
             // this point `current()` is still the outgoing task.
             program_sched_deadline_for(Some(next), now, next_rel);
@@ -947,6 +974,7 @@ impl RunQueue {
             krcu_core::SchedulerObservation::new(&prev_task.rcu_reader, self.cpu_id.as_usize())
         };
         krcu_core::RcuContextIf::note_context_switch(observation);
+
         if prev_task.ptr_eq(&next_task) {
             #[cfg(feature = "sched_stat")]
             sched_stat_inc(&sched_stat_cpu(this_cpu_id()).switch_same);

@@ -1,5 +1,14 @@
 # ksyscall design
 
+## Exec fixture owner preparation
+
+The partial-install observer is prepared through `PartialInstallProbe::new`
+after image validation and before `de_thread()`, in unlocked, reclaim-safe
+sleepable task context. Its KBox allocation error returns before thread-group
+surgery. Attaching the process-update counter later only clones an existing
+Arc; it does not allocate another callback owner. The existing partial-install
+failure, scheduling and migration tests retain their observation point.
+
 ## x86_64 signal return
 
 `sys_rt_sigreturn` owns checked user copies of the 304-byte Linux kernel
@@ -610,6 +619,16 @@ entry; timeout, signal-mask and valid-event masking paths otherwise stay intact.
 Five user-task regressions cover ignored negatives, mixed ready/invalid entries,
 unready/invalid entries, duplicate ready entries and a zero-timeout control.
 
+### Poll array admission
+
+`poll` and `ppoll` share `do_sys_poll`, which admits and loads the descriptor
+array, invokes `do_poll`, and copies results back. The unsigned 32-bit count is
+checked against the process's current `RLIMIT_NOFILE` before allocation
+or user-array access; excess returns `EINVAL`. Zero count accepts a NULL array
+without allocating. `ppoll` reads the optional timeout and signal mask before
+entering this common admission, matching Linux's frontend order. No new limit
+or descriptor-accounting state is introduced.
+
 ### Epoll millisecond timeout normalization
 
 `sys_epoll_pwait` maps every negative millisecond timeout to an unlimited wait,
@@ -724,9 +743,12 @@ in BOOTTIME; absolute waits do not write remaining time.
 
 ### Typed clock-ID boundary
 
-`time/clock_id.rs` parses signed ABI clock IDs into the shared `ktime_types::ClockId` once for queries,
-wall-clock setting, clock sleeps and timerfd creation. Unsupported values,
-including negative FD-encoded clocks, remain rejected. Each operation restricts
+`time/clock_id.rs` parses signed ABI clock IDs into the shared `ktime_types::ClockId` for queries,
+wall-clock setting, clock sleeps and timerfd creation. Queries and POSIX timer
+creation also decode the Linux process scheduler CPU clock for the current
+process; queries accept the calling thread's ID as a process-clock alias.
+Other-process CPU clocks, other encoded CPU clock kinds and FD-encoded clocks
+remain unsupported. Each operation restricts
 the parsed enum to its existing supported set; MONOTONIC_RAW sleep still returns
 OperationNotSupported. Raw signed values remain available for diagnostics only.
 Timerfd creation maps the accepted enum to the backend's `TimerFdClock`, which

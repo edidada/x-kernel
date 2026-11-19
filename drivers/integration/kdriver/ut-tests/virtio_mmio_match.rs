@@ -86,6 +86,7 @@ fn raw_ids_classify_before_any_transport_is_built() {
 
 #[def_test(serial)]
 fn platform_driver_matches_a_transportless_mmio_descriptor() {
+    let _guard = super::virtio_mmio_support::MMIO_FIXTURE_LOCK.lock();
     let (_bus_type, bus) = kdevice::reset_and_setup_platform_bus_for_tests("virtio-mmio-match-bus");
     let desc = mmio_desc(bus.id());
     assert_eq!(desc.transport(), None);
@@ -108,6 +109,7 @@ fn platform_driver_matches_a_transportless_mmio_descriptor() {
 #[cfg(all(feature = "virtio-rng", feature = "virtio-socket"))]
 #[def_test(serial)]
 fn wrong_candidate_reads_only_then_the_matching_candidate_activates() -> unittest::TestResult {
+    let _guard = super::virtio_mmio_support::MMIO_FIXTURE_LOCK.lock();
     run_wrong_candidate_scenario()
 }
 
@@ -150,8 +152,8 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
                 }
                 // Resetting the device registry cleared kclass's one-shot
                 // `Removed` subscription, so the bridge cannot drop the class
-                // runtime here. Remove it explicitly to release the transport
-                // and its range claim.
+                // entry here. Withdraw it explicitly; fixture cleanup waits
+                // for remaining readers to release the transport and claim.
                 kclass::remove_class_device_for_tests(id);
             }
         }
@@ -165,6 +167,7 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
     }
 
     let (_bus_type, bus) = kdevice::reset_and_setup_platform_bus_for_tests("virtio-mmio-chain-bus");
+    kclass::reinstall_event_bridge_for_tests();
 
     // Register the candidate that must be rejected before the one that owns
     // the device, so the round really probes a wrong candidate first.
@@ -222,7 +225,6 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
     let dma_before = super::virtio_mmio_support::DmaSnapshot::capture();
 
     let outcome = probe_device_desc(desc.id()).unwrap();
-    let vsock_after = kclass::vsock_devices();
     let hwrng_after = kclass::hwrng_devices();
     // Hand the published device to the guard before the first assertion.
     let records = kdevice::device_records_snapshot();
@@ -307,6 +309,7 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
     assert_eq!(status_at_open.as_slice(), &[INITIAL_STATUS]);
     assert_eq!(handle.status(), INITIAL_STATUS);
 
+    let vsock_after = kclass::vsock_devices();
     assert_eq!(vsock_after.len(), vsock_before + 1);
     // The rejected RNG candidate published no class device.
     assert_eq!(hwrng_after.len(), hwrng_before);
@@ -322,18 +325,28 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
 
     // Release the test's own snapshots first, then remove the device and its
     // class entry explicitly. The registry reset cleared kclass's one-shot
-    // `Removed` subscription, so `Cleanup` drops the class runtime itself.
+    // `Removed` subscription, so `Cleanup` withdraws the class entry itself.
     drop(vsock_after);
     drop(hwrng_after);
     drop(records);
     cleanup.remove();
     assert_eq!(kclass::vsock_devices().len(), vsock_before);
     assert_eq!(kclass::hwrng_devices().len(), hwrng_before);
-    assert!(kdevice::device_records_snapshot().is_empty());
+    // Unbind keeps the stable device object and requeues its descriptor.
+    let records_after_unbind = kdevice::device_records_snapshot();
+    assert_eq!(records_after_unbind.len(), 1);
+    assert_eq!(records_after_unbind[0].id, device_id);
+    assert_eq!(
+        records_after_unbind[0].state,
+        kdevice::DeviceState::Discovered
+    );
+    assert!(records_after_unbind[0].driver_name.is_none());
+    assert!(kdevice::find_device(device_id).is_some());
     assert!(right.bound_devices_snapshot().is_empty());
 
     // The device-owner teardown released every mapping through the real HAL:
     // each share has one unshare and each ring allocation one deallocation.
+    handle.wait_released();
     let hal_after_remove = super::virtio_mmio_support::counts();
     assert_eq!(hal_after_remove.unshare_calls, hal_after_remove.share_calls);
     assert_eq!(hal_after_remove.unshare_bytes, hal_after_remove.share_bytes);
@@ -390,6 +403,7 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
 
 #[def_test(serial)]
 fn pci_driver_still_matches_by_transport_type_only() {
+    let _guard = super::virtio_mmio_support::MMIO_FIXTURE_LOCK.lock();
     let (_bus_type, bus) = kdevice::reset_and_setup_platform_bus_for_tests("virtio-pci-match-bus");
 
     let driver = make_virtio_driver(

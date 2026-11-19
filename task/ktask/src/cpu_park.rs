@@ -56,14 +56,14 @@ fn park_remote(argument: *mut ()) {
     if state.is_reset_aware {
         // SAFETY: acquire_for_system_sleep requires the platform transaction;
         // our pinned state and callback stack survive until joined completion.
-        unsafe { khal::power::SystemSleepIf::park_cpu(acknowledge_and_wait, argument) };
+        unsafe { khal::power::SystemSleepIf::park_cpu(reset_wait, argument) };
     } else {
-        acknowledge_and_wait(argument);
+        acknowledge_and_wait(state);
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
         debug_assert!(!state.is_reset_aware);
-        acknowledge_and_wait(argument);
+        acknowledge_and_wait(state);
     }
     // Reset-aware entry returns after CPU context/controller restoration, before
     // shared time or device recovery necessarily completes on the coordinator.
@@ -77,10 +77,13 @@ fn park_remote(argument: *mut ()) {
     assert!(events.resume().is_ok());
 }
 
-extern "C" fn acknowledge_and_wait(argument: *mut ()) {
-    // SAFETY: the participant's boxed state outlives callback/CPU restoration;
-    // its owner reclaims it only after the stopper's completion publication.
-    let state = unsafe { &*argument.cast::<ParkState>() };
+#[cfg(target_arch = "x86_64")]
+extern "C" fn reset_wait(argument: *mut ()) {
+    // SAFETY: park_cpu invokes this callback with its original pinned ParkState.
+    acknowledge_and_wait(unsafe { &*argument.cast::<ParkState>() });
+}
+
+fn acknowledge_and_wait(state: &ParkState) {
     state.acknowledged.store(1, Ordering::Release);
     while !state.release.load(Ordering::Acquire) {
         core::hint::spin_loop();

@@ -54,6 +54,7 @@ The node registry is protected by a sleepable mutex. All hierarchy transactions 
 | T-06 | Deletion/same-name re-creation makes an old fd operate on a new node | High | Lookup rebuilds the inode or rmdir re-looks up by name | Stable registry, locked victim identity; operations on the old node return `ENODEV` |
 | T-07 | A command is concatenated by offset or split into multiple mutations | Medium | Reusing seekable merge or the default write_iter chunking | `CommandFile` fully copies a single request of at most 4096 bytes and ignores the offset |
 | T-08 | `pids.max` conflicts with the unlimited sentinel | Medium | Accepting a `usize` outside the PID domain | Accept only `<= 4*1024*1024` or the text `max` |
+| T-09 | Privilege escalation into a cgroup via clone3 using an inherited fd | High | Authorizing with the fd opener's credentials, or checking only the destination | `cgroup_clone_target` uses the caller's **current** credentials to require `MAY_WRITE` on both the target's and the common ancestor's `cgroup.procs`, with both endpoints under the mount view root; out-of-view returns `ENOENT`, missing write permission `EACCES`, and a removed target `ENODEV` |
 
 ## Failure Mode and Effects Analysis (FMEA)
 
@@ -78,7 +79,7 @@ PID namespace translation is not yet implemented, so namespace isolation must no
 ## Known Limitations
 
 - Non-zero `cgroup.procs` IDs are still resolved in the root PID namespace.
-- Only the `pids` controller exists.
+- Implemented controller surfaces are `pids`, `cpuset`, `cpu`, and `memory`; `io` is not implemented.
 - User namespace ID mapping, capabilities and LSM are not fully wired in; delegation currently relies on the inode
   owner/mode, the mount view and VFS DAC.
 
@@ -89,3 +90,13 @@ PID namespace translation is not yet implemented, so namespace isolation must no
 - Does it avoid directly accessing the scheduler, the procfs registry or credential internals?
 - Does task display continue to verify the stable identity?
 - Do the normal mount and the boot mount each maintain the current/initial view boundary?
+
+
+## Controller files
+
+`memory.*` and `cpu.*` writes are untrusted control input. Values are parsed
+as bounded integers; invalid domains are rejected before touching controller
+state. Memory accounting ids are kernel-owned, never read from userspace.
+`cgroup.procs` migration authorizes the source and common ancestor file
+credentials before membership changes; a post-migration affinity failure is
+reported without claiming the migration was rolled back.

@@ -4,6 +4,7 @@
 
 use alloc::sync::Arc;
 
+use kbandwidth::Bandwidth;
 use kcpu_id_map::LogicalCpuId;
 use ktask::{TaskInner, UserTaskRuntime};
 
@@ -41,20 +42,54 @@ impl UserTaskRuntime for Thread {
         Thread::identity_token(self)
     }
 
-    fn on_enter(&self) {
-        // `activate_cpu_time` ignores a thread whose exit sample is already
-        // published. `is_exiting` is set earlier and must not skip the interval.
-        self.activate_cpu_time();
+    fn cpu_bandwidth(&self) -> Option<Arc<Bandwidth>> {
+        self.cgroup()
+            .and_then(|cgroup| cgroup.effective_cpu_bandwidth())
     }
 
-    fn on_leave(&self) {
-        self.deactivate_cpu_time();
+    fn cpu_weight(&self) -> u32 {
+        self.cgroup()
+            .map_or(100, |cgroup| cgroup.effective_cpu_weight())
     }
 
-    fn on_cpu_time_tick(&self, now_ns: u64) {
-        self.settle_cpu_time_at(ktime_types::MonotonicInstant::from_span_since_origin(
-            ktime_types::TimeSpan::from_nanos(now_ns),
-        ));
+    fn cgroup_cpus(&self) -> Option<ktask::KCpuMask> {
+        kcgroup::refresh_root_cpuset_universe();
+        let mut mask = ktask::KCpuMask::new();
+        match self.cgroup() {
+            Some(cgroup) => {
+                let cpus = cgroup.cpuset_effective_cpus().ok()?;
+                let count = cpus.iter().count();
+                // A root cgroup created before secondary CPUs were discovered
+                // may still expose only the boot CPU. Do not pin new tasks to
+                // that stale root universe; child cgroups keep their explicit
+                // narrow mask.
+                if cgroup.parent().is_none() && count == 1 && kcpu_id_map::nr_cpus() > 1 {
+                    for cpu in 0..kcpu_id_map::nr_cpus() {
+                        mask.set(cpu, true);
+                    }
+                } else {
+                    for cpu in cpus.iter() {
+                        mask.set(cpu, true);
+                    }
+                }
+            }
+            None => {
+                // A task without explicit cgroup membership is in the root
+                // cgroup. It must not inherit the boot CPU's narrow affinity.
+                for cpu in 0..kcpu_id_map::nr_cpus() {
+                    mask.set(cpu, true);
+                }
+            }
+        }
+        Some(mask)
+    }
+
+    fn on_periodic_tick(&self, user_tick: bool, tick_ns: u64) {
+        // The owning CPU charges one tick to the interrupted context's raw
+        // counter, then requests coalesced CPU-timer work for the next user
+        // return. Switch boundaries do not settle time.
+        self.account_tick(user_tick, tick_ns);
+        self.request_cpu_timer_work();
     }
 
     fn set_user_mm_resident_cpu(&self, cpu_id: LogicalCpuId) {

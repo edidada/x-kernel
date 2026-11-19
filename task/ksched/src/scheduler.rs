@@ -20,6 +20,7 @@ use crate::{
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
     owner::SharedOwner,
+    pelt::{LoadState, PeltAvg},
     policy::{RtPrio, SchedAttr, SchedClass, SchedError},
 };
 
@@ -76,6 +77,23 @@ pub struct Scheduler<T, Owner: SharedOwner<SchedTask<T>> = Arc<SchedTask<T>>> {
     classes: ClassSet<T, Owner>,
 }
 
+/// Fair history and present occupancy under the owning run-queue lock.
+#[derive(Clone, Copy, Debug)]
+pub struct FairBalanceStats {
+    /// Queue averages, including decaying blocked history.
+    pub pelt: PeltAvg,
+    /// Queued Fair entities plus the off-tree Fair runner.
+    ///
+    /// Cgroup-parked waiters are included; migration must filter them.
+    pub nr_running: usize,
+    /// Fair waiters on the ready tree, including cgroup-parked entities.
+    pub nr_queued: usize,
+    /// Whether the entire CPU is idle, with no waiter of any class.
+    ///
+    /// An empty Fair queue on a CPU running RT/Deadline is not an idle CPU.
+    pub is_idle: bool,
+}
+
 impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// Build an empty scheduler whose Idle fallback is `idle`.
     ///
@@ -92,7 +110,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
                 stop: StopClass::new(),
                 deadline: DeadlineClass::new(),
                 rt: RtClass::new(),
-                fair: FairClass::new(),
+                fair: FairClass::new(now_ns),
                 idle: IdleClass::new(idle),
             },
         }
@@ -119,6 +137,11 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// `RqClock::advance`. Class `advance` and a later `account` /
     /// `pick_next` must not see a different `now_ns`/`last_ns`.
     fn advance_classes(&mut self, clock: &RqClock, tok: RqLocked) {
+        self.classes.fair.update_pelt(
+            clock.now_ns(),
+            Self::curr_for(&self.curr, SchedClass::Fair),
+            tok,
+        );
         for class in self.classes.iter_by_rank_mut() {
             class.advance(clock, tok);
         }
@@ -259,6 +282,69 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
         self.curr.as_ref()
     }
 
+    /// Fair queue PELT at the last clock update, including blocked history.
+    ///
+    /// Read under this RQ's lock. `update(now_ns, UpdateKind::Account)` refreshes
+    /// the queue first when a current sample is needed. No CPU/frequency/IRQ
+    /// normalization is applied, and higher classes do not hide this history.
+    pub fn fair_pelt(&self) -> PeltAvg {
+        self.classes.fair.pelt_avg()
+    }
+
+    /// Read Fair balance statistics at the last queue clock sample.
+    ///
+    /// Requires the owning RQ lock. Use `update(Account)` first for fresh data.
+    /// This does not scan tasks or account for CPU/frequency differences.
+    pub fn fair_balance_stats(&self) -> FairBalanceStats {
+        let curr = Self::curr_for(&self.curr, SchedClass::Fair);
+        FairBalanceStats {
+            pelt: self.fair_pelt(),
+            nr_running: self.classes.fair.nr_queued() + usize::from(curr.is_some()),
+            nr_queued: self.classes.fair.nr_queued(),
+            is_idle: self.nr_queued() == 0
+                && self
+                    .curr
+                    .as_ref()
+                    .is_none_or(|task| task.sched_class() == SchedClass::Idle),
+        }
+    }
+
+    /// Refresh a task's lazy Fair history under its owning RQ lock.
+    ///
+    /// Does not advance the RQ clock. Sleeping and waiting tasks are updated
+    /// to the last queue sample. Never call under a different RQ's lock.
+    pub fn task_pelt(&self, task: &SchedTask<T>) -> PeltAvg {
+        let tok = Self::token();
+        let mut load = task.fair().load.get(tok);
+        let is_curr = self
+            .curr
+            .as_deref()
+            .is_some_and(|curr| core::ptr::eq(curr, task));
+        load.update(
+            self.clock.now_ns(),
+            u64::from(task.fair().weight.get(tok)),
+            is_curr,
+        );
+        task.fair().load.set(load, tok);
+        load.pelt.avg
+    }
+
+    /// Remove a sleeping task's retained Fair history before moving its owner.
+    ///
+    /// Caller holds only the old owner RQ lock. Ready migration already detaches
+    /// through `dequeue`/`steal`; this handles wake placement onto another CPU.
+    /// The destination must enqueue only after this method returns and the
+    /// source lock is released. Runnable tasks are left untouched.
+    pub fn detach_blocked_pelt(&mut self, task: &SchedTask<T>, now_ns: u64) {
+        let tok = Self::token();
+        let _ = self.charge(now_ns, tok);
+        if task.fair().load.get(tok).state == LoadState::Blocked {
+            self.classes
+                .fair
+                .detach_pelt(task, self.clock.now_ns(), tok);
+        }
+    }
+
     /// RT placement rank of this run queue, read under its scheduler lock.
     ///
     /// Call only while that lock is held. `token()` then reads the runner's
@@ -369,6 +455,41 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
         }
         let fair_curr = Self::curr_for(&self.curr, SchedClass::Fair);
         self.classes.fair.steal(want, fair_curr, &clock, tok)
+    }
+
+    /// Refresh this queue and remove at most one Fair waiter for balancing.
+    ///
+    /// Requires the source RQ lock, with no destination RQ lock held. Higher
+    /// classes do not prevent removal of a Fair waiter, including a sole Fair
+    /// waiter behind an RT runner. At most `scan_limit` entries are inspected;
+    /// a saved key resumes beyond rejected candidates and eventually wraps.
+    /// Parked entities are skipped. `want` receives fresh entity and source
+    /// history under this lock; it must not sleep, allocate, or reenter the
+    /// scheduler. The caller must reject tasks still executing on a CPU and
+    /// validate destination affinity. A returned owner is detached, with lag
+    /// saved and PELT removed; publish it with `EnqueueKind::MigrateIn` only
+    /// after releasing this lock.
+    pub fn steal_fair(
+        &mut self,
+        scan_limit: usize,
+        want: &mut dyn FnMut(&SchedTask<T>, PeltAvg, FairBalanceStats) -> bool,
+        now_ns: u64,
+    ) -> Option<Owner> {
+        let tok = Self::token();
+        let _ = self.charge(now_ns, tok);
+        let source = self.fair_balance_stats();
+        if source.nr_queued == 0 {
+            return None;
+        }
+        let clock = self.clock;
+        let curr = Self::curr_for(&self.curr, SchedClass::Fair);
+        self.classes.fair.steal_for_balance(
+            scan_limit,
+            &mut |task, pelt| want(task, pelt, source),
+            curr,
+            &clock,
+            tok,
+        )
     }
 
     /// Pick the next runner. Idle always supplies a task.

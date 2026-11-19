@@ -114,7 +114,7 @@ fn journal_abort_marks_superblock_read_only_and_rejects_buffered_writes() {
         Err(VfsError::from(kerrno::LinuxError::EROFS).canonicalize())
     );
     assert_eq!(
-        with_state(&super_block, |state| state.reserve_delalloc_range(
+        with_state(&super_block, |state| state.reserve_delalloc_range_into(
             &inode,
             LogicalBlock::new(0),
             1
@@ -261,7 +261,7 @@ fn close_retains_spaces_while_delalloc_reservations_exist() {
         // Establish a delalloc reservation: the close gate must now keep the
         // space so a future allocation can consume through it.
         inode
-            .reserve_delalloc_range(state, LogicalBlock::new(0), 4)
+            .reserve_delalloc_range_into(state, LogicalBlock::new(0), 4)
             .unwrap();
     });
     assert!(inode.has_delalloc_reservations());
@@ -280,4 +280,87 @@ fn close_retains_spaces_while_delalloc_reservations_exist() {
     with_state(&super_block, |state| {
         assert_eq!(prealloc_twin_count(state), 0)
     });
+}
+
+#[def_test]
+fn cancelled_batch_releases_only_the_reservation_it_newly_created() {
+    let (mut filesystem, _storage) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let private = allocate_checkpointed_regular_inode(&mut filesystem);
+    install_test_internal_journal(&mut filesystem, 8104);
+    let (super_block, file) = writable_mount(filesystem, private);
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let block_size = super_block.block_size();
+
+    // An earlier write already owns the reservation on the run's second block.
+    with_state(&super_block, |state| {
+        inode
+            .reserve_delalloc_range_into(state, LogicalBlock::new(1), 1)
+            .unwrap();
+    });
+
+    // The run covers both blocks but can newly reserve only the first one.
+    let mapping = file.mapping();
+    let batched: &dyn kvfs::BatchedWriteOperations = &EXT4_ADDRESS_SPACE_OPERATIONS;
+    let reservation = batched
+        .batch_write_begin(mapping, kvfs::WriteBeginRequest::new(0, (2 * block_size) as usize))
+        .unwrap();
+    assert_eq!(reservation.ranges(), &[(0, block_size)]);
+
+    // Cancelling the whole run must keep the earlier owner's block reserved.
+    batched
+        .release_write_run_tail(
+            mapping,
+            kvfs::BatchWriteRunTail::new(0, (2 * block_size) as usize, 0),
+            &reservation,
+        )
+        .unwrap();
+    assert_eq!(
+        inode
+            .reserved_delalloc_in_range(LogicalBlock::new(1), 1)
+            .unwrap(),
+        1,
+        "cancellation released a reservation owned by an earlier write"
+    );
+    assert_eq!(inode.reserved_data_blocks(), 1);
+}
+
+#[def_test]
+fn cancelled_folio_write_keeps_earlier_reservations_and_visible_length() {
+    let (mut filesystem, _storage) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let private = allocate_checkpointed_regular_inode(&mut filesystem);
+    install_test_internal_journal(&mut filesystem, 8106);
+    let (super_block, file) = writable_mount(filesystem, private);
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let block_size = super_block.block_size();
+    with_state(&super_block, |state| {
+        inode
+            .reserve_delalloc_range_into(state, LogicalBlock::new(1), 1)
+            .unwrap();
+    });
+
+    let mapping = file.mapping();
+    let _data_guard = file.inode().lock_data();
+    let visible_len = file.inode().size();
+    let reservation = EXT4_ADDRESS_SPACE_OPERATIONS
+        .write_begin(mapping, kvfs::WriteBeginRequest::new(0, block_size as usize))
+        .unwrap();
+    assert_eq!(reservation.ranges(), &[(0, block_size)]);
+    assert_eq!(
+        EXT4_ADDRESS_SPACE_OPERATIONS.write_end(
+            mapping,
+            kvfs::WriteEndRequest::new(kvfs::WriteBeginRequest::new(0, block_size as usize), 0),
+            &reservation,
+        ),
+        Ok(0)
+    );
+    assert_eq!(file.inode().size(), visible_len);
+    assert_eq!(inode.reserved_data_blocks(), 1);
+    assert_eq!(
+        inode
+            .reserved_delalloc_in_range(LogicalBlock::new(1), 1)
+            .unwrap(),
+        1
+    );
 }

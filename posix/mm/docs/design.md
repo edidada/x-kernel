@@ -1,10 +1,24 @@
 # posix-mm — Design Document
 
+## System commitment admission
+
+`RLIMIT_AS` remains the per-process virtual footprint limit. Independently,
+`memspace` enforces Linux's default overcommit heuristic for new private writable
+commitments, writable protection upgrades and remap growth. A single new
+commitment larger than managed RAM is denied even with unlimited `RLIMIT_AS`.
+The heuristic does not cap aggregate commitments or eagerly allocate backing.
+Before destructive `MAP_FIXED` replacement, the syscall preflights this admission
+using the requested private/write/noreserve policy. VMA installation performs
+the owned charge; mapping creation, fork, changes and destruction are accounted
+inside `memspace`. `MAP_NORESERVE` is preserved on file/anonymous mappings and
+fresh `MREMAP_DONTUNMAP` source mappings. Shared objects keep their own quotas.
+
 ## Positioning
 
 `posix-mm` implements the POSIX/Linux-style memory-management syscall entry points, including
-`mmap`, `mremap`, `brk`, `madvise`, `msync`, `mincore`, and
-`memfd_create`. It sits between the userspace ABI and the kernel `mm`/`fs` subsystems, and is responsible only for
+`mmap`, `mremap`, `brk`, `madvise`, `msync`, `mincore`, `memfd_create`, and the
+`mlockall`/`munlockall` pair (validated no-ops: the kernel has no swap, so every
+page is already resident). It sits between the userspace ABI and the kernel `mm`/`fs` subsystems, and is responsible only for
 argument validation, typed request construction, object assembly, and error-code translation.
 
 `posix-mm` does not own the VMA tree, page tables, the page cache, file objects, or anonymous objects.
@@ -14,6 +28,7 @@ This state is maintained by `mm/memspace`, `mm/filemap`, `pagecache`, `memfs`,
 ## Scope
 
 - `src/brk.rs`
+- `src/limits.rs`: address-space limit admission for mapping growth.
 - `src/mmap.rs`
 - `src/memfd.rs`
 - `src/mincore.rs`
@@ -29,8 +44,9 @@ All raw syscall arguments are first frozen into a typed request inside `posix-mm
 sys_mmap(raw args)
   -> MmapRequest::from_raw()
   -> MmapRequest { flags, map_type, page_size, permissions, offset }
-  -> MmSpace::mmap_resolve_addr()
-  -> filemap::mmap_*_file() + MmSpace::map_runtime_vma() or MmSpace::map_with_max_flags()
+  -> MmapRequest::resolve_address_with_limit() (RLIMIT_AS and commitment admission)
+  -> file-backed: filemap::mmap_*_file(); anonymous: construct VmArea + VmRuntimeRef
+  -> MmSpace::map_runtime_vma()
 
 sys_mprotect(raw args)
   -> MprotectRequest::from_raw()
@@ -80,7 +96,11 @@ This boundary carries the Linux-visible ABI policy:
 - `munmap(addr, 0)` returns `InvalidInput`;
 - `MprotectRequest` rejects `PROT_GROWSDOWN` / `PROT_GROWSUP`;
 - `MsyncRequest` rejects unknown flags and the conflicting `MS_ASYNC | MS_SYNC` combination, and converts the
-  raw `MS_*` bitmask into `memspace::MsyncPolicy`.
+  raw `MS_*` bitmask into `memspace::MsyncPolicy`;
+- `mlockall` validates its `MCL_*` word before accepting the request: an empty word, a bit outside
+  `MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT`, and the bare `MCL_ONFAULT` are `InvalidInput`, matching
+  `SYSCALL_DEFINE1(mlockall)`. The call still does no work because the kernel has no swap, so every page is
+  already resident; only the input contract is enforced.
 
 ### file-backed mapping handoff
 
@@ -281,3 +301,19 @@ callback rather than new-map admission. Fixed replacement removes the target,
 trims a shrinking source, then resolves the remaining source and prepares its
 move. These removals remain effective if a later preparation fails. The syscall
 has no mapping-admission retry around this destructive sequence.
+
+## Address-space resource admission
+
+`mmap`, growing `brk`, and growing or `MREMAP_DONTUNMAP` remaps snapshot the
+current process's `RLIMIT_AS` and check the projected VMA footprint under the
+same MM lock as the mapping mutation. `MAP_FIXED` credits mapped destination
+bytes before replacing them. A growing `mremap` checks its growth before fixed
+destination removal; fixed `MREMAP_DONTUNMAP` removes the destination before
+checking the retained source's additional charge, as in Linux `mremap_to`.
+Shrinking mappings remains available after a limit is lowered.
+Denied `mmap` and `mremap` return `ENOMEM`; denied `brk` returns the unchanged
+break, matching the Linux syscall ABI.
+
+The existing VMA tree supplies accounting for finite limits. Unlimited limits
+bypass the accounting walk. The syscall layer adds no counters or policy fields
+to the MM object and does not enforce an address-space limit at page-fault time.

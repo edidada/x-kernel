@@ -1,5 +1,14 @@
 # kexec design
 
+The unittest-only `PartialInstallProbe::new` prepares a KBox callback owner in
+sleepable, reclaim-safe task context before destructive exec operations. The
+syscall fixture prepares it before `de_thread()`; allocation failure returns
+`NoMemory` without invoking the observer or starting thread-group surgery.
+Installation invokes the already prepared owner under the target MM lock,
+without allocating another callback owner. Dropping an unused probe releases
+its captures without invoking them, covered by a loader unit test. This is not
+global OOM injection or a guarantee about nested allocations.
+
 ## Purpose and background
 
 `kexec` loads user executables and prepares their address-space layout. It is an
@@ -110,7 +119,9 @@ an already resolved object.
 
 `ElfCacheEntry::load_file` reads up to 4096 bytes and then reads the complete,
 checked program-header range when necessary. Short reads, file-bound violations,
-and range conversion failures reject the image. `ouroboros`
+and range conversion failures reject the image. The ELF parser returns typed
+`ElfError` variants; the loader logs their preserved diagnostic text and maps
+parser failures to `KError::InvalidExecutable`. `ouroboros`
 encapsulates a self-referential header view over owned data. Under `tee_ta_sign`,
 TA verification is requested before accepting an entry; failure maps to
 `PermissionDenied`. Entries are keyed by `Path::ptr_eq`, not file content version.
@@ -159,9 +170,10 @@ credential snapshot's `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, and explicit
 pool and `AT_EXECFN` backed by the resolved request's display path, including
 when `argv` is empty. Script redirects preserve the original script display
 path for `AT_EXECFN` while using the interpreter path for loading. `AT_HWCAP`
-and `AT_PLATFORM` are not yet supplied, so dynamic runtimes that require either
-entry remain outside the supported ABI. The interpreter entry is selected when
-present.
+carries the boot CPU's userspace-visible capability word (`khal::cpu_hwcap()`),
+encoded in the architecture's own Linux bit layout; `AT_PLATFORM` is not yet
+supplied, so dynamic runtimes that require that entry remain outside the
+supported ABI. The interpreter entry is selected when present.
 
 Preparation builds argc/argv/env/aux data with `app_stack_region` and checks
 its configured stack capacity. The ready value owns these encoded bytes rather
@@ -235,7 +247,7 @@ are prepared without a target MM; fallible installation remains separate. The
 exec syscall replaces only its own process binding, preserving independent
 CLONE_VM peers' old image, and distinguishes errors at the exchange boundary.
 Known constraints include stale cache contents, fixed
-rather than randomized load hints, missing `AT_HWCAP`/`AT_PLATFORM`, and no
+rather than randomized load hints, missing `AT_PLATFORM`, and no
 complete exec credential/namespace transaction within this crate. The init
 process bootstrap discards the backing executable because the low-level
 `build_process_thread` path does not install `ExecMetadata`; `/proc/1/exe` is
@@ -256,3 +268,8 @@ adding a scheduler dependency or a global handshake to the loader.
 File-private BSS page prefixes are capped at the actual executable size,
 including when the BSS offset lies beyond EOF within the same page. The
 remaining bytes are zero-filled rather than copied from the file cache.
+
+The initial auxiliary vector includes `AT_CLKTCK = posix_types::USER_HZ`, the
+same fixed userspace tick rate used by `times(2)`. It is independent of scheduler
+frequency, matching Linux `fs/binfmt_elf.c`'s `CLOCKS_PER_SEC` entry. Dynamic
+libc obtains its profiling period from this ABI value.

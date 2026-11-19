@@ -7,13 +7,14 @@
 use core::{
     cell::UnsafeCell,
     ops::Deref,
-    sync::atomic::{AtomicU8, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 
 use intrusive_collections::RBTreeAtomicLink;
 
 use crate::{
     fair_tree::FairLink,
+    pelt::EntityLoad,
     policy::{Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy},
     ready_list::{ReadyItem, ReadyLinks},
 };
@@ -88,7 +89,7 @@ impl<V: Copy> RqCell<V> {
 /// [`SchedClass::as_u8`] as a seat byte; convert with
 /// [`QueueSeat::from_sched_class`].
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QueueSeat {
     Detached = 0,
     Stop     = 1,
@@ -139,6 +140,7 @@ const _: () = {
 /// writes it. Links are prepared here so enqueue does not allocate an
 /// index node.
 pub(crate) struct FairEntity {
+    pub(crate) load: RqCell<EntityLoad>,
     pub(crate) vruntime: RqCell<i64>,
     pub(crate) deadline: RqCell<i64>,
     pub(crate) vlag: RqCell<i64>,
@@ -224,6 +226,7 @@ impl DeadlineEntity {
 impl FairEntity {
     const fn new(request_ns: u64) -> Self {
         Self {
+            load: RqCell::new(EntityLoad::new()),
             vruntime: RqCell::new(0),
             deadline: RqCell::new(0),
             vlag: RqCell::new(0),
@@ -237,7 +240,7 @@ impl FairEntity {
 }
 
 /// Kernel-only class used at task construction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KernelClass {
     /// Per-CPU stop / migration helper. `ktask` activates one `migration/%u`.
     Stop,
@@ -262,6 +265,11 @@ pub struct SchedTask<T> {
     rt_prio: AtomicU8,
     /// Complete donation level for PI readers that cannot take an RQ lock.
     pi_donor_prio: AtomicU8,
+    /// Cgroup `cpu.max` throttle: a parked entity stays linked in its ready
+    /// queue but is ineligible for selection until the period rolls over.
+    /// This mirrors Linux's cgroup bandwidth throttle, where tasks leave the
+    /// run queue into a throttle list.
+    cgroup_parked: AtomicBool,
     // Written only by the owning RQ's charge path; atomic for remote readers.
     sum_exec_runtime_ns: AtomicU64,
     seat: RqCell<QueueSeat>,
@@ -295,6 +303,7 @@ impl<T> SchedTask<T> {
             class: AtomicU8::new(class.as_u8()),
             rt_prio: AtomicU8::new(attr.rt_priority.get()),
             pi_donor_prio: AtomicU8::new(0),
+            cgroup_parked: AtomicBool::new(false),
             sum_exec_runtime_ns: AtomicU64::new(0),
             seat: RqCell::new(QueueSeat::Detached),
             attr: RqCell::new(attr),
@@ -580,6 +589,23 @@ impl<T> SchedTask<T> {
     /// Absolute instant the next period starts.
     pub(crate) fn dl_period_start_for_test(&self) -> u64 {
         self.deadline.period_start_ns.get(Self::test_token())
+    }
+}
+
+impl<T> SchedTask<T> {
+    /// Reports whether cgroup `cpu.max` has parked this entity.
+    #[inline]
+    pub fn is_cgroup_parked(&self) -> bool {
+        self.cgroup_parked.load(Ordering::Acquire)
+    }
+
+    /// Parks or resumes the entity for cgroup `cpu.max` throttling.
+    ///
+    /// Parking only changes selection eligibility; the entity keeps its
+    /// position in the ready tree so resuming does not disturb ordering.
+    #[inline]
+    pub fn set_cgroup_parked(&self, parked: bool) {
+        self.cgroup_parked.store(parked, Ordering::Release);
     }
 }
 

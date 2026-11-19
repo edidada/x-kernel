@@ -1,5 +1,9 @@
 # kprocess — Design
 
+Unit-test wake counters and exit observers use fallible `KBox` allocation in
+sleepable fixture setup. `KBox::leak` retains their existing static lifetime:
+raw wakers borrow the observers and never reclaim them.
+
 ## Fallible Ordinary Signal Admission
 
 Process/thread signal helpers propagate ksignal WouldBlock before interrupting
@@ -114,7 +118,8 @@ The analysis covers the entire crate, including feature-gated code and tests.
 | `src/thread/mod.rs`, `src/thread/core.rs`, `src/thread/current.rs`, `src/thread/cpu_time.rs`, `src/thread/restart.rs`, `src/thread/task_ext.rs` | Task-bound thread state, credentials, restart-block slot, current-context access and task-runtime hooks. |
 | `src/publication.rs`, `src/process_domain.rs`, `src/lookup.rs`, `src/lifecycle.rs` | Directory slots, relation transaction lock, lookup and exit events/CPU totals. |
 | `src/process_group.rs`, `src/session.rs` | Group member slots, session groups and controlling terminal. |
-| `src/capability.rs`, `src/cgroup.rs`, `src/credentials.rs`, `src/job_control.rs`, `src/pidfd.rs`, `src/process_exit.rs`, `src/process_signals.rs`, `src/procfs.rs`, `src/ptrace.rs`, `src/resource_limits.rs`, `src/scheduler.rs`, `src/stat.rs`, `src/system_view.rs`, `src/timer_delivery.rs`, `src/wait_reap.rs` | Domain-specific public queries, updates, callbacks and snapshots. |
+| `src/capability.rs`, `src/cgroup.rs`, `src/credentials.rs`, `src/job_control.rs`, `src/process_exit.rs`, `src/process_signals.rs`, `src/procfs.rs`, `src/ptrace.rs`, `src/resource_limits.rs`, `src/scheduler.rs`, `src/stat.rs`, `src/system_view.rs`, `src/timer_delivery.rs`, `src/wait_reap.rs` | Domain-specific public queries, updates, callbacks and snapshots. |
+| `src/pidfd.rs` | Pidfd file identity and lifetime: process-anchored lifecycle/notification, fdinfo `Pid:` resolution, and thread-pidfd identity-token verification (`new_file_for_task`, `fdinfo_pid`). |
 | `ut-tests/lib.rs`, `ut-tests/process_runtime_runtime_state.rs` | Process-domain and captured-MM regression cases; the remaining regression modules also live in `ut-tests/`. |
 
 ```text
@@ -142,6 +147,24 @@ retains init identity; orphan reparenting reserves an init relation slot.
   caller initializer while the task is still private, then publishes it.
   `PublishedUserTask::commit` runs parent-side writeback before activation;
   abort/drop rolls back publication.
+- `ksyscall`'s clone path calls `PidFd::new_file` (process pidfd, reporting the
+  thread-group leader) or `PidFd::new_file_for_task` (thread pidfd for
+  `CLONE_THREAD | CLONE_PIDFD`, reporting the thread's own tid). Both anchor
+  lifecycle, poll readiness and file lookup on the owning `Process`; only the
+  reported fdinfo number differs.
+- `procfs` calls `PidFd::fdinfo_pid(observer)` with the reading task's active
+  PID namespace to render `/proc/<pid>/fdinfo/<fd>`'s `Pid:` line. Resolution
+  is a snapshot: the process identity is reported while a task is attached
+  (a waitable zombie included) and `-1` after reaping, while a thread pidfd
+  reports its root tid only while `lookup::task` still resolves that tid to the
+  same immutable identity token. A thread that exited, moved its number through
+  an exec leader takeover, or lost its tid to reuse therefore reports `-1`
+  instead of a stale or recycled number. Process identities translate through
+  their per-namespace projections (`0` when the observer has none). Thread
+  identities are allocated root-only, so the kernel names a thread by its root
+  tid (`gettid(2)`, the `clone3` return value); that number is reported to a
+  reader in the thread's namespace or an ancestor of it, while a reader below
+  or beside that branch gets `0`, matching `pid_nr_ns`.
 - `Process` runtime capabilities return filesystem/namespace/mm/resource/signal
   references and expose timer/exec/teardown operations. `LiveAddressSpace` owns
   an active mm-user handle; its mapping closure supplies both the locked space
@@ -226,7 +249,10 @@ retains init identity; orphan reparenting reserves an init relation slot.
   caller's effective set, and allows effective `CAP_SYS_PTRACE` to override
   both checks.
 - `timer_delivery` registers `ktimer` expiry and attaches typed dequeue receipts;
-  CPU timers run on current-user-thread return and wall timers on the alarm task.
+  a periodic tick coalesces CPU-timer work on the current thread while its
+  process has armed timers. User return consumes that request and polls the
+  manager; wall timers run on the alarm task. The per-thread pending bit plays
+  the role of Linux `posix_cputimers_work.scheduled`.
   `UserTaskRuntime for Thread` supplies CPU residency, pending-fatal-signal
   queries and AArch64 switch roots to `ktask`; `CurrentThreadSignalIf` adapts
   current-task signal injection.
@@ -263,19 +289,44 @@ not return to the old image. The `stat`
 signal fields are a compatibility view: they expose only the low 31 bits, as
 Linux's obsolete `do_task_stat` fields do.
 
-CPU accounting uses `Inactive`, `Kernel`, and `User` states, following Linux
-generic vtime. The user/kernel boundary only publishes the current mode with one
-relaxed atomic store; it takes no lock and reads no clock, so the syscall fast
-path stays lock-free. Settlement instead happens at the local timer tick, at
-context switch (switch-in starts a fresh interval, switch-out settles it) and on
-demand when sampling. A settlement charges the unsettled interval to the mode
-that is current when it runs, giving the user/kernel split tick-level
-resolution; long kernel work still settles as kernel time because the trap path
-publishes `Kernel` for it. Settlement is a compare-exchange on `last_wall_ns`
-followed by an accumulator update, so concurrent local and remote settlements
-cannot charge the same interval twice. The existing exit flag prevents
-restarting finalized accounting during cleanup. Separate IRQ/steal/guest
-accounting remains outside this model.
+CPU accounting charges raw per-thread user/system counters: the owning CPU's
+periodic tick adds one tick to the counter selected by the interrupted frame's
+privilege. The user/kernel boundary publishes nothing and settles nothing, so
+the syscall fast path stays lock-free; a remote reader loads the committed
+counters without settling another thread. Views that need the split scale the
+raw sample against scheduler runtime through a per-thread and per-group
+monotonic adjustment history, so the published pair sums to the runtime and
+never goes backwards. Separate IRQ/steal/guest accounting remains outside this
+model.
+
+The process CPU clocks sample one group ledger: the scheduler runtime and raw
+user/system counters of published and exiting members plus the group's exited
+totals. The membership lock serializes live-to-exited transfers: the exit path
+accumulates the dead thread's counters and runtime into the group totals in
+the same critical section that retires its membership. A sequence check retries a snapshot if
+membership changes between fixed-size batches. The caller refreshes
+its own scheduler runtime before taking that lock; remote running tasks supply
+their last committed values. An exiting last thread remains in the accounting
+view through process cleanup, despite losing TID visibility, and transfers its
+counters and runtime before process-exit publication. Task references acquired for the
+snapshot are retained until after each batch releases the membership lock;
+the snapshot uses only a fixed-size stack buffer and does not allocate.
+`process_cpu_time` returns the ledger's scheduler runtime;
+`process_cpu_times` adjusts the raw split against it and feeds times,
+getrusage and wait. CPU interval timers instead consume one raw
+`TaskCputime` snapshot per poll, set or get, so every timer in a pass shares
+a single time base and expiry never derives from the adjusted split — the
+same division Linux draws in `posix-cpu-timers`.
+
+The thread CPU clock samples the same scheduler ledger directly. Reading
+advances it: the running delta is committed before the value returns, so the
+caller never observes its own elapsed on-CPU time as missing. The sampler
+takes no thread handle because only the owning run queue may advance a
+ledger; remote tasks contribute committed values only. This is the split
+Linux draws with `CPUCLOCK_SCHED` versus `CPUCLOCK_PROF`/`CPUCLOCK_VIRT`:
+the named CPU clocks read scheduler runtime, while the tick-accounted
+user/system split above, adjusted against that runtime, feeds views that need
+the split.
 
 ## Execution context and calling constraints
 
@@ -295,8 +346,20 @@ introduced under that transaction. Callbacks passed to cgroup authorization,
 scheduler validation, TEE access or mapping access execute while the documented
 owner lock is held and must avoid recursive acquisition/incompatible lock order.
 Timer initialization is once-only and requires timer/signal/task runtime ready.
-CPU accounting depends on monotonic time; task runtime hooks depend on MM CPU
-residency and architecture initialization.
+Raw tick accounting depends on the periodic tick; the adjustment history
+depends on monotonic scheduler runtime. The named
+CPU clocks depend on the scheduler runtime ledger instead:
+`current_thread_cpu_clock` requires an initialized current task and run queue
+(any task, user thread or kernel task), never sleeps, and must be called
+without the local run-queue lock; `Process::process_cpu_time` requires task
+context with neither the run-queue nor the membership lock held; it samples
+in bounded, allocation-free batches and retries on membership changes. A periodic CPU
+timer poll inherits both constraints through its sampling of these clocks.
+`Process::exited_thread_time` acquires the IRQ-safe `thread_membership` lock and
+must not be called while holding it. `Thread::cpu_time_adjusted` requires the
+caller to have refreshed the current task's scheduler-runtime sample before
+reading (remote threads contribute their last committed runtime instead).
+Task runtime hooks depend on MM CPU residency and architecture initialization.
 
 ## State transitions
 
@@ -315,9 +378,9 @@ of an already Published identity leaves it published. Cleanup removes only the
 same slot when it is Vacant/Retired, protecting reused PID/TID bindings. A
 `PublishedUserTask` owns a rollback record until activation consumes it.
 
-Thread accounting uses Inactive/User/Kernel. A mode change only publishes the
-next state; elapsed time is charged to the mode current at the next tick,
-switch, or sample. Thread exit and no-new-privileges
+Thread accounting has no mode state: the periodic tick charges the raw user
+or system counter selected by the interrupted frame, and queries adjust the
+committed split against scheduler runtime. Thread exit and no-new-privileges
 are separately published atomic flags. Group/session changes create or select a
 group and publish group/session identity together; existing-group movement
 requires the same session. The syscall owner checks additional leader/ID rules.

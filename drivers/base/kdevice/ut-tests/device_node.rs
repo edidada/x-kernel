@@ -7,6 +7,13 @@ use unittest::{assert_eq, def_test};
 use super::*;
 
 /// A minimal connector snapshot for a test DRM card.
+fn node_key(id: u64) -> DeviceNodeKey {
+    DeviceNodeKey::new(
+        DeviceId::new(id),
+        PublicationId::allocate().expect("publication id"),
+    )
+}
+
 fn drm_metadata() -> DrmDeviceNodeMetadata {
     DrmDeviceNodeMetadata::new(
         String::from("Virtual-1"),
@@ -40,7 +47,8 @@ fn render_node_derives_from_the_primary_index() {
     // index 0 the assertion could not tell `base + index` from `base`.
     let (_first, ..) = registry
         .register(
-            DeviceId::new(6),
+            node_key(6),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("first"),
             String::from("test"),
@@ -50,7 +58,8 @@ fn render_node_derives_from_the_primary_index() {
         .expect("the first DRM node must fit");
     let (node, ..) = registry
         .register(
-            DeviceId::new(7),
+            node_key(7),
+            None,
             DeviceNodeClass::Drm(drm_metadata()),
             String::from("display"),
             String::from("test"),
@@ -74,7 +83,8 @@ fn render_node_derives_from_the_primary_index() {
 
     let (input, ..) = registry
         .register(
-            DeviceId::new(8),
+            node_key(8),
+            None,
             DeviceNodeClass::Input(InputDeviceNodeMetadata::new(
                 String::from("keyboard"),
                 String::new(),
@@ -103,111 +113,68 @@ fn class_index_is_reused_only_after_release() {
 }
 
 #[def_test]
-fn removal_keeps_the_old_index_reserved_until_callbacks_finish() {
-    let mut registry = DeviceNodeRegistry::new();
-    let (original, ..) = registry
-        .register(
-            DeviceId::new(0),
-            DeviceNodeClass::Drm(drm_metadata()),
-            String::from("original"),
-            String::from("test"),
-            DeviceLocation::PlatformStatic { id: 0 },
-            None,
-        )
-        .expect("original node must fit");
-    assert!(registry.finish_publish(&original).is_none());
-    assert_eq!(original.index(), 0);
-
-    let (removed, ..) = registry
-        .begin_remove(original.core_id())
-        .expect("the original node must be removable");
-    assert!(!removed.is_available());
-    let duplicate = registry.register(
-        original.core_id(),
-        DeviceNodeClass::Drm(drm_metadata()),
-        String::from("duplicate"),
-        String::from("test"),
-        DeviceLocation::PlatformStatic { id: 0 },
-            None,
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: DeferredNodeRetirement is a production Box callback contract"
+)]
+fn publication_scoped_nodes_are_independent() {
+    let device = crate::DeviceObject::new_bound_for_test(
+        DeviceId::new(0x9100),
+        driver_base::DeviceKind::Char,
     );
-    assert_eq!(duplicate.err(), Some(DriverError::ResourceBusy));
-    let (replacement, ..) = registry
-        .register(
-            DeviceId::new(1),
-            DeviceNodeClass::Drm(drm_metadata()),
-            String::from("replacement"),
-            String::from("test"),
-            DeviceLocation::PlatformStatic { id: 1 },
-            None,
-        )
-        .expect("replacement node must fit while the old index is reserved");
-    assert_eq!(replacement.index(), 1);
+    let binding = device.binding_ref().expect("fixture has a binding");
+    let first = PublicationId::allocate().expect("publication id");
+    let second = PublicationId::allocate().expect("publication id");
+    let first_node = register_device_node_for_publication(
+        device.id(),
+        first,
+        &binding,
+        DeviceNodeClass::Drm(drm_metadata()),
+        String::from("first"),
+        String::from("test"),
+        DeviceLocation::PlatformStatic { id: 0x9100 },
+        None,
+    )
+    .expect("first node");
+    let second_node = register_device_node_for_publication(
+        device.id(),
+        second,
+        &binding,
+        DeviceNodeClass::Drm(drm_metadata()),
+        String::from("second"),
+        String::from("test"),
+        DeviceLocation::PlatformStatic { id: 0x9100 },
+        None,
+    )
+    .expect("second node");
 
-    registry.finish_remove(&removed);
-    let (later, ..) = registry
-        .register(
-            DeviceId::new(2),
-            DeviceNodeClass::Drm(drm_metadata()),
-            String::from("later"),
-            String::from("test"),
-            DeviceLocation::PlatformStatic { id: 2 },
-            None,
-        )
-        .expect("the released index must be reusable");
-    assert_eq!(later.index(), 0);
-}
-
-#[def_test]
-fn removal_requested_during_add_preserves_lifecycle_order() {
-    let observed = Arc::new(SpinNoPreempt::new(Vec::new()));
-    let projection_observed = observed.clone();
-    let publisher_observed = observed.clone();
-    let mut registry = DeviceNodeRegistry::new();
-    registry.subscribers.push(Arc::new(move |event| {
-        projection_observed.lock().push(match event {
-            DeviceNodeEvent::Added(_) => "projection-add",
-            DeviceNodeEvent::Removing(_) => "projection-removing",
-            DeviceNodeEvent::Removed(_) => "projection-removed",
-        });
-    }));
-    registry
-        .install_lifecycle_publisher(Arc::new(move |event| {
-            publisher_observed.lock().push(match event {
-                DeviceNodeLifecycleEvent::Added(_) => "publisher-add",
-                DeviceNodeLifecycleEvent::Removed(_) => "publisher-remove",
-            });
-        }))
-        .unwrap();
-
-    let (node, subscribers, publisher, is_new) = registry
-        .register(
-            DeviceId::new(0),
-            DeviceNodeClass::Drm(drm_metadata()),
-            String::from("device"),
-            String::from("test"),
-            DeviceLocation::PlatformStatic { id: 0 },
-            None,
-        )
-        .unwrap();
-    assert!(is_new);
-    assert!(registry.begin_remove(node.core_id()).is_none());
-    assert!(!node.is_available());
-    dispatch_node_added(&node, subscribers, publisher);
-    let (node, subscribers, publisher) = registry
-        .finish_publish(&node)
-        .expect("pending removal must follow add publication");
-    dispatch_node_removal(&node, subscribers, publisher);
-    registry.finish_remove(&node);
-
-    let observed = observed.lock();
+    assert_ne!(first_node.key(), second_node.key());
     assert_eq!(
-        observed.as_slice(),
-        [
-            "projection-add",
-            "publisher-add",
-            "projection-removing",
-            "publisher-remove",
-            "projection-removed",
-        ]
+        unregister_device_node_for_publication(
+            device.id(),
+            first,
+            &binding,
+            Box::new(|| {}),
+        ),
+        NodeRemoval::Removed
+    );
+    assert!(
+        crate::device_nodes_snapshot()
+            .iter()
+            .any(|node| node.key() == second_node.key())
+    );
+    assert_eq!(
+        unregister_device_node_for_publication(
+            device.id(),
+            second,
+            &binding,
+            Box::new(|| {}),
+        ),
+        NodeRemoval::Removed
     );
 }

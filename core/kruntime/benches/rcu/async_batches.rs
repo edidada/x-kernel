@@ -8,6 +8,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+use kerrno::KResult;
 
 use super::{Observation, prepare};
 
@@ -17,25 +18,25 @@ struct Submission {
     observation: Arc<Observation>,
 }
 
-fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) {
+fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) -> KResult<()> {
     let can_start = Arc::new(AtomicBool::new(false));
     let mut workers = Vec::with_capacity(cpus.len());
     let mut outputs = Vec::with_capacity(cpus.len());
     // Prepare all storage before opening the gate, so allocator pressure is
     // excluded from submit timing and total record storage is strictly bounded.
     for &cpu in cpus {
-        let records: Vec<_> = (0..batch)
+        let records = (0..batch)
             .map(|_| {
                 let observation = Arc::new(Observation::default());
-                (prepare(cpu, &observation), observation)
+                Ok((prepare(cpu, &observation)?, observation))
             })
-            .collect();
+            .collect::<KResult<Vec<_>>>()?;
         let mut samples = Vec::with_capacity(batch);
         let output = Arc::new(kmutex::Mutex::new(Vec::new()));
         outputs.push(output.clone());
         let can_start = can_start.clone();
-        let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 while !can_start.load(Ordering::Acquire) {
                     ktask::yield_now();
                 }
@@ -55,7 +56,7 @@ fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) {
                     });
                 }
                 *output.lock() = samples;
-            },
+            })?,
             "rcu-async-batch".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
@@ -112,6 +113,7 @@ fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) {
         completed_ns - drain_begin_ns,
         completed_ns - begin_ns
     );
+    Ok(())
 }
 
 pub(super) fn run(cpus: &[LogicalCpuId]) {
@@ -121,7 +123,8 @@ pub(super) fn run(cpus: &[LogicalCpuId]) {
         }
         for batch in [32, 256] {
             for round in 0..=3 {
-                run_round(&cpus[..workers], batch, round);
+                let result = run_round(&cpus[..workers], batch, round);
+                assert!(result.is_ok(), "RCU burst preparation failed: {result:?}");
             }
         }
     }

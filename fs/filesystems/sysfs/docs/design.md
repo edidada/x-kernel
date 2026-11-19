@@ -21,26 +21,64 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 Named KVFS cdev registrations use the same device-projection tree as hardware
 nodes, at `devices/virtual/<class>/<name>` with class/dev links and read-only
 identity attributes. Name, class, dev_t and availability come from the cdev
-registration handle; there is no ConsoleAttribute or hardcoded tty0/tty1 path.
+registration handle. The one class-specific attribute is `/sys/class/tty/tty0/active`, which
+is projected for the `tty0` registration and reports the fixed VT console (`tty1`, the value
+ktty's `VT_GETSTATE` reports); logind's `seat_has_vts()` reads it to decide whether seat0 has
+virtual terminals, and without it `CreateSession` rejects a `VTNr`. No other class needs a
+per-name attribute, and the projection for every other cdev registration stays generic.
 Sysfs subscribes atomically with a registry snapshot, and named add/remove
 callbacks rebuild/invalidate the projection after registry locks are released.
 Read closures recheck registration availability. These virtual identity uevent
 attributes are read-only; hardware DeviceNode uevent behavior is unchanged.
+
+## Block inventory and statistics
+
+`src/block_nodes.rs` projects the block core's registered whole disks at
+`/sys/block/<name>/{stat,dev,size,ro}`. `/sys/class/block/<name>` and
+`/sys/dev/block/<major>:<minor>` are relative links to that directory. Block
+identity comes from the existing block registry rather than kdevice's character
+DeviceNode classes. Physical-bus canonical block paths and partition entries
+are outside this change's scope.
+
+Projection initialization subscribes and snapshots the block inventory under
+its registry lock. Notifications re-snapshot under sysfs's existing event and
+projection serialization, then invalidate changed dentries after unlocking.
+Unchanged directory inodes and static mountpoints retain their identity.
+
+Block attributes are live read callbacks, not frozen projection-time bytes.
+Each callback verifies the captured canonical BlockDevice still occupies its
+dev_t; a withdrawn device or a replacement with the same number returns ENODEV
+through an old open attribute. A read admitted before removal may finish with
+its own snapshot. Size/read-only state is sampled from the block core; no driver
+I/O occurs when reading an attribute.
+
+Stat renders the 17 Linux fields documented in
+https://docs.kernel.org/block/stat.html. Sector counts use fixed 512-byte units,
+and cumulative nanoseconds are truncated to milliseconds only at rendering.
+The block core owns I/O counts, outstanding requests and timing. Merges and
+discards remain zero because neither operation exists in the current core;
+explicit flushes have their own count and time. These statistics cover accepted
+operations and do not promise that all 17 Linux capabilities are implemented.
 
 ## Purpose
 
 `sysfs` provides a Linux-compatible, read-mostly device discovery filesystem.
 It projects `kdevice::DeviceNode` facts into `/sys/devices`, `/sys/class`,
 `/sys/dev/char`, and `/sys/bus`, and exposes `uevent` attributes for standard
-device-management clients.
+device-management clients. It also projects block registry identity and live
+disk I/O statistics.
 
 ## Responsibilities
 
+- Project registered whole disks and render live block-core statistics.
 - Project device-core node assignments into Linux-compatible device, class,
   bus, driver, and character-number paths.
 - Render read-only attributes and relative symlinks from owned snapshots.
 - Validate `uevent` action writes and pass them to the shared kobject event
-  publisher.
+  publisher. The action is parsed as `kobject_action_type` does: one trailing
+  newline or NUL is dropped, the action is the token before the first single
+  space (`udevadm trigger` writes `add <uuid>`), and any other whitespace is
+  part of the token, so a tab or an embedded newline is refused with `EINVAL`.
 - Apply Linux-compatible permissions: ordinary attributes are `0444` and
   writable `uevent` attributes are `0644`.
 
@@ -57,7 +95,7 @@ policy.
 
 ## Scope
 
-The production implementation is in `src/lib.rs`. It owns filesystem registration,
+The production implementation is in `src/lib.rs` and `src/block_nodes.rs`. It owns filesystem registration,
 the singleton superblock, device projection, dynamic tree lookup, symlink
 construction, input attributes, and user-triggered uevent files.
 
@@ -109,7 +147,22 @@ For an input device the canonical object is:
 DRM uses `/sys/devices/<physical>/drm/cardN` with `dev`, `device`, `subsystem`,
 and `uevent`. Class and character-number entries are relative links to these
 canonical objects. `relative_symlink` computes links from source and target
-components, so link depth follows the actual paths.
+components, so link depth follows the actual paths. Each connector also gets a
+`class/drm/cardN-<connector>` link to its own directory, which carries `status`,
+`dpms`, `modes`, `enabled`, and raw `edid`; linking the connector to the card
+would hide those attributes. The class tree therefore contains `class/drm/cardN`
+for the card, `class/drm/cardN-<connector>` for each connector, and
+`class/drm/renderD<minor>` for the render minor; `dev/char/<major>:<minor>` links
+point back to the canonical device directories.
+
+Every device directory also carries its own `uevent`. PCI devices report the
+`PCI_*` identity Linux publishes; platform devices (MMIO, firmware node, static)
+report `DRIVER` and a `MODALIAS=platform:<leaf>` line. The platform attribute is
+not decoration: libdrm's `drmParseOFBusInfo`/`drmParseOFDeviceInfo` read
+`OF_FULLNAME`/`OF_COMPATIBLE_N` first and fall back to `MODALIAS`, returning
+`ENOENT` when neither is present. A missing `uevent` makes `drmGetDevices2` drop
+the node silently, so DRM clients fail with "no drm device found" even though
+`/dev/dri/cardN` exists.
 
 The root also supplies `/sys/fs/cgroup` and `/sys/fs/bpf` mountpoints required
 by boot filesystem setup.
@@ -128,7 +181,7 @@ unavailable. The `Removing` callback takes the projected device's access gate
 exclusively, which waits for in-flight attribute reads or uevent writes. The
 coordinator then publishes remove while the path still exists, and `Removed`
 finally deletes the projection. A removing node remains reserved in `kdevice`,
-so a replacement with the same core ID cannot interleave with this sequence.
+so a replacement with the same `DeviceNodeKey` cannot interleave with this sequence; distinct publications of one DeviceId are separate projections.
 
 Each add or remove rebuilds the generated path tree once. A structural diff
 identifies the highest changed paths and invalidates only those cached dentries.
@@ -195,3 +248,16 @@ reaches into the display driver itself: a device that stops reporting a
 connector stops has its entry removed with the node, and a card that has no
 connector metadata gets no connector entry.
 
+## System device projection
+
+`/sys/devices/system/{cpu,memory}` is synthesized from `kdevice`'s system
+device registry. Directories exist only for present devices. All attributes are
+read-only: `cpuN/{online,present,possible}`, `memoryN/{phys_index,state,online}`,
+global `cpu/{online,possible}`, `memory/{online,possible}`, and
+`memory/block_size_bytes`. CPU sets use cpulist formatting and memory sets use
+Linux's hex block bitmap. This layer is a snapshot projection; state-changing
+hotplug is deliberately outside it.
+
+System devices have no major/minor number and no `/dev` node. Attributes are a
+separate `TreeEntry::SystemAttribute` variant carrying the device ID, kind and
+permission, because ordinary attributes are hard-wired read-only.

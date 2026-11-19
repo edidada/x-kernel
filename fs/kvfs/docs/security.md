@@ -7,6 +7,15 @@ SimpleDir skips that child's `NotFound` while enumerating subsequent live
 entries. It does not suppress permission, allocation or I/O errors, and direct
 lookup of the missing child retains its normal failure behavior.
 
+## Writeback test fixture allocation
+
+Writeback test operations are allocated fallibly before inode publication or
+worker startup. Allocation failure is a fixture setup failure, not an injected
+writeback failure. The deferred setup helper propagates the error to its test
+caller. Successful operations retain their existing guest-lifetime leak because
+the inode stores a static operations reference. Nested Arc/Vec allocations and
+production writeback behavior are unchanged; this is not an end-to-end OOM test.
+
 ## Parallel lookup result publication
 
 The parent children mutex protects both candidate membership and the decision
@@ -128,6 +137,54 @@ and the namespace mutation use the same passed-in object.
 `CommandFile` does not trust the read callback to always return content; `Ok(None)` returns
 `VfsError::InvalidData` instead of triggering a kernel panic.
 
+The complete-command transport is crate-private; procfs supplies only business
+callbacks and never calls the copy helper directly. `SeqFileInode` opts into the
+writable form only when a command callback is configured; read state remains
+owned by `SeqFile`.
+
+Sequential observation errors are not EOF: `try_start`/`try_next` preserve
+`ENOENT`/`ENODATA`/other errors and discard the partial record. A private
+`ReadRecovery<T>` state distinguishes format retry from observation recovery:
+format failure always retains the failed item, including at a nonzero offset
+with no prefix; observation failure reports first when a prefix was copied, then
+rewinds and rebuilds the committed byte position rather than trusting the failed
+iterator cursor. `SeqIterator::Item` is `Send` because an item may be retained
+across reads. `SeqTextSink` keeps the real `NoMemory`/`FileTooLarge` in a private
+buffer side channel; a formatter cannot clear it, and a plain `fmt::Error`
+without a sink error is mapped to `Io`. Lazy `SeqFileInode` forms do not observe
+at open and apply `validate_read` to each new read/read_iter.
+
+## Directory position serialization
+
+Directory iteration samples f_pos, runs the filesystem callback, and commits
+`ctx.pos()` as one `VfsFile::dir_position` operation. Directory `llseek` takes
+the same lock, so concurrent dup descriptors cannot interleave a read-commit
+with a seek or with another iterate. `position` remains the sole f_pos storage
+and is only briefly locked; the operation lock, not the position lock, defines
+the callback's lock lifetime. Directory callbacks must not re-enter iterate or
+seek on the same open description. Production position changes outside
+`iterate_dir()` go through `llseek()`; direct `set_position()` is limited to
+iteration commit and tests.
+
+## Sparse directory sources
+
+A sparse directory source is a kvfs opt-in and must return canonical, unique
+names and a current object matching the key/name pair. `name_for_key()` or
+`lookup_key()` `NotFound` is a vanished candidate: it is skipped without
+consuming an output cookie. A returned dentry with a mismatching name, or an
+empty/dot/slash/NUL name, is rejected with `InvalidData`. kvfs does not build a
+full name table to detect duplicates; the source owns that invariant.
+
+Cookies are VFS positions, not keys or inode numbers; they are bounded by
+`i64::MAX`, sparse directories reject `SEEK_END`, and positive seek overflow
+returns `EOVERFLOW` without changing f_pos. The sparse adapter disables child
+dentry caching because the source has no invalidation contract in this version;
+fresh pathname lookups must re-consult the source. A sink rejection keeps the
+pending key and does not advance the cursor. A seek past EOF preserves the
+requested position rather than silently clamping it. Source locks must not span
+the sink callback, and sparse does not support `ChainedDirOps` composition in
+this version.
+
 ## External Boundaries / Attack Surface
 
 - `Filename::open_with_flags_at` and `dentry_open` are compatibility entry points that preserve raw `O_*` bits, and they normalize the
@@ -172,7 +229,10 @@ and the namespace mutation use the same passed-in object.
 |---|---|---|---|
 
 The `unsafe` encapsulation of the file-lock shared node lives in the private `locks/node.rs`: range access relies on unique ownership,
-and the wait relationships and cancellation unlinking are protected by a global wait lock. The intrusive list uses the `intrusive-collections`
+and the wait relationships and cancellation unlinking are protected by a global wait lock. The lease payload `LeaseState` is stored in
+`LockNode.lease` as an `UnsafeCell<Option<LeaseState>>` with the same ownership discipline: mutations go only through `&mut OwnedLock`,
+and every read or write of the lease list additionally runs under the owning inode's lock-state mutex, which serializes all lease-list
+accessors — this is the prerequisite the lease SAFETY comments record and it is what makes the raw dereferences sound. The intrusive list uses the `intrusive-collections`
 typed adapter and the safe `clone_pointer()`, and does not adjust Arc reference counts by hand. The rest of the namespace
 model maintains memory safety through safe Rust locks, `Arc` ownership, and operation traits.
 
@@ -283,11 +343,10 @@ model maintains memory safety through safe Rust locks, `Arc` ownership, and oper
   filemap or a filesystem as an independently clonable cache owner. The entries and the derived dirty marks are maintained under the same mutex, while Folio references
   continue to keep page data alive independently; this adjustment does not change the invalidate lock or the mapping identity check.
   Filesystem-owned `CacheResidency` is installed once during inode construction.
-  Admission runs under folio and mapping index locks; final physical-page
-  release returns capacity outside both locks and must not sleep, including
-  final provider destruction. Callbacks must not reenter a
-  mapping, lock folios, perform I/O, or invert the folio-to-index-to-provider
-  lock order. Detachment alone never releases a live allocation's charge.
+  Admission and release run as cache identities enter/leave the mapping index.
+  Callbacks must not sleep, reenter a mapping, lock folios, perform I/O, or
+  invert the folio-to-index-to-provider lock order. Detached physical references
+  do not retain cache-residency capacity.
 - The operation table of a `SuperBlock` is separate from the filesystem-private state, corresponding to Linux `s_op` and
   `s_fs_info`. The construction API accepts only a static shared operation table; a filesystem callback must recover the private state through a typed borrow bound to
   `&SuperBlock`, and must not obtain an escapable private owner, store the mount owner in the
@@ -448,7 +507,7 @@ KVFS returns the mapped error, does not fabricate a successful byte count, and d
 | T-28 | unlink/rmdir deletes a same-name replacement object after the pathname's initial resolution | High | The syscall resolves the full target first, then performs a second lookup by parent/name | `Filename::unlink_at/rmdir_at` resolves only the parent; the Dentry resolves and operates on the final victim exactly once under the parent exclusive lock |
 | T-29 | A pathname FIFO re-looks-up after authorization and opens a replacement inode | High | The syscall performs a second path resolution based on the first open error | The FIFO file operations complete the open on the same `Path` and `VfsFileBuilder` that namei already authorized, with no fallback lookup |
 | T-30 | A pathname FIFO fd loses the identity of the original inode | Medium | A special open creates an anonymous-inode-backed file | The shared FIFO operations modify only the stream/private state of the original builder, keeping the original path, inode and filesystem |
-| T-31 | The same FIFO inode publishes two pipe sessions at once | High | The last release and a new open modify the slot and the file count separately | get/create/increment and decrement/clear are all completed within the inode pipe-slot lock domain |
+| T-31 | The same pipe or FIFO inode publishes two pipe sessions at once | High | The last release and a new open modify the slot and the file count separately | get/create/increment and decrement/clear are all completed within the inode pipe-slot lock domain |
 | T-32 | A non-blocking reader that never connected a writer immediately gets HUP | Medium | poll checks only `writers == 0` | The file stores a `w_counter` snapshot from open time, and HUP also checks that the generation has changed |
 | T-33 | A poll waiting only for HUP/ERR is never woken by peer close | Medium | The wait queue is chosen by the user event mask | The reader/writer wait queue is registered by `f_mode`, and the event mask only filters readiness |
 | T-20 | Reverse cross-directory rename deadlock | High | Two threads lock the parent directories in opposite orders | One topology mutex serializes topology mutation, and parent directories are locked in topology order |
@@ -469,7 +528,7 @@ KVFS returns the mapped error, does not fabricate a successful byte count, and d
 | T-41 | Two mutable superblocks appear on the same block device, or a mount lands on an instance being torn down | High | The filesystem allocates its own state on every mount, or there is no state check between `get_tree` and active acquisition | KVFS builds a nascent reservation and an exclusive claim keyed by the canonical `(s_type, BlockDevice)`; the same identity waits/reuses, a RO/RW mismatch or a cross-type conflict returns `EBUSY`; `mount_new` retries after a dying/dead activation race |
 | T-42 | A filesystem keeps using a stale mount data borrow after the transaction completes | High | The filesystem stores the `FsContext::data()` byte-slice reference directly into superblock state | The opaque data serves only as synchronous context input; the filesystem must parse and store owned/typed state, and the generic fill closure is `FnOnce` |
 | T-43 | A resident inode exposes timestamp precision the disk format cannot store, or field coupling inconsistent with the disk | Medium | After the filesystem callback the VFS republishes the original request, masking the backend's range clamping, field-specific granularity or ignore behavior | `TimestampLimits` handles only superblock-level common capability; the callback reuses `MetadataUpdate` to return the fields actually applied, and KVFS publishes only the returned value; FAT date-granularity atime, the 2-second mtime/ctime coupling, and KVFS callback echo tests constrain this contract |
-| T-44 | A command-style pseudo file merges multiple writes by offset, or splits one write_iter into multiple commands | High | The default scalar write algorithm handles a command file | `CommandFile`'s own `write_iter` fully copies one request of at most 4096 bytes, ignores the offset, and hands `VfsFile::f_cred` and the complete buffer to the callback at once |
+| T-44 | A command-style pseudo file merges multiple writes by offset, or splits one write_iter into multiple commands | High | The default scalar write algorithm handles a command file | The crate-private complete-command transport fully copies one request into a fallible buffer, ignores the offset and hands `VfsFile::f_cred` plus the complete buffer to the callback at once; `CommandFile` uses a 4096-byte bound, and opt-in `SeqFileInode` writable files compose it with sequential reads |
 | T-45 | A dynamic directory backend re-resolves by name a victim the VFS has already locked | High | The `rmdir` callback receives only a string, and a replacement race makes the backend delete a different identity | `SimpleDirOps::rmdir` receives `LockedDentry`; the backend can validate `inode_ref()`, and `mkdir` also receives the parent inode, prepared mode and credential |
 
 ## Failure Mode and Effects Analysis (FMEA)
@@ -537,9 +596,18 @@ Locks constrain only cooperating callers; file reads and writes without an advis
 
 ### Mount propagation limits
 
-- Mount propagation covers only `MS_PRIVATE`/`MS_SLAVE` (there are no shared propagation groups, so the two behave equivalently) and non-recursive
-  bind; `MS_SHARED`/`MS_UNBINDABLE` and copying of recursively bind-mounted subtrees still return `EINVAL`,
-  and the mount tree is not silently flattened. A recursive bind is accepted only when the source subtree has no mounts, in which case the result is the same as for a non-recursive one.
+- There are no shared propagation groups, so every propagation request is behaviourally private. `MS_PRIVATE`/`MS_SLAVE`
+  are accepted after validating the target is a registered mount in this namespace, and `MS_SHARED`/`MS_UNBINDABLE` are accepted
+  as validated no-ops for the same reason: a shared mount here would propagate no events and an unbindable one has no peer to
+  refuse, and systemd remounts the namespace root `MS_SHARED` after `pivot_root`, so rejecting it would abort the switch-root.
+  An invalid target is still `EINVAL` in all four cases, and the mount tree is never silently flattened.
+- Recursive bind (`MS_BIND|MS_REC`) is supported: `attach_bind_recursive` clones the source mount subtree and re-grafts each cloned
+  child under its cloned parent. Only submounts at or below the bind source are cloned (sibling submounts elsewhere in the host mount
+  are excluded), so every cloned child stays reachable under the new root and can be unmounted; the tree is not silently flattened.
+- `MS_MOVE` (`move_mount_to`) is supported with Linux `do_move_mount` safeguards: a target at or below the moved subtree is rejected
+  with `ELOOP` (no self-referential mount), the directory/non-directory match is validated before any detach so a failing move leaves
+  the source attached, and the whole detach + re-graft runs under the namespace registry lock plus the touched inodes'
+  namespace-exclusive locks (no split critical section).
 
 ### Validity of buffered read window hints
 
@@ -571,7 +639,7 @@ completed prefix is returned preferentially, and an error is reported only when 
   `Dentry::can_lookup()` rather than merely checking for a directory-like type.
 - Whether newly created inodes use `inode_init_owner()`, and whether the backend persists UID/GID.
 - Whether fd-based operations use the open file mode/`f_cred`, rather than re-running pathname authorization.
-- Whether a FIFO session is owned only by the inode pipe slot, and whether fops remain shared and stateless.
+- Whether a pipe or FIFO session is owned only by the inode pipe slot, and whether fops remain shared and stateless.
 - Whether pipe private data stores only `PipeObject`, and whether direction and the HUP snapshot come only from
   `f_mode` and `pipe_generation` respectively.
 - Whether FIFO poll registration selects the wait queue by file mode, rather than by the user event mask.
@@ -657,12 +725,12 @@ Independent opens do not share policy state; dup/fork references to the same ope
 - `with_pinned_file_page` holds the invalidate read lock through EOF validation
   and publication, and rejects page starts at/beyond EOF or overflowing indices
   before materialization or admission. A callback error keeps an initialized
-  in-range cache page charged for reuse. Its callback must not wait for this mapping's exclusive
+  in-range cache page resident and charged for reuse. Its callback must not wait for this mapping's exclusive
   invalidation lock.
-- Read-only publication consumes `PinnedFolio` and returns a must-use
-  `MappedFolio` token. The mapping owner retains that token until its PTE is
-  removed and the corresponding TLB invalidation completes. A deferred
-  invalidation submission and cache detachment do not establish completion.
+- Read-only publication acquires an independent managed PTE hold and returns
+  an optional content token. No access permissions install no PTE/token. Content
+  tokens preserve exact source identity for COW; releasing them does not wait
+  for TLB retirement, which retains the PTE's own physical reference.
 - The stable `Folio` owns its page identity, allocation and content lock.
   Ordinary access uses `FolioGuard`; initialization consumes `FolioRead`, which
   retains the allocation and lock until completion; replacing
@@ -670,25 +738,20 @@ Independent opens do not share policy state; dup/fork references to the same ope
 - Copies deliberately remain available after detachment and are serialized
   with writers of the original object. They initialize all destination bytes,
   but are neither current-EOF validation nor an immutable snapshot.
-- Pins and mapping tokens retain the allocation and its single capacity charge
-  through ordinary shared ownership, without a separate pin statistics system.
+- Pins and mapping tokens retain stable content independently of cache quota.
+  Each managed PTE owns a separate physical reference through retirement.
 
 ## Cache residency lifecycle
 
-The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under folio and index locks. Its stable folio retains one
-capacity charge until the physical allocation is freed. Cache detachment and
-mapping destruction leave charges intact while pins, tokens or batches remain.
-The last reference frees the allocation and returns capacity outside both locks;
-its charge also keeps the accounting provider alive until this release.
-Providers must not reenter mappings, acquire folio locks, or perform I/O.
-Release and final provider destruction must not sleep: the last reference can
-be released by I/O completion. Admission still requires task context.
-For memfs, the provider is its filesystem-owned quota, so lock order is cache
-folio -> index -> quota limit; remount and statfs never acquire cache locks.
-Speculative physical storage remains outside the admission policy until insertion.
-
+The mapping owns one filesystem-supplied `CacheResidency` provider. Only a
+winning cache identity is admitted and charged; cache removal and final index
+destruction return each charge once. Surviving Folio, pin, read or PTE references
+retain physical memory without retaining tmpfs `size=` quota. Physical lifetime
+is enforced by PageRef and PTE retirement, not the cache capacity callback.
+Admission/removal run in task context under the cache index lock; providers must
+not sleep or reenter the mapping. Memfs admission takes quota-limit locks after
+folio/index locks, while removal is an atomic decrement. Remount/statfs never
+acquire cache locks.
 
 Sparse-hole zero filling applies only to absent cache identities. A retained
 non-uptodate reservation retries initialization under the invalidate read lock;
@@ -698,8 +761,8 @@ propagated.
 
 Filesystem sparse reads must not consume remaining quota by prefetching absent
 pages. Truncate invalidates retained read-batch entries before removing cache
-identity; references cannot serve stale bytes, and keep their physical page
-charged until its final release.
+identity; references cannot serve stale cache bytes. They keep physical pages
+alive independently of the quota returned at identity removal.
 
 Filesystem-driven resident traversal uses one invalidate read guard per bounded
 31-page snapshot. Page callbacks may only consume data, cannot reenter the
@@ -840,7 +903,7 @@ holding that lock. The VFS cache binds and registers initialized identities
 before publication; inode constructors must not rely on write-dependent
 lifecycle initialization outside mutation or writable-open admission.
 
-FIFO/pipe timestamp mutations share remount write admission even though their
+FIFO timestamp mutations share remount write admission even though FIFO
 file descriptions carry no inode writer count. The guard spans the read-only
 check and timestamp callback; read-only policy prevents metadata mutation while
 allowing the special file's already-completed data operation. Regular writable
@@ -877,9 +940,10 @@ revoked views allow clean-folio discard. A dirty folio reported as
 must treat the range as not fully invalidated and must not assume the cache
 still holds every folio.
 
-Buffered writes publish or dirty cache folios only while holding the invalidate
-read lock, so an invalidation that holds it exclusively cannot report completion
-while a concurrent writer can still make the range dirty again. A registered
+Buffered writes dirty cache folios only while holding the folio lock, and the
+generic write path holds the inode data lock that every invalidation and
+set-length entry also takes, so an invalidation cannot report completion while
+a concurrent writer can still make the range dirty again. A registered
 view never spans a partial tail page: that page is anonymous and must survive a
 file invalidation, so rounding the view to the page boundary keeps file
 invalidation from zapping user data in an executable's BSS tail. Executable text
@@ -941,10 +1005,38 @@ owned I/O is still drained and cache ownership remains intact.
 
 ## Buffered acceptance/writeback handoff
 
-The copied folio remains locked through write_end acceptance and i_size
-publication, with invalidate shared held. Write-end implementations cannot
-reacquire that folio or wait for its I/O. Cancellation and rollback release
-those guards before lifecycle waits, while retaining writer data serialization.
-Writeback samples live EOF only after taking the same folio lock. Attempted
-work and filesystem declines share one pagecache-owned control; completion
-never retains it. This does not replace shared-PTE dirty rearming/invalidation.
+A single-folio write keeps the copied folio locked through write_end acceptance
+and i_size publication. A batched run accepts each slot while its own folio is
+locked and releases the run's unaccepted tail afterwards, unlocked, in one
+tail-release hook whose return type cannot change the published count; it
+publishes no size and releases
+only the reservation units that run newly created, never reservations owned by
+earlier writes. Write-end implementations cannot reacquire a folio or wait for
+its I/O. Cancellation and rollback release those guards before lifecycle waits,
+while retaining writer data serialization. Writeback samples live EOF only
+after taking the same folio lock. Attempted work and filesystem declines share
+one pagecache-owned control; completion never retains it. This does not replace
+shared-PTE dirty rearming/invalidation.
+
+Buffered completion requests describe only the prepared range and copied count;
+the range's exclusive end is validated before admission, and the copy count is
+bounded by its length. The size-publication helper compares the accepted end
+against the owning inode's current size while the inode data lock excludes
+competing writes and truncate. Hooks must accept at most the copied count and
+publish a nonempty accepted prefix before returning success. Cancellation
+preserves the file length. Writeback continues to sample live EOF under its own
+folio-lock protocol.
+
+## Open validation bounds
+
+The optional open hooks are checked once at the common `SimpleFile`/`SimpleDir`
+open boundary, before private state is installed. They do not replace VFS
+permission checks and are not evaluated through `link_count` or other metadata
+observations. A failed validation leaves no open file or directory state.
+
+The writable `SnapshotCommand` backend and its per-open generation state were
+removed after procfs IRQ moved to `SeqFileInode` command transport. Its
+`validate_write` hook is gone with it. Command-size limits, complete copying,
+callback-once behavior and iterator rollback now belong to the retained
+`SeqCommandOptions` path; ordinary `CommandFile` and read-only snapshots keep
+their existing behavior.

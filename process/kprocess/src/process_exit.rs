@@ -6,7 +6,6 @@ use alloc::sync::Arc;
 
 use ksignal::{ChildExitInfo, ChildExitSignalInfo, SigchldChildExitSignalInfo, Signo};
 use ktask::KtaskRef;
-use ktime_types::TimeSpan;
 
 use crate::{
     Process, ProcessExitPublication, process::exit::ReparentedZombie, process_signals, wait_reap,
@@ -19,8 +18,9 @@ use crate::{
 /// the reservation rejects all later task publication into this process. Repeated
 /// exit calls for an already removed task return `false`.
 ///
-/// `task` must be the exiting published task so TID directory unpublish can
-/// identity-check against the live publication slot before retiring it. Its
+/// `task` must be the exiting current task, or a detached non-running task,
+/// so its committed runtime cannot continue changing after the group handoff.
+/// TID directory unpublish identity-checks its live publication slot. Its
 /// global TID publication is retired before this function returns, while the
 /// process identity remains available until later process completion and reap.
 /// The caller that receives `true` performs explicit process cleanup stages and
@@ -39,11 +39,6 @@ pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i3
 /// Marks the process thread group as group-exited.
 pub fn mark_group_exited(process: &Process) {
     process.group_exit();
-}
-
-/// Records CPU time accumulated by a thread that has just exited.
-pub fn record_exited_thread_cpu_time(process: &Process, utime: TimeSpan, stime: TimeSpan) {
-    process.accumulate_exited_thread_time(utime, stime);
 }
 
 /// Transitions the process into waitable zombie state and reparents surviving children.

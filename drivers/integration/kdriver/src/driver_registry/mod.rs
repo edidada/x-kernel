@@ -4,10 +4,8 @@
 
 //! Built-in driver descriptor registration for the Linux-like device object model.
 
-use alloc::sync::Arc;
-
 use driver_base::{DeviceKind, DriverResult};
-use kdevice::{DeviceDriver, DeviceId};
+use kdevice::DeviceId;
 
 pub(crate) mod block;
 #[cfg(feature = "char")]
@@ -16,12 +14,11 @@ pub(crate) mod firmware_specs;
 pub(crate) mod net;
 pub(crate) mod virtio;
 
+/// Convenience type alias for a shared driver implementation.
+pub use kdevice::BoxedDriver;
 /// Re-export the matcher result type from `kdevice` for convenience when
 /// implementing [`DeviceMatcher`](kdevice::DeviceMatcher).
 pub use kdevice::MatchResult;
-
-/// Convenience type alias for a shared driver implementation.
-pub type BoxedDriver = Arc<dyn DeviceDriver>;
 
 /// Factory function for one built-in driver descriptor.
 pub type DriverFactory = fn() -> BoxedDriver;
@@ -41,7 +38,7 @@ pub fn register_platform_drivers(registrar: &mut DriverRegistrar) {
 
 /// Lightweight summary of the current long-lived ownership graph visible at
 /// the driver orchestration boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnershipSummary {
     pub bus_count: usize,
     pub driver_count: usize,
@@ -49,7 +46,7 @@ pub struct OwnershipSummary {
 }
 
 /// Ownership summary for one bus visible at the driver orchestration boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BusOwnershipSummary {
     pub id: kdevice::BusId,
     pub name: &'static str,
@@ -57,7 +54,7 @@ pub struct BusOwnershipSummary {
 }
 
 /// Ownership summary for one driver visible at the driver orchestration boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DriverOwnershipSummary {
     pub id: kdevice::DriverId,
     pub name: &'static str,

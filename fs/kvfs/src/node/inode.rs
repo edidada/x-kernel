@@ -20,7 +20,7 @@ use bitflags::bitflags;
 use hashbrown::HashMap;
 use kalloc_types::KBox;
 use kcred::Cred;
-use kerrno::LinuxError;
+use kerrno::{KResult, LinuxError};
 use klazy::{Lazy, Once};
 use ktask::WaitQueue;
 use ktime_types::SystemTime;
@@ -748,6 +748,33 @@ impl InodeIdentity {
         true
     }
 
+    /// Adds `dentry` as an alias, or returns the live directory alias that
+    /// blocks the add, under a single lock.
+    ///
+    /// Splitting this into `add_alias` followed by `directory_alias` leaves a
+    /// window where a concurrent drop of the alias's last strong reference can
+    /// retire it between the two calls, so the follow-up lookup finds nothing.
+    /// Performing the retain, the conflict check, and the upgrade atomically
+    /// closes that window; the loop only retries if an alias is retired while
+    /// the lock is held.
+    fn add_alias_or_existing(&self, dentry: &Dentry, is_directory: bool) -> Result<(), Dentry> {
+        let mut aliases = self.aliases.lock();
+        loop {
+            aliases.retain(DentryAlias::is_live);
+            if aliases.iter().any(|alias| alias.points_to(dentry)) {
+                return Ok(());
+            }
+            if is_directory && !aliases.is_empty() {
+                match aliases.first().and_then(DentryAlias::upgrade) {
+                    Some(existing) => return Err(existing),
+                    None => continue,
+                }
+            }
+            aliases.push(DentryAlias::new(dentry));
+            return Ok(());
+        }
+    }
+
     fn directory_alias(&self) -> Option<Dentry> {
         let mut aliases = self.aliases.lock();
         aliases.retain(DentryAlias::is_live);
@@ -1224,7 +1251,7 @@ impl InodeAttributes {
 
 struct InodeSpecialState {
     character_device: Mutex<Weak<ChrdevEntry>>,
-    fifo_pipe: Mutex<Option<Arc<PipeObject>>>,
+    pipe: Mutex<Option<Arc<PipeObject>>>,
     cached_link: Once<String>,
 }
 
@@ -1232,7 +1259,7 @@ impl InodeSpecialState {
     fn new() -> Self {
         Self {
             character_device: Mutex::new(Weak::new()),
-            fifo_pipe: Mutex::new(None),
+            pipe: Mutex::new(None),
             cached_link: Once::new(),
         }
     }
@@ -1265,6 +1292,7 @@ pub struct VfsInode {
     identity: InodeIdentity,
     attributes: InodeAttributes,
     write_count: AtomicUsize,
+    read_count: AtomicUsize,
     notification_mask: AtomicU32,
     data_lock: RwLock<()>,
     namespace_lock: RwLock<()>,
@@ -1784,6 +1812,7 @@ impl VfsInode {
             identity: InodeIdentity::new(init.number),
             attributes,
             write_count: AtomicUsize::new(0),
+            read_count: AtomicUsize::new(0),
             notification_mask: AtomicU32::new(0),
             data_lock: RwLock::new(()),
             namespace_lock: RwLock::new(()),
@@ -1810,29 +1839,75 @@ impl VfsInode {
         debug_assert_ne!(previous, 0);
     }
 
-    pub(crate) fn acquire_fifo_pipe(&self) -> VfsResult<Arc<PipeObject>> {
-        let mut fifo_pipe = self.special_state.fifo_pipe.lock();
-        let pipe = fifo_pipe.get_or_insert_with(PipeObject::new_fifo);
+    pub(crate) fn acquire_read_access(&self) {
+        let previous = self.read_count.fetch_add(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, usize::MAX);
+    }
+
+    pub(crate) fn release_read_access(&self) {
+        let previous = self.read_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, 0);
+    }
+
+    /// Revokes leases conflicting with an open or truncate; Linux
+    /// `break_lease`. A filesystem object without an allocated lock context
+    /// has no leases, matching the inline empty check in Linux.
+    ///
+    /// # Errors
+    ///
+    /// Forwards [`crate::locks::FileLockContext::break_leases`] errors:
+    /// `WouldBlock` when `nonblock` and a conflict was marked, or
+    /// `LinuxError::ERESTARTSYS` when an interruptible wait was signalled.
+    pub(crate) fn break_leases(&self, want_write: bool, nonblock: bool) -> KResult<()> {
+        match self.existing_file_locks() {
+            None => Ok(()),
+            Some(locks) => locks.break_leases(want_write, nonblock),
+        }
+    }
+
+    /// Installs the initial session for a newly created anonymous pipe inode.
+    ///
+    /// Call before publishing the inode or either file, using the session
+    /// whose initial reader and writer correspond to those files.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inode already has a pipe session.
+    pub fn init_anonymous_pipe(&self, pipe: Arc<PipeObject>) {
+        let mut slot = self.special_state.pipe.lock();
+        assert!(slot.is_none(), "pipe inode already initialized");
+        *slot = Some(pipe);
+    }
+
+    pub(crate) fn acquire_pipe(&self) -> VfsResult<Arc<PipeObject>> {
+        let mut slot = self.special_state.pipe.lock();
+        let pipe = slot.get_or_insert_with(PipeObject::new_empty);
         pipe.acquire_file()?;
         Ok(pipe.clone())
     }
 
-    pub(crate) fn release_fifo_pipe(&self, pipe: &Arc<PipeObject>) {
-        let mut fifo_pipe = self.special_state.fifo_pipe.lock();
+    pub(crate) fn release_pipe(&self, pipe: &Arc<PipeObject>) {
+        let mut slot = self.special_state.pipe.lock();
         assert!(
-            fifo_pipe
-                .as_ref()
+            slot.as_ref()
                 .is_some_and(|active| Arc::ptr_eq(active, pipe)),
-            "released FIFO pipe is not attached to its inode"
+            "released pipe is not attached to its inode"
         );
         if pipe.release_file() {
-            *fifo_pipe = None;
+            *slot = None;
         }
     }
 
     /// Returns the number of open files holding write access to this inode.
     pub fn write_count(&self) -> usize {
         self.write_count.load(Ordering::Acquire)
+    }
+
+    /// Returns the number of read-only open files on this inode, Linux
+    /// `i_readcount`; lease setting compares both counts with the requestor's
+    /// own contribution.
+    pub(crate) fn read_count(&self) -> usize {
+        self.read_count.load(Ordering::Acquire)
     }
 
     /// Construct a directory inode without directory file operations.
@@ -2040,6 +2115,12 @@ impl VfsInode {
     /// Records a file length already changed by the backing filesystem.
     pub fn update_size_after_backing_change(&self, len: u64) -> VfsResult<()> {
         let _data_guard = self.data_lock.write();
+        self.update_size_after_backing_change_locked(len)
+    }
+
+    /// Records a backing-store size change; caller must hold the inode data
+    /// lock exclusively.
+    pub fn update_size_after_backing_change_locked(&self, len: u64) -> VfsResult<()> {
         self.mapping.truncate_setsize_after_backing_change(len)
     }
 
@@ -2050,6 +2131,16 @@ impl VfsInode {
             return Ok(());
         }
         let _data_guard = self.data_lock.write();
+        self.grow_size_after_backing_write_locked(end)
+    }
+
+    /// Publishes growth after a backing write; caller must hold the inode data
+    /// lock exclusively. Other inode types do not acquire a data size from
+    /// scalar writes.
+    pub fn grow_size_after_backing_write_locked(&self, end: u64) -> VfsResult<()> {
+        if self.node_type() != NodeType::RegularFile {
+            return Ok(());
+        }
         if end > self.size() {
             self.mapping.truncate_setsize_after_backing_change(end)?;
         }
@@ -2518,6 +2609,10 @@ impl VfsInode {
         self.identity.add_alias(dentry, self.is_dir())
     }
 
+    pub(crate) fn add_dentry_alias_or_existing(&self, dentry: &Dentry) -> Result<(), Dentry> {
+        self.identity.add_alias_or_existing(dentry, self.is_dir())
+    }
+
     pub(crate) fn directory_alias(&self) -> Option<Dentry> {
         if self.is_dir() {
             self.identity.directory_alias()
@@ -2546,9 +2641,14 @@ impl VfsInode {
         self.set_changed_at(self.current_time())
     }
 
-    /// Returns the current wall-clock time truncated to this inode's filesystem capability.
+    /// Returns the current wall-clock time, sampled once per kernel tick and
+    /// truncated to this inode's filesystem capability.
+    ///
+    /// Repeated calls inside one tick return the same value, so callers can
+    /// recognize an unchanged timestamp. The value is monotonic while the
+    /// clock identity is unchanged; a backward clock update can step it down.
     pub fn current_time(&self) -> SystemTime {
-        self.truncate_timestamp(ktime::realtime())
+        self.truncate_timestamp(ktime::realtime_coarse())
     }
 
     /// Truncates a timestamp to this inode's filesystem capability.

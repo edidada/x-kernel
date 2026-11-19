@@ -5,22 +5,20 @@
 //! VirtIO device probing and HAL integration.
 #[cfg(any(
     feature = "virtio-net",
-    feature = "virtio-gpu",
-    feature = "virtio-9p",
-    feature = "virtio-socket"
+    feature = "virtio-socket",
+    feature = "virtio-9p"
 ))]
 use alloc::boxed::Box;
-#[cfg(any(feature = "virtio-gpu", feature = "virtio-rng"))]
+#[cfg(feature = "virtio-rng")]
 use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
 #[cfg(any(
     feature = "virtio-net",
-    feature = "virtio-gpu",
-    feature = "virtio-rng",
+    feature = "virtio-socket",
     feature = "virtio-9p",
-    feature = "virtio-socket"
+    feature = "virtio-rng"
 ))]
 use driver_base::DriverResult;
 use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
@@ -41,70 +39,6 @@ cfg_if! {
                     Some(crate::resource::resource_provider()),
                 )?))
             }
-        }
-    }
-}
-
-cfg_if! {
-    if #[cfg(feature = "virtio-gpu")] {
-        use driver_os_api::{IrqEvent, IrqHandler, IrqResource};
-
-        pub(super) struct VirtIoGpu;
-
-        impl VirtIoGpu {
-            pub(super) fn try_new<T: virtio::Transport + 'static>(
-                transport: T,
-            ) -> DriverResult<kclass::prelude::DisplayDeviceImpl> {
-                Ok(Box::new(virtio::VirtIoGpuDev::<VirtIoHalImpl, T>::try_new(
-                    transport,
-                )?))
-            }
-        }
-
-        pub(super) fn install_irq(
-            parent: &Arc<kdevice::DeviceObject>,
-            display: &kclass::ClassDevice<kclass::prelude::DisplayDeviceImpl>,
-            irq: IrqResource,
-        ) -> DriverResult<()> {
-            use crate::resource::DeviceResourceExt;
-            use kclass::prelude::DisplayDevice;
-
-            let device_id = display.id();
-            let work_display = display.clone();
-            let display = display.clone();
-            let work = kworkng::WorkHandle::new(move || {
-                if work_display.refresh_info().is_none() {
-                    return;
-                }
-                let Some(node) = kdevice::device_nodes_snapshot()
-                    .into_iter()
-                    .find(|node| node.core_id() == device_id)
-                else {
-                    return;
-                };
-                kdevice_uevent::publish_drm_hotplug(&node);
-            })
-            .map_err(|_| driver_base::DriverError::NoMemory)?;
-            let virq = irq.virq().raw();
-            let handler: Arc<dyn IrqHandler> = Arc::new(move |fired: usize| {
-                if fired != virq {
-                    return IrqEvent::NOT_HANDLED;
-                }
-                let status = display.ack_irq();
-                if status.is_empty() {
-                    // Shared level-triggered lines may fire for another owner;
-                    // do not claim an interrupt this device did not report.
-                    return IrqEvent::NOT_HANDLED;
-                }
-                if status.config {
-                    // The work callback refreshes the display and publishes the
-                    // uevent in task context; hard IRQ only acknowledges and
-                    // coalesces the hint.
-                    let _ = work.queue_default(None);
-                }
-                IrqEvent::HANDLED
-            });
-            parent.devm_request_irq(irq, handler)
         }
     }
 }
@@ -131,6 +65,15 @@ cfg_if! {
             /// [`Self::try_new`]. Only the synthetic MMIO fixture dispatches
             /// here, so the caller attributes these counts to that scenario.
             #[cfg(unittest)]
+            #[expect(
+                clippy::allow_attributes,
+                reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+            )]
+            #[allow(
+                unknown_lints,
+                std_box_in_kernel_tests,
+                reason = "CG-049-no-std-box-in-kernel-tests: the counting-HAL fixture returns the production boxed VsockDeviceImpl required by kclass publication"
+            )]
             pub(super) fn try_new_counting<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<driver_os_api::IrqResource>,

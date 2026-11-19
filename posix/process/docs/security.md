@@ -1,5 +1,15 @@
 # posix-process — Security and reliability
 
+## Physical OOM faults
+
+A user page fault that returns `OutOfMemory` terminates the allocating process
+through kernel `SIGKILL`, independently of user signal handlers. There is no
+retry loop, address-error misclassification, global victim scan or reclaim.
+MM cleanup releases commitments and private pages, but unrelated infallible
+kernel allocations can still fail; this policy is not an end-to-end NOFAIL
+recovery guarantee. Default overcommit admission and `MAP_NORESERVE` semantics
+are owned by `memspace`, not the signal layer.
+
 ## Synchronous signal-frame faults
 
 The fault API accepts only kernel-generated fault information in the current
@@ -60,9 +70,14 @@ user-supplied exception interpretations.
 Internal syscall restart codes are resolved according to handler installation,
 not merely signal consumption. Default continue actions cannot suppress this
 resolution, and signal return must not restart an already restored context.
+CPU-timer work is requested by a periodic IRQ and consumed on user return.
+An armed timer alone does not force a group scan after each syscall; a task
+that never returns to userspace can still defer its own timer delivery.
 
 `exit_robust_list` reads the registered userspace head and linked nodes through
-`read_vm`; failed reads stop the walk. Pointer low-bit tags distinguish PI
+`UserConstPtr::read_vm`; `RobustListHead` and `RobustList` implement `UserRead`
+because their pointer and integer fields admit every bit pattern. Failed reads
+stop the walk. Pointer low-bit tags distinguish PI
 entries. Both kinds are marked, but only ordinary entries use plain wake.
 The walk stops at the sentinel or `ROBUST_LIST_LIMIT`, then separately handles
 a nonnull pending entry.
@@ -76,15 +91,14 @@ registration is not proof that their pages remain accessible.
 ## Unsafe inventory and memory invariants
 
 User-transfer callbacks call `krcu::enter_user_quiescent` and
-`krcu::exit_user_quiescent`. POSIX owns their placement relative to the CPU-time
-mode publication and trap dispatch, not the permanent watching state, reader
-cleanup policy or GP service. Those belong to `krcu`; task storage remains owned
-by `ktask`. These callbacks do not expose general consumer read or reclamation
+`krcu::exit_user_quiescent`. POSIX owns their placement relative to trap
+dispatch; the callbacks publish no accounting state and read no clock. The
+watching state, reader cleanup policy and GP service belong to `krcu`. Task storage remains owned by `ktask`. These callbacks do not expose general consumer read or reclamation
 admission.
 
 | Location | Operation and necessary invariant | Guard/provider |
 |---|---|---|
-| `src/runtime.rs`, `run_user_thread_loop` callbacks | Enter/exit user quiescence with no protected borrow spanning the window; restore watching before trap dispatch. | IRQs are masked; only audited RCU-free architecture transfer runs between transitions. The CPU-time mode publication is a lock-free store placed after watched restoration; it performs no settlement. No scheduling may span the quiescent window. |
+| `src/runtime.rs`, `run_user_thread_loop` callbacks | Enter/exit user quiescence with no protected borrow spanning the window; restore watching before trap dispatch. | IRQs are masked; only audited RCU-free architecture transfer runs between transitions. The callbacks only enter/exit user quiescence: they publish no accounting state and read no clock. Both defer preemption checks. No scheduling may span the quiescent window. |
 | `src/runtime.rs`, `run_user_thread_loop` (LoongArch only) | Calls unsafe `UserContext::emulate_unaligned`; the saved context must still describe the faulting misaligned instruction. | Only reached for the `Misaligned` exception returned by that context's `run`; matches its adjacent SAFETY explanation. |
 | `src/runtime.rs`, `exit_robust_list` | Forms a raw address of the embedded list sentinel without loading the field. | The pointer is the registered robust-list head; the address is used only for termination comparison, and actual contents are copied with `read_vm`, as stated by the SAFETY comment. |
 

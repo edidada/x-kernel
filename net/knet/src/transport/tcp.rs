@@ -25,8 +25,8 @@ use smoltcp::{
 };
 
 use crate::{
-    AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
-    SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
+    AcceptOptions, ConnectOptions, LISTEN_TABLE, QueueLengths, RecvFlags, RecvOptions, SERVICE,
+    SOCKET_SET, SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
     consts::{
         TCP_KEEPCNT_DEFAULT, TCP_KEEPCNT_MAX, TCP_KEEPIDLE_DEFAULT_SECS, TCP_KEEPIDLE_MAX_SECS,
         TCP_KEEPINTVL_DEFAULT_SECS, TCP_KEEPINTVL_MAX_SECS, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN,
@@ -327,9 +327,9 @@ impl TcpSocket {
 
     /// Copies queued data from the socket into `dst`, or peeks it when `peek`.
     ///
-    /// Sets `should_poll_rx_window` when a dequeue reopens enough receive
-    /// window to be worth advertising. Returns `Ok(0)` at end of stream and
-    /// `WouldBlock` while no data is queued.
+    /// Sets `should_poll_rx_window` after consuming data so protocol processing
+    /// can decide whether to advertise the enlarged window. Returns `Ok(0)` at
+    /// end of stream and `WouldBlock` while no data is queued.
     fn recv_from_socket(
         socket: &mut smol::Socket<'_>,
         dst: &mut (impl Write + IoBufMut),
@@ -350,8 +350,6 @@ impl TcpSocket {
                     .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
             );
         }
-        let receive_capacity_bytes = socket.recv_capacity();
-        let available_before_bytes = receive_capacity_bytes.saturating_sub(socket.recv_queue());
         let result = socket
             .recv(|buf| {
                 let result = dst.write(buf);
@@ -360,11 +358,9 @@ impl TcpSocket {
             })
             .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
         if let Ok(received) = result {
-            *should_poll_rx_window = should_poll_receive_window(
-                receive_capacity_bytes,
-                available_before_bytes,
-                received,
-            );
+            // A positive advertised window can still be too small for the peer
+            // to send. Reevaluate it after every read that frees buffer space.
+            *should_poll_rx_window = received > 0;
         }
         result
     }
@@ -464,6 +460,10 @@ impl Configurable for TcpSocket {
             });
             return Ok(OptionHandled::Yes);
         }
+        if let O::AcceptConn(listening) = option {
+            **listening = self.is_listening();
+            return Ok(OptionHandled::Yes);
+        }
         if self.general.get_option_inner(option)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
@@ -504,7 +504,9 @@ impl Configurable for TcpSocket {
                 **size = TCP_RX_BUF_LEN;
             }
             O::TcpInfo(_) => {
-                // TODO(mivik): implement TCP diagnostics
+                // No diagnostic snapshot is available. Success would leave
+                // callers interpreting their unchanged output as TCP metrics.
+                return Err(KError::OperationNotSupported);
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -587,6 +589,38 @@ impl SocketOps for TcpSocket {
 
     fn socket_protocol(&self) -> i32 {
         linux_raw_sys::net::IPPROTO_TCP as i32
+    }
+
+    fn is_listening(&self) -> bool {
+        TcpSocket::is_listening(self)
+    }
+
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        // `tcp_ioctl(SIOCINQ)` reports `tcp_inq()` -- the bytes queued for
+        // reading -- and answers EINVAL to a listening socket, which holds no
+        // data of its own. `SIOCOUTQ` reports `tp->write_seq - tp->snd_una`,
+        // the bytes handed to the peer but not yet acknowledged; smoltcp's
+        // `send_queue()` is the unsent transmit buffer instead, so it is the
+        // closest quantity this stack exposes and is reported as such.
+        if self.is_listening() {
+            return Err(KError::InvalidInput);
+        }
+        // A closed or time-wait socket still answers: `tcp_inq` reports its
+        // (usually empty) receive queue rather than an error, and only the
+        // listening state is refused. `recv_queue()`/`send_queue()` remain
+        // readable in those states, so no state check beyond listening is
+        // needed here.
+        //
+        // An ioctl can arrive after the transport was torn down (the caller
+        // still holds the descriptor while the peer-close path removed the
+        // smoltcp socket), and smoltcp's accessors panic for a dead handle.
+        // A missing socket reports an idle connection instead.
+        let Some((received, queued)) = SOCKET_SET.try_with_socket_mut(self.handle, |socket| {
+            (socket.recv_queue(), socket.send_queue())
+        }) else {
+            return Ok(Some(QueueLengths::default()));
+        };
+        Ok(Some(QueueLengths::from_bytes(queued, received)))
     }
 
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
@@ -869,23 +903,6 @@ impl SocketOps for TcpSocket {
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.shutdown_inner(how, true, true)
     }
-}
-
-fn should_poll_receive_window(
-    receive_capacity_bytes: usize,
-    available_before_bytes: usize,
-    received_bytes: usize,
-) -> bool {
-    // Keep this calculation aligned with smoltcp Socket::new so dependency
-    // upgrades cannot silently narrow the zero-window range covered here.
-    let capacity_bit_len = usize::BITS as usize - receive_capacity_bytes.leading_zeros() as usize;
-    let max_window_scale_shift = capacity_bit_len.saturating_sub(16);
-    let max_window_scale_quantum_bytes = 1usize << max_window_scale_shift;
-
-    // A peer without window scaling needs the first notification after a full
-    // buffer is consumed. A scaled peer can still see a zero window until one
-    // complete scale quantum is free, so each read in that range must poll.
-    received_bytes > 0 && available_before_bytes < max_window_scale_quantum_bytes
 }
 
 impl Pollable for TcpSocket {

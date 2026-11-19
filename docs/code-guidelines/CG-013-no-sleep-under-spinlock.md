@@ -23,8 +23,8 @@ triggers:
   helpers and callbacks; blocking primitives include `ksync::Mutex`, `RwLock`,
   `Semaphore`, and `WaitQueue`.
   Not this rule: [CG-001](CG-001-static-spinlock-registration.md),
-  the pending Dylint lint `unregistered_static_lock` ([pending](pending.md)) and
-  the pending Dylint lint `untracked_runtime_lock` ([pending](pending.md)) own lock registration and runtime
+  the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) and
+  the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) own lock registration and runtime
   constructor tracking; this rule owns work done while guards are live.
   Attribute an unnecessary IRQ mask to
   [CG-014](CG-014-spin-noirq-needs-irq-contender.md), and an atomicity gap
@@ -35,7 +35,9 @@ triggers:
   section still assumes it is pinned.
 - **How to check**:
   1. Identify each live spinlock, IRQ-disable, and preempt-disable guard and
-     where it is dropped.
+     where it is dropped: a guard in a temporary drops at the end of its
+     statement, a guard in a block drops at the block end, and after
+     `let x = m.lock().take();` the lock is no longer held.
   2. Trace calls made before that drop for I/O, blocking lock acquisition,
      `block_on`, `wait`, `sleep`, event listeners, scheduler operations, or
      handling of `WouldBlock` by waiting.

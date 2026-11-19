@@ -4,13 +4,16 @@
 
 //! Bounded multi-CPU submission, self-release and drain accounting.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
+    mem::MaybeUninit,
     ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use kalloc_types::KBox;
 use kcpu_id_map::KCpuMaskExt;
+use kerrno::{KError, KResult};
 use krcu::{CallbackNode, PreparedCallback};
 
 const PER_PRODUCER: usize = 32;
@@ -42,12 +45,12 @@ impl Drop for Record {
 }
 
 /// # Safety
-/// Consume once the zero-offset node projection of the Box transferred by
+/// Consume once the zero-offset node projection of the KBox transferred by
 /// prepare. The service has detached it and no other owner may access it.
 unsafe fn invoke(node: *mut CallbackNode) {
     // SAFETY: repr(C) and the checked offset recover the submitted allocation;
-    // acceptance retained its unique Box ownership until this invocation.
-    let record = unsafe { Box::from_raw(node.cast::<Record>()) };
+    // acceptance retained its unique KBox ownership until this invocation.
+    let record = unsafe { KBox::from_raw(node.cast::<Record>()) };
     if kirq::context::interrupt_context_level() != kirq::context::InterruptContextLevel::Softirq
         || ktask::is_sleepable_context()
     {
@@ -60,34 +63,47 @@ unsafe fn invoke(node: *mut CallbackNode) {
 }
 
 /// # Safety
-/// Consume once the same Box projection as invoke, but only while unsubmitted.
+/// Consume once the same KBox projection as invoke, but only while unsubmitted.
 /// Neither the queue nor a callback may access this node.
 unsafe fn cancel(node: *mut CallbackNode) {
-    // SAFETY: the unique unsubmitted handle retains the original Box owner.
-    let record = unsafe { Box::from_raw(node.cast::<Record>()) };
+    // SAFETY: the unique unsubmitted handle retains the original KBox owner.
+    let record = unsafe { KBox::from_raw(node.cast::<Record>()) };
     record.ledger.cancelled.fetch_add(1, Ordering::Relaxed);
     drop(record);
 }
 
-fn prepare(id: usize, ledger: &Arc<Ledger>) -> PreparedCallback {
-    let record = Box::into_raw(Box::new(Record {
-        node: CallbackNode::new(invoke),
-        id,
-        ledger: ledger.clone(),
-    }));
-    let live = ledger.live.fetch_add(1, Ordering::Relaxed) + 1;
-    ledger.peak_live.fetch_max(live, Ordering::Relaxed);
-    // SAFETY: raw projection preserves the enclosing live Box's provenance.
-    let node = unsafe { &raw mut (*record).node };
-    // SAFETY: an initialized field of the live Box allocation is non-null.
-    let node = unsafe { NonNull::new_unchecked(node) };
-    // SAFETY: the initialized Box field is non-null, uniquely owned and stable;
-    // cancel/invoke consume that owner once and never block. No protected data
-    // was published. Ledger storage survives both paths and permits transfer.
-    unsafe { PreparedCallback::new(node, cancel) }
+fn prepare(id: usize, ledger: &Arc<Ledger>) -> KResult<PreparedCallback> {
+    prepare_with_storage(id, ledger, KBox::<Record>::new_uninit)
 }
 
-pub(super) fn run() {
+fn prepare_with_storage(
+    id: usize,
+    ledger: &Arc<Ledger>,
+    reserve: impl FnOnce() -> KResult<KBox<MaybeUninit<Record>>>,
+) -> KResult<PreparedCallback> {
+    let storage = reserve()?;
+    let record = KBox::write(
+        storage,
+        Record {
+            node: CallbackNode::new(invoke),
+            id,
+            ledger: ledger.clone(),
+        },
+    );
+    let live = ledger.live.fetch_add(1, Ordering::Relaxed) + 1;
+    ledger.peak_live.fetch_max(live, Ordering::Relaxed);
+    let record = KBox::into_raw(record);
+    // SAFETY: raw projection preserves the enclosing live KBox's provenance.
+    let node = unsafe { &raw mut (*record).node };
+    // SAFETY: an initialized field of the live KBox allocation is non-null.
+    let node = unsafe { NonNull::new_unchecked(node) };
+    // SAFETY: the initialized KBox field is non-null, uniquely owned and stable;
+    // cancel/invoke consume that owner once and never block. No protected data
+    // was published. Ledger storage survives both paths and permits transfer.
+    Ok(unsafe { PreparedCallback::new(node, cancel) })
+}
+
+pub(super) fn run() -> KResult<()> {
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
     assert!(!cpus.is_empty());
@@ -101,16 +117,27 @@ pub(super) fn run() {
         peak_live: AtomicUsize::new(0),
         errors: AtomicUsize::new(0),
     });
+    let failed = prepare_with_storage(0, &ledger, || Err(KError::NoMemory));
+    assert!(matches!(failed, Err(KError::NoMemory)));
+    assert_eq!(ledger.live.load(Ordering::Relaxed), 0);
+    assert_eq!(ledger.drops[0].load(Ordering::Relaxed), 0);
+    assert_eq!(Arc::strong_count(&ledger), 1);
     let mut producers = Vec::new();
     for (producer, cpu) in cpus.into_iter().enumerate() {
         let ledger = ledger.clone();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || {
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            ktask::PreparedTaskEntry::new(move || {
                 if khal::percpu::this_cpu_id() != cpu {
                     ledger.errors.fetch_add(1, Ordering::Relaxed);
                 }
                 for index in 0..PER_PRODUCER {
-                    let prepared = prepare(producer * PER_PRODUCER + index, &ledger);
+                    let prepared = match prepare(producer * PER_PRODUCER + index, &ledger) {
+                        Ok(prepared) => prepared,
+                        Err(_) => {
+                            ledger.errors.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                    };
                     // SAFETY: unpublished unique records; permanent callback
                     // code and boot service, nonblocking invocation, no held
                     // RCU/scheduler locks. No node access follows acceptance.
@@ -123,13 +150,15 @@ pub(super) fn run() {
                         }
                     }
                 }
-            },
+            })?,
             "rcu-callback-producer".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));
         task.set_cpumask(ktask::KCpuMask::one_shot_logical(cpu));
-        ktask::activate_task(&task);
         producers.push(task);
+    }
+    for task in &producers {
+        ktask::activate_task(task);
     }
     // Invocation can precede submit's return, so acceptance and call counters
     // are compared only after producer joins and the following drain.
@@ -166,4 +195,5 @@ pub(super) fn run() {
         assert_eq!(ledger.calls[id].load(Ordering::Relaxed), 1);
         assert_eq!(ledger.drops[id].load(Ordering::Relaxed), 1);
     }
+    Ok(())
 }

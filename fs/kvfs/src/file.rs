@@ -336,6 +336,53 @@ pub trait FileOperations: Send + Sync + 'static {
         file.inode().file_locks()?.apply(request, is_blocking)
     }
 
+    /// Applies a file lease; the `generic_setlease` default for filesystems
+    /// whose lease semantics are the inode lock context's. Filesystems with
+    /// private lease backings (delegations) override this method.
+    ///
+    /// `fd` identifies the requestor's descriptor in the break SIGIO;
+    /// `self_wcount`/`self_rcount` are the requestor's own share of the inode
+    /// open counts (Linux `lease_open_conflict`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for inodes that hold no leases, and forwards
+    /// `WouldBlock` (`EAGAIN`) conflicts from the lease context.
+    fn set_lease(
+        &self,
+        file: &VfsFile,
+        request: &crate::FileLock,
+        fd: i32,
+        self_wcount: usize,
+        self_rcount: usize,
+    ) -> VfsResult<()> {
+        if file.node_type() != NodeType::RegularFile {
+            // Linux generic_setlease accepts only regular files and
+            // directories; the fcntl entry already rejects directories, and
+            // no in-kernel caller sets a lease on a special file.
+            return Err(VfsError::InvalidInput);
+        }
+        if request.kind() == crate::FileLockType::Unlock
+            && file.inode().existing_file_locks().is_none()
+        {
+            // Linux generic_delete_lease with no lock context: nothing to remove.
+            return Err(VfsError::WouldBlock);
+        }
+        file.inode()
+            .file_locks()?
+            .set_lease(file.inode(), request, fd, self_wcount, self_rcount)
+    }
+
+    /// Reports the lease held by this open file description; the
+    /// `__fcntl_getlease` default. An inode without a lock context holds none.
+    fn get_lease(&self, file: &VfsFile) -> VfsResult<crate::FileLockType> {
+        Ok(file
+            .inode()
+            .existing_file_locks()
+            .map(|context| context.get_lease(crate::FileLockOwner::ofd(file)))
+            .unwrap_or(crate::FileLockType::Unlock))
+    }
+
     /// Flushes an open file description.
     fn flush(&self, _file: &VfsFile) -> VfsResult<()> {
         Ok(())
@@ -714,16 +761,70 @@ impl VfsFileBuilder {
                     | NodeType::Fifo
                     | NodeType::Socket
             );
-        let _write_guard = if holds_write_access {
-            Some(location.path().lock_writable_mount()?)
-        } else {
-            None
-        };
+        // Linux's open path admits a writer with a transient
+        // `mnt_want_write()` in `may_open()` that is released long before
+        // `do_dentry_open()` publishes `i_writecount` (`file_get_write_access`
+        // then only checks the mount's read-only state; it never sleeps). Our
+        // write admission is a blocking lock and a read-only remount samples
+        // the inode write counts, so validate admission transiently here,
+        // before publishing any count: an open still waiting for admission
+        // must not show up as an active writer to a pending remount.
+        if holds_write_access {
+            let _admission = location.path().lock_writable_mount()?;
+        }
         if holds_write_access {
             location.inode().acquire_write_access();
             self.mode.insert(FMode::WRITER);
         }
+        // Linux `i_readcount_inc` for read-only opens, then `break_lease`
+        // before the filesystem open: the count is published first so a
+        // concurrent lease request either sees it or its break below wakes
+        // it (both orders are serialized on the inode lock state mutex).
+        let holds_read_access =
+            self.mode.contains(FMode::READ) && !self.mode.contains(FMode::WRITE);
+        if holds_read_access {
+            location.inode().acquire_read_access();
+        }
+        // Break leases outside the superblock write-admission guard. A
+        // conflicting lease can make this wait up to `LEASE_BREAK_TIME`,
+        // and Linux performs the open-path `break_lease` without holding
+        // mount/superblock write admission, so an unprivileged lease holder
+        // must not be able to stall remount/umount through our read guard.
+        // Publishing the counts first keeps lease requests atomic against
+        // this open either way; the admission guard taken below is re-validated
+        // after the break, so a read-only remount that won the intervening
+        // window fails this open instead of proceeding.
+        let break_result = location.inode().break_leases(
+            self.mode.contains(FMode::WRITE),
+            self.flags.contains(OpenFlags::NONBLOCK),
+        );
+        if let Err(error) = break_result {
+            if holds_read_access {
+                location.inode().release_read_access();
+            }
+            if holds_write_access {
+                location.inode().release_write_access();
+            }
+            return Err(error);
+        }
+        let _write_guard = if holds_write_access {
+            match location.path().lock_writable_mount() {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    if holds_read_access {
+                        location.inode().release_read_access();
+                    }
+                    location.inode().release_write_access();
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         if let Err(error) = operations.open(location.inode().as_ref(), &mut self) {
+            if holds_read_access {
+                location.inode().release_read_access();
+            }
             if holds_write_access {
                 location.inode().release_write_access();
             }
@@ -736,6 +837,9 @@ impl VfsFileBuilder {
                 | OpenFlags::TRUNCATE,
         );
         if let Err(error) = self.mark_opened() {
+            if holds_read_access {
+                location.inode().release_read_access();
+            }
             if holds_write_access {
                 location.inode().release_write_access();
             }
@@ -829,6 +933,7 @@ impl VfsFileBuilder {
             slots: Mutex::new(slots),
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
+            dir_position: Mutex::new(()),
             readahead: Mutex::new(readahead),
             writeback_error_cursor: Mutex::new(writeback_error_cursor),
             filesystem_error_cursor: Mutex::new(filesystem_error_cursor),
@@ -849,6 +954,10 @@ pub struct VfsFile {
     slots: Mutex<FileSlots>,
     flags: AtomicU32,
     position: Mutex<u64>,
+    /// Serializes directory position operations. `position` remains the sole
+    /// f_pos storage; this lock only prevents iterate/seek from interleaving
+    /// their read-execute-commit sequences.
+    dir_position: Mutex<()>,
     pub(crate) readahead: Mutex<crate::file_ra::FileRaState>,
     writeback_error_cursor: Mutex<u64>,
     filesystem_error_cursor: Mutex<u64>,
@@ -874,6 +983,10 @@ impl VfsFile {
     ) -> VfsResult<Arc<Self>> {
         let mut file = VfsFileBuilder::cloned_from(self, flags, open_flags, f_op);
         file.mark_opened()?;
+        // Linux file_init_path accounting for opens built outside do_dentry_open.
+        if flags.contains(FMode::READ) && !flags.contains(FMode::WRITE) {
+            self.inode().acquire_read_access();
+        }
         file.finish()
     }
 
@@ -891,6 +1004,10 @@ impl VfsFile {
         let mut file = VfsFileBuilder::cloned_from(self, flags, open_flags, f_op);
         file.set_private_data(private_data);
         file.mark_opened()?;
+        // Linux file_init_path accounting for opens built outside do_dentry_open.
+        if flags.contains(FMode::READ) && !flags.contains(FMode::WRITE) {
+            self.inode().acquire_read_access();
+        }
         file.finish()
     }
 
@@ -1099,16 +1216,22 @@ impl VfsFile {
     }
 
     fn verify_read_area(&self, pos: u64, count: usize) -> VfsResult<()> {
-        self.verify_mode(FMode::READ)?;
-        if !self.mode().contains(FMode::CAN_READ) {
+        let mode = self.mode();
+        if !mode.contains(FMode::READ) || mode.contains(FMode::PATH) {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        if !mode.contains(FMode::CAN_READ) {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)
     }
 
     fn verify_write_area(&self, pos: u64, count: usize) -> VfsResult<()> {
-        self.verify_mode(FMode::WRITE)?;
-        if !self.mode().contains(FMode::CAN_WRITE) {
+        let mode = self.mode();
+        if !mode.contains(FMode::WRITE) || mode.contains(FMode::PATH) {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        if !mode.contains(FMode::CAN_WRITE) {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)?;
@@ -1238,18 +1361,26 @@ impl VfsFile {
     /// Requires sleepable task context with IRQs/preemption enabled, outside
     /// non-sleepable RCU sections and locks needed by reclaim, IO or filesystem
     /// callbacks. Directory implementations may allocate with the default
-    /// KERNEL policy. No position lock is held across the implementation call.
+    /// KERNEL policy.
+    ///
+    /// Directory iteration holds `dir_position` across reading f_pos, calling
+    /// the implementation and committing `ctx.pos()`, including error exits.
+    /// `position` itself is only held for the short read/commit steps; the
+    /// operation lock is what prevents another iterate or llseek from
+    /// interleaving with this sequence. Directory callbacks must not re-enter
+    /// iterate/llseek on the same open description.
     pub fn iterate_dir(&self, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
         if self.inode().node_type() != NodeType::Directory {
             return Err(VfsError::NotADirectory);
         }
         self.verify_mode(FMode::READ)?;
 
+        let _dir_position = self.dir_position.lock();
         ctx.set_pos(self.position());
-        let directory = self
-            .operations()
-            .dir_operations()
-            .ok_or(VfsError::NotADirectory)?;
+        let Some(directory) = self.operations().dir_operations() else {
+            self.set_position(ctx.pos());
+            return Err(VfsError::NotADirectory);
+        };
         let result = directory.iterate_shared(self, ctx);
         self.set_position(ctx.pos());
         result
@@ -1264,6 +1395,11 @@ impl VfsFile {
     }
 
     /// Locks this file's `f_pos`.
+    ///
+    /// This is the single position storage, but it is not the directory
+    /// operation lock. Directory position changes must go through
+    /// [`Self::iterate_dir`] or [`Self::llseek`], which hold `dir_position`.
+    /// Direct callers in production must not bypass that sequence.
     pub fn position_lock(&self) -> MutexGuard<'_, u64> {
         self.position.lock()
     }
@@ -1278,6 +1414,10 @@ impl VfsFile {
     }
 
     /// Sets this file's `f_pos`.
+    ///
+    /// Directory iteration is the only production caller; tests may use it
+    /// directly. Other production code must use [`Self::llseek`] so the
+    /// directory operation lock is respected.
     pub fn set_position(&self, position: u64) {
         *self.position_lock() = position;
     }
@@ -1382,6 +1522,56 @@ impl VfsFile {
         }
     }
 
+    /// Requests a file lease on this open file description; Linux
+    /// `vfs_setlease` plus the `fcntl(F_SETLEASE)` request construction.
+    ///
+    /// The lease belongs to the open file description (Ofd identity), matching
+    /// Linux using the filp as `fl_owner`. `fd` is reported in the break SIGIO
+    /// and refreshed on every call (Linux `lm_setup`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `LinuxError::EACCES` unless the caller owns the inode or holds
+    /// `CAP_LEASE`; forwards `InvalidInput` from the lease dispatch and
+    /// `WouldBlock` (`EAGAIN`) for open-count or lease conflicts.
+    pub fn set_lease(
+        &self,
+        cred: &Cred,
+        fd: i32,
+        pid: i32,
+        kind: crate::FileLockType,
+    ) -> VfsResult<()> {
+        let inode = self.inode();
+        if cred.fsuid() != inode.metadata().uid && !cred.has_cap(kcred::CAP_LEASE) {
+            return Err(LinuxError::EACCES.into());
+        }
+        // Linux lease_open_conflict: this filp's own contribution to the inode
+        // open counts, as seen by the write-lease exclusivity check.
+        let mode = self.mode();
+        let (self_wcount, self_rcount) = if mode.contains(FMode::WRITE) {
+            (1, 0)
+        } else if mode.contains(FMode::READ) {
+            (0, 1)
+        } else {
+            (0, 0)
+        };
+        let request = crate::FileLock::new(
+            crate::FileLockOwner::ofd(self),
+            pid,
+            kind,
+            0,
+            0, // whole file
+        )?;
+        self.operations()
+            .set_lease(self, &request, fd, self_wcount, self_rcount)
+    }
+
+    /// Reports the lease held by this open file description; Linux
+    /// `fcntl(F_GETLEASE)`. Pending break targets report their post-break type.
+    pub fn get_lease(&self) -> VfsResult<crate::FileLockType> {
+        self.operations().get_lease(self)
+    }
+
     /// Removes all record locks for an owner. Descriptor close supplies the
     /// files owner; final release supplies the OFD owner. Cleanup cannot fail
     /// to the caller and does not allocate in the local lock implementation.
@@ -1439,10 +1629,20 @@ impl VfsFile {
     }
 
     /// Changes this open file offset.
+    ///
+    /// Directory seeks take the same `dir_position` operation lock as
+    /// [`Self::iterate_dir`], so a seek cannot land between iteration's f_pos
+    /// read and commit. The callback still owns the actual position update.
     pub fn llseek(&self, offset: i64, whence: i32) -> VfsResult<u64> {
         if !self.mode().contains(FMode::LSEEK) {
             return Err(VfsError::from(LinuxError::ESPIPE));
         }
+        let is_directory = self.inode().node_type() == NodeType::Directory;
+        let _dir_position = if is_directory {
+            Some(self.dir_position.lock())
+        } else {
+            None
+        };
         self.operations().llseek(self, offset, whence)
     }
 
@@ -1542,6 +1742,13 @@ impl VfsFile {
 impl Drop for VfsFile {
     fn drop(&mut self) {
         self.remove_posix_locks(crate::FileLockOwner::ofd(self));
+        // locks_remove_file also drops this description's lease; the error
+        // only reports that no lease was held.
+        if !self.is_path()
+            && let Some(locks) = self.inode().existing_file_locks()
+        {
+            let _ = locks.delete_lease(crate::FileLockOwner::ofd(self));
+        }
         let _ = self.operations().flock(
             self,
             &crate::FileLock::unlock(crate::FileLockOwner::flock(self)),
@@ -1556,6 +1763,13 @@ impl Drop for VfsFile {
         };
         if old_mode.contains(FMode::WRITER) {
             self.inode().release_write_access();
+        }
+        // put_file_access: a read-only opened file released its i_readcount.
+        if old_mode.contains(FMode::OPENED)
+            && old_mode.contains(FMode::READ)
+            && !old_mode.contains(FMode::WRITE)
+        {
+            self.inode().release_read_access();
         }
 
         if let Err(err) = release_result {

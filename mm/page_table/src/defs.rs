@@ -127,7 +127,7 @@ pub trait PageTableEntry: fmt::Debug + Clone + Copy + Sync + Send + Sized {
 }
 
 /// Page table operation errors.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PtError {
     /// Frame allocation failed (out of memory).
     NoMemory,
@@ -149,7 +149,7 @@ pub enum PtError {
 /// such as COW write faults. Callers may inspect the mapping identity
 /// and permissions, but only `page_table` interprets `raw_bits` when checking
 /// whether the observed PTE is still unchanged.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PteSnapshot {
     paddr: PhysAddr,
     flags: PagingFlags,
@@ -190,7 +190,7 @@ impl PteSnapshot {
 }
 
 /// Error returned by conditional PTE replacement.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PteReplaceError {
     /// Page-table walk, address validation, or replacement validation failed.
     PageTable(PtError),
@@ -216,7 +216,7 @@ impl From<PtError> for PteReplaceError {
 /// This is diagnostic batching information, not a completion proof. Managed
 /// holds remain owned internally until invalidation completes. Call
 /// [`crate::PageTableMut::try_finish`] when synchronous invalidation is required.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TlbFlushReceipt {
     had_pending: bool,
 }
@@ -240,7 +240,7 @@ impl TlbFlushReceipt {
 /// transfer or release a managed mapping hold. Ordinary managed callers rely on
 /// automatic retention; synchronous operations receive an error from
 /// [`crate::PageTableMut::try_finish`] and must not claim revocation completed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TlbFlushError {
     /// Remote CPU services cannot yet accept and acknowledge shootdowns.
     NotReady,
@@ -502,6 +502,27 @@ pub trait PagingHandler: Sized {
     /// A valid physical address or a metadata lookup alone cannot supply a hold.
     unsafe fn mapping_reference_from_raw(paddr: PhysAddr, bytes: usize) -> Self::MappingReference;
 
+    /// Acquires an independent hold from a live managed leaf's raw transfer.
+    ///
+    /// The original transfer remains owned by its leaf, including on error.
+    /// Raw-only providers reject this operation by default.
+    ///
+    /// # Safety
+    /// The caller must hold exclusive page-table access and retain the live
+    /// managed leaf owning this exact physical range and allocation incarnation
+    /// throughout the call. Address validity or metadata lookup is insufficient.
+    /// The implementation must not consume or release the source transfer.
+    ///
+    /// # Errors
+    /// Returns InvalidAddress when unsupported, or NoMemory when another hold
+    /// cannot be acquired. Failure leaves the original lifetime counts unchanged.
+    unsafe fn mapping_reference_try_clone_from_raw(
+        _paddr: PhysAddr,
+        _bytes: usize,
+    ) -> PtResult<Self::MappingReference> {
+        Err(PtError::InvalidAddress)
+    }
+
     /// Allocates a 4K-aligned physical frame.
     ///
     /// # Returns
@@ -527,7 +548,7 @@ pub trait PagingHandler: Sized {
 ///
 /// The discriminant values are the actual byte sizes of each page.
 #[repr(usize)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageSize {
     /// 4 KiB page (standard granularity).
     Size4K = 0x1000,

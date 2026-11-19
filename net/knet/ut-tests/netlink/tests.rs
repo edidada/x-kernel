@@ -85,6 +85,7 @@ fn assert_socket_unbound(socket: &NetlinkSocket) {
 struct TestDevice {
     link: LinkSnapshot,
     device_id: Option<kdevice::DeviceId>,
+    publication_id: Option<kdevice::PublicationId>,
     neighbors: Vec<(crate::ip::IpAddress, NeighborState)>,
 }
 
@@ -93,12 +94,15 @@ impl TestDevice {
         Self {
             link,
             device_id: None,
+            publication_id: None,
             neighbors: Vec::new(),
         }
     }
 
     fn with_device_id(mut self, device_id: kdevice::DeviceId) -> Self {
         self.device_id = Some(device_id);
+        self.publication_id =
+            Some(kdevice::PublicationId::allocate().expect("test publication id"));
         self
     }
 }
@@ -137,6 +141,10 @@ impl NetDevice for TestDevice {
 
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         self.device_id
+    }
+
+    fn publication_id(&self) -> Option<kdevice::PublicationId> {
+        self.publication_id
     }
 
     fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> kerrno::KResult<RxPoll> {
@@ -833,7 +841,7 @@ fn test_device_removal_refreshes_views() {
     )
     .unwrap();
 
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev_for_test(kdevice::DeviceId::new(2)));
     assert_eq!(service.rebuild_count_for_tests(), rebuild_count + 1);
     assert_eq!(service.link_snapshots().len(), 1);
     assert_eq!(
@@ -5501,7 +5509,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
     }
 
     // Removing eth0 preserves eth1's interface ID and address.
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev_for_test(kdevice::DeviceId::new(2)));
     assert_eq!(
         crate::interface_ipv4_addr("eth1"),
         Ok(core::net::Ipv4Addr::new(10, 0, 0, 2))
@@ -6730,6 +6738,89 @@ fn test_unicast_accepts_one_datagram_larger_than_receive_buffer() {
             &Cred::root(),
         ),
         Ok(1)
+    );
+}
+
+/// `NETLINK_ADD_MEMBERSHIP` links the socket into the protocol's broadcast
+/// list (`mc_list`) without needing a port id, so a subscriber that never binds
+/// still receives its group's multicast.
+#[def_test(serial)]
+fn test_unbound_group_subscriber_receives_multicast() {
+    let subscriber = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
+    subscriber
+        .set_option(SetSocketOption::NetlinkAddMembership(&1))
+        .unwrap();
+    assert!(
+        subscriber.inner.local_addr.read().is_none(),
+        "the subscriber never binds"
+    );
+    let sender = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
+    sender
+        .bind(SocketAddrEx::Netlink(NetlinkAddr {
+            pid: 631,
+            groups: 0,
+        }))
+        .unwrap();
+
+    let payload = b"ACTION=add\0";
+    let send = |sender: &NetlinkSocket| {
+        sender.send_with_cred(
+            Cursor::new(payload.as_slice()),
+            SendOptions {
+                to: Some(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 })),
+                ..SendOptions::default()
+            },
+            &Cred::root(),
+        )
+    };
+    assert_eq!(send(&sender), Ok(payload.len()));
+
+    let packet = pop_event(&subscriber);
+    assert_eq!(packet.data, payload);
+    assert_eq!(packet.from.pid, 631);
+
+    // Dropping the last subscription unlinks it from the broadcast list again.
+    subscriber
+        .set_option(SetSocketOption::NetlinkDropMembership(&1))
+        .unwrap();
+    assert_eq!(send(&sender), Ok(payload.len()));
+    assert!(subscriber.inner.rx_queue.lock().is_empty());
+}
+
+/// The `CAP_NET_ADMIN` buffer forms resize the same netlink queues as the
+/// unforced options: `sock_setsockopt` writes `sk_sndbuf`/`sk_rcvbuf` for both,
+/// and netlink's accessors and admission checks read those fields.
+#[def_test(serial)]
+fn test_netlink_buffer_force_options_resize_the_queues() {
+    let socket = NetlinkSocket::new(NETLINK_USERSOCK, NetlinkSocketType::Raw);
+
+    let mut before = 0usize;
+    socket
+        .get_option(GetSocketOption::ReceiveBuffer(&mut before))
+        .unwrap();
+    let request = 65_536usize;
+    socket
+        .set_option(SetSocketOption::ReceiveBufferForce(&request))
+        .unwrap();
+    let mut after = 0usize;
+    socket
+        .get_option(GetSocketOption::ReceiveBuffer(&mut after))
+        .unwrap();
+    assert_eq!(after, request * 2, "the force form doubles the hint");
+    assert_eq!(
+        socket.inner.rx_queue.lock().limit(),
+        after,
+        "the receive queue follows the readback"
+    );
+
+    let send_request = 32_768usize;
+    socket
+        .set_option(SetSocketOption::SendBufferForce(&send_request))
+        .unwrap();
+    assert_eq!(
+        socket.inner.send_buffer.load(Ordering::Relaxed),
+        send_request * 2,
+        "the send buffer follows the force form"
     );
 }
 
@@ -8614,7 +8705,7 @@ fn test_device_unregister_publishes_teardown_events() {
         }))
         .unwrap();
 
-    assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
+    assert!(crate::unregister_netdev_for_test(kdevice::DeviceId::new(2)));
 
     let mut saw_down_link = false;
     let mut saw_address = false;

@@ -22,6 +22,7 @@ members = [
     "task/kworkng/crates/kworkqueue_ng",
     "task/kworkng",
     "task/ktimer-core",
+    "task/kbandwidth",
     "sync/krtmutex",
     "tee/tee_crypto",
     "tee/xdice",
@@ -79,6 +80,11 @@ categories = ["os", "no-std"]
 
 # Lint levels; lint parameters live in clippy.toml.
 [workspace.lints.rust]
+# Keep the production build warning-free: clippy runs with `--cfg unittest`
+# and cannot see dead code that only the production build removes, so a plain
+# `make build` is the gate for these. Fix with cfg(unittest), an
+# architecture/feature cfg, or an `expect` carrying a CG-024 reason.
+warnings = "deny"
 unreachable_pub = "warn"
 unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(unittest)"] }
@@ -167,6 +173,7 @@ kiface-cpu-api = { path = "util/kiface/crates/cpu-api" }
 kiface-task-wait-api = { path = "util/kiface/crates/task-wait-api" }
 krcu = { path = "sync/krcu" }
 krcu-core = { path = "sync/krcu/crates/krcu-core" }
+kbandwidth = { path = "task/kbandwidth" }
 kspin = { path = "task/kspin" }
 ksync = { path = "task/ksync" }
 kworkerpool_ng = { path = "task/kworkng/crates/kworkerpool_ng" }
@@ -176,7 +183,6 @@ ktask = { path = "task/ktask" }
 ktask-types = { path = "task/ktask-types" }
 ktimer_core = { path = "task/ktimer-core", package = "ktimer-core" }
 ksched = { path = "task/ksched" }
-linked_list_r4l = "0.3"
 intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc", "nightly"] }
 
 # Internal: process management
@@ -224,6 +230,7 @@ devpts = { path = "fs/filesystems/devpts" }
 p9 = { path = "net/9p", default-features = false }
 v9fs = { path = "fs/filesystems/9p" }
 memaddr = { path = "mm/memaddr" }
+memacct = { path = "mm/memacct" }
 anon = { path = "mm/anon" }
 memspace = { path = "mm/memspace" }
 filemap = { path = "mm/filemap" }
@@ -299,7 +306,6 @@ xdice = { path = "tee/xdice", default-features = false, features = ["nostd"] }
 kvmm = { path = "virt/kvmm" }
 kvmm-api = { path = "virt/kvmm-api" }
 vdev-core = { path = "virt/vdev/core" }
-vdev-test-mmio = { path = "virt/vdev/test-mmio" }
 vdev-uart16550 = { path = "virt/vdev/uart16550" }
 vdev-virtio = { path = "virt/vdev/virtio" }
 vdev-virtio-blk = { path = "virt/vdev/virtio-blk" }

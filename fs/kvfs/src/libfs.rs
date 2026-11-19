@@ -70,7 +70,7 @@ pub fn new_pseudo_super_block(
 }
 
 fn pseudo_fs_root_dentry() -> Dentry {
-    let timestamp = ktime::realtime();
+    let timestamp = ktime::realtime_coarse();
     let init = VfsInodeInit::new(
         PSEUDO_FS_ROOT_INO,
         0,
@@ -208,23 +208,17 @@ pub fn simple_getattr(
 /// This is the `fs/libfs.c` helper used by ramfs-like address-space
 /// operations. Block-backed filesystems must complete their own write-end
 /// work and publish the accepted size with [`AddressSpace::write_end_set_size`].
-/// Successful-copy callers retain the copied folio lock through this helper;
-/// it updates inode size without reacquiring cache locks or waiting for I/O.
+/// The per-folio write path holds the copied folio lock through this helper;
+/// batched runs release their tail through `BatchedWriteOperations` and never
+/// call it.
+/// It updates inode size without reacquiring cache locks or waiting for I/O.
 pub fn simple_write_end(mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
     let copied = request.copied();
-    let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-    let old_size = inode.size();
-    let last_pos = request
-        .pos()
-        .checked_add(copied as u64)
-        .ok_or(VfsError::InvalidInput)?;
-
-    let new_size = if copied == 0 {
-        old_size
-    } else {
-        old_size.max(last_pos)
-    };
-    mapping.write_end_set_size(new_size)?;
+    if copied == 0 {
+        return Ok(0);
+    }
+    let last_pos = request.pos() + copied as u64;
+    mapping.write_end_set_size(last_pos)?;
     Ok(copied)
 }
 
