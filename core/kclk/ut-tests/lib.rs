@@ -11,7 +11,7 @@
 
 use alloc::{sync::Arc, vec, vec::Vec};
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 use unittest::{assert_eq, def_test};
 
 use crate::{
@@ -165,6 +165,57 @@ impl ClkHwOps for ReparentThenFailOps {
     }
 }
 
+/// Switches to the second registered parent and asks it for a rate change in
+/// the same request: the shape that commits a lateral switch before the
+/// `SET_RATE_PARENT` upward branch runs.
+struct ReparentThenAskParentOps {
+    parent: SpinNoIrq<u8>,
+}
+
+impl ReparentThenAskParentOps {
+    fn new() -> Self {
+        Self {
+            parent: SpinNoIrq::new(0),
+        }
+    }
+}
+
+impl ClkHwOps for ReparentThenAskParentOps {
+    fn recalc_rate(&self, parent_rate: u64) -> crate::ClkResult<u64> {
+        Ok(parent_rate)
+    }
+
+    fn determine_rate(
+        &self,
+        req: &mut crate::ClkRateRequest,
+        parents: &[(u8, u64)],
+    ) -> crate::ClkResult<()> {
+        req.best_parent_index = Some(1);
+        req.best_parent_rate = parents
+            .iter()
+            .find(|(index, _)| *index == 1)
+            .map_or(32_000_000, |(_, rate)| *rate);
+        req.rate = req.best_parent_rate;
+        // Ask the selected parent for a rate it does not have yet, so the
+        // upward branch actually notifies it instead of returning early.
+        req.parent_target = Some(40_000_000);
+        Ok(())
+    }
+
+    fn set_rate(&self, _rate: u64, _parent_rate: u64) -> crate::ClkResult<u64> {
+        Err(ClkError::NotSupported)
+    }
+
+    fn get_parent(&self) -> crate::ClkResult<u8> {
+        Ok(*self.parent.lock())
+    }
+
+    fn set_parent(&self, index: u8) -> crate::ClkResult<()> {
+        *self.parent.lock() = index;
+        Ok(())
+    }
+}
+
 impl crate::ClkHwOps for FailingGateOps {
     fn prepare(&self) -> crate::ClkResult<()> {
         if self.fail_prepare {
@@ -184,7 +235,9 @@ impl crate::ClkHwOps for FailingGateOps {
 }
 
 // Serializes tests that touch the global provider registry.
-static PROVIDER_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
+static_lock! {
+    static PROVIDER_SERIAL: SpinNoIrq<()> = SpinNoIrq::new(());
+}
 
 /// Shared helpers for the invariants module (cross-module test utilities).
 pub(crate) fn provider_serial_lock() -> kspin::SpinNoIrqGuard<'static, ()> {
@@ -435,6 +488,22 @@ fn divider_power_of_two_encodes_floor_log2() {
     let actual = div.set_rate(300_000_000).unwrap();
     assert_eq!(actual, 250_000_000); // ÷4, not ÷2 (which would need ceil)
     assert_eq!(reg.word(0), 2);
+
+    // The exponent is bounded by the field MASK (7), not by the field width:
+    // a 3-bit field legally encodes dividers above 2^3.
+    let actual = div.set_rate(15_625_000).unwrap(); // ÷64 = 2^6
+    assert_eq!(actual, 15_625_000);
+    assert_eq!(reg.word(0), 6);
+
+    let actual = div.set_rate(7_812_500).unwrap(); // ÷128 = 2^7, the largest
+    assert_eq!(actual, 7_812_500);
+    assert_eq!(reg.word(0), 7);
+
+    // ÷256 would need exponent 8, which the 3-bit field cannot hold: the
+    // request clamps to the largest representable divider instead of wrapping.
+    let actual = div.set_rate(3_906_250).unwrap();
+    assert_eq!(actual, 7_812_500);
+    assert_eq!(reg.word(0), 7);
 }
 
 // ---------------------------------------------------------------------------
@@ -672,7 +741,10 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
     let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty());
     let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::empty());
 
-    let comp = ClkBuilder::new("comp", Composite::new(Some(mux), Some(div), Some(gate)))
+    let comp = ClkBuilder::new(
+        "comp",
+        Composite::new(Some(mux), Some(div), Some(gate)).into_ops(),
+    )
         .parent(parent)
         .build()
         .unwrap();
@@ -685,9 +757,12 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
 
     // Gate bit lives at offset 8 in the same word.
     assert_eq!(comp.is_enabled().unwrap(), false);
+    comp.prepare().unwrap();
     comp.enable().unwrap();
     assert!(comp.is_enabled().unwrap());
     assert_eq!(reg.word(0) & (1 << 8), 1 << 8);
+    comp.disable();
+    comp.unprepare().unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -927,6 +1002,39 @@ fn failed_rate_program_restores_selected_parent() {
     ));
 }
 
+/// F1: a Pre-rate veto from the parent selected by `determine_rate` aborts the
+/// call *and* rolls the lateral switch back, so a failed `set_rate` leaves the
+/// clock on the parent — and at the rate — the consumer saw before the call.
+#[def_test(serial)]
+fn parent_veto_after_reparent_restores_the_previous_parent() {
+    let osc24 = ClkBuilder::new("veto_osc24", FixedRate::new(24_000_000).into_ops())
+        .build()
+        .unwrap();
+    let osc32 = ClkBuilder::new("veto_osc32", FixedRate::new(32_000_000).into_ops())
+        .build()
+        .unwrap();
+    let ops = Arc::new(ReparentThenAskParentOps::new());
+    let clk = ClkBuilder::new("veto_mux", ops.clone() as Arc<dyn ClkHwOps>)
+        .parent(osc24)
+        .parent(osc32.clone())
+        .flags(ClkFlags::SET_RATE_PARENT)
+        .build()
+        .unwrap();
+    // The parent `determine_rate` switches to vetoes every rate change.
+    osc32.add_notifier(Arc::new(|event| {
+        if matches!(event, ClkEvent::PreRateChange { .. }) {
+            NotifierResult::Stop
+        } else {
+            NotifierResult::Proceed
+        }
+    }));
+
+    assert_eq!(clk.set_rate(40_000_000), Err(ClkError::Aborted));
+    assert_eq!(clk.get_parent().unwrap().name(), "veto_osc24");
+    assert_eq!(clk.get_rate(), 24_000_000);
+    assert_eq!(*ops.parent.lock(), 0, "the mux field must be rolled back too");
+}
+
 #[def_test(serial)]
 fn failed_child_recalc_restores_programmed_parent_rate() {
     let root = ClkBuilder::new("txn_rate_root", FixedRate::new(1_000_000_000).into_ops())
@@ -1077,6 +1185,44 @@ fn set_parent_migrates_prepare_enable_refs() {
     assert_eq!(osc_ops.snapshot(), (2, 2, 2, 2));
 }
 
+/// F1 (round 10): a clock may be enabled but unprepared (`prepare_enable` then
+/// `unprepare`), which leaves `enable_count == 1, prepare_count == 0`. The
+/// migration such a clock performs on reparenting must not be rejected by the
+/// consumer-side "enable requires a prepare reference" check, so the enable
+/// reference still moves to the new parent.
+#[def_test(serial)]
+fn reparent_after_unprepare_still_migrates_enable_refs() {
+    let osc_ops = Arc::new(CountingOps::new());
+    let alt_ops = Arc::new(CountingOps::new());
+    let osc = ClkBuilder::new("mig_osc", osc_ops.clone() as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    let alt = ClkBuilder::new("mig_alt", alt_ops.clone() as Arc<dyn ClkHwOps>)
+        .build()
+        .unwrap();
+    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty());
+    let child = ClkBuilder::new("mig_child", mux)
+        .parent(osc.clone())
+        .parent(alt.clone())
+        .build()
+        .unwrap();
+    let handle = ClkHandle::new(child);
+
+    handle.prepare_enable().unwrap();
+    handle.unprepare().unwrap(); // enabled but unprepared
+    assert_eq!(osc_ops.snapshot(), (1, 1, 1, 0));
+
+    // The enable reference (not a prepare reference) migrates to the new
+    // parent; the consumer-side check must not fire on this internal call.
+    handle.set_parent(1).unwrap();
+    assert_eq!(osc_ops.snapshot(), (1, 1, 1, 1));
+    assert_eq!(alt_ops.snapshot(), (0, 0, 1, 0));
+
+    // A consumer enable on the still-unprepared parent is still rejected.
+    let err = handle.get_parent().unwrap().enable().unwrap_err();
+    assert_eq!(err, ClkError::BadState);
+}
+
 #[def_test(serial)]
 fn init_hook_runs_at_build() {
     let flag: Arc<SpinNoIrq<bool>> = Arc::new(SpinNoIrq::new(false));
@@ -1141,7 +1287,7 @@ fn hiword_mask_gate_writes_atomic_single_word() {
 }
 
 #[def_test(serial)]
-fn clk_disable_unused_gates_idle_and_skips_critical() {
+fn clk_disable_unused_gates_idle_and_skips_critical_and_ignored() {
     let reg = Arc::new(MockReg::new());
     reg.mem.lock()[0] = 1; // bootloader left the gate on
     let idle = ClkBuilder::new(
@@ -1165,9 +1311,45 @@ fn clk_disable_unused_gates_idle_and_skips_critical() {
     .build()
     .unwrap();
 
+    // IGNORE_UNUSED is the "hand off, do not gate" flag: a clock the firmware
+    // or another agent left running on purpose keeps running.
+    let reg3 = Arc::new(MockReg::new());
+    reg3.mem.lock()[0] = 1;
+    let _ignored = ClkBuilder::new(
+        "ignored",
+        Gate::into_ops(reg3.clone(), 0, 0, GateFlags::empty()),
+    )
+    .flags(ClkFlags::IGNORE_UNUSED)
+    .build()
+    .unwrap();
+
     clk_disable_unused();
-    assert_eq!(reg.mem.lock()[0], 0);
-    assert_eq!(reg2.mem.lock()[0], 1);
+    assert_eq!(reg.mem.lock()[0], 0, "an unused gate is switched off");
+    assert_eq!(reg2.mem.lock()[0], 1, "IS_CRITICAL is never gated");
+    assert_eq!(reg3.mem.lock()[0], 1, "IGNORE_UNUSED is never gated");
+}
+
+/// F3 (round 11): the consumer view and the hardware view are different
+/// questions, so a register-less clock reports "enabled by its consumers"
+/// without ever claiming a gate register is on. Before the split,
+/// `is_enabled` answered the hardware question and this fails.
+#[def_test(serial)]
+fn handle_is_enabled_reports_the_consumer_view_not_the_hardware_view() {
+    let clk = ClkBuilder::new("plain_rate", FixedRate::new(1_000_000).into_ops())
+        .build()
+        .unwrap();
+    let handle = ClkHandle::new(clk.clone());
+    assert!(!handle.is_enabled().unwrap());
+
+    handle.prepare_enable().unwrap();
+    // Consumer view: the framework enable count is 1.
+    assert!(handle.is_enabled().unwrap());
+    // Hardware view: a fixed-rate clock has no gate register to read, so the
+    // framework must not claim the hardware is enabled.
+    assert!(!clk.is_enabled_in_hw().unwrap());
+
+    handle.disable_unprepare();
+    assert!(!handle.is_enabled().unwrap());
 }
 
 #[def_test(serial)]
@@ -1557,7 +1739,7 @@ fn register_table_resolves_external_parent_refs() {
         &[ParentRef::External(0x90, 0)],
         ClkFlags::empty(),
         ClkNodeDesc::Gate {
-            offset: 0,
+            offset_bytes: 0,
             bit: 3,
             flags: GateFlags::empty(),
         },
@@ -1581,7 +1763,7 @@ fn register_table_resolves_external_parent_refs() {
         &[ParentRef::External(0xDEAD, 0)],
         ClkFlags::empty(),
         ClkNodeDesc::Gate {
-            offset: 0,
+            offset_bytes: 0,
             bit: 0,
             flags: GateFlags::empty(),
         },
@@ -1862,22 +2044,54 @@ fn no_reparent_mux_propagates_instead_of_switching() {
 /// instead of read-modify-write, and READ_ONLY dividers reject set_rate.
 #[def_test(serial)]
 fn hiword_divider_writes_masked_word_and_read_only_rejects() {
+    // Writable hiword divider: shift 0, width 5, so the write mask
+    // (field << 16) stays inside the high half. Preload bits outside the field
+    // to prove the update is the single masked store: a read-modify-write
+    // would keep 0xA5A5_0000 and yield 0xA5A5_0007, while the hiword
+    // convention replaces the whole word with mask | value.
     let reg = Arc::new(MockReg::new());
-    let div = Divider::into_ops(
-        reg.clone(),
-        0,
-        0,
-        5,
-        None,
-        DividerFlags::HIWORD_MASK | DividerFlags::READ_ONLY,
-    );
-    let core = ClkBuilder::new("f5_div", div)
-        .flags(ClkFlags::SET_RATE_PARENT)
+    reg.reg_write(0, 0xA5A5_0000);
+    let parent = ClkBuilder::new("f5_parent", FixedRate::new(1_000_000_000).into_ops())
         .build()
         .unwrap();
-    // READ_ONLY rounds to the rate already in hardware (÷1 here).
-    assert_eq!(core.round_rate(100).unwrap(), core.get_rate());
-    assert_eq!(core.set_rate(100).unwrap_err(), ClkError::NotSupported);
+    let div = ClkBuilder::new(
+        "f5_div",
+        Divider::into_ops(reg.clone(), 0, 0, 5, None, DividerFlags::HIWORD_MASK),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+    // 1 GHz / 125 MHz = ÷8 -> zero-based raw 7, field 0x07, mask 0x1f << 16.
+    assert_eq!(div.set_rate(125_000_000).unwrap(), 125_000_000);
+    assert_eq!(reg.word(0), 0x001F_0007);
+    assert_eq!(div.get_rate(), 125_000_000);
+
+    // READ_ONLY: the field belongs to firmware, so set_rate is rejected and
+    // rounding reports the rate already in hardware (raw 9 = ÷10).
+    let reg = Arc::new(MockReg::new());
+    reg.reg_write(0, 9);
+    let parent = ClkBuilder::new("f5_ro_parent", FixedRate::new(1_000_000_000).into_ops())
+        .build()
+        .unwrap();
+    let ro = ClkBuilder::new(
+        "f5_ro_div",
+        Divider::into_ops(
+            reg.clone(),
+            0,
+            0,
+            5,
+            None,
+            DividerFlags::HIWORD_MASK | DividerFlags::READ_ONLY,
+        ),
+    )
+    .parent(parent)
+    .build()
+    .unwrap();
+    assert_eq!(ro.get_rate(), 100_000_000);
+    assert_eq!(ro.round_rate(300_000_000).unwrap(), 100_000_000);
+    assert_eq!(ro.set_rate(300_000_000).unwrap_err(), ClkError::NotSupported);
+    // The rejected call must not have written the register.
+    assert_eq!(reg.word(0), 9);
 }
 
 /// F1: register_table resolves local parent names through the global provider

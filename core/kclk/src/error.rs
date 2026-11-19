@@ -5,7 +5,7 @@
 //! Error and result types for the clock subsystem.
 
 /// Errors returned by clock operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClkError {
     /// No clock provider has been installed yet.
     NoProvider,

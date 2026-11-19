@@ -14,7 +14,7 @@
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
-use kspin::SpinNoIrq;
+use kspin::SpinNoPreempt;
 
 use crate::{ClkCore, ClkIndex, ClkLookup, ProviderId};
 
@@ -27,8 +27,8 @@ use crate::{ClkCore, ClkIndex, ClkLookup, ProviderId};
 /// ```
 pub struct ClkTable {
     provider_id: ProviderId,
-    by_index: SpinNoIrq<Vec<Option<Arc<ClkCore>>>>,
-    by_name: SpinNoIrq<BTreeMap<&'static str, Arc<ClkCore>>>,
+    by_index: SpinNoPreempt<Vec<Option<Arc<ClkCore>>>>,
+    by_name: SpinNoPreempt<BTreeMap<&'static str, Arc<ClkCore>>>,
 }
 
 impl ClkTable {
@@ -39,8 +39,8 @@ impl ClkTable {
     pub const fn new(provider_id: ProviderId) -> Self {
         Self {
             provider_id,
-            by_index: SpinNoIrq::new(Vec::new()),
-            by_name: SpinNoIrq::new(BTreeMap::new()),
+            by_index: SpinNoPreempt::new(Vec::new()),
+            by_name: SpinNoPreempt::new(BTreeMap::new()),
         }
     }
 
@@ -78,6 +78,19 @@ impl ClkTable {
     pub fn clear(&self) {
         self.by_index.lock().clear();
         self.by_name.lock().clear();
+    }
+
+    /// Returns the clock registered under DT binding `index`, if any.
+    pub fn get_by_index(&self, index: ClkIndex) -> Option<Arc<ClkCore>> {
+        self.by_index
+            .lock()
+            .get(index as usize)
+            .and_then(|slot| slot.clone())
+    }
+
+    /// Returns the clock registered under SoC output `name`, if any.
+    pub fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
+        self.by_name.lock().get(name).cloned()
     }
 }
 

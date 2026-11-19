@@ -22,9 +22,9 @@ field encoding is the controller driver's responsibility.
 - **MMIO register contents** are read by `Gate`, `Mux`, and `Divider` through
   `ClkRegAccess`. They are treated as untrusted integers; field extraction never
   indexes out of bounds.
-- **Consumer clock specifiers** (`ClkSpec` name/index) come from drivers and, in
-  the future, from DT parsing. An unknown name or out-of-range index yields
-  `None` / `NotFound`, never a panic.
+- **Consumer clock specifiers** (`ClkIndex` DT index or output name) come from
+  drivers and, in the future, from DT parsing. An unknown name or out-of-range
+  index yields `None` / `NotFound`, never a panic.
 
 ## Unsafe Code
 
@@ -40,9 +40,10 @@ safety contract is documented on `MmioClkReg::new`:
   bit. Topology migration nests the locks in that order. See the *Known
   Limitations* note on register-word sharing (use `HIWORD_MASK`).
 
-`ClkHandle::into_core` also uses a documented `unsafe` cast to recover the
-concrete `ClkCore` behind its private consumer trait object; construction is
-sealed to the crate, so every such object was created from `Arc<ClkCore>`.
+`ClkHandle::into_core` moves the `Arc<ClkCore>` out of a `ManuallyDrop<Self>`
+with one documented `unsafe` `ptr::read`: no `Drop` runs on the forgotten
+handle, so the consumer state (rate vote, notifier id) is intentionally left
+behind and the node reference transfers to the caller.
 `Gate`/`Mux`/`Divider` field math and parent recursion otherwise use safe code.
 
 ## Invariants
@@ -94,7 +95,7 @@ sealed to the crate, so every such object was created from `Arc<ClkCore>`.
 |----|--------|--------|---------|------------------|
 | T-01 | Invalid MMIO base passed to `MmioClkReg` | High | Controller driver hands a wrong/unmapped address | Safety contract is documented on `new`; the controller driver (and `memspace` mapping it supplies) owns validity. Residual risk is the caller's. |
 | T-02 | Out-of-range parent index | Medium | Firmware or driver requests parent `N` beyond the table | `ClkCore::set_parent` returns `InvalidParent` without touching hardware. |
-| T-03 | Zero or huge decoded divider | Medium | Register field decodes to 0, or a divider that would overflow | `rate_for` passes through on 0; `closest_div`/`div_to_raw` clamp to the field width; `FixedFactor::scale` rejects overflow with `InvalidRate`. |
+| T-03 | Zero or huge decoded divider | Medium | Register field decodes to 0, or a divider that would overflow | `rate_for` passes through on 0; `closest_div`/`div_to_raw` clamp the `POWER_OF_TWO` exponent to the field mask, capped at 31 so the decoded `u32` divider stays representable; `FixedFactor::scale` rejects overflow with `InvalidRate`. |
 | T-04 | Concurrent rate change on a sibling | Low | Two probes reprogram overlapping subtrees | Serialized by the global `CLK_LOCK`; only one sleepable mutation runs at a time across the whole tree. |
 | T-05 | Provider lookup before install | Low | Driver resolves a clock before controller probe completes | Returns `NoProvider`; the integration layer maps this to deferred probe instead of permanent failure. |
 | T-06 | Subscriber re-enters the framework in a notifier | High | A `ClkNotifier` callback calls `set_rate`/`get_rate` re-entrantly | Documented constraint: callbacks run under `CLK_LOCK` and must be non-re-entrant (re-entrancy panics). Audit checklist enforces it. |
@@ -114,8 +115,9 @@ sealed to the crate, so every such object was created from `Arc<ClkCore>`.
 
 - No authenticity/integrity check on firmware-described clocks; a misconfigured
   tree produces wrong but representable rates.
-- Notifiers fire only on the node where `set_rate` was called; intermediate
-  parents changed during upward propagation receive no separate notification.
+- Notifiers fire on every reprogrammed clock (the entry node and each parent
+  reprogrammed during `SET_RATE_PARENT` propagation); a `Pre` veto anywhere
+  aborts the whole change.
 - The slow-operation lock is a sleepable mutex, so `prepare`/`unprepare` and
   `set_rate` provider callbacks may block. `enable`/`disable`, `set_parent`,
   reparent-time recalculation, and otherwise lock-free callbacks must not sleep.

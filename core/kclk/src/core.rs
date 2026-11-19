@@ -10,7 +10,7 @@ use alloc::{
     vec::Vec,
 };
 
-use kspin::{SpinNoIrq, SpinRaw};
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use ksync::{Mutex, static_lock};
 
 use crate::{
@@ -50,16 +50,21 @@ static_lock! {
     static CLK_LOCK: Mutex<()> = Mutex::new(());
 }
 
-/// Serializes `enable`/`disable` propagation across the whole tree (Linux's
-/// `clk_enable_lock`). An IRQ-saving spinlock: usable from interrupt context,
-/// and holding it makes the per-CPU IRQ-off guarantee deadlock-free against
-/// same-CPU handlers. Never sleep while holding it.
-static CLK_ENABLE_LOCK: SpinRaw<()> = SpinRaw::new(());
+static_lock! {
+    /// Serializes `enable`/`disable` propagation across the whole tree (Linux's
+    /// `clk_enable_lock`). `SpinNoIrq` saves IRQ state and disables preemption on
+    /// acquire, so the per-CPU IRQ-off guarantee is deadlock-free against
+    /// same-CPU handlers. Never sleep while holding it: the provider
+    /// `enable`/`disable` callbacks run here and must stay non-sleeping.
+    static CLK_ENABLE_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+}
 
-/// Global list of every registered clock, used by the unused-clock gate-down
-/// pass and future PM walks. Strong references mirror Linux, which never frees
-/// a `clk_core` during normal operation.
-static CLOCKS: SpinNoIrq<Vec<Arc<ClkCore>>> = SpinNoIrq::new(Vec::new());
+static_lock! {
+    /// Global list of every registered clock, used by the unused-clock gate-down
+    /// pass and future PM walks. Strong references mirror Linux, which never frees
+    /// a `clk_core` during normal operation.
+    static CLOCKS: SpinNoPreempt<Vec<Arc<ClkCore>>> = SpinNoPreempt::new(Vec::new());
+}
 
 /// A clock slot waiting for a parent (by name) that has not been registered
 /// yet. When a clock with `parent_name` is built, the framework adopts it.
@@ -70,8 +75,10 @@ struct OrphanEntry {
     parent_name: &'static str,
 }
 
-/// Clocks waiting for a not-yet-registered parent.
-static ORPHANS: SpinNoIrq<Vec<OrphanEntry>> = SpinNoIrq::new(Vec::new());
+static_lock! {
+    /// Clocks waiting for a not-yet-registered parent.
+    static ORPHANS: SpinNoPreempt<Vec<OrphanEntry>> = SpinNoPreempt::new(Vec::new());
+}
 
 /// Mutable per-node state, guarded by a spin lock.
 struct ClkState {
@@ -113,16 +120,20 @@ pub struct ClkCore {
     ops: Arc<dyn ClkHwOps>,
     /// Parent table. Interior-mutable so an orphan slot (`None`) can be filled
     /// later when its named parent is registered.
+    // `parents` and `state` are read on the IRQ-safe enable path
+    // (`enable_locked`/`disable_locked`, reachable from interrupt context), so
+    // they keep IRQ masking. The remaining fields are task-context-only: they
+    // are touched under the sleepable `CLK_LOCK` (topology, notifiers, rates).
     parents: SpinNoIrq<Vec<Option<Arc<ClkCore>>>>,
     /// Children whose *currently selected* parent is this node. Weak so a
     /// parent does not keep a dropped child alive; maintained by
     /// [`relink_selected`](Self::relink_selected).
-    children: SpinNoIrq<Vec<Weak<ClkCore>>>,
+    children: SpinNoPreempt<Vec<Weak<ClkCore>>>,
     /// Weak back-reference to this node, used to push `self` into a parent's
     /// `children` list from a `&self` method. Set once in [`ClkBuilder::build`].
-    self_ref: SpinNoIrq<Option<Weak<ClkCore>>>,
+    self_ref: SpinNoPreempt<Option<Weak<ClkCore>>>,
     state: SpinNoIrq<ClkState>,
-    notifiers: SpinNoIrq<NotifierState>,
+    notifiers: SpinNoPreempt<NotifierState>,
 }
 
 impl ClkCore {
@@ -387,7 +398,9 @@ impl ClkCore {
         }
     }
 
-    /// Number of live children (for tests/diagnostics). Prunes dangling weaks.
+    /// Number of live children (test-only invariant helper). Prunes dangling
+    /// weaks.
+    #[cfg(unittest)]
     pub(crate) fn children_count(&self) -> usize {
         let mut list = self.children.lock();
         list.retain(|w| w.strong_count() > 0);
@@ -399,11 +412,17 @@ impl ClkCore {
     /// No hardware write — only `recalc_rate`, matching the non-sleeping
     /// contract. Used by the table-driven registrar for the top-down rate
     /// refresh once parents are resolved. The caller holds `CLK_LOCK`.
-    pub(crate) fn refresh_rate(&self) {
+    ///
+    /// # Errors
+    ///
+    /// Propagates `recalc_rate`'s failure so the registrar can roll the
+    /// batch back instead of publishing a clock with a stale (possibly zero)
+    /// cached rate.
+    pub(crate) fn refresh_rate(&self) -> ClkResult {
         let parent_rate = self.parent_rate();
-        if let Ok(rate) = self.ops.recalc_rate(parent_rate) {
-            self.state.lock().rate = rate;
-        }
+        let rate = self.ops.recalc_rate(parent_rate)?;
+        self.state.lock().rate = rate;
+        Ok(())
     }
 
     /// Walk children top-down and refresh each cached rate from its (now
@@ -421,7 +440,10 @@ impl ClkCore {
             .filter_map(|w| w.upgrade())
             .collect();
         for child in children {
-            child.refresh_rate();
+            // Best-effort on the propagation path: the caller's own change is
+            // already committed, so a descendant whose recalc fails keeps its
+            // previous cached rate instead of failing the whole update.
+            let _ = child.refresh_rate();
             child.refresh_descendants();
         }
     }
@@ -567,24 +589,33 @@ impl ClkCore {
     /// `set_parent`'s count migration. The provider `enable` callback runs
     /// under it and must be quick and non-sleeping (it only flips a gate bit).
     pub fn enable(&self) -> ClkResult {
-        let _guard = CLK_ENABLE_LOCK.lock();
-        self.enable_locked()
+        let result = {
+            let _guard = CLK_ENABLE_LOCK.lock();
+            // Linux __clk_enable WARN semantics: enabling an unprepared clock is
+            // consumer misuse — hardware needs prepare (PLL settle, async
+            // unlocks) before it can be safely ungated. Rejected at runtime
+            // (CG-021: no debug-only downgrade) so release builds reject it too.
+            // Only the consumer entry point validates: the framework's own
+            // reference migration calls `enable_locked` on a parent it has just
+            // prepared exactly as often as the child held prepare references,
+            // which is 0 for an enabled-but-unprepared clock.
+            if self.state.lock().prepare_count == 0 {
+                Err(ClkError::BadState)
+            } else {
+                self.enable_locked()
+            }
+        };
+        if let Err(error) = &result {
+            log::warn!("kclk: enable failed for \"{}\" ({error:?})", self.name);
+        }
+        result
     }
 
     /// Internal enable; the caller holds [`CLK_ENABLE_LOCK`]. Propagates to
-    /// the parent first and rolls it back on a hardware failure.
+    /// the parent first and rolls it back on a hardware failure. No logging
+    /// here: this runs under a spinlock (CG-013); the public wrapper reports
+    /// failures after the guard is dropped.
     pub(crate) fn enable_locked(&self) -> ClkResult {
-        // Linux __clk_enable WARN semantics: enabling an unprepared clock is
-        // consumer misuse — hardware needs prepare (PLL settle, async
-        // unlocks) before it can be safely ungated. kclk (like the other
-        // core-service crates) has no logging dependency, so this surfaces
-        // as a debug-build assertion rather than a runtime warning.
-        debug_assert!(
-            self.state.lock().prepare_count > 0,
-            "kclk: enabling unprepared clock \"{}\" — call prepare() first",
-            self.name
-        );
-
         let parent_done = match self.parent_node() {
             Some(parent) => {
                 parent.enable_locked()?;
@@ -595,13 +626,8 @@ impl ClkCore {
 
         let need_enable = self.state.lock().enable_count == 0;
         if need_enable && let Err(err) = self.ops.enable() {
-            // Temporary bring-up diagnostic: the PCIe/combphy clock tree
-            // shows enables that end up disabled, and this is the only spot
-            // that disables a parent from inside the enable path.
-            log::warn!(
-                "kclk: enable failed for \"{}\" ({err:?}) — rolling back parent",
-                self.name
-            );
+            // Roll the parent back and surface the failure; the public
+            // wrapper logs it after dropping the spinlock (CG-013).
             if parent_done && let Some(parent) = self.parent_node() {
                 parent.disable_locked();
             }
@@ -630,9 +656,6 @@ impl ClkCore {
             st.enable_count == 0
         };
         if need_disable {
-            // Temporary bring-up diagnostic: name the clock whose refcount
-            // hit zero so an unexpected hardware disable identifies itself.
-            log::info!("kclk: hw-disable \"{}\" (count 0)", self.name);
             self.ops.disable();
         }
         if let Some(parent) = self.parent_node() {
@@ -640,7 +663,9 @@ impl ClkCore {
         }
     }
 
-    /// Whether the hardware reports the clock as enabled.
+    /// Whether the clock has at least one enable reference — the
+    /// prepare/enable contract's answer. The register-backed view is
+    /// [`is_enabled_in_hw`](Self::is_enabled_in_hw).
     pub fn is_enabled(&self) -> ClkResult<bool> {
         // The consumer-facing answer is the framework's own enable count:
         // gate-less providers (fixed-rate) have no register to query, and a
@@ -671,7 +696,8 @@ impl ClkCore {
 
     /// Invariant check: does the cached rate still equal what `recalc_rate`
     /// would derive from the (current) parent rate? Roots are trivially
-    /// coherent. For tests/diagnostics.
+    /// coherent. Test-only invariant helper.
+    #[cfg(unittest)]
     pub(crate) fn cache_coherent(&self) -> bool {
         let Some(p) = self.parent_node() else {
             return true;
@@ -773,9 +799,12 @@ impl ClkCore {
     ///
     /// When this node asks for a parent change and carries
     /// [`ClkFlags::SET_RATE_PARENT`], the request is forwarded to the parent
-    /// (reprogramming it) and this node is recalculated. Only this node's
-    /// notifiers fire; intermediate parents changed during propagation do not
-    /// receive separate notifications.
+    /// (reprogramming it) and this node is recalculated. Rate-change
+    /// notifiers fire on **every** clock whose rate is actually
+    /// reprogrammed — this node and each parent reprogrammed on its behalf —
+    /// and a `Pre`-rate veto on any of them aborts the whole change with
+    /// [`ClkError::Aborted`]. Register a parent notifier only if it must
+    /// observe child-driven changes.
     pub fn set_rate(&self, rate: Rate) -> ClkResult<Rate> {
         let _guard = CLK_LOCK.lock();
         let rate = self.clamp_rate(rate);
@@ -848,55 +877,21 @@ impl ClkCore {
         }
         let parent_rate = self.parent_rate();
 
-        let result = if let Some(target) = req
+        let result = match req
             .parent_target
             .filter(|_| self.flags.contains(ClkFlags::SET_RATE_PARENT))
         {
-            // Upward: the node asks its selected parent to change rate.
-            let parent = self.parent_node().ok_or(ClkError::NotSupported)?;
-            let old_parent_rate = parent.get_rate();
-            if old_parent_rate == target {
-                // Parent already at target (e.g. set through another path):
-                // nothing to program; report this node through recalc.
-                return self.ops.recalc_rate(old_parent_rate);
-            }
-            // The parent's own subscribers observe this change too: Linux
-            // fires rate notifiers on every clock whose rate changes,
-            // including parents changed on a child's behalf (clk_change_rate).
-            // The rockchip cpuclk/frac remux dances hook exactly these events.
-            if !parent.notify_pre(old_parent_rate, target) {
-                parent.notify_aborted(old_parent_rate, target);
-                return Err(ClkError::Aborted);
-            }
-            match parent.set_rate_locked(target) {
-                Ok(actual_parent) => {
-                    parent.notify_post(old_parent_rate, actual_parent);
-                    match self.ops.recalc_rate(actual_parent) {
-                        Ok(rate) => Ok(rate),
-                        Err(error) => {
-                            // The child could not accept the newly programmed
-                            // parent rate. Restore the upstream transaction before
-                            // reporting an aborted change to this node's consumer.
-                            match parent.set_rate_locked(old_parent_rate) {
-                                Ok(restored) if restored == old_parent_rate => Err(error),
-                                Ok(_) | Err(_) => Err(ClkError::BadState),
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    parent.notify_aborted(old_parent_rate, target);
-                    Err(error)
-                }
-            }
-        } else {
-            // Own rate field. A transparent node (no `set_rate`) only
-            // succeeds by reporting its parent's rate after a source switch.
-            match self.ops.set_rate(req.rate, parent_rate) {
+            // Upward: the node asks its selected parent to change rate. The
+            // helper returns every failure as a value, so the topology
+            // rollback below always runs after a lateral switch happened.
+            Some(target) => self.ask_parent_for_rate_locked(target),
+            // Own rate field. A transparent node (no `set_rate`) only succeeds
+            // by reporting its parent's rate after a source switch.
+            None => match self.ops.set_rate(req.rate, parent_rate) {
                 Ok(actual) => Ok(actual),
                 Err(ClkError::NotSupported) if reparented => self.ops.recalc_rate(parent_rate),
                 Err(error) => Err(error),
-            }
+            },
         };
 
         if result.is_err() && reparented && self.switch_parent_locked(current).is_err() {
@@ -906,6 +901,62 @@ impl ClkCore {
             return Err(ClkError::BadState);
         }
         result
+    }
+
+    /// Ask the parent selected by `determine_rate` to provide `target`.
+    ///
+    /// `program_rate_locked` calls this after a possible lateral switch, so the
+    /// caller owns the topology rollback: every failure here is returned as a
+    /// value, never propagated with `?`.
+    fn ask_parent_for_rate_locked(&self, target: Rate) -> ClkResult<Rate> {
+        debug_assert_clk_lock_held();
+        let Some(parent) = self.parent_node() else {
+            return Err(ClkError::NotSupported);
+        };
+        let old_parent_rate = parent.get_rate();
+        if old_parent_rate == target {
+            // Parent already at target (e.g. set through another path):
+            // nothing to program; report this node through recalc.
+            return self.ops.recalc_rate(old_parent_rate);
+        }
+        // The parent's own subscribers observe this change too: Linux fires
+        // rate notifiers on every clock whose rate changes, including parents
+        // changed on a child's behalf (clk_change_rate). The rockchip
+        // cpuclk/frac remux dances hook exactly these events.
+        if !parent.notify_pre(old_parent_rate, target) {
+            parent.notify_aborted(old_parent_rate, target);
+            return Err(ClkError::Aborted);
+        }
+        match parent.set_rate_locked(target) {
+            Ok(actual_parent) => {
+                parent.notify_post(old_parent_rate, actual_parent);
+                self.accept_parent_rate_locked(&parent, old_parent_rate, actual_parent)
+            }
+            Err(error) => {
+                parent.notify_aborted(old_parent_rate, target);
+                Err(error)
+            }
+        }
+    }
+
+    /// Recalculate after the parent moved to `actual`; restore `old` if this
+    /// node cannot accept the newly programmed rate.
+    fn accept_parent_rate_locked(
+        &self,
+        parent: &ClkCore,
+        old: Rate,
+        actual: Rate,
+    ) -> ClkResult<Rate> {
+        debug_assert_clk_lock_held();
+        match self.ops.recalc_rate(actual) {
+            Ok(rate) => Ok(rate),
+            // Restore the upstream transaction before reporting an aborted
+            // change to this node's consumer.
+            Err(error) => match parent.set_rate_locked(old) {
+                Ok(restored) if restored == old => Err(error),
+                Ok(_) | Err(_) => Err(ClkError::BadState),
+            },
+        }
     }
 
     // ---- parent selection ----
@@ -1145,8 +1196,8 @@ impl ClkBuilder {
             flags,
             ops,
             parents: SpinNoIrq::new(parents),
-            children: SpinNoIrq::new(Vec::new()),
-            self_ref: SpinNoIrq::new(None),
+            children: SpinNoPreempt::new(Vec::new()),
+            self_ref: SpinNoPreempt::new(None),
             state: SpinNoIrq::new(ClkState {
                 enable_count: 0,
                 prepare_count: 0,
@@ -1157,7 +1208,7 @@ impl ClkBuilder {
                 votes: Vec::new(),
                 next_vote_id: 1,
             }),
-            notifiers: SpinNoIrq::new(NotifierState {
+            notifiers: SpinNoPreempt::new(NotifierState {
                 // Ids start at 1; 0 is the reserved "no notifier" sentinel used
                 // by ClkHandle's automatic unregister tracking.
                 next_id: 1,
@@ -1205,14 +1256,16 @@ fn adopt_orphans(name: &'static str, parent: Arc<ClkCore>) -> ClkResult {
     let matched: Vec<OrphanEntry> = {
         let mut orphans = ORPHANS.lock();
         let mut matched = Vec::new();
-        let mut i = 0;
-        while i < orphans.len() {
-            if orphans[i].parent_name == name {
-                matched.push(orphans.remove(i));
+        // Partition in one pass: `retain` compacts the queue without the
+        // repeated element shifting of `remove` inside a loop.
+        orphans.retain(|entry| {
+            if entry.parent_name == name {
+                matched.push(entry.clone());
+                false
             } else {
-                i += 1;
+                true
             }
-        }
+        });
         matched
     };
 
@@ -1316,7 +1369,7 @@ pub(crate) fn with_clk_lock<T>(f: impl FnOnce() -> T) -> T {
 
 /// Acquire the enable-path lock (for callers already holding `CLK_LOCK`; the
 /// CLK_LOCK → CLK_ENABLE_LOCK order is the only legal nesting).
-pub(crate) fn enable_lock() -> kspin::SpinRawGuard<'static, ()> {
+pub(crate) fn enable_lock() -> kspin::SpinNoIrqGuard<'static, ()> {
     CLK_ENABLE_LOCK.lock()
 }
 
@@ -1467,13 +1520,20 @@ pub fn clk_disable_unused() {
             st.enable_count == 0
         };
         if unused && clk.is_enabled_in_hw().unwrap_or(false) {
-            clk.ops.disable();
+            // Re-check under CLK_ENABLE_LOCK: a consumer enable between the
+            // read above and the gate write would otherwise be gated straight
+            // back off. The lock order CLK_LOCK -> CLK_ENABLE_LOCK holds.
+            let _enable_guard = CLK_ENABLE_LOCK.lock();
+            let still_unused = clk.state.lock().enable_count == 0;
+            if still_unused && clk.is_enabled_in_hw().unwrap_or(false) {
+                clk.ops.disable();
+            }
         }
     }
 }
 
 /// A one-line summary of one clock (see [`clk_summary`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClkSummaryEntry {
     /// Clock name.
     pub name: &'static str,

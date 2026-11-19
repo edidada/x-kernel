@@ -50,16 +50,21 @@ names and polarity. Verified against `drivers/clk/clk-*.c`:
 | `ClkFlags::SET_RATE_PARENT` | `CLK_SET_RATE_PARENT` | ✓ |
 | `ClkFlags::IS_CRITICAL` / `IGNORE_UNUSED` | same names | ✓ honored by `clk_disable_unused` |
 | `ClkFlags::GET_RATE_NOCACHE` | `CLK_GET_RATE_NOCACHE` | ✓ |
-| enable-before-prepare | `__clk_enable` WARN | debug assertion (no log in core crates) |
+| enable-before-prepare | `__clk_enable` WARN | rejected with `ClkError::BadState` in every build profile (not a debug-only assertion); `enable()` failures are logged |
 
 `ClkFlags` bit positions differ from the Linux C ABI (Rust bitflags, no FFI
 sharing), so flags must be written by name, never by numeric value.
 
 ## Layering
 
-`kclk` is the framework core. It is host-free: it names no bus, no device
-model, and no kernel implementation crate. The integration surfaces around it
-are split the way the driver subsystem splits every capability:
+`kclk` is the framework core. It is host-free in the driver-model sense: it
+names no bus, no device model, no firmware parser, and no driver subsystem
+crate, so it runs unchanged on mocks. It does depend on the kernel primitive
+crates every framework core needs — `kspin` for the clock-tree locks (IRQ-safe
+where the enable fast path touches them, preemption-only elsewhere),
+`ksync` for the sleepable mutation mutex, and (unittest builds only, for the
+concurrency stress tests) `ktask`. The integration surfaces around it are
+split the way the driver subsystem splits every capability:
 
 ```text
 provider drivers (drv/clk/*: fixed-clock, fixed-factor, SoC controllers)
@@ -110,6 +115,10 @@ The gate is two-phase on purpose:
   block);
 - `enable` / `disable` must be atomic (toggle a gate bit only) and run under the
   global IRQ-saving `CLK_ENABLE_LOCK`, so they **must not sleep**.
+
+Enabling a clock whose `prepare_count` is zero is rejected in every build
+profile with `ClkError::BadState`, and the `enable()` wrapper logs the failure;
+Linux only warns from `__clk_enable`, so this is deliberately stricter.
 
 `round_rate` returns a [`RoundResult`] carrying both the closest achievable
 rate *and* an optional `parent_target`: when a node cannot satisfy a request
@@ -209,8 +218,10 @@ A driver registers a [`ClkNotifier`] on a clock to learn when its rate
 changes. `set_rate` delivers [`ClkEvent::PreRateChange`] before the change
 (a subscriber may veto by returning `NotifierResult::Stop`, which aborts with
 `ClkError::Aborted`) and [`ClkEvent::PostRateChange`] after. Notifiers fire on
-the node on which `set_rate` was called; intermediate parents changed during
-upward propagation do not receive separate notifications.
+**every** clock whose rate is actually reprogrammed — the node `set_rate` was
+called on and each parent reprogrammed on its behalf during upward
+`SET_RATE_PARENT` propagation. A `Pre` veto on any node in the chain aborts
+the whole change.
 
 Registration returns an id (`ClkNotifierId`) that can be passed to
 `unregister_notifier` to remove the subscriber.
@@ -252,8 +263,9 @@ DT node (compatible = "fixed-clock" or SoC-specific controller)
          |-- reads the node's firmware properties (#clock-cells,
          |   clock-output-names, clock-frequency) via fwnode
          |-- builds ClkHwOps (basic type or custom PLL) with ClkBuilder
-         \-- kclk::register_provider(node_id, lookup)?
-               (the provider id is the node's firmware identity; consumers
+         \-- kclk::register_provider(lookup)
+               (the lookup reports the provider id itself — `ClkLookup::
+                provider_id()`, the node's firmware identity — and consumers
                 resolve their `clocks` specifiers against the same id)
 ```
 
@@ -319,17 +331,25 @@ calling the hardware op once when the count reaches zero.
 
 ## Concurrency
 
-- Each node's mutable state is one `SpinNoIrq<ClkState>`; the notifier list is
-  a separate `SpinNoIrq<NotifierState>`.
+- Each node's mutable state is one `SpinNoIrq<ClkState>`, and the parent table
+  is a `SpinNoIrq` too: both are read on the `enable_locked`/`disable_locked`
+  fast path, which is reachable from interrupt context, so they keep IRQ
+  masking.
+- Everything reached only from the sleepable `CLK_LOCK` mutations is a
+  `SpinNoPreempt`: the children list, `self_ref`, the notifier list, the global
+  clock list, the orphan list, the provider registry, and the `ClkTable`
+  index/name maps. Preemption off is all they need — masking IRQs there would
+  be masking without an interrupt-context contender.
 - All sleepable mutations are serialized by the global `CLK_LOCK` (a
   `ksync::Mutex`), so a rate change — including parent recursion and
   re-rounding — is atomic w.r.t. other changes. `get_rate` reads the per-node
   cache without this lock.
-- The atomic gate (`enable`/`disable`) takes a separate IRQ-saving
+- The atomic gate (`enable`/`disable`) takes a separate `SpinNoIrq`
   `CLK_ENABLE_LOCK` (Linux's two-lock model), so it neither races a concurrent
   `set_parent` migration nor loses interrupt-context usability. Lock order is
   `CLK_LOCK` → `CLK_ENABLE_LOCK`; the reparent migration nests them in exactly
-  that order.
+  that order. The concurrency regressions exercise the migration against
+  task-context `prepare_enable`/`disable_unprepare` (which take both locks).
 - Parent recursion clones the parent `Arc` and releases the child state lock
   first, so propagation acquires locks strictly parent-before-child — no
   lock-ordering deadlock across the tree.
@@ -406,7 +426,9 @@ so children can reference it:
 ```rust
 use kclk::{ClkBuilder, ClkFlags, ClkTable, Divider, DividerFlags, FixedRate, Gate, GateFlags, Mux};
 
-static CCU: ClkTable = ClkTable::new();
+// The provider id is the controller node's firmware id; `ClkTable::provider_id`
+// reports it to the registry, so consumers resolve `clocks` phandles to it.
+static CCU: ClkTable = ClkTable::new(0x1 /* controller phandle */);
 
 pub fn init_ccu(ccu_vaddr: usize) {
     // SAFETY: `ccu_vaddr` is a live, word-aligned mapping from memspace::iomap_device.
@@ -442,7 +464,8 @@ pub fn init_ccu(ccu_vaddr: usize) {
                 DividerFlags::empty(),
             )),
             Some(Gate::into_ops(reg.clone(), 0x30, 11, GateFlags::empty())),
-        ),
+        )
+        .into_ops(),
     )
     .parent(pll)
     .build()
@@ -477,8 +500,10 @@ impl DeviceDriver for FixedClockDriver {
 
         let lookup: &'static FixedClockLookup = Box::leak(Box::new(
             FixedClockLookup { provider_id: node.id().raw(), core: core.clone() }));
-        kclk::register_provider(node.id().raw(), lookup)
-            .map_err(|_| DriverError::AlreadyExists)?;
+        // One argument: the provider id comes from `lookup.provider_id()`.
+        // Registering the same id twice replaces nothing — the registry is
+        // keyed by id, and a duplicate registration is a driver bug.
+        kclk::register_provider(lookup);
         Ok(FixedClockData { _core: core })
     }
 }
@@ -490,7 +515,7 @@ impl DeviceDriver for Rk3588CruDriver {
         let regs = /* devm-iomap the controller's register window */;
         let reg: Arc<dyn ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(regs.as_ptr()) });
         let ccu = build_ccu_tree(&reg)?;                    // kclk branches
-        kclk::register_provider(node_id, &ccu.lookup)?;
+        kclk::register_provider(&ccu);
         Ok(CruData { _regs: regs, _ccu: ccu })
     }
 }
@@ -565,9 +590,10 @@ Arc::new(MyPll { reg })).parent(..).build()`.
   interrupt-context usable). The otherwise lock-free callbacks (`recalc_rate`,
   `is_enabled`, `init`, ...) must also stay non-sleeping. Only the `CLK_LOCK`-
   only provider callbacks (`prepare`/`unprepare`/`set_rate`) may sleep.
-- **Notifiers fire only on the entry node.** A `set_rate` that propagates up
-  the tree delivers events only to the node on which it was called; intermediate
-  parents reprogrammed during propagation do not receive separate notifications.
+- **Notifiers fire on every reprogrammed clock.** A `set_rate` that propagates
+  up the tree delivers Pre/Post on the entry node and on each parent
+  reprogrammed during propagation (matching Linux `clk_change_rate`); a `Pre`
+  veto anywhere aborts the whole change.
 - **Firmware clock specifiers currently carry zero or one provider cell.** DT
   parsing supports `#clock-cells = <0>` and `<1>`. Providers with two or more
   cells require an extensible/raw specifier representation before they can be

@@ -63,6 +63,10 @@ impl MmioClkReg {
     /// behavior, so the constructor is `unsafe` to make the contract explicit
     /// at every call site.
     pub unsafe fn new(base: usize) -> Self {
+        debug_assert!(
+            base != 0 && base.is_multiple_of(4),
+            "clk register base misaligned"
+        );
         Self {
             base: base as *mut u8,
         }
@@ -71,8 +75,13 @@ impl MmioClkReg {
 
 impl ClkRegAccess for MmioClkReg {
     fn reg_read(&self, offset: usize) -> u32 {
-        // SAFETY: the caller of `new` guaranteed `base` is a valid mapped MMIO
-        // window and `offset` is within it and word-aligned.
+        // SAFETY: `offset` is a constant from the controller driver's
+        // register map (the gate/mux/divider field descriptors built at
+        // registration), so it stays within the window `new` was given and
+        // is 4-byte aligned; `new`'s caller guaranteed `base` is non-zero,
+        // word-aligned, mapped and live for the clock tree's lifetime. With
+        // both established, `base.add(offset)` stays inside the mapped
+        // window and is correctly aligned for a `u32` read.
         let addr = unsafe { self.base.add(offset) };
         // SAFETY: `addr` points inside the mapped window; volatile prevents
         // the compiler from eliding or reordering the device read.
@@ -80,7 +89,12 @@ impl ClkRegAccess for MmioClkReg {
     }
 
     fn reg_write(&self, offset: usize, value: u32) {
-        // SAFETY: as `reg_read` — `base` is valid, `offset` in-window.
+        // SAFETY: `offset` is a constant from the controller driver's
+        // register map — in-window and 4-byte aligned for the window `new`
+        // was given — and `base` is non-zero, word-aligned, mapped and live
+        // (established by `new`'s caller). With both established,
+        // `base.add(offset)` stays inside the mapped window and is correctly
+        // aligned for a `u32` store.
         let addr = unsafe { self.base.add(offset) };
         // SAFETY: the volatile store orders the device write so it is
         // not combined with neighboring stores.

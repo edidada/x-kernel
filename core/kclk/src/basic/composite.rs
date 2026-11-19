@@ -24,17 +24,17 @@ pub struct Composite {
 
 impl Composite {
     /// Create a composite clock from optional sub-node roles.
-    #[expect(
-        clippy::new_ret_no_self,
-        reason = "CG-024-lint-exceptions: new() returns the composite node handle, not Self — the \
-                  composite is a set of children, not one clock"
-    )]
     pub fn new(
         mux: Option<Arc<dyn ClkHwOps>>,
         div: Option<Arc<dyn ClkHwOps>>,
         gate: Option<Arc<dyn ClkHwOps>>,
-    ) -> Arc<dyn ClkHwOps> {
-        Arc::new(Self { mux, div, gate })
+    ) -> Self {
+        Self { mux, div, gate }
+    }
+
+    /// Wrap the composite as the provider-side ops object.
+    pub fn into_ops(self) -> Arc<dyn ClkHwOps> {
+        Arc::new(self)
     }
 }
 
@@ -103,6 +103,7 @@ impl ClkHwOps for Composite {
         // req.rate to the chosen parent's rate, so the divider must be queried
         // with the *original* request, not the clobbered req.rate.
         let requested = req.rate;
+        let mut have_div = false;
         if let Some(mux) = &self.mux {
             mux.determine_rate(req, parents)?;
         }
@@ -112,6 +113,22 @@ impl ClkHwOps for Composite {
             // The divider satisfies the request on the chosen parent; it does
             // not ask the framework to change that parent's rate.
             req.parent_target = rr.parent_target;
+            have_div = true;
+        }
+        if !have_div && self.mux.is_none() {
+            // Gate-only (or bare) composite: the node is rate-transparent, so
+            // mirror `round_rate` — keep the current parent rate as the
+            // achievable rate and ask the parent to provide the request, in
+            // step with the SET_RATE_PARENT propagation. Leaving the raw
+            // request here would report an unachievable rate.
+            //
+            // A mux-only composite is excluded on purpose: the mux already
+            // decided (`parent_target = None` for several parents, meaning
+            // "switching source satisfies the request"), and overwriting that
+            // with `Some(requested)` would ask the framework to reprogram a
+            // parent the mux just switched to.
+            req.rate = req.best_parent_rate;
+            req.parent_target = Some(requested);
         }
         Ok(())
     }

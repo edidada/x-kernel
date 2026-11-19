@@ -60,7 +60,7 @@ pub struct Divider {
 }
 
 /// One `(register value, divider)` row of a divider table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DivTableEntry {
     /// The raw register field value.
     pub val: u32,
@@ -119,13 +119,21 @@ impl Divider {
         (1u32 << self.width) - 1
     }
 
+    /// Largest exponent a `POWER_OF_TWO` field can hold, capped at 31 because
+    /// the decoded divider is a `u32` (`1 << 32` would not be representable).
+    /// Legal register values go up to the field mask, not the field width:
+    /// a 3-bit field encodes exponents 0..=7, i.e. dividers up to 128.
+    fn max_power_of_two_exp(&self) -> u32 {
+        self.field_mask().min(31)
+    }
+
     /// Maximum achievable divider value.
     fn max_div(&self) -> u32 {
         if let Some(table) = self.table {
             return table.iter().map(|e| e.div).max().unwrap_or(1).max(1);
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
-            1u32 << self.width
+            1u32 << self.max_power_of_two_exp()
         } else if self.flags.contains(DividerFlags::ONE_BASED) {
             // Raw values [1, field_mask] map 1:1 to dividers.
             self.field_mask()
@@ -173,7 +181,9 @@ impl Divider {
             return Ok(entry.div.max(1));
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
-            return Ok(1u32 << raw.min(self.width as u32));
+            // The stored value is the exponent; the field mask bounds it, not
+            // the width (a 3-bit field legally holds exponents above 3).
+            return Ok(1u32 << raw.min(self.max_power_of_two_exp()));
         }
         if self.flags.contains(DividerFlags::ONE_BASED) {
             // raw 0 is not a valid one-based divider; clamp defensively.
@@ -202,8 +212,9 @@ impl Divider {
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
             // floor(log2(div)), matching Linux's `fls(divider) - 1`: a
             // divider of 5 encodes as 2^2 = 4, never overshooting to 2^3.
+            // The exponent is bounded by the field mask, not the width.
             let exp = 31 - div.max(1).leading_zeros();
-            return Ok(exp.min(self.width as u32));
+            return Ok(exp.min(self.max_power_of_two_exp()));
         }
         if self.flags.contains(DividerFlags::ONE_BASED) {
             return Ok(div.min(self.field_mask()));
@@ -227,16 +238,19 @@ impl Divider {
             return best.max(1);
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
+            // Scan exponents instead of doubling a u32 divider (with a large
+            // exponent the doubled value would shift the only set bit out and
+            // wrap to zero, spinning forever). The legal exponent range is the
+            // field mask, capped at 31 for `u32` representability.
             let mut best = 1u32;
             let mut best_diff = u64::MAX;
-            let mut d = 1u32;
-            while d <= self.max_div() {
+            for exp in 0..=self.max_power_of_two_exp() {
+                let d = 1u32 << exp;
                 let df = diff(rate_for(parent_rate, d), target);
                 if df < best_diff {
                     best_diff = df;
                     best = d;
                 }
-                d <<= 1;
             }
             return best;
         }

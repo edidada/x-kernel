@@ -17,7 +17,7 @@ pub type Rate = u64;
 /// the request on its own, ask the framework to change its parent's rate. The
 /// framework honors `parent_target` only when the node carries
 /// [`ClkFlags::SET_RATE_PARENT`](crate::ClkFlags::SET_RATE_PARENT).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoundResult {
     /// Closest rate this node can achieve for the request.
     pub rate: Rate,
@@ -45,7 +45,7 @@ impl RoundResult {
 /// (`best_parent_index` / `best_parent_rate`), and — when it is
 /// rate-transparent — the rate the parent must output (`parent_target`) so the
 /// framework can propagate the change upward.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClkRateRequest {
     /// Requested rate, already clamped by the core into
     /// [`min_rate`](Self::min_rate)..=[`max_rate`](Self::max_rate).

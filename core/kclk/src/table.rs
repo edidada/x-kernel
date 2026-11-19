@@ -54,7 +54,7 @@ use crate::{
 /// `clocks = <&phandle N>` specifier carries. This lets a controller describe
 /// cross-controller dependencies (e.g. a PMU clock derived from a main-CCU
 /// output) declaratively instead of pre-building `Arc<ClkCore>` handles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParentRef {
     /// A clock registered by this same table, by name.
     Local(&'static str),
@@ -101,7 +101,7 @@ pub struct ClkBranch {
 }
 
 /// The parent list of a [`ClkBranch`], in one of its two spellings.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum ParentList {
     /// Local names within this table (the common single-controller form).
     Names(&'static [&'static str]),
@@ -215,7 +215,7 @@ impl ClkBranch {
     pub const fn gate(
         index: ClkIndex,
         name: &'static str,
-        offset: usize,
+        offset_bytes: usize,
         bit: u8,
         flags: GateFlags,
         parents: &'static [&'static str],
@@ -225,23 +225,22 @@ impl ClkBranch {
             name,
             parents,
             ClkFlags::empty(),
-            ClkNodeDesc::Gate { offset, bit, flags },
+            ClkNodeDesc::Gate {
+                offset_bytes,
+                bit,
+                flags,
+            },
         )
     }
 
     /// Mux clock (parent-selector field).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "CG-024-lint-exceptions: the constructor carries the clock table plus its                   parent context, matching the firmware description"
-    )]
+    ///
+    /// Takes the same [`MuxDesc`] a composite sub-node uses, so the hardware
+    /// fields are named once instead of being spelled out per constructor.
     pub const fn mux(
         index: ClkIndex,
         name: &'static str,
-        offset: usize,
-        shift: u8,
-        mask: u32,
-        table: Option<&'static [u8]>,
-        flags: MuxFlags,
+        desc: MuxDesc,
         parents: &'static [&'static str],
     ) -> Self {
         Self::new(
@@ -250,28 +249,24 @@ impl ClkBranch {
             parents,
             ClkFlags::empty(),
             ClkNodeDesc::Mux {
-                offset,
-                shift,
-                mask,
-                table,
-                flags,
+                offset_bytes: desc.offset_bytes,
+                shift: desc.shift,
+                mask: desc.mask,
+                table: desc.table,
+                flags: desc.flags,
             },
         )
     }
 
     /// Divider clock (programmable divider field).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "CG-024-lint-exceptions: the constructor carries the clock table plus its                   parent context, matching the firmware description"
-    )]
+    ///
+    /// Takes the same [`DividerDesc`] a composite sub-node uses, so the
+    /// hardware fields are named once instead of being spelled out per
+    /// constructor.
     pub const fn divider(
         index: ClkIndex,
         name: &'static str,
-        offset: usize,
-        shift: u8,
-        width: u8,
-        table: Option<&'static [crate::DivTableEntry]>,
-        flags: DividerFlags,
+        desc: DividerDesc,
         parents: &'static [&'static str],
     ) -> Self {
         Self::new(
@@ -280,11 +275,11 @@ impl ClkBranch {
             parents,
             ClkFlags::empty(),
             ClkNodeDesc::Divider {
-                offset,
-                shift,
-                width,
-                table,
-                flags,
+                offset_bytes: desc.offset_bytes,
+                shift: desc.shift,
+                width: desc.width,
+                table: desc.table,
+                flags: desc.flags,
             },
         )
     }
@@ -341,7 +336,7 @@ pub enum ClkNodeDesc {
     /// A single enable bit.
     Gate {
         /// Byte offset of the register word.
-        offset: usize,
+        offset_bytes: usize,
         /// Enable-bit position.
         bit: u8,
         /// Gate polarity flags.
@@ -350,7 +345,7 @@ pub enum ClkNodeDesc {
     /// A parent-selector field.
     Mux {
         /// Byte offset of the register word.
-        offset: usize,
+        offset_bytes: usize,
         /// LSB position of the field.
         shift: u8,
         /// Unshifted field mask (e.g. `0x7` for 3 bits).
@@ -363,7 +358,7 @@ pub enum ClkNodeDesc {
     /// A programmable divider field.
     Divider {
         /// Byte offset of the register word.
-        offset: usize,
+        offset_bytes: usize,
         /// LSB position of the field.
         shift: u8,
         /// Field width in bits (`1..32`).
@@ -393,7 +388,7 @@ pub enum ClkNodeDesc {
 #[derive(Clone, Copy)]
 pub struct MuxDesc {
     /// Byte offset of the register word.
-    pub offset: usize,
+    pub offset_bytes: usize,
     /// LSB position of the field.
     pub shift: u8,
     /// Unshifted field mask (e.g. `0x7` for 3 bits).
@@ -408,7 +403,7 @@ pub struct MuxDesc {
 #[derive(Clone, Copy)]
 pub struct DividerDesc {
     /// Byte offset of the register word.
-    pub offset: usize,
+    pub offset_bytes: usize,
     /// LSB position of the field.
     pub shift: u8,
     /// Field width in bits (`1..32`).
@@ -423,7 +418,7 @@ pub struct DividerDesc {
 #[derive(Clone, Copy)]
 pub struct GateDesc {
     /// Byte offset of the register word.
-    pub offset: usize,
+    pub offset_bytes: usize,
     /// Enable-bit position.
     pub bit: u8,
     /// Gate polarity flags.
@@ -588,34 +583,50 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
     Ok(match node {
         ClkNodeDesc::FixedRate { rate } => FixedRate::new(*rate).into_ops(),
         ClkNodeDesc::FixedFactor { mult, div } => FixedFactor::new(*mult, *div)?.into_ops(),
-        ClkNodeDesc::Gate { offset, bit, flags } => {
-            Gate::into_ops(reg.clone(), *offset, *bit, *flags)
-        }
+        ClkNodeDesc::Gate {
+            offset_bytes,
+            bit,
+            flags,
+        } => Gate::into_ops(reg.clone(), *offset_bytes, *bit, *flags),
         ClkNodeDesc::Mux {
-            offset,
+            offset_bytes,
             shift,
             mask,
             table,
             flags,
-        } => Mux::into_ops(reg.clone(), *offset, *shift, *mask, *table, *flags),
+        } => Mux::into_ops(reg.clone(), *offset_bytes, *shift, *mask, *table, *flags),
         ClkNodeDesc::Divider {
-            offset,
+            offset_bytes,
             shift,
             width,
             table,
             flags,
-        } => Divider::into_ops(reg.clone(), *offset, *shift, *width, *table, *flags),
+        } => Divider::into_ops(reg.clone(), *offset_bytes, *shift, *width, *table, *flags),
         ClkNodeDesc::Composite { mux, div, gate } => {
-            let m = mux
-                .as_ref()
-                .map(|d| Mux::into_ops(reg.clone(), d.offset, d.shift, d.mask, d.table, d.flags));
+            let m = mux.as_ref().map(|d| {
+                Mux::into_ops(
+                    reg.clone(),
+                    d.offset_bytes,
+                    d.shift,
+                    d.mask,
+                    d.table,
+                    d.flags,
+                )
+            });
             let dv = div.as_ref().map(|d| {
-                Divider::into_ops(reg.clone(), d.offset, d.shift, d.width, d.table, d.flags)
+                Divider::into_ops(
+                    reg.clone(),
+                    d.offset_bytes,
+                    d.shift,
+                    d.width,
+                    d.table,
+                    d.flags,
+                )
             });
             let g = gate
                 .as_ref()
-                .map(|d| Gate::into_ops(reg.clone(), d.offset, d.bit, d.flags));
-            Composite::new(m, dv, g)
+                .map(|d| Gate::into_ops(reg.clone(), d.offset_bytes, d.bit, d.flags));
+            Composite::new(m, dv, g).into_ops()
         }
         ClkNodeDesc::Custom { ops } => ops.clone(),
     })
@@ -652,6 +663,6 @@ fn refresh_subtree(
     }
     visiting.remove(name);
     visited.insert(name);
-    nodes[name].refresh_rate();
+    nodes[name].refresh_rate()?;
     Ok(())
 }

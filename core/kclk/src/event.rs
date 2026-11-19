@@ -20,7 +20,7 @@ use alloc::sync::Arc;
 use crate::Rate;
 
 /// Rate-change event delivered to clock subscribers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClkEvent {
     /// The rate is about to change from `old` to `new`. A subscriber may veto
     /// by returning [`NotifierResult::Stop`].
@@ -47,7 +47,7 @@ pub enum ClkEvent {
 }
 
 /// Outcome returned by a rate-change subscriber.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum NotifierResult {
     /// Allow the change to proceed.
     #[default]

@@ -17,7 +17,7 @@
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoPreempt, static_lock};
 
 use crate::{ClkCore, ClkError, ClkHandle, ClkIndex, ClkResult};
 
@@ -71,6 +71,8 @@ impl Registry {
         self.providers.insert(provider.provider_id(), provider);
     }
 
+    /// Only called from the test-only `unregister_provider`.
+    #[cfg(unittest)]
     fn unregister(&mut self, id: ProviderId) {
         self.providers.remove(&id);
     }
@@ -89,7 +91,9 @@ impl Registry {
     }
 }
 
-static REGISTRY: SpinNoIrq<Registry> = SpinNoIrq::new(Registry::new());
+static_lock! {
+    static REGISTRY: SpinNoPreempt<Registry> = SpinNoPreempt::new(Registry::new());
+}
 
 /// Register a clock provider under its [`ProviderId`].
 ///

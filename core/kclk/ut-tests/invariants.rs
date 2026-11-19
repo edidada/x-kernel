@@ -97,6 +97,9 @@ impl ClkHwOps for FailOps {
 
     fn unprepare(&self) -> ClkResult<()> {
         *self.unprepare.lock() += 1;
+        if self.armed("unprepare") {
+            return Err(ClkError::Io);
+        }
         Ok(())
     }
 
@@ -544,9 +547,17 @@ fn unprepare_failure_surfaces_error_but_completes_release() {
     h.prepare_enable().unwrap();
 
     mid_ops.fail_next("unprepare");
-    assert_eq!(h.disable_unprepare(), ());
-    // Software counts released, parent unwound; the error was dropped by the
-    // convenience wrapper (documented) but the release completed.
+    // `unprepare` surfaces the hardware error directly (one count released,
+    // enable still held): the release is committed even on failure.
+    assert_eq!(
+        h.unprepare().unwrap_err(),
+        ClkError::Io,
+        "armed unprepare failure must surface"
+    );
+    assert_eq!(mid.counts(), (0, 1));
+    // The retried unprepare (unarmed) completes the release; the combined
+    // wrapper then unwinds the enable with no outstanding HW error.
+    h.disable_unprepare();
     assert_eq!(mid.counts(), (0, 0));
     assert_eq!(root.counts(), (0, 0));
     assert_cache_coherent_ok(&[&root, &mid]);
@@ -695,9 +706,11 @@ fn register_table_injection_matrix() {
     ];
     assert!(crate::register_table(table, reg, &branches).is_err());
     assert_eq!(crate::clocks_len(), before);
-    // Nothing published.
-    assert!(crate::clk_get_by_index(0x88, 0).is_err());
-    assert!(crate::clk_get_by_index(0x88, 1).is_err());
+    // Nothing published into the scratch table itself (the registry was
+    // cleared, so registry lookups cannot observe it).
+    assert!(table.get_by_index(0).is_none());
+    assert!(table.get_by_index(1).is_none());
+    assert!(table.get_by_name("tm_a").is_none());
     crate::reset_providers();
 }
 
@@ -716,7 +729,8 @@ fn register_table_cycle_rollback_keeps_global_list_clean() {
     ];
     assert!(crate::register_table(table, reg, &branches).is_err());
     assert_eq!(crate::clocks_len(), before);
-    assert!(crate::clk_get_by_index(0x89, 0).is_err());
+    assert!(table.get_by_index(0).is_none());
+    assert!(table.get_by_name("cy_a").is_none());
     crate::reset_providers();
 }
 
@@ -891,6 +905,11 @@ fn concurrent_reparent_migration_keeps_refcounts() {
     let done = Arc::new(AtomicU32::new(0));
     let failures = Arc::new(AtomicU32::new(0));
 
+    // Prepare the leaf once so the gater workers can use the enable/disable
+    // fast path (CLK_ENABLE_LOCK only) — that is the lock-level interleaving
+    // with the migration this test exists to exercise.
+    leaf.prepare().expect("leaf prepare");
+
     for worker in 0..TASKS {
         let done = done.clone();
         let failures = failures.clone();
@@ -905,12 +924,14 @@ fn concurrent_reparent_migration_keeps_refcounts() {
                         failures.fetch_add(1, Ordering::Relaxed);
                     }
                 } else {
-                    // Gater: enable/disable under CLK_ENABLE_LOCK, racing the
-                    // migration across both parents.
-                    if handle.prepare_enable().is_err() {
+                    // Gater: the enable/disable fast path takes only
+                    // CLK_ENABLE_LOCK, racing the migration's enable_count
+                    // snapshot / topology commit (which nest it inside
+                    // CLK_LOCK).
+                    if handle.enable().is_err() {
                         failures.fetch_add(1, Ordering::Relaxed);
                     }
-                    handle.disable_unprepare();
+                    handle.disable();
                 }
                 ktask::yield_now();
             }
@@ -931,6 +952,9 @@ fn concurrent_reparent_migration_keeps_refcounts() {
         ktest_println!("CONC: reparent/gating failed under contention");
         return TestResult::Failed;
     }
+    // Release the setup prepare reference so the hardware counters balance
+    // before the INV-1 check below.
+    leaf.unprepare().expect("leaf unprepare");
     // INV-1: both parents' hardware counters balance — the migration never
     // leaked a count on either side.
     let (op, oup, oe, od, _) = osc_ops.counters();
