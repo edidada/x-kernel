@@ -994,6 +994,10 @@ infrastructure whose execution is governed by CPU parking. User tasks and
 ordinary kernel work must participate in cooperative freezing. PM must keep this task's resources available until its CPU acknowledges
 parking, and restore them before release. Recovery must not require a lock
 the task could hold while parked.
+Before marking the task, the caller must establish both the platform's resource
+lifetime and restoration ordering and the recovery path's lock requirements.
+`with_pm_infrastructure` only sets the tag. It performs no runtime check of
+when the platform restores resources or which locks recovery will acquire.
 
 In `src/softirqd.rs`, IRQ and device resources stay available until the CPU
 Stop callback excludes softirq execution. PM restores them before CPU release
