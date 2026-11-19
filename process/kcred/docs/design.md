@@ -116,10 +116,13 @@ parent's `setgroups` policy. `initial_user_namespace()` returns the implicit
 identity-mapped root; its policy is immutable.
 
 `write_uid_map`/`write_gid_map` implement Linux `new_idmap_permitted()`: maps are
-write-once, must stay inside the parent map, require `CAP_SYS_ADMIN` in the
-target namespace plus either the owner self-map shortcut or the corresponding
-`CAP_SETUID`/`CAP_SETGID` in the parent, and a UID mapping that includes parent
-UID 0 additionally requires `CAP_SETFCAP` (or a creator that held it).
+write-once, must stay inside the parent map, and require `CAP_SYS_ADMIN` in the
+target namespace through the map file's opener (`file_ns_capable`). A map that
+does not take the owner self-map shortcut additionally requires the
+corresponding `CAP_SETUID`/`CAP_SETGID` in the parent on **both** the opener and
+the task issuing `write(2)` (`ns_capable`); dropping privilege after open cannot
+authorize the write. A UID mapping that includes parent UID 0 additionally
+requires `CAP_SETFCAP` (or a creator that held it).
 `set_setgroups_allowed` implements the one-way `allow`/`deny` file; the initial
 namespace rejects `deny`. `map_*_to_initial`, `map_*_from_initial`, and the
 parent-relative variants expose the coordinate translations used at syscall and
