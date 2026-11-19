@@ -354,10 +354,9 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 validation and `kprocess` commit (see above). `clone`/`clone3` now accept
 `CLONE_NEWPID` (the child is allocated in a fresh child PID namespace) and
 `CLONE_NEWNS`/`CLONE_NEWUTS`/`CLONE_NEWIPC`/`CLONE_NEWNET` (a fresh network
-namespace whose protocol stack is materialized by `knet::netns::ensure_stack`),
-while `CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` still return
-`ENOSYS` from the namespace-flag validator instead of improvising namespace
-creation without isolation. A thread clone cannot switch namespaces — the namespace
+namespace whose protocol stack is materialized by `knet::netns::ensure_stack`).
+`CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` are implemented through
+the same plan/commit path; invalid combinations return `EINVAL`. A thread clone cannot switch namespaces — the namespace
 bundle hangs off the process — so `CLONE_THREAD` combined with any namespace
 flag is rejected with `EINVAL` (Linux `copy_process()`), and every namespace
 flag on any clone is gated on the caller's privilege before the thread or
