@@ -28,7 +28,10 @@ mod socket;
 pub(crate) fn net_capable(cred: &kcred::Cred, cap: u32) -> bool {
     kprocess::try_current_user_process()
         .and_then(|process| process.net_ns().ok())
-        .is_some_and(|namespace| cred.has_cap_in(namespace.owner(), cap))
+        .map_or_else(
+            || cred.has_cap(cap),
+            |namespace| cred.has_cap_in(namespace.owner(), cap),
+        )
 }
 
 pub use self::{
