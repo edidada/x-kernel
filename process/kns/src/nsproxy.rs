@@ -320,6 +320,7 @@ impl NsProxy {
     ///     fs_shared_with_others: false,
     ///     unshare_fs: false,
     ///     unshare_files: true,
+    ///     current_cgroup: None,
     /// };
     /// let _prepared = proxy
     ///     .prepare_unshare(NamespaceFlags::NEWUTS, context, &fs)

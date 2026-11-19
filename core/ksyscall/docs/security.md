@@ -243,11 +243,10 @@ registered wakeups rather than polling or a timer.
   before testing reclamation. Tests must not supply the cleanup they verify.
 
 - namespace flags may leave the `ENOSYS` list only when fully implemented;
-  `CLONE_NEWUSER` and `CLONE_NEWTIME` are now implemented, while
-  `CLONE_NEWCGROUP` remains unsupported. Adapters do not create a second
-  membership or namespace-view state.
-- `unshare`/`setns` never create a fake namespace switch: unsupported kinds
-  stay `EOPNOTSUPP`/`ENOSYS`, never a reference swap.
+  user, time, cgroup and net namespace creation are implemented. Adapters do
+  not create a second membership or namespace-view state.
+- `unshare`/`setns` never create a fake namespace switch: invalid flag
+  combinations return `EINVAL`, never a reference swap.
 - Does a new syscall implementation only adapt the ABI instead of copying
   an owner state machine?
 - Is a new adapter placed near its owner rather than in a historical
