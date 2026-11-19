@@ -187,7 +187,7 @@ pub unsafe fn map_dma_buffer(
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) -> AllocResult<DmaInfo> {
-    if buffer.len() == 0 {
+    if buffer.is_empty() {
         return Err(alloc_engine::AllocError::InvalidInput);
     }
     DmaAllocator::ensure_bounce_pool()?;
