@@ -106,7 +106,9 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 - Coherent allocation participates in the global page allocator and page
   table updates, so it must run after `kalloc` and the address-space
   subsystem are initialized; first use of the bounce path lazily
-  allocates the pool through the same path.
+  allocates the pool through the same path. Allocation confirms the coherent
+  mapping before platform preparation or publication. Concurrent first users
+  install one confirmed backing and release any unused candidate.
 - `map_dma_buffer`/`unmap_dma_buffer` copy up to the buffer length on the
   calling thread; they are intended for driver submit/completion paths.
 - Completion softirqs can submit pending requests on the interrupted idle

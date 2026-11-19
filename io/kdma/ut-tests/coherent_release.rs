@@ -37,3 +37,13 @@ fn page_release_requires_confirmed_normal_mapping() {
     assert!(release_after_restore(Ok(None), release()).is_none());
     assert_eq!(releases.load(Ordering::Relaxed), 2);
 }
+
+#[def_test]
+fn coherent_allocation_requires_positive_confirmation() {
+    use super::confirm_mapping;
+
+    assert!(confirm_mapping(Ok(None)).is_ok());
+    assert!(confirm_mapping(Ok(Some(DmaMappingCompletion::new(|| true)))).is_ok());
+    assert!(confirm_mapping(Ok(Some(DmaMappingCompletion::new(|| false)))).is_err());
+    assert!(confirm_mapping(Err(AllocError::NoMemory)).is_err());
+}
