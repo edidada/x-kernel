@@ -85,7 +85,7 @@ impl SimpleDirOps for ProcessTaskDir {
             return Err(VfsError::NotFound);
         }
 
-        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
+        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task, None))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -97,6 +97,7 @@ impl SimpleDirOps for ProcessTaskDir {
 // the inode and iterator retain only a weak target, never a credential cache.
 struct StatusIter {
     task: WeakKtaskRef,
+    observer_ns: Option<Arc<PidNamespace>>,
 }
 
 impl SeqIterator for StatusIter {
@@ -118,7 +119,7 @@ impl SeqIterator for StatusIter {
 
     fn try_show(&self, _item: &Self::Item, buf: &mut String) -> VfsResult<()> {
         let task = upgrade_task(&self.task)?;
-        buf.push_str(&task_status(&task)?);
+        buf.push_str(&task_status(&task, self.observer_ns.as_ref())?);
         Ok(())
     }
 }
@@ -134,22 +135,29 @@ impl SeqIterator for StatusIter {
 struct TaskStatus {
     stat: TaskStat,
     tgid: u32,
+    reader_user_ns: Arc<kcred::UserNamespace>,
     cred: Arc<Cred>,
     shared_pending: u64,
     cpumask: KCpuMask,
 }
 
 impl TaskStatus {
-    fn capture(task: &KtaskRef) -> Self {
+    fn capture(task: &KtaskRef, observer_ns: Option<&Arc<PidNamespace>>) -> Self {
         let thread = task.as_thread();
-        let (stat, masks) = TaskStat::sample_thread(task);
-        let tgid = thread.process().pid();
+        let process = thread.process();
+        let (mut stat, masks) = TaskStat::sample_thread(task);
+        let pid = observer_ns
+            .and_then(|ns| process.number_in_namespace(ns))
+            .unwrap_or_else(|| process.pid());
+        stat.pid = pid;
+        let tgid = pid;
         let cred = thread.real_cred();
         let shared_pending = masks.shared_pending().bits();
         let cpumask = task.cpumask();
         Self {
             stat,
             tgid,
+            reader_user_ns: kprocess::current_cred().user_ns_arc().clone(),
             cred,
             shared_pending,
             cpumask,
@@ -157,8 +165,16 @@ impl TaskStatus {
     }
 }
 
-fn task_status(task: &KtaskRef) -> VfsResult<String> {
-    format_task_status(&TaskStatus::capture(task))
+fn task_status(task: &KtaskRef, observer_ns: Option<&Arc<PidNamespace>>) -> VfsResult<String> {
+    format_task_status(&TaskStatus::capture(task, observer_ns))
+}
+
+fn local_uid(status: &TaskStatus, uid: u32) -> u32 {
+    kvfs::Kuid::from_raw(uid).to_inside(&status.reader_user_ns)
+}
+
+fn local_gid(status: &TaskStatus, gid: u32) -> u32 {
+    kvfs::Kgid::from_raw(gid).to_inside(&status.reader_user_ns)
 }
 
 fn format_task_status(status: &TaskStatus) -> VfsResult<String> {
@@ -189,20 +205,20 @@ fn format_task_status(status: &TaskStatus) -> VfsResult<String> {
         &mut out,
         format_args!(
             "Uid:\t{}\t{}\t{}\t{}",
-            status.cred.ruid(),
-            status.cred.euid(),
-            status.cred.suid(),
-            status.cred.fsuid()
+            local_uid(status, status.cred.ruid()),
+            local_uid(status, status.cred.euid()),
+            local_uid(status, status.cred.suid()),
+            local_uid(status, status.cred.fsuid())
         ),
     );
     push_status_line(
         &mut out,
         format_args!(
             "Gid:\t{}\t{}\t{}\t{}",
-            status.cred.rgid(),
-            status.cred.egid(),
-            status.cred.sgid(),
-            status.cred.fsgid()
+            local_gid(status, status.cred.rgid()),
+            local_gid(status, status.cred.egid()),
+            local_gid(status, status.cred.sgid()),
+            local_gid(status, status.cred.fsgid())
         ),
     );
     // Linux's `proc_pid_status()` emits `VmSize` only when the task has an
@@ -1144,6 +1160,7 @@ fn render_fdinfo(file: &VfsFile, cloexec: bool) -> String {
 struct ThreadDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
+    observer_ns: Option<Arc<PidNamespace>>,
 }
 
 fn make_thread_dir(
@@ -1151,10 +1168,12 @@ fn make_thread_dir(
     name: &str,
     fs: Arc<SimpleFs>,
     task: &KtaskRef,
+    observer_ns: Option<Arc<PidNamespace>>,
 ) -> Dentry {
     let thread_dir = ThreadDir {
         fs: fs.clone(),
         task: KtaskRef::downgrade(task),
+        observer_ns,
     };
 
     #[cfg(feature = "tee")]
@@ -1486,6 +1505,7 @@ impl SimpleDirOps for ThreadDir {
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();
         let task_weak = self.task.clone();
+        let observer_ns = self.observer_ns.clone();
         match name {
             "stat" => lookup.file(
                 name,
@@ -1493,7 +1513,15 @@ impl SimpleDirOps for ThreadDir {
                     let task_weak = task_weak.clone();
                     move || {
                         let task = upgrade_task(&task_weak)?;
-                        Ok(format!("{}", TaskStat::from_thread(&task)).into_bytes())
+                        let mut stat = TaskStat::from_thread(&task);
+                        if let Some(ns) = observer_ns.as_ref() {
+                            stat.pid = task
+                                .as_thread()
+                                .process()
+                                .number_in_namespace(ns)
+                                .unwrap_or(stat.pid);
+                        }
+                        Ok(format!("{stat}").into_bytes())
                     }
                 }),
             ),
@@ -1504,6 +1532,7 @@ impl SimpleDirOps for ThreadDir {
                     move || {
                         Ok(StatusIter {
                             task: task_weak.clone(),
+                            observer_ns: observer_ns.clone(),
                         })
                     }
                 }),
@@ -1918,7 +1947,7 @@ impl SimpleDirOps for ProcFsHandler {
         let pid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
         let task = procfs::process_task_in_namespace(pid, self.observer_ns.as_ref())
             .map_err(|_| VfsError::NotFound)?;
-        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
+        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task, None))
     }
 
     fn supports_dentry_cache(&self) -> bool {
