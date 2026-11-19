@@ -132,9 +132,20 @@ impl WaitQueue {
 
     /// Wakes up to `count` tasks in the wait queue.
     ///
-    /// If `resched` is true, the current task will yield.
+    /// If `resched` is true, the current task yields after the event mutex is
+    /// released. The waker itself must not preempt while that mutex is held:
+    /// `event-listener` 5.4.1 wakes listeners before dropping it, and a local
+    /// preemption there leaves the woken task to poll the lock and sleep again.
     pub fn notify_many(&self, count: usize, resched: bool) -> usize {
-        let n = self.event.notify(count);
+        let pending_before = crate::needs_resched();
+        let n = crate::with_preempt_check_deferred(|| self.event.notify(count));
+        // A local wake marks this CPU inside `notify`, before the mutex drop.
+        // Keep a request that was already pending. Drop one that this wake
+        // introduced when the caller did not ask to schedule: `stop_one_cpu`
+        // must reach its own wait before the stopper runs.
+        if !resched && !pending_before {
+            crate::current().set_preempt_pending(false);
+        }
         if resched {
             crate::yield_now();
         }
