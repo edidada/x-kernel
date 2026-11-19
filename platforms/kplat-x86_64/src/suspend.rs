@@ -286,7 +286,7 @@ fn raw_delay(microseconds: u64) {
 }
 
 #[kiface::provide]
-impl khal::power::SystemSleepIf {
+impl kplat::sys::SystemSleepIf {
     fn persistent_time() -> Option<ktime_types::SystemTime> {
         #[cfg(feature = "rtc")]
         {

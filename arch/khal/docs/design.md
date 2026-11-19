@@ -384,7 +384,7 @@ shootdown or prove an architecture's private category-bit selection.
 
 ## Reset-aware system sleep interface
 
-On x86, `power::SystemSleepIf` separates platform resource preparation, saved
+On x86, `power::SystemSleepIf` re-exports `kplat::sys::SystemSleepIf`. The interface separates platform resource preparation, saved
 remote CPU context, BSP firmware entry, AP reconstruction and final release.
 The kpm coordinator supplies boot-discovered S3 types and independently owns
 task/work, device/DMA, IRQ, clock/event and RTC ordering. The bare legacy

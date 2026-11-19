@@ -2975,6 +2975,7 @@ dependencies = [
  "kiface",
  "kiface-cpu-api",
  "kplat-macros",
+ "ktime_types",
 ]
 
 [[package]]
