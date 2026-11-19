@@ -628,6 +628,10 @@ The guest tests and the two shared fixture modules live under `ut-tests/` at the
 `unittest::path_mod_test!`. Module names, visibility, and registration paths are unchanged;
 the external test call paths of `context::test_support` and `softirq::test_support` are also unchanged.
 
+The softirq restart-budget regression samples diagnostics from its pinned CPU.
+Its local IRQ guard excludes local IRQ-tail work between the explicit pass and
+inspection; other CPUs may still record daemon wake requests independently.
+
 | File (relative to `ut-tests/`) | Test cases | Additional gate |
 | --- | --- | --- |
 | `backend_msi.rs` | 1 | None |

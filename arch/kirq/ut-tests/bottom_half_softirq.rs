@@ -199,7 +199,7 @@ fn test_softirq_reraise_is_not_lost() {
 fn test_softirq_restart_limit_preserves_pending() {
     // Prevent another IRQ-tail pass between our bounded run and inspection
     // of its retained pending bit and exact restart/wake counters.
-    let _irq = kspin::NoPreemptIrqSave::new();
+    let irq = kspin::NoPreemptIrqSave::new();
     let _wake_gate = begin_softirq_test();
     LIMIT_CALLS.store(0, Ordering::Relaxed);
     let _sched = ScopedSoftirqAction::install(SoftirqVec::Sched, always_reraise_action);
@@ -210,8 +210,12 @@ fn test_softirq_restart_limit_preserves_pending() {
     assert_eq!(run_with_resched(|| false), SoftirqRunResult::Deferred);
     assert!(LIMIT_CALLS.load(Ordering::Relaxed) >= 10);
     assert!(local_softirq_pending() & (1usize << SoftirqVec::Sched.as_usize()) != 0);
-    assert_eq!(softirq_diagnostics().restart_limit_hits, 1);
-    assert_eq!(softirq_diagnostics().daemon_wake_requests, 1);
+    // Other CPUs keep servicing real IRQs while this fixture runs. Their
+    // daemon wake requests are independent of this CPU's bounded pass.
+    let mut diagnostics = SoftirqDiagnostics::default();
+    super::with_softirq_stats(&irq, |stats| stats.add_to(&mut diagnostics));
+    assert_eq!(diagnostics.restart_limit_hits, 1);
+    assert_eq!(diagnostics.daemon_wake_requests, 1);
 }
 
 #[def_test(serial)]
