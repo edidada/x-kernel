@@ -97,3 +97,11 @@ until close rather than silently regenerating on read, which would invalidate
 the snapshot ABI. It does not introduce a per-inode aggregate quota, change
 the default simple-file permissions, or treat descriptor limits as a byte
 budget. Sharing an existing snapshot through clone keeps one allocation.
+
+## Kernel text protection
+
+Static-key text patching requires sleepable task context after runtime kernel
+mapping admission. The current control path is the procfs event-enable write;
+scheduler/IRQ capture does not patch text. One kernel address-space mutex covers
+PTE edits and synchronous TLB completion. Early boot and IRQ/NMI callers must
+not invoke this control operation; IRQ root reads use the cached root.

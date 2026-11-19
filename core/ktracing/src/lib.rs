@@ -304,7 +304,10 @@ pub fn event_enable_state(subsystem: &str, event: &str) -> Option<String> {
     })
 }
 
-/// Update an event's enable state using the first byte of the user input.
+/// Updates an event's enable state using the first byte of the user input.
+///
+/// Requires sleepable task context after kernel mappings enter runtime mode:
+/// static-key patching changes text permissions through the kernel MM mutex.
 pub fn write_event_enable(subsystem: &str, event: &str, data: &[u8]) -> bool {
     let Some(enable) = data
         .iter()
@@ -384,8 +387,7 @@ impl KernelTraceOps for Kops {
         // static-keys patches instructions in kernel text, which is normally RX.
         // Temporarily add WRITE permission for the touched page range.
         {
-            let mut layout = memspace::kernel_layout().lock();
-            if layout
+            if memspace::kernel_layout()
                 .protect(start_va, span, old_flags | MappingFlags::WRITE)
                 .is_err()
             {
@@ -400,9 +402,8 @@ impl KernelTraceOps for Kops {
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len()) };
 
         {
-            let mut layout = memspace::kernel_layout().lock();
             // Patched text cannot be rolled back; restoring protection is best effort.
-            let _ = layout.protect(start_va, span, old_flags);
+            let _ = memspace::kernel_layout().protect(start_va, span, old_flags);
         }
 
         karch::flush_icache_range(VirtAddr::from(addr), data.len());

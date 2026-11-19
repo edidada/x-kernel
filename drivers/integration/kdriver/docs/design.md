@@ -989,7 +989,7 @@ Bus enumeration/rescan prepares MMIO mappings and may wait for confirmed TLB
 publication. DeviceManager serializes its backends with a task mutex, without
 holding a preemption-disable spinlock across those operations. The manager's
 entry points require sleepable task context; IRQ handlers never enumerate buses.
-Enumeration retains no preemption-disable spinlock while MM completes publication.
+The MM owner retains its task mutex through publication with IRQs enabled.
 
 `DeviceManager` requires `ksync::Mutex` for bus enumeration and resource mapping
 in every driver configuration. `ksync` is an unconditional dependency, including

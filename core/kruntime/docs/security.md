@@ -457,9 +457,26 @@ System PM admission, platform trust and rollback are owned by `kpm`, not the
 runtime startup layer. See `../../kpm/docs/security.md`. Runtime initialization
 still establishes the scheduler, time and IRQ prerequisites required by PM.
 
-## DMA streaming readiness
+## TLB completion through boot rendezvous
 
-After the CPU-service rendezvous, the host prepares streaming DMA backing before
-publishing drivers. Missing backing can be retried by a sleepable task outside
-DMA metadata locks; IRQ/BH mappings use prepared backing only. Coherent mapping
-transitions and platform prepare/release run without the DMA metadata spinlock.
+Shared kernel mapping mutation is closed before AP startup and reopened only
+after every CPU can acknowledge shootdown. Each AP flushes locally when it
+installs the stable kernel root. User processes start after the service barrier,
+so no user address space can have remote residency during bootstrap. These
+ordering requirements allow local-only bootstrap completion without ignoring
+any stale remote translation. Boot waits therefore need no shootdown polling.
+
+The primary publishes remote-shootdown readiness after the CPU-service
+rendezvous and before runtime mapping admission. Every later required ACK is
+awaited with retries and diagnostics; no timeout permits backing reuse.
+Runtime initiation requires IRQs enabled and leaves them enabled through the
+wait, so incoming requests are handled by the normal IPI path.
+CPU hot-unplug requires a separate retirement protocol.
+
+## DMA and kernel mapping readiness
+
+Before AP startup, sealing closes mapping admission and transfers the boot
+address space into its task mutex. Runtime mapping updates open after CPU
+services are ready; IRQ readers use the cached kernel root. The host then prepares streaming DMA
+backing before publishing drivers. Failed preparation leaves IRQ streaming
+unavailable; a sleepable task can retry outside DMA metadata locks.

@@ -3,10 +3,10 @@
 // See LICENSES for license details.
 
 #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-use core::ptr::NonNull;
+use core::{ptr::NonNull, sync::atomic::AtomicBool};
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
@@ -407,16 +407,15 @@ fn replace_if_same_reports_changed_without_overwrite() {
     );
 }
 
-/// Metadata whose all-CPU invalidation is observable and can fail once.
+/// Metadata whose synchronous all-CPU invalidation is observable.
 ///
-/// Only the deferred-invalidation test uses this type, so its counters cannot
+/// Only the kernel-completion test uses this type, so its counters cannot
 /// be polluted by sibling test cases.
-struct DeferredTestMeta;
+struct CompletionTestMeta;
 
 static ALL_CPU_FLUSHES: AtomicUsize = AtomicUsize::new(0);
-static FAIL_NEXT_ALL_CPU_FLUSH: AtomicBool = AtomicBool::new(false);
 
-impl PagingMetaData for DeferredTestMeta {
+impl PagingMetaData for CompletionTestMeta {
     type VirtAddr = VirtAddr;
 
     const LEVELS: usize = 4;
@@ -440,15 +439,12 @@ impl PagingMetaData for DeferredTestMeta {
 
     fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
         ALL_CPU_FLUSHES.fetch_add(1, Ordering::Relaxed);
-        if FAIL_NEXT_ALL_CPU_FLUSH.swap(false, Ordering::Relaxed) {
-            return Err(crate::TlbFlushError::TimedOut);
-        }
         Self::flush_tlb(vaddr);
         Ok(())
     }
 }
 
-type DeferredTestPageTable = PageTable64<DeferredTestMeta, TestEntry, TestHandler>;
+type CompletionTestPageTable = PageTable64<CompletionTestMeta, TestEntry, TestHandler>;
 
 #[def_test]
 fn finish_reports_explicit_flush_boundary() {
@@ -469,58 +465,9 @@ fn finish_reports_explicit_flush_boundary() {
 }
 
 #[def_test]
-fn deferred_kernel_invalidation_detaches_the_shootdown() {
-    let mut table = TestPageTable::try_new_kernel().expect("kernel test page table");
-    let mut modify = table.modify();
-
-    assert!(
-        modify.defer_kernel_invalidation().is_none(),
-        "nothing is pending before the first change"
-    );
-    modify
-        .map_raw(
-            vaddr(0x20_0000),
-            paddr(0x60_0000),
-            PageSize::Size4K,
-            PagingFlags::READ,
-        )
-        .expect("map test page");
-    let deferred = modify
-        .defer_kernel_invalidation()
-        .expect("kernel mapping records an invalidation");
-    assert!(
-        !modify.finish().had_pending(),
-        "the detached invalidation must not remain with the guard"
-    );
-    drop(modify);
-    assert_eq!(deferred.complete(), Ok(()));
-}
-
-#[def_test]
-fn deferred_kernel_invalidation_rejects_user_tables() {
-    let mut table = TestPageTable::try_new().expect("user test page table");
-    let mut modify = table.modify();
-
-    modify
-        .map_raw(
-            vaddr(0x20_0000),
-            paddr(0x60_0000),
-            PageSize::Size4K,
-            PagingFlags::READ,
-        )
-        .expect("map test page");
-    assert!(
-        modify.defer_kernel_invalidation().is_none(),
-        "user tables use residency-scoped flushes"
-    );
-}
-
-#[def_test]
-fn deferred_kernel_invalidation_performs_and_retries_the_shootdown() {
+fn kernel_invalidation_completes_once_at_finish_or_drop() {
     ALL_CPU_FLUSHES.store(0, Ordering::Relaxed);
-    FAIL_NEXT_ALL_CPU_FLUSH.store(false, Ordering::Relaxed);
-
-    let mut table = DeferredTestPageTable::try_new_kernel().expect("kernel test page table");
+    let mut table = CompletionTestPageTable::try_new_kernel().expect("kernel test page table");
     let mut modify = table.modify();
     modify
         .map_raw(
@@ -530,30 +477,12 @@ fn deferred_kernel_invalidation_performs_and_retries_the_shootdown() {
             PagingFlags::READ,
         )
         .expect("map test page");
-    let deferred = modify
-        .defer_kernel_invalidation()
-        .expect("kernel mapping records an invalidation");
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        0,
-        "detaching must not sit in the shootdown"
-    );
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 0);
+    modify.finish();
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 1);
     drop(modify);
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        0,
-        "the guard drop must not repeat the detached flush"
-    );
-    assert_eq!(deferred.complete(), Ok(()));
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        1,
-        "complete must perform the all-CPU shootdown"
-    );
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 1);
 
-    // A failed scoped shootdown must be retried as a full flush instead of
-    // silently leaving stale translations.
-    FAIL_NEXT_ALL_CPU_FLUSH.store(true, Ordering::Relaxed);
     let mut modify = table.modify();
     modify
         .map_raw(
@@ -562,17 +491,9 @@ fn deferred_kernel_invalidation_performs_and_retries_the_shootdown() {
             PageSize::Size4K,
             PagingFlags::READ,
         )
-        .expect("map retry page");
-    let deferred = modify
-        .defer_kernel_invalidation()
-        .expect("retry mapping records an invalidation");
+        .expect("map drop-completion page");
     drop(modify);
-    assert_eq!(deferred.complete(), Ok(()));
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        3,
-        "a failed attempt must be followed by one full-flush retry"
-    );
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 2);
 }
 
 /// Checks the policy flag, not the presence or effect of either DSB.

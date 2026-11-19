@@ -6,20 +6,6 @@ use unittest::{assert, def_test};
 
 use super::*;
 
-struct AllCpusStartedGuard(bool);
-
-impl AllCpusStartedGuard {
-    fn save() -> Self {
-        Self(ALL_CPUS_STARTED.load(Ordering::Acquire))
-    }
-}
-
-impl Drop for AllCpusStartedGuard {
-    fn drop(&mut self) {
-        ALL_CPUS_STARTED.store(self.0, Ordering::Release);
-    }
-}
-
 fn reset_request_state() {
     for pending_epoch in &PENDING_EPOCH_BY_CPU {
         pending_epoch.store(0, Ordering::Relaxed);
@@ -56,32 +42,9 @@ fn test_handle_shootdown_no_pending() {
 }
 
 #[def_test(serial)]
-fn test_mark_all_cpus_started_gate() {
-    let _all_cpus_started_guard = AllCpusStartedGuard::save();
-    reset_request_state();
-    ALL_CPUS_STARTED.store(false, Ordering::Release);
-    let mut targets = KCpuMask::new();
-    targets.set(this_cpu_id().as_usize(), true);
-    assert_eq!(TlbFlushIf::flush_process_mask(None, targets), Ok(()));
-    let mut has_remote = false;
-    for_each_present_logical_cpu(|_, cpu, _| {
-        if cpu != this_cpu_id() {
-            targets.set(cpu.as_usize(), true);
-            has_remote = true;
-        }
-    });
-    if has_remote {
-        assert_eq!(
-            TlbFlushIf::flush_process_mask(None, targets),
-            Err(TlbFlushError::NotReady)
-        );
-        assert_eq!(
-            TlbFlushIf::flush_all_cpus(None),
-            Err(TlbFlushError::NotReady)
-        );
-    }
-    mark_all_cpus_started();
+fn remote_shootdown_is_enabled_before_the_tests_run() {
     assert!(ALL_CPUS_STARTED.load(Ordering::Acquire));
+    assert_eq!(TlbFlushIf::flush_all_cpus(None), Ok(()));
 }
 
 #[def_test(serial)]
