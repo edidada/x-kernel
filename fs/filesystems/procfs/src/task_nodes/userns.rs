@@ -6,7 +6,7 @@
 
 use alloc::{borrow::Cow, format, string::String, sync::Arc, vec::Vec};
 
-use kcred::{CAP_SETGID, CAP_SYS_ADMIN, IdMapExtent, UserNamespace};
+use kcred::{CAP_SYS_ADMIN, IdMapExtent, UserNamespace};
 use kprocess::AsThread;
 use ktask::WeakKtaskRef;
 use kvfs::{SimpleFileOps, VfsError, VfsFile, VfsResult};
@@ -99,7 +99,7 @@ fn render_id_map(
                 IdMapKind::Uid => lower_ns.map_uid_from_initial(id),
                 IdMapKind::Gid => lower_ns.map_gid_from_initial(id),
             })
-            .unwrap_or(65_534);
+            .unwrap_or(u32::MAX);
         text.push_str(&format!(
             "{:10} {:10} {:10}\n",
             extent.inside(),
@@ -160,6 +160,19 @@ impl SetgroupsFile {
 }
 
 impl SimpleFileOps for SetgroupsFile {
+    fn validate_open(&self) -> VfsResult<()> {
+        // Linux `proc_setgroups_open()` requires CAP_SYS_ADMIN in the target
+        // namespace at open-for-write; the write callback performs no
+        // capability check. CAP_SETGID is not sufficient.
+        let task = upgrade_task(&self.task)?;
+        let ns = task.as_thread().real_cred().user_ns_arc().clone();
+        if kprocess::current_cred().has_cap_in(&ns, CAP_SYS_ADMIN) {
+            Ok(())
+        } else {
+            Err(VfsError::PermissionDenied)
+        }
+    }
+
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
         let task = upgrade_task(&self.task)?;
         let ns = task.as_thread().real_cred().user_ns_arc().clone();
@@ -171,19 +184,15 @@ impl SimpleFileOps for SetgroupsFile {
         Ok(Cow::Owned(text.as_bytes().to_vec()))
     }
 
-    fn write(&self, file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
+    fn write(&self, _file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
         const MAX_SETGROUPS_WRITE: usize = 8;
 
         // The pid file resolves its task before the write callback in Linux; a
         // task that vanished after open therefore reports ESRCH even for
-        // malformed input.
+        // malformed input. Authority was checked at open.
         let task = upgrade_task(&self.task)?;
         let target_cred = task.as_thread().real_cred();
         let ns = target_cred.user_ns_arc().clone();
-        let opener = file.cred();
-        if !opener.has_cap_in(&ns, CAP_SETGID) {
-            return Err(VfsError::OperationNotPermitted);
-        }
         if offset != 0 || data.len() >= MAX_SETGROUPS_WRITE {
             return Err(VfsError::InvalidInput);
         }

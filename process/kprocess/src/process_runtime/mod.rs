@@ -696,6 +696,18 @@ fn prepare_fork_fs_and_namespaces(
     };
 
     let parent_nsproxy = parent.nsproxy().ok_or(KError::NoSuchProcess)?;
+    if config
+        .namespace_flags
+        .contains(kns::NamespaceFlags::NEWUSER)
+        && !fs_context
+            .lock()
+            .root()
+            .ptr_eq(&parent_nsproxy.mnt_ns().root_path())
+    {
+        // Linux `current_chrooted()`: a chrooted creator cannot obtain a new
+        // user namespace (and the capability reset that comes with it).
+        return Err(KError::OperationNotPermitted);
+    }
     // `CLONE_NEWCGROUP` roots the child's view at the cgroup the parent is
     // leaving, not at `config.target_cgroup` (the `CLONE_INTO_CGROUP`
     // destination the child is migrated to during publication).

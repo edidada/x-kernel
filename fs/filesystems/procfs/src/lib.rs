@@ -48,7 +48,7 @@ fn init_fs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 }
 
 /// Registered proc filesystem type.
-pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", init_fs_context);
+pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev_userns("proc", init_fs_context);
 
 #[macros::register_init]
 fn init_proc_fs() {

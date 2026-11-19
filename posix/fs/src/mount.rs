@@ -204,6 +204,7 @@ fn path_mount(
 
     let fs_type = fs_type.ok_or(KError::InvalidInput)?;
     let file_system_type = kvfs::get_filesystem_type(fs_type).ok_or(KError::NoSuchDevice)?;
+    require_userns_mountable(cred, file_system_type)?;
     let (root, pwd) = process.fs_context()?.lock().root_and_pwd();
     let mut context =
         kvfs::FsContext::new(file_system_type, dev_name, data, superblock_flags, cred)?;
@@ -259,6 +260,22 @@ pub(crate) fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
         None => cred.has_cap(kcred::CAP_SYS_ADMIN),
     };
     if allowed {
+        Ok(())
+    } else {
+        Err(KError::OperationNotPermitted)
+    }
+}
+
+/// Applies Linux's `FS_USERNS_MOUNT` gate.
+///
+/// A caller in a non-initial user namespace may only mount filesystem types
+/// that declared themselves userns-mountable; all other types require
+/// `CAP_SYS_ADMIN` in the initial namespace (`mount_capable()`).
+pub(crate) fn require_userns_mountable(
+    cred: &kcred::Cred,
+    fs_type: &kvfs::FileSystemType,
+) -> KResult<()> {
+    if fs_type.is_userns_mountable() || cred.has_cap(kcred::CAP_SYS_ADMIN) {
         Ok(())
     } else {
         Err(KError::OperationNotPermitted)

@@ -38,7 +38,11 @@ fn id_map_renders_overflow_for_unmapped_reader() {
         .unwrap();
     let sibling = UserNamespace::new_child(&initial, 2000, 2000, false).unwrap();
 
-    // The sibling cannot translate global 1000; Linux renders 65534.
+    // The sibling cannot translate global 1000; Linux `from_kuid` renders
+    // (uid_t)-1, not the munged overflow UID 65534.
     let rendered = render_id_map(IdMapKind::Uid, &child, &sibling);
-    assert_eq!(rendered.split_whitespace().nth(1), Some("65534"));
+    assert_eq!(
+        rendered.split_whitespace().nth(1),
+        Some("4294967295")
+    );
 }

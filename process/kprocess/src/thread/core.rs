@@ -416,7 +416,7 @@ impl Thread {
     pub fn prepare_thread_clone_with_files(&self, is_shared: bool) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
         let charge = self.cgroup.reserve_child()?;
-        let task_number = allocate_thread_task_number()?;
+        let task_number = allocate_thread_task_number(&self.process.active_pid_namespace())?;
         let thread = Self::new_with_charge(
             self.process.clone(),
             self.runtime.clone(),

@@ -35,11 +35,11 @@ bitflags::bitflags! {
 /// Filesystems that do not override [`crate::InodeOperations::permission`]
 /// reach this implementation.
 pub fn generic_permission(inode: &VfsInode, permission: Permission, cred: &Cred) -> KResult<()> {
-    let user_ns = inode
-        .super_block()
-        .map(|super_block| super_block.user_ns())
-        .unwrap_or_else(|_| kcred::initial_user_namespace());
-    check_dac_permission_in(&inode.metadata(), permission, cred, &user_ns)
+    // Linux `capable_wrt_inode_uidgid()` checks the capability in the caller's
+    // user namespace and additionally requires the inode's uid/gid to be
+    // mapped there. Using the superblock's `s_user_ns` here would deny a
+    // namespaced root that owns a mapped ID on a host-mounted filesystem.
+    check_dac_permission_in(&inode.metadata(), permission, cred, cred.user_ns())
 }
 
 #[cfg(unittest)]
@@ -70,11 +70,16 @@ fn check_dac_permission_in(
         return Err(KError::PermissionDenied);
     }
 
-    if cred.has_cap_in(user_ns, CAP_DAC_OVERRIDE) {
+    // `capable_wrt_inode_uidgid()` also fails when the inode's IDs are not
+    // mapped into the caller's namespace.
+    let inode_ids_mapped = user_ns.map_uid_from_initial(metadata.uid).is_some()
+        && user_ns.map_gid_from_initial(metadata.gid).is_some();
+
+    if inode_ids_mapped && cred.has_cap_in(user_ns, CAP_DAC_OVERRIDE) {
         return Ok(());
     }
 
-    if cred.has_cap_in(user_ns, CAP_DAC_READ_SEARCH) {
+    if inode_ids_mapped && cred.has_cap_in(user_ns, CAP_DAC_READ_SEARCH) {
         let readable = Permission::MAY_READ
             | if metadata.mode.node_type() == NodeType::Directory {
                 Permission::MAY_EXEC

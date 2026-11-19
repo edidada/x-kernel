@@ -47,6 +47,18 @@ pub(super) fn upgrade_task(task_weak: &WeakKtaskRef) -> VfsResult<KtaskRef> {
     task_weak.upgrade().ok_or(VfsError::NoSuchProcess)
 }
 
+/// Returns the target task's global inode-owner IDs.
+///
+/// `Cred` stores UID/GID in initial-namespace coordinates and
+/// `SimpleFile::new_regular_with_owner` expects those same global values, so
+/// no namespace projection belongs here.
+fn procfs_inode_owner(task: &WeakKtaskRef) -> (u32, u32) {
+    task.upgrade().map_or((0, 0), |task| {
+        let cred = task.as_thread().real_cred();
+        (cred.euid(), cred.egid())
+    })
+}
+
 struct ProcessTaskDir {
     fs: Arc<SimpleFs>,
     process: Weak<Process>,
@@ -155,6 +167,9 @@ impl TaskStatus {
         let (mut stat, masks) = TaskStat::sample_thread(task);
         let tgid = if let Some(ns) = observer_ns {
             stat.project_pid_namespace(process, ns);
+            if let Some(pid) = thread.task_number().nr_in(ns) {
+                stat.pid = pid;
+            }
             process
                 .number_in_namespace(ns)
                 .unwrap_or_else(|| process.pid())
@@ -1526,6 +1541,9 @@ impl SimpleDirOps for ThreadDir {
                         let mut stat = TaskStat::from_thread(&task);
                         if let Some(ns) = observer_ns.as_ref() {
                             stat.project_pid_namespace(task.as_thread().process(), ns);
+                            if let Some(pid) = task.as_thread().task_number().nr_in(ns) {
+                                stat.pid = pid;
+                            }
                         }
                         Ok(format!("{stat}").into_bytes())
                     }
@@ -1676,30 +1694,7 @@ impl SimpleDirOps for ThreadDir {
                 ))
             }
             "uid_map" => lookup.file(name, {
-                let (uid, gid) = {
-                    let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
-                    owner.map_or((0, 0), |owner| {
-                        let ns = owner.user_ns_arc();
-                        let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
-                        let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
-                        let parent = ns.parent();
-                        let uid = if uid.is_invalid() {
-                            parent
-                                .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
-                                .unwrap_or(0)
-                        } else {
-                            uid.as_raw()
-                        };
-                        let gid = if gid.is_invalid() {
-                            parent
-                                .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
-                                .unwrap_or(0)
-                        } else {
-                            gid.as_raw()
-                        };
-                        (uid, gid)
-                    })
-                };
+                let (uid, gid) = procfs_inode_owner(&task_weak);
                 SimpleFile::new_regular_with_owner(
                     fs.clone(),
                     NodePermission::from_bits_truncate(0o666),
@@ -1709,30 +1704,7 @@ impl SimpleDirOps for ThreadDir {
                 )
             }),
             "gid_map" => lookup.file(name, {
-                let (uid, gid) = {
-                    let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
-                    owner.map_or((0, 0), |owner| {
-                        let ns = owner.user_ns_arc();
-                        let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
-                        let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
-                        let parent = ns.parent();
-                        let uid = if uid.is_invalid() {
-                            parent
-                                .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
-                                .unwrap_or(0)
-                        } else {
-                            uid.as_raw()
-                        };
-                        let gid = if gid.is_invalid() {
-                            parent
-                                .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
-                                .unwrap_or(0)
-                        } else {
-                            gid.as_raw()
-                        };
-                        (uid, gid)
-                    })
-                };
+                let (uid, gid) = procfs_inode_owner(&task_weak);
                 SimpleFile::new_regular_with_owner(
                     fs.clone(),
                     NodePermission::from_bits_truncate(0o666),
@@ -1742,30 +1714,7 @@ impl SimpleDirOps for ThreadDir {
                 )
             }),
             "setgroups" => lookup.file(name, {
-                let (uid, gid) = {
-                    let owner = task_weak.upgrade().map(|task| task.as_thread().real_cred());
-                    owner.map_or((0, 0), |owner| {
-                        let ns = owner.user_ns_arc();
-                        let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
-                        let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
-                        let parent = ns.parent();
-                        let uid = if uid.is_invalid() {
-                            parent
-                                .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
-                                .unwrap_or(0)
-                        } else {
-                            uid.as_raw()
-                        };
-                        let gid = if gid.is_invalid() {
-                            parent
-                                .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
-                                .unwrap_or(0)
-                        } else {
-                            gid.as_raw()
-                        };
-                        (uid, gid)
-                    })
-                };
+                let (uid, gid) = procfs_inode_owner(&task_weak);
                 SimpleFile::new_regular_with_owner(
                     fs.clone(),
                     NodePermission::from_bits_truncate(0o644),
@@ -1775,26 +1724,7 @@ impl SimpleDirOps for ThreadDir {
                 )
             }),
             "auxv" => {
-                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
-                let owner = task.as_thread().real_cred();
-                let ns = owner.user_ns_arc();
-                let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
-                let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
-                let parent = ns.parent();
-                let owner_uid = if uid.is_invalid() {
-                    parent
-                        .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
-                        .unwrap_or(0)
-                } else {
-                    uid.as_raw()
-                };
-                let owner_gid = if gid.is_invalid() {
-                    parent
-                        .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
-                        .unwrap_or(0)
-                } else {
-                    gid.as_raw()
-                };
+                let (owner_uid, owner_gid) = procfs_inode_owner(&task_weak);
                 lookup.file(
                     name,
                     SimpleFile::new_snapshot_with_owner(

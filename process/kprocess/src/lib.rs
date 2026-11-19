@@ -134,9 +134,10 @@ pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers_for, spawn_alarm_task,
 };
 
-pub(crate) fn allocate_thread_task_number()
--> kerrno::KResult<alloc::sync::Arc<kidentity::PidHandle>> {
-    kidentity::allocate_root_pid_handle()
+pub(crate) fn allocate_thread_task_number(
+    active_ns: &alloc::sync::Arc<kidentity::PidNamespace>,
+) -> kerrno::KResult<alloc::sync::Arc<kidentity::PidHandle>> {
+    kidentity::PidHandle::allocate_in(active_ns)
 }
 
 /// Runtime action requested by a syscall after handling a user trap.

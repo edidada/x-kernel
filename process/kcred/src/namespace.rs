@@ -249,9 +249,9 @@ impl UserNamespace {
         owner_egid: Gid,
         parent_could_setfcap: bool,
     ) -> KResult<alloc::sync::Arc<Self>> {
-        // Linux `create_user_ns`: nesting is capped at 32 levels below the
-        // initial namespace and exhaustion reports ENOSPC.
-        if parent.level >= 32 {
+        // Linux `create_user_ns`: a parent at level > 32 cannot create another
+        // child; exhaustion reports ENOSPC.
+        if parent.level > 32 {
             return Err(KError::from(LinuxError::ENOSPC));
         }
         // Linux also rejects a creator whose euid/egid has no mapping in the
@@ -464,7 +464,11 @@ impl UserNamespace {
         // the parent. For GIDs this shortcut requires that `setgroups(2)` has
         // already been disabled, since otherwise the process could drop groups.
         if extents.len() == 1 && extents[0].count() == 1 {
-            let owner = parent.map_uid_to_initial(self.owner_euid);
+            // Owner IDs are stored in initial-namespace coordinates (the
+            // contract `new_child` checks); comparing a re-projected value
+            // would treat the global ID as parent-local and fail for nested
+            // namespaces.
+            let owner = Some(self.owner_euid);
             let mapped = match kind {
                 MapKind::Uid => parent.map_uid_to_initial(extents[0].outside()),
                 MapKind::Gid => parent.map_gid_to_initial(extents[0].outside()),
@@ -518,20 +522,13 @@ impl UserNamespace {
     /// those numbers are therefore still expressed in the parent namespace. Once
     /// the map is installed, the writer's own namespace is authoritative.
     fn writer_id_in_initial(&self, kind: MapKind, writer: &Cred) -> Option<Uid> {
-        let parent = self.parent.as_ref()?;
-        if !core::ptr::eq(writer.user_ns(), self) {
-            return match kind {
-                MapKind::Uid => writer.user_ns().map_uid_to_initial(writer.euid()),
-                MapKind::Gid => writer.user_ns().map_gid_to_initial(writer.egid()),
-            };
-        }
-        let mapped = match kind {
-            MapKind::Uid => self.map_uid_to_initial(writer.euid()),
-            MapKind::Gid => self.map_gid_to_initial(writer.egid()),
-        };
-        mapped.or_else(|| match kind {
-            MapKind::Uid => parent.map_uid_to_initial(writer.euid()),
-            MapKind::Gid => parent.map_gid_to_initial(writer.egid()),
+        // Credentials store IDs in initial-namespace coordinates, including in
+        // the window between `clone(CLONE_NEWUSER)` and the first map write.
+        // Do not translate them through this namespace's (possibly empty) map
+        // or the parent again.
+        Some(match kind {
+            MapKind::Uid => writer.euid(),
+            MapKind::Gid => writer.egid(),
         })
     }
 

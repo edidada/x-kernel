@@ -23,6 +23,17 @@ use super::{
     next_ipc_id,
 };
 
+/// Returns the user namespace that owns the caller's IPC namespace.
+///
+/// Linux `ipcperms()` evaluates capabilities in `ipc_namespace->user_ns`, not
+/// in the creating task's credential namespace. A kernel/fixture task without
+/// an IPC namespace uses the initial namespace.
+fn current_ipc_namespace_owner() -> Arc<UserNamespace> {
+    kprocess::try_current_user_process()
+        .and_then(|process| process.ipc_ns().ok())
+        .map_or_else(initial_user_namespace, |ns| ns.owner().clone())
+}
+
 /// Rejects IDs that `ipc_update_perm()` cannot represent.
 fn validate_set_perm(perm: &IpcPerm) -> KResult<()> {
     if perm.uid == INVALID_UID || perm.gid == INVALID_GID {
@@ -346,7 +357,7 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
             current_pid,
             current_uid,
             current_gid,
-            cred.user_ns_arc().clone(),
+            current_ipc_namespace_owner(),
         )));
 
         msg_manager.insert_msqid_queues(msqid, msg_queue);
@@ -391,7 +402,7 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
         current_pid,
         current_uid,
         current_gid,
-        cred.user_ns_arc().clone(),
+        current_ipc_namespace_owner(),
     )));
 
     msg_manager.insert_key_msqid(key, msqid);

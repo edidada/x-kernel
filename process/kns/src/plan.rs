@@ -84,6 +84,16 @@ impl NamespacePlan {
             return Err(UnshareError::NotPermitted);
         }
 
+        // Linux `create_user_ns()` rejects a chrooted creator: a task whose
+        // fs root has moved away from the mount-namespace root must not gain
+        // a fresh full capability set through `CLONE_NEWUSER`.
+        if flags.contains(NamespaceFlags::NEWUSER)
+            && let Some(fs_context) = fs_context
+            && !fs_context.root().ptr_eq(&parent.mnt_ns().root_path())
+        {
+            return Err(UnshareError::NotPermitted);
+        }
+
         // A depth-exhausted namespace tree reports ENOSPC, matching Linux
         // `create_user_ns`.
         let user_ns = if flags.contains(NamespaceFlags::NEWUSER) {
