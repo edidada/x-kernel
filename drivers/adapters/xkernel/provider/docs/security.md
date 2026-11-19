@@ -77,3 +77,10 @@ IOMMU support, multiple windows, cache maintenance for noncoherent devices or
 hardware validation. The existing zero-bus streaming-release shortcut on the
 legacy DmaOp path is unchanged and is not certified as a general DMA-address
 rule. Time forwarding retains the host monotonic-clock assumption.
+
+## DMA and MMIO execution context
+
+Coherent DMA allocation/free and runtime MMIO map/unmap require sleepable task
+context; invalid teardown retains its allocation/mapping. The host prepares the
+fixed streaming pool before driver publication. Streaming map/unmap can then
+run in ordinary IRQ/BH context without PTE changes or TLB waits; NMI is excluded.

@@ -718,3 +718,10 @@ System suspend/resume coordination belongs to `core/kpm`, independently of
 runtime bring-up. See `../../kpm/docs/design.md` for the transaction, platform
 contract and cooperative task-freezing sequence. Runtime does not own PM
 admission or expose a compatibility PM module.
+
+## DMA streaming readiness
+
+After the CPU-service rendezvous, the host prepares streaming DMA backing before
+publishing drivers. Missing backing can be retried by a sleepable task outside
+DMA metadata locks; IRQ/BH mappings use prepared backing only. Coherent mapping
+transitions and platform prepare/release run without the DMA metadata spinlock.

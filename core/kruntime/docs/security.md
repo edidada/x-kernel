@@ -456,3 +456,10 @@ quiescence or memory reclamation safety for dynamic device mappings.
 System PM admission, platform trust and rollback are owned by `kpm`, not the
 runtime startup layer. See `../../kpm/docs/security.md`. Runtime initialization
 still establishes the scheduler, time and IRQ prerequisites required by PM.
+
+## DMA streaming readiness
+
+After the CPU-service rendezvous, the host prepares streaming DMA backing before
+publishing drivers. Missing backing can be retried by a sleepable task outside
+DMA metadata locks; IRQ/BH mappings use prepared backing only. Coherent mapping
+transitions and platform prepare/release run without the DMA metadata spinlock.

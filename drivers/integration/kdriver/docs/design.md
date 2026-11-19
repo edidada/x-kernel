@@ -793,7 +793,7 @@ not allocate from the heap.
 
 ## Concurrency Model
 
-- `DeviceManager::bus_mgr` uses `SpinNoPreempt`: bus enumeration, rescan,
+- `DeviceManager::bus_mgr` uses a sleepable `Mutex`: bus enumeration, rescan,
   quiesce, and remove run in process context with mutual exclusion.
 - `EnumerationContext` has no interior locking: it is a single-threaded
   bridge between bus backends and probe, filled only inside the `bus_mgr`
@@ -982,3 +982,15 @@ discovery or consumer I/O. The X-Kernel provider reads khal's monotonic clock;
 reusable block code imports only driver_os_api. Clock samples may occur under a
 short IRQ-safe accounting lock in task or completion IRQ/softirq context and
 must not allocate or sleep.
+
+## Discovery mapping context
+
+Bus enumeration/rescan prepares MMIO mappings and may wait for confirmed TLB
+publication. DeviceManager serializes its backends with a task mutex, without
+holding a preemption-disable spinlock across those operations. The manager's
+entry points require sleepable task context; IRQ handlers never enumerate buses.
+Enumeration retains no preemption-disable spinlock while MM completes publication.
+
+`DeviceManager` requires `ksync::Mutex` for bus enumeration and resource mapping
+in every driver configuration. `ksync` is an unconditional dependency, including
+console/RNG-only builds without `block` or `unittest-threads` features.
