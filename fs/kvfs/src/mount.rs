@@ -1824,15 +1824,16 @@ impl Path {
         let _data_guard = inode.lock_data();
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
+        let inode_ns = self.dentry.user_namespace();
         let is_touch = matches!(
             (atime, mtime),
             (Some(SetattrTime::Current), Some(SetattrTime::Current))
         );
         if !is_touch {
-            if !is_owner && !cred.has_cap_fowner() {
+            if !is_owner && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
                 return Err(VfsError::OperationNotPermitted);
             }
-        } else if !is_owner && !cred.has_cap_fowner() {
+        } else if !is_owner && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
             self.permission(Permission::MAY_WRITE, cred)?;
         }
 

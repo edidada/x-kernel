@@ -35,10 +35,24 @@ bitflags::bitflags! {
 /// Filesystems that do not override [`crate::InodeOperations::permission`]
 /// reach this implementation.
 pub fn generic_permission(inode: &VfsInode, permission: Permission, cred: &Cred) -> KResult<()> {
-    check_dac_permission(&inode.metadata(), permission, cred)
+    let user_ns = inode
+        .super_block()
+        .map(|super_block| super_block.user_ns())
+        .unwrap_or_else(|_| kcred::initial_user_namespace());
+    check_dac_permission_in(&inode.metadata(), permission, cred, &user_ns)
 }
 
+#[cfg(unittest)]
 fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred) -> KResult<()> {
+    check_dac_permission_in(metadata, permission, cred, &kcred::initial_user_namespace())
+}
+
+fn check_dac_permission_in(
+    metadata: &Metadata,
+    permission: Permission,
+    cred: &Cred,
+    user_ns: &kcred::UserNamespace,
+) -> KResult<()> {
     let permission = permission
         .intersection(Permission::MAY_READ | Permission::MAY_WRITE | Permission::MAY_EXEC);
     let mode = metadata.mode.permission();
@@ -56,11 +70,11 @@ fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred
         return Err(KError::PermissionDenied);
     }
 
-    if cred.has_cap(CAP_DAC_OVERRIDE) {
+    if cred.has_cap_in(user_ns, CAP_DAC_OVERRIDE) {
         return Ok(());
     }
 
-    if cred.has_cap(CAP_DAC_READ_SEARCH) {
+    if cred.has_cap_in(user_ns, CAP_DAC_READ_SEARCH) {
         let readable = Permission::MAY_READ
             | if metadata.mode.node_type() == NodeType::Directory {
                 Permission::MAY_EXEC
@@ -72,13 +86,12 @@ fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred
         }
     }
 
-    let fsuid = crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc());
-    let fsgid = crate::kid::Kgid::from_inside(cred.fsgid(), cred.user_ns_arc());
-    let in_group = fsgid.as_raw() == metadata.gid
-        || cred.supplementary_groups().iter().any(|gid| {
-            crate::kid::Kgid::from_inside(*gid, cred.user_ns_arc()).as_raw() == metadata.gid
-        });
-    let is_allowed = if fsuid.as_raw() == metadata.uid {
+    let in_group = cred.fsgid() == metadata.gid
+        || cred
+            .supplementary_groups()
+            .binary_search(&metadata.gid)
+            .is_ok();
+    let is_allowed = if cred.fsuid() == metadata.uid {
         owner_allows(mode, permission)
     } else if in_group {
         group_allows(mode, permission)
