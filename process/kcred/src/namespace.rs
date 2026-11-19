@@ -541,7 +541,7 @@ impl UserNamespace {
             }
             return Ok(());
         }
-        if state.gid_map.is_written {
+        if self.parent.is_none() || state.gid_map.is_written {
             return Err(KError::OperationNotPermitted);
         }
         state.setgroups_allowed = false;
