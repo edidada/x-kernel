@@ -98,6 +98,10 @@ registered, requires a published VirtIO RNG device, and fails rather than skips
 when no device is present. Use the configured kernel guest unittest workflow;
 these files are not host Cargo integration-test targets.
 
+The host-source admission test uses fixed available, temporarily unavailable,
+and failed states so asynchronous device registration or recovery cannot
+change its input between probes.
+
 Controlled collector tests cover demand coalescing, return to idle, reuse,
 repeated read errors without new demand, successful recovery, and explicit
 terminal device failure.

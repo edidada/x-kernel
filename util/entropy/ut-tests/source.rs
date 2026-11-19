@@ -72,10 +72,35 @@ fn test_eager_reseed_excludes_host_trusted() {
 #[cfg(feature = "entropy_virtio_rng")]
 #[def_test]
 fn test_host_source_reseed_requires_availability() {
-    assert_eq!(
-        include_in_reseed(&VIRTIO_RNG_SOURCE),
-        VIRTIO_RNG_SOURCE.availability().is_available()
-    );
+    struct HostSource(SourceAvailability);
+
+    impl EntropySource for HostSource {
+        fn name(&self) -> &'static str {
+            "test-host"
+        }
+
+        fn tier(&self) -> SourceTier {
+            SourceTier::HostTrusted
+        }
+
+        fn availability(&self) -> SourceAvailability {
+            self.0
+        }
+
+        fn read(&self, _len_bytes: usize) -> SourceReadResult {
+            Err(SourceReadError::NoEntropy)
+        }
+    }
+
+    // Device registration and recovery can change a live source between probes.
+    // Check admission against one fixed state for each policy case.
+    for (availability, is_included) in [
+        (SourceAvailability::Available, true),
+        (SourceAvailability::TemporarilyUnavailable, false),
+        (SourceAvailability::Failed, false),
+    ] {
+        assert_eq!(include_in_reseed(&HostSource(availability)), is_included);
+    }
 }
 
 #[def_test]
