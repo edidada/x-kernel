@@ -1294,3 +1294,32 @@ fn map_existing_huge_leaf_requires_exact_bases_and_preserves_geometry() {
     edit.finish();
     fixture.0.assert_drops(0, 2);
 }
+
+#[def_test(serial)]
+fn mixed_teardown_retains_owned_frames_until_full_invalidation_succeeds() {
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K), (0x20_0000, PageSize::Size2M as usize)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    edit.map(VirtAddr::from(0), fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.map_sized(
+        VirtAddr::from(0x20_0000),
+        fixture.reference(1),
+        PageSize::Size2M,
+        PagingFlags::READ,
+    )
+    .unwrap();
+    edit.try_finish().unwrap();
+    fixture.0.withdraw(0);
+    fixture.0.withdraw(1);
+    edit.unmap_sparse_region_any_size(VirtAddr::from(0), 0x40_0000)
+        .unwrap();
+    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
+    assert_eq!(edit.try_finish(), Err(TlbFlushError::TimedOut));
+    fixture.0.assert_drops(0, 0);
+    fixture.0.assert_drops(1, 0);
+    edit.try_finish().unwrap();
+    fixture.0.assert_drops(0, 1);
+    fixture.0.assert_drops(1, 1);
+    fixture.0.assert_counts(0, 1);
+}

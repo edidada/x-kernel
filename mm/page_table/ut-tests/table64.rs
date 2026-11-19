@@ -1342,3 +1342,67 @@ fn fresh_map_invalidates_when_architecture_requires_it() {
     let receipt = guard.finish();
     assert!(receipt.had_pending());
 }
+
+#[def_test]
+fn sparse_mixed_unmap_clears_base_and_huge_leaves_in_one_walk() {
+    let mut table = TestPageTable::try_new().unwrap();
+    let addresses = [
+        (0x1000, PageSize::Size4K),
+        (0x20_0000, PageSize::Size2M),
+        (0x4000_0000, PageSize::Size1G),
+    ];
+    let mut edit = table.modify();
+    for (address, size) in addresses {
+        edit.map_raw(vaddr(address), paddr(address), size, PagingFlags::READ)
+            .unwrap();
+    }
+    edit.try_finish().unwrap();
+    edit.unmap_sparse_region_any_size(vaddr(0), 0x8000_0000)
+        .unwrap();
+    assert!(edit.sparse_entries_visited < 2048);
+    assert!(matches!(edit.flush, super::ToFlush::Full));
+    assert!(edit.try_finish().unwrap().had_pending());
+    for (address, _) in addresses {
+        assert_eq!(edit.query(vaddr(address)), Err(crate::PtError::NotMapped));
+    }
+    edit.unmap_sparse_region_any_size(vaddr(0), 0x8000_0000)
+        .unwrap();
+    assert!(!edit.try_finish().unwrap().had_pending());
+}
+
+#[def_test]
+fn sparse_mixed_unmap_preserves_partially_covered_huge_leaves() {
+    let mut table = TestPageTable::try_new().unwrap();
+    let start = 0x20_0000;
+    let mut edit = table.modify();
+    edit.map_raw(
+        vaddr(start),
+        paddr(start),
+        PageSize::Size2M,
+        PagingFlags::READ,
+    )
+    .unwrap();
+    edit.try_finish().unwrap();
+    for (base, len) in [(start + PAGE_SIZE_4K, PAGE_SIZE_4K), (start, PAGE_SIZE_4K)] {
+        assert_eq!(
+            edit.unmap_sparse_region_any_size(vaddr(base), len),
+            Err(crate::PtError::MappedToHugePage)
+        );
+        assert_eq!(edit.query(vaddr(start)).unwrap().2, PageSize::Size2M);
+        assert!(!edit.try_finish().unwrap().had_pending());
+    }
+    assert_eq!(
+        edit.unmap_sparse_region_any_size(vaddr(1), PAGE_SIZE_4K),
+        Err(crate::PtError::NotAligned)
+    );
+}
+
+#[def_test]
+fn sparse_mixed_unmap_skips_an_empty_address_space_without_flushing() {
+    let mut table = TestPageTable::try_new().unwrap();
+    let mut edit = table.modify();
+    edit.unmap_sparse_region_any_size(vaddr(0), 1usize << 38)
+        .unwrap();
+    assert_eq!(edit.sparse_entries_visited, 1);
+    assert!(!edit.try_finish().unwrap().had_pending());
+}

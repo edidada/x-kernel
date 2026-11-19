@@ -82,6 +82,10 @@ impl VmRuntimeOps for SleepableBacking {
         VmRuntimeOps::unmap(&self.pages, range, table)
     }
 
+    fn release_for_exit(&self, range: VirtAddrRange) -> KResult {
+        VmRuntimeOps::release_for_exit(&self.pages, range)
+    }
+
     fn on_protect(
         &self,
         range: VirtAddrRange,

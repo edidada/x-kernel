@@ -153,6 +153,20 @@ impl InvalidateSink {
     fn remove(&self, id: PendingInvalidateId) -> bool {
         self.queue.lock().remove(id)
     }
+
+    fn discard_pending(&self) {
+        // Detach a finite snapshot without allocating or running request
+        // destructors under the IRQ-disabled queue lock. Preserve next_id so
+        // an in-flight submit cannot remove a newer request after teardown.
+        let pending = {
+            let mut queue = self.queue.lock();
+            (
+                core::mem::take(&mut queue.order),
+                core::mem::take(&mut queue.entries),
+            )
+        };
+        drop(pending);
+    }
 }
 
 #[derive(Clone)]
@@ -657,6 +671,36 @@ impl MmSpace {
             }
         }
         self.vmas.clear();
+    }
+
+    /// Tears down the final user's mappings with one sparse page-table walk.
+    ///
+    /// No active users may remain or be acquired. The last-user lifetime gate
+    /// and the caller's MM mutex serialize this path against faults and fork.
+    /// Backing and view owners stay live until synchronous TLB completion.
+    /// On any error the caller must retain this MM rather than destroy owners
+    /// that stale translations could still reach.
+    pub(crate) fn clear_for_exit(&mut self) -> KResult {
+        // Final teardown subsumes queued object invalidations. Keep their
+        // owners, and all VMA runtimes, until the whole range has retired.
+        {
+            let mut modify = self.pgtbl.modify();
+            modify
+                .unmap_sparse_region_any_size(self.range.start, self.range.size())
+                .map_err(crate::backend::map_paging_err)?;
+            modify.try_finish().map_err(|_| KError::ResourceBusy)?;
+        }
+        for vma in self.vmas.iter() {
+            vma.runtime()
+                .ok_or(KError::BadAddress)?
+                .release_for_exit(vma.range())?;
+            if vma.is_accounted() {
+                commit::uncharge(vma.size());
+            }
+        }
+        self.vmas.clear();
+        self.invalidate_sink.discard_pending();
+        Ok(())
     }
 
     /// Returns the address space base.

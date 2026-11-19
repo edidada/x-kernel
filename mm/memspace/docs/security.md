@@ -359,10 +359,10 @@ must exclude source fork reservation between an exclusivity check and writable
 publication; observer handles and PTE clones do not grant or remove logical
 shares. Old logical-slot guards survive until old-owner access retirement:
 `try_finish` success permits drop, while unconfirmed completion conservatively
-retains the committed single-page replacement guard. Range cleanup uses the
-same policy for the removed slots: no `WouldBlock` reaches the infallible exit
-caller, and a refault cannot restore the discarded association. Only affected
-guards are forgotten, not the whole object. Physical retention alone cannot
+retains the committed single-page replacement guard. Ordinary range cleanup
+uses the same policy for the removed slots: completion errors do not become
+unmap errors, and a refault cannot restore the discarded association. Only
+affected guards are forgotten, not the whole object. Physical retention alone cannot
 prevent a sibling from writing contents still observable through an old private
 translation. Forgotten range/single-page guards retain memory and sharing
 indefinitely, without a global bound or recovery machinery. Software cleanup
@@ -377,3 +377,20 @@ runnable during rollback. Logical slot and physical backing destruction require
 owning-MM teardown/exclusion; dropping a runtime is not proof of remote access
 retirement for arbitrary live aliases. Tests check actual allocation lifetime,
 logical-slot sharing, managed source conflict, and final cleanup separately.
+
+## Final-user teardown boundary
+
+`MmUserHandle` closes the user-acquisition gate before calling
+`MmSpace::clear_for_exit` under the MM mutex. Faults and fork cannot publish
+new mappings during the sparse walk. All VMA runtimes, object backing and
+view guards are kept until `PageTableMut::try_finish` confirms the requested
+TLB invalidation. `VmRuntimeOps::release_for_exit` may then release only the
+notified VMA range, including shared-file registrations; it cannot invalidate
+more PTEs or re-enter MM. Split and fork ownership must remain independent.
+
+An error withholds remaining release and permanently pins the whole MM through
+an intentionally retained `Arc`. This prevents stale hardware translations or
+ASID-provider callbacks from reaching reused memory. It can leak memory and
+commitment on teardown failure; no retry service is claimed. Managed PTE holds
+keep their existing bounded-retirement behavior. The legacy ordinary `clear`
+and other raw `finish()` callers are outside this change's completion proof.

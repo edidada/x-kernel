@@ -1290,3 +1290,80 @@ fn non_aligned_file_end_view_rounds_to_page_boundary() {
         vec![(0, PAGE_SIZE_4K as u64)]
     );
 }
+
+#[def_test]
+fn final_user_exit_releases_private_cow_slots_and_file_tokens_after_vma_split() {
+    use alloc::{collections::BTreeMap, sync::Arc};
+
+    use ksync::Mutex;
+    use memspace::{MmSpace, VmRuntimeRef};
+
+    let start = VirtAddr::from_usize(0xa00_000);
+    let len = PAGE_SIZE_4K * 3;
+    let file = page_cache_file("private-exit-split");
+    file.write_from(&vec![0x51; len], &mut 0).unwrap();
+    let runtime = Arc::new(FilePrivateRuntime {
+        mapping_view: None,
+        anon_view: None,
+        start,
+        len,
+        size: PageSize::Size4K,
+        anon: AnonPrivateObject::new_root(),
+        anon_start: 0,
+        file_pages: Arc::new(Mutex::new(BTreeMap::new())),
+        file: file.clone(),
+        file_start: 0,
+        file_end: Some(len as u64),
+    });
+    let mm = Arc::new(Mutex::new(MmSpace::new_empty_user(start, len).unwrap()));
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    {
+        let mut guard = mm.lock();
+        let vma = VmArea::new(
+            start,
+            len,
+            flags,
+            flags,
+            runtime.backing_info(),
+            0,
+            Some(memspace::FileMappingInfo {
+                offset: 0,
+                inode: file.inode().inode(),
+                path: None,
+            }),
+        );
+        guard
+            .map_runtime_vma(vma, false, VmRuntimeRef::new_file_private(runtime.clone()))
+            .unwrap();
+        for offset in [0, PAGE_SIZE_4K * 2] {
+            assert!(
+                guard
+                    .handle_page_fault(start + offset, PageFaultFlags::READ)
+                    .is_resolved()
+            );
+        }
+        assert!(
+            guard
+                .handle_page_fault(start + PAGE_SIZE_4K, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        guard.write(start + PAGE_SIZE_4K, b"private").unwrap();
+        guard
+            .protect(
+                start + PAGE_SIZE_4K,
+                PAGE_SIZE_4K,
+                MappingFlags::USER | MappingFlags::READ,
+            )
+            .unwrap();
+    }
+    assert!(runtime.anon.page_at(PAGE_SIZE_4K as u64).is_some());
+    assert!(!runtime.file_pages.lock().is_empty());
+    drop(MmSpace::acquire_user(mm.clone()).unwrap());
+    assert!(runtime.anon.page_at(PAGE_SIZE_4K as u64).is_none());
+    assert!(runtime.file_pages.lock().is_empty());
+    assert_eq!(mm.lock().vmas().count(), 0);
+    let mut original = [0; 7];
+    file.read_from(&mut original, &mut (PAGE_SIZE_4K as u64))
+        .unwrap();
+    assert_eq!(original, [0x51; 7]);
+}

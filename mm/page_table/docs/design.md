@@ -713,3 +713,19 @@ Sv39 and Sv48 reserve W=1,R=0, so both new_page and set_flags must use this
 normalization, including first write-only file faults and later mprotect updates.
 This changes the hardware leaf only; VMA permission policy remains with memspace.
 The managed software bit is preserved independently during protection changes.
+
+## Mixed-size sparse teardown
+
+`PageTableMut::unmap_sparse_region_any_size` shares the sparse walker with
+`unmap_sparse_region`, but accepts 4 KiB, 2 MiB and 1 GiB leaves in one range.
+The range is base-page aligned; every present huge leaf must be wholly covered.
+Missing subtrees are skipped without per-VA root walks. Any removed leaf uses
+a full address-space invalidation summary. Managed holds still retire through
+the fixed-capacity gather, which may drain before the final `try_finish`.
+Neither operation frees table frames or mutates borrowed root subtrees.
+
+Whole-MM callers can revoke all PTEs without walking each VMA's backend. Raw
+backing must remain owned until `try_finish` succeeds. A partial-huge or borrowed
+subtree error can follow a cleared prefix and does not authorize release.
+Tests cover mixed leaves, clipped huge leaves, empty sparse ranges, and retained
+managed references across failed invalidation and a successful full retry.

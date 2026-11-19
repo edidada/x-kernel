@@ -293,6 +293,12 @@ impl VmRuntimeOps for PrivateBackend {
         BackendOps::unmap(self, range, pgtbl)
     }
 
+    fn release_for_exit(&self, range: VirtAddrRange) -> KResult {
+        let object_start = self.object_offset_for(range.start)?;
+        release_private_object_range_after_unmap(&self.object, object_start, range.size());
+        Ok(())
+    }
+
     fn on_protect(
         &self,
         range: VirtAddrRange,
@@ -583,6 +589,20 @@ fn unmap_private_object_range_with_retirement(
         object.retire_range(object_start, range.size(), retain_fn);
     }
     Ok(())
+}
+
+/// Releases a private object's resident slots after their translations retire.
+///
+/// The caller must have removed all corresponding PTEs and confirmed TLB
+/// invalidation, and must serialize faults and fork for this mapping. Shared
+/// slots retain the fork child's logical shares and physical backing. Removal
+/// allocates no temporary page list and drops each slot outside the object lock.
+pub fn release_private_object_range_after_unmap(
+    object: &AnonPrivateObject,
+    object_start: u64,
+    object_len: usize,
+) {
+    object.remove_range(object_start, object_len);
 }
 
 /// Discards one private-anon object range for `MADV_DONTNEED`.

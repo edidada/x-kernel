@@ -22,7 +22,8 @@ use memspace::{
         private::{
             PrivateForkMaterialize, clone_private_object_pages_for_fork, cow_private_object_page,
             discard_private_object_range, map_existing_private_object_page,
-            private_anon_invalidate_notifier, unmap_private_object_range,
+            private_anon_invalidate_notifier, release_private_object_range_after_unmap,
+            unmap_private_object_range,
         },
     },
 };
@@ -673,6 +674,13 @@ impl VmRuntimeOps for FilePrivateRuntime {
 
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
         self.unmap_impl(range, pgtbl)
+    }
+
+    fn release_for_exit(&self, range: VirtAddrRange) -> KResult {
+        let object_start = self.anon_offset_for(range.start)?;
+        release_private_object_range_after_unmap(&self.anon, object_start, range.size());
+        self.release_file_pages(range);
+        Ok(())
     }
 
     fn on_protect(

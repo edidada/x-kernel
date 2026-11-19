@@ -182,8 +182,19 @@ mutex. Present leaves keep their COW source identities; removed leaves keep thei
 physical protection in page-table retirement. File invalidation and permission
 revocation still obey their existing consistency/completion contracts.
 
-Private-file anonymous cleanup follows memspace's conservative range-retirement
-policy: a successful PTE walk removes anonymous object association even if TLB
+Ordinary private-file anonymous cleanup follows memspace's conservative
+range-retirement policy: a successful PTE walk removes anonymous object association even if TLB
 completion is unconfirmed, retaining the removed logical shares instead of
 returning a new teardown error. Missing-PTE content tokens remain independently
 removable. This does not prove remote revocation on a completion error.
+
+## Final-user release hook
+
+The MM owner calls `release_for_exit` only with its exclusive mutex held, no
+remaining active users and successful synchronous retirement of all MM PTEs.
+The private hook may then release logical COW slots, their physical holds and
+content tokens; the shared hook drops only the specified range's shared/seal
+registrations. A runtime shared by split VMAs must not release outside that range. Other processes'
+shared content and fork-owned COW references remain valid. The hooks neither
+re-enter MM nor initiate invalidation. MM retains remaining owners on teardown
+failure; ordinary unmap/invalidation contracts are unchanged.

@@ -443,10 +443,32 @@ the VMA, and does not take on the concrete ownership of file pins or anonymous f
 finishes TLB invalidation, `MmSpace` invokes the same completion hook so backing
 runtimes can release references that only kept those translations valid.
 
-Last-user address-space teardown walks the stable VMA set to unmap each range,
-finishes TLB invalidation, then walks it again to complete runtime invalidation
-before clearing the VMA metadata. It does not copy the VMA set into temporary
-arrays, so this outer walk does not require memory proportional to VMA count.
+Last-user address-space teardown closes the `MmUserLifetime` acquisition gate
+before `MmUserHandle::clear_after_last_user` takes the MM mutex. It invokes
+`MmSpace::clear_for_exit`, which walks the address space's sparse page table
+once through `unmap_sparse_region_any_size`, across base and huge leaves. It
+skips missing subtrees and coalesces invalidation into a full-MM summary;
+managed mapping holds still use page-table retirement's bounded batches.
+
+Only successful `PageTableMut::try_finish` permits the next phase. The stable
+VMA set is then visited once to call `VmRuntimeOps::release_for_exit(range)`
+and release commitment accounting. This hook performs each backend's non-PTE
+cleanup: private anonymous slots, file-private COW slots and content tokens,
+and shared-file/seal registrations. Split VMAs release only their own range,
+so fork children retain their independent ownership. VMA/view owners remain
+live through invalidation and are dropped after backend release. Queued object
+invalidations are subsumed by full teardown: the finite pending queue is
+detached under its spinlock, then request owners are dropped outside it. Request
+IDs remain monotonic so an in-flight submit cannot consume a newer request.
+No VMA snapshot or detached private-page list is allocated.
+
+If traversal, synchronous invalidation or backend release fails, the final
+user path retains an `Arc` to the whole MM and reports the failure. It must
+retain the ASID provider and raw backing even if page-table-owned holds were
+automatically retained. The closed user gate prevents resurrection. This is
+permanent retention on a failed teardown, not an asynchronous cleanup/retry
+service. Ordinary `MmSpace::clear`, `munmap`, invalidation and `mremap` retain
+their existing paths; only final-user release selects the exit operation.
 
 Private anonymous offsets have one source: anonymous VMAs derive bytes from
 `page_offset`, while file-private runtimes derive them from their retained

@@ -1070,10 +1070,13 @@ fn mm_pin_does_not_keep_user_mappings_alive_after_last_user_release() {
     let pin = user.pin();
 
     assert!(pin.is_user_alive());
+    let invalidate = aspace.lock().invalidate_handle(&aspace);
+    assert!(invalidate.enqueue(sample_request()));
     assert!(
         user.release_and_clear_if_last(),
         "last active user should tear down mappings"
     );
+    assert!(aspace.lock().invalidate_sink.pop_front().is_none());
     assert!(
         pin.try_upgrade_user().is_none(),
         "object pin must not resurrect a torn-down user address space"
@@ -1130,6 +1133,7 @@ fn synchronous_invalidation_is_complete_after_mm_destruction() {
 struct MsyncTestRuntime {
     backing: crate::VmBackingInfo,
     sync: KBox<dyn Fn(core::ops::Range<u64>) -> KResult + Send + Sync>,
+    release_error: Option<KError>,
 }
 
 impl crate::VmRuntimeOps for MsyncTestRuntime {
@@ -1148,6 +1152,10 @@ impl crate::VmRuntimeOps for MsyncTestRuntime {
 
     fn unmap(&self, _: memaddr::VirtAddrRange, _: &mut khal::paging::PageTableMut) -> KResult {
         Ok(())
+    }
+
+    fn release_for_exit(&self, _: memaddr::VirtAddrRange) -> KResult {
+        self.release_error.map_or(Ok(()), Err)
     }
 
     fn on_protect(
@@ -1220,6 +1228,7 @@ fn map_msync_file(
     let runtime = Arc::new(MsyncTestRuntime {
         backing,
         sync: KBox::new_nowait(sync).unwrap(),
+        release_error: None,
     });
     let runtime = if shared {
         VmRuntimeRef::new_file_shared(runtime)
@@ -1523,6 +1532,19 @@ fn private_commitments_follow_protection_splits_fork_and_partial_unmap() {
     drop(child);
     space.clear();
     assert_eq!(crate::committed_pages(), baseline);
+
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    space.map(start, 3 * PAGE_SIZE_4K, writable, false, runtime).unwrap();
+    space.protect(start + PAGE_SIZE_4K, PAGE_SIZE_4K, writable - MappingFlags::WRITE).unwrap();
+    let mm = Arc::new(Mutex::new(space));
+    let user = MmSpace::acquire_user(mm.clone()).unwrap();
+    let sibling = user.clone_user_unless_zero().unwrap();
+    assert_eq!(crate::committed_pages(), baseline + 3);
+    assert!(!user.release_and_clear_if_last());
+    assert_eq!(crate::committed_pages(), baseline + 3);
+    assert!(sibling.release_and_clear_if_last());
+    assert_eq!(crate::committed_pages(), baseline);
+    assert_eq!(mm.lock().vmas().count(), 0);
 }
 
 #[def_test(serial)]
@@ -1609,4 +1631,125 @@ fn final_mm_user_release_clears_sparse_anonymous_pages_shared_with_a_child() {
         mm.clear();
     }
     assert_eq!(kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem), initial);
+}
+
+#[def_test]
+fn last_user_exit_preserves_fork_child_after_sparse_and_split_private_mappings() {
+    let start = VirtAddr::from_usize(0x40_0000);
+    let len = 1usize << 30;
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let mut mm = MmSpace::new_empty_user(start, len + PAGE_SIZE_4K).unwrap();
+    let runtime = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+    let vma =
+        VmArea::new(start, len, flags, flags, runtime.backing_info(), 0, None).with_noreserve(true);
+    mm.map_runtime_vma(vma, false, runtime).unwrap();
+    let offsets = [0, PAGE_SIZE_4K * 17, len - PAGE_SIZE_4K];
+    for (index, offset) in offsets.into_iter().enumerate() {
+        assert!(
+            mm.handle_page_fault(start + offset, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        mm.write(start + offset, &[index as u8 + 1]).unwrap();
+    }
+    mm.protect(
+        start + PAGE_SIZE_4K,
+        PAGE_SIZE_4K * 3,
+        MappingFlags::USER | MappingFlags::READ,
+    )
+    .unwrap();
+    let child = mm.try_clone().unwrap();
+    let parent = Arc::new(Mutex::new(mm));
+    let user = MmSpace::acquire_user(parent.clone()).unwrap();
+    let shared_user = user.clone_user_unless_zero().unwrap();
+    let pin = user.pin();
+    assert!(!user.release_and_clear_if_last());
+    assert!(parent.lock().page_table().query(start).is_ok());
+    assert!(shared_user.release_and_clear_if_last());
+    assert!(pin.try_upgrade_user().is_none());
+    assert_eq!(parent.lock().vmas().count(), 0);
+    for (index, offset) in offsets.into_iter().enumerate() {
+        assert!(parent.lock().page_table().query(start + offset).is_err());
+        let mut byte = [0];
+        child.lock().read(start + offset, &mut byte).unwrap();
+        assert_eq!(byte, [index as u8 + 1]);
+        assert!(
+            child
+                .lock()
+                .handle_page_fault(start + offset, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        child
+            .lock()
+            .write(start + offset, &[0x80 + index as u8])
+            .unwrap();
+    }
+    let child_user = MmSpace::acquire_user(child.clone()).unwrap();
+    drop(child_user);
+    assert_eq!(child.lock().vmas().count(), 0);
+}
+
+#[def_test]
+fn last_user_exit_removes_shared_ptes_without_destroying_another_mappings_data() {
+    let start = VirtAddr::from_usize(0x4000);
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let mut mm = MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4).unwrap();
+    map_shared(&mut mm, start.as_usize(), PAGE_SIZE_4K * 2, flags);
+    mm.write(start, b"shared").unwrap();
+    let child = mm.try_clone().unwrap();
+    let parent = Arc::new(Mutex::new(mm));
+    drop(MmSpace::acquire_user(parent.clone()).unwrap());
+    assert!(parent.lock().page_table().query(start).is_err());
+    assert!(child.lock().handle_page_fault(start, PageFaultFlags::READ).is_resolved());
+    let mut data = [0; 6];
+    child.lock().read(start, &mut data).unwrap();
+    assert_eq!(&data, b"shared");
+    child.lock().write(start, b"retained").unwrap();
+    drop(MmSpace::acquire_user(child.clone()).unwrap());
+    assert_eq!(child.lock().vmas().count(), 0);
+}
+
+#[def_test]
+fn failed_final_teardown_retains_mm_ownership_and_cannot_resurrect_a_user() {
+    let start = VirtAddr::from_usize(0xc00_000);
+    let mm = Arc::new(Mutex::new(
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K).unwrap(),
+    ));
+    let backing = crate::VmBackingInfo::new(
+        VmBackingKind::FileShared {
+            object: VmObjectId::File(FileObjectId::from_raw(0xc00_000)),
+        },
+        PageSize::Size4K,
+    );
+    let runtime = Arc::new(MsyncTestRuntime {
+        backing,
+        sync: KBox::new_nowait(|_| Ok(())).unwrap(),
+        release_error: Some(KError::BadAddress),
+    });
+    let vma = VmArea::new(
+        start,
+        PAGE_SIZE_4K,
+        MappingFlags::READ,
+        MappingFlags::READ,
+        backing,
+        0,
+        None,
+    );
+    mm.lock()
+        .map_runtime_vma(vma, false, VmRuntimeRef::new_file_shared(runtime))
+        .unwrap();
+    let owners_before = Arc::strong_count(&mm);
+    let user = MmSpace::acquire_user(mm.clone()).unwrap();
+    drop(user);
+    assert!(MmSpace::acquire_user(mm.clone()).is_none());
+    assert_eq!(Arc::strong_count(&mm), owners_before + 1);
+    assert_eq!(mm.lock().vmas().count(), 1);
+
+    // This fixture never publishes a PTE, so ordinary cleanup can safely remove
+    // its intentionally failing runtime before reclaiming the retained owner.
+    mm.lock().clear();
+    // SAFETY: final-user teardown retained exactly one Arc::into_raw count,
+    // as checked above. No PTE or hardware reference exists in this fixture,
+    // and clearing the remaining VMA permits consuming that count once.
+    drop(unsafe { Arc::from_raw(Arc::as_ptr(&mm)) });
+    assert_eq!(Arc::strong_count(&mm), owners_before);
 }

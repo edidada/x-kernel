@@ -614,3 +614,13 @@ publication and set_flags. The VMA still enforces requested software access
 policy. Direct PTE-bit regression checks cover base/huge leaves, USER-only and
 read-only to writable protection updates, and managed-bit preservation. These
 encoding fixtures do not claim to execute accesses through an active user table.
+
+## Mixed-size sparse unmapping
+
+`unmap_sparse_region_any_size` validates address geometry before traversal and
+rejects a partially covered huge leaf before changing that leaf. A cleared
+prefix is not rolled back. Borrowed subtrees remain immutable. Removed managed
+leaves enter the existing bounded retirement gather with a full invalidation
+summary; failed completion retains their holds. Raw leaves transfer no owner,
+so the caller must retain raw backing until `try_finish` succeeds. This API is
+not permission to drop an active root or its intermediate tables.

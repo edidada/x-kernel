@@ -56,6 +56,19 @@ pub trait VmRuntimeOps: Send + Sync {
         Ok(())
     }
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult;
+    /// Releases this range's backing and registrations during final MM teardown.
+    ///
+    /// Called in sleepable task context with MM serialization held, after the
+    /// whole MM's PTEs have been removed and TLB invalidation has succeeded.
+    /// No active MM users remain. Split VMAs may share a runtime, so release
+    /// only this range; fork children and other mappings retain their owners.
+    /// Implementations must perform the non-PTE cleanup of `unmap`, including
+    /// completion callbacks, without re-entering MM or issuing invalidations.
+    ///
+    /// # Errors
+    /// Returns an error if the range cannot be resolved in this runtime. The
+    /// caller retains the MM and its remaining owners if cleanup fails.
+    fn release_for_exit(&self, range: VirtAddrRange) -> KResult;
     fn on_protect(
         &self,
         range: VirtAddrRange,
@@ -339,6 +352,15 @@ impl VmRuntimeRef {
             Self::AnonPrivate(inner) => VmRuntimeOps::unmap(inner, range, pgtbl),
             Self::FileShared(inner) => inner.unmap(range, pgtbl),
             Self::FilePrivate(inner) => inner.unmap(range, pgtbl),
+        }
+    }
+
+    pub(crate) fn release_for_exit(&self, range: VirtAddrRange) -> KResult {
+        match self {
+            Self::Linear(inner) => VmRuntimeOps::release_for_exit(inner, range),
+            Self::AnonShared(inner) => VmRuntimeOps::release_for_exit(inner, range),
+            Self::AnonPrivate(inner) => VmRuntimeOps::release_for_exit(inner, range),
+            Self::FileShared(inner) | Self::FilePrivate(inner) => inner.release_for_exit(range),
         }
     }
 

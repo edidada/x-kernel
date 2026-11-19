@@ -142,6 +142,11 @@ impl VmRuntimeOps for LinearBackend {
         BackendOps::unmap(self, range, pgtbl)
     }
 
+    fn release_for_exit(&self, _range: VirtAddrRange) -> KResult {
+        // Linear mappings borrow their frames.
+        Ok(())
+    }
+
     fn on_protect(
         &self,
         range: VirtAddrRange,

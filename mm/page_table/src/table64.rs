@@ -1284,8 +1284,38 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         size: usize,
         page_size: PageSize,
     ) -> PtResult {
+        self.unmap_sparse_region_inner(vaddr, size, Some(page_size))
+    }
+
+    /// Unmaps a sparse region containing any supported leaf page size.
+    ///
+    /// Intended for whole-address-space teardown: missing subtrees are skipped
+    /// and invalidations are coalesced into a full address-space flush. Managed
+    /// mapping holds retain the existing bounded retirement batches. No page
+    /// table is allocated or freed, and borrowed subtrees cannot be changed.
+    ///
+    /// The range must be 4 KiB aligned and contain every huge leaf it overlaps
+    /// in full. Partial huge leaves are never split. Raw backing must remain
+    /// owned until [`try_finish`](Self::try_finish) succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the alignment and address errors of [`unmap_sparse_region`](Self::unmap_sparse_region),
+    /// or [`PtError::MappedToHugePage`] for a partially covered huge leaf. An
+    /// error may leave a cleared prefix; its backing must remain owned.
+    pub fn unmap_sparse_region_any_size(&mut self, vaddr: M::VirtAddr, size: usize) -> PtResult {
+        self.unmap_sparse_region_inner(vaddr, size, None)
+    }
+
+    fn unmap_sparse_region_inner(
+        &mut self,
+        vaddr: M::VirtAddr,
+        size: usize,
+        page_size: Option<PageSize>,
+    ) -> PtResult {
         let start: usize = vaddr.into();
-        if !page_size.is_aligned(start) || !page_size.is_aligned(size) {
+        let alignment = page_size.unwrap_or(PageSize::Size4K);
+        if !alignment.is_aligned(start) || !alignment.is_aligned(size) {
             return Err(PtError::NotAligned);
         }
         if !M::vaddr_is_valid(start) {
@@ -1309,7 +1339,7 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         shift: usize,
         mut start: usize,
         end: usize,
-        page_size: PageSize,
+        page_size: Option<PageSize>,
     ) -> PtResult {
         let span = 1usize << shift;
         while start < end {
@@ -1329,13 +1359,26 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
                         start = next;
                         continue;
                     }
-                    if span != page_size as usize {
+                    let leaf_size = match shift {
+                        12 => PageSize::Size4K,
+                        21 => PageSize::Size2M,
+                        30 => PageSize::Size1G,
+                        _ => return Err(PtError::MappedToHugePage),
+                    };
+                    if page_size.is_some_and(|expected| expected != leaf_size)
+                        || start & (span - 1) != 0
+                        || next - start != span
+                    {
                         return Err(PtError::MappedToHugePage);
                     }
                     let old_entry = *entry;
                     entry.clear();
-                    self.flush_leaf(start.into(), page_size);
-                    self.retire_mapping_reference(old_entry, page_size);
+                    if page_size.is_none() {
+                        self.flush = ToFlush::Full;
+                    } else {
+                        self.flush_leaf(start.into(), leaf_size);
+                    }
+                    self.retire_mapping_reference(old_entry, leaf_size);
                 } else if entry.is_table() {
                     match self.next_table_mut(entry) {
                         Ok(child) => {

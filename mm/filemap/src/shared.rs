@@ -386,6 +386,12 @@ impl VmRuntimeOps for FileSharedRuntime {
         self.unmap_impl(range, pgtbl)
     }
 
+    fn release_for_exit(&self, range: VirtAddrRange) -> KResult {
+        self.0.unregister_shared_range(range);
+        self.0.unregister_writable_shared_range(range);
+        Ok(())
+    }
+
     fn on_mapping_retired(&self, range: VirtAddrRange) {
         self.0.unregister_shared_range(range);
         self.0.unregister_writable_shared_range(range);

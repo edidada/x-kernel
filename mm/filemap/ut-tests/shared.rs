@@ -608,3 +608,72 @@ fn shared_write_only_mapping_resolves_first_write_without_read_permission() {
 fn shared_write_only_protection_resolves_a_previously_absent_page() {
     write_only_shared_first_fault(true);
 }
+
+#[def_test]
+fn final_user_exit_releases_split_shared_seal_registrations_and_keeps_dirty_data() {
+    use khal::trap::PageFaultFlags;
+    use linux_raw_sys::general::F_SEAL_WRITE;
+    use memfs::shmem;
+    use memspace::VmArea;
+
+    let location = shmem::create_memfd_file("shared-exit-seals", true, kcred::initial_cred())
+        .unwrap()
+        .into_path();
+    let file = crate::test_support::open_test_file(location, 2);
+    let len = PAGE_SIZE_4K * 3;
+    file.write_from(&vec![0x51; len], &mut 0).unwrap();
+    let mm = Arc::new(Mutex::new(MmSpace::new_user_empty().unwrap()));
+    let start = VirtAddr::from_usize(0xb00_000);
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let mm_id = mm.lock().mm_id();
+    let invalidate = mm.lock().invalidate_handle(&mm);
+    let runtime = super::new_shared_runtime(super::FileSharedRuntimeSpec {
+        start,
+        len,
+        file: file.clone(),
+        offset: 0,
+        mm_id,
+        invalidate,
+    });
+    let vma = VmArea::new(
+        start,
+        len,
+        flags,
+        flags,
+        runtime.backing_info(),
+        0,
+        Some(memspace::FileMappingInfo {
+            offset: 0,
+            inode: file.inode().inode(),
+            path: None,
+        }),
+    );
+    {
+        let mut guard = mm.lock();
+        guard.map_runtime_vma(vma, false, runtime.clone()).unwrap();
+        assert!(
+            guard
+                .handle_page_fault(start, PageFaultFlags::WRITE)
+                .is_resolved()
+        );
+        guard.write(start, b"dirty").unwrap();
+        guard
+            .protect(
+                start + PAGE_SIZE_4K,
+                PAGE_SIZE_4K,
+                MappingFlags::USER | MappingFlags::READ,
+            )
+            .unwrap();
+    }
+    assert!(shmem::add_seals_for_location(file.path(), F_SEAL_WRITE).is_err());
+    drop(MmSpace::acquire_user(mm.clone()).unwrap());
+    assert_eq!(
+        shmem::add_seals_for_location(file.path(), F_SEAL_WRITE),
+        Ok(())
+    );
+    assert!(mm.lock().page_table().query(start).is_err());
+    let mut data = [0; 5];
+    file.read_from(&mut data, &mut 0).unwrap();
+    assert_eq!(&data, b"dirty");
+    drop(runtime);
+}

@@ -293,6 +293,11 @@ impl VmRuntimeOps for SharedBackend {
         BackendOps::unmap(self, range, pgtbl)
     }
 
+    fn release_for_exit(&self, _range: VirtAddrRange) -> KResult {
+        // The shared object retains frames after this mapping retires.
+        Ok(())
+    }
+
     fn on_protect(
         &self,
         range: VirtAddrRange,

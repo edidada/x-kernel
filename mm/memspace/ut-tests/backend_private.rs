@@ -638,3 +638,52 @@ fn unconfirmed_range_retirement_removes_slots_without_error_or_premature_cow_reu
         assert_eq!(kalloc::global_allocator().usages().get(UsageKind::VirtMem), baseline);
     }
 }
+
+#[def_test]
+fn final_user_exit_releases_private_slots_while_runtime_is_still_retained() {
+    use alloc::sync::Arc;
+
+    use ksync::Mutex;
+
+    use crate::{MmSpace, VmRuntimeRef};
+
+    let start = VirtAddr::from_usize(0x900_000);
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let backend = PrivateBackend::new(start, PageSize::Size4K);
+    let mm = Arc::new(Mutex::new(
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 4).unwrap(),
+    ));
+    {
+        let mut guard = mm.lock();
+        guard
+            .map(
+                start,
+                PAGE_SIZE_4K * 3,
+                flags,
+                false,
+                VmRuntimeRef::AnonPrivate(backend.clone()),
+            )
+            .unwrap();
+        for offset in [0, PAGE_SIZE_4K * 2] {
+            assert!(
+                guard
+                    .handle_page_fault(start + offset, PageFaultFlags::WRITE)
+                    .is_resolved()
+            );
+            assert!(backend.object.page_at(offset as u64).is_some());
+        }
+        guard
+            .protect(
+                start + PAGE_SIZE_4K,
+                PAGE_SIZE_4K,
+                MappingFlags::USER | MappingFlags::READ,
+            )
+            .unwrap();
+    }
+    drop(MmSpace::acquire_user(mm.clone()).unwrap());
+    for offset in [0, PAGE_SIZE_4K, PAGE_SIZE_4K * 2] {
+        assert!(backend.object.page_at(offset as u64).is_none());
+        assert!(mm.lock().page_table().query(start + offset).is_err());
+    }
+    assert_eq!(mm.lock().vmas().count(), 0);
+}

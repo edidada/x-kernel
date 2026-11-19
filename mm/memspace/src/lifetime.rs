@@ -69,9 +69,11 @@ impl MmUserLifetime {
 /// actively use the user mappings hold an `MmUserHandle`. Ordinary
 /// `Arc<Mutex<MmSpace>>` observers do not keep mappings alive.
 ///
-/// Dropping the last handle synchronously clears the address space's user
-/// mappings. Callers must only release this capability from sleepable task
-/// context, without holding spinlocks or running with IRQs/preemption disabled.
+/// Dropping the last handle synchronously tears down the user mappings. If
+/// teardown cannot complete, the MM is retained and the failure is logged so
+/// stale translations cannot reach recycled backing. Callers must only release
+/// this capability from sleepable task context, without holding spinlocks or
+/// running with IRQs/preemption disabled.
 /// Releasing or dropping the last user must also not happen while the current
 /// task already holds this handle's `MmSpace` mutex, because final release
 /// synchronously locks the same mutex to tear mappings down.
@@ -183,6 +185,9 @@ impl MmUserHandle {
 
     /// Releases this user and clears mappings if it was the last active user.
     ///
+    /// Returns whether this was the final active user. A teardown failure is
+    /// logged and retains the MM; it does not reopen the user-acquisition gate.
+    ///
     /// This may take the `MmSpace` mutex and run VMA/backend teardown. It must
     /// not be called while holding a spinlock or from IRQ/preempt-disabled
     /// context, or while the current task already holds this handle's
@@ -195,11 +200,21 @@ impl MmUserHandle {
             return false;
         }
 
+        self.clear_after_last_user();
+        true
+    }
+
+    fn clear_after_last_user(&self) {
         self.address_space.assert_not_owned_by_current(
             "MmUserHandle final release would relock the current task's MmSpace mutex",
         );
-        self.address_space.lock().clear();
-        true
+        if let Err(err) = self.address_space.lock().clear_for_exit() {
+            // The final user gate is closed, but an unconfirmed shootdown can
+            // still leave hardware references. Pin the whole MM, including its
+            // ASID provider and raw backing, instead of recycling those frames.
+            let _retained_mm = Arc::into_raw(self.address_space.clone());
+            error!("Retaining exiting address space after incomplete teardown: {err}");
+        }
     }
 }
 
@@ -209,10 +224,7 @@ impl Drop for MmUserHandle {
             return;
         };
         if lifetime.release_user() {
-            self.address_space.assert_not_owned_by_current(
-                "MmUserHandle drop would relock the current task's MmSpace mutex",
-            );
-            self.address_space.lock().clear();
+            self.clear_after_last_user();
         }
     }
 }

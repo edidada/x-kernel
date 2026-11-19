@@ -321,3 +321,15 @@ tokens outside the token-map mutex. It needs neither a whole-range offset array
 nor a TLB completion call: the PTE retirement layer owns physical protection.
 Fork rollback still records newly installed child PTEs because restoring mapping
 state and parent permissions remains necessary under independent references.
+
+## Final-user address-space release
+
+Final MM teardown removes file PTEs in the common sparse page-table walk and
+confirms TLB invalidation before invoking `VmRuntimeOps::release_for_exit`.
+`FilePrivateRuntime` releases the range's anonymous COW slots through
+`release_private_object_range_after_unmap` and removes its file content tokens.
+`FileSharedRuntime` unregisters the range's shared and writable-shared accounting,
+including shmem seal admission state. Neither hook repeats PTE walks or TLB
+flushes. Split VMA ranges are handled independently; fork children retain their
+objects and registrations. Shared dirty content remains owned by the inode/page
+cache and follows existing writeback semantics rather than being discarded.
