@@ -68,8 +68,9 @@ each with `# Safety` sections and `SAFETY:` comments:
   memory. Caller obligations: deallocate exactly once with the same
   layout, never forge or offset the CPU address, expose the bus address
   only to devices permitted to DMA it.
-- `deallocate_dma_memory(dma, layout)` — matching release; the layout
-  must match the allocation.
+- `deallocate_dma_memory(dma, layout)` — releases the live `DmaInfo` from
+  a successful `allocate_dma_memory` call with its exact layout. Device access
+  must have stopped, and the allocation must be released exactly once.
 - `map_dma_buffer(buffer, direction)` — stages the buffer through the
   bounce pool for every direction, preserving RX initialization state in the
   bounce copy. Caller obligations: buffer stays live and exclusively

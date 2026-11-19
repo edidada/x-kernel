@@ -132,15 +132,15 @@ fn update_mapping_mode(vaddr: VirtAddr, num_pages: usize, mode: DmaMappingMode) 
     })
 }
 
-fn prepare_platform_dma(paddr: PhysAddr, size: usize) -> AllocResult<()> {
-    kplat::dma::prepare(paddr.as_usize(), size).map_err(|_| {
+fn prepare_platform_dma(paddr: PhysAddr, size_bytes: usize) -> AllocResult<()> {
+    kplat::dma::prepare(paddr.as_usize(), size_bytes).map_err(|_| {
         error!("platform dma prepare failed");
         AllocError::NoMemory
     })
 }
 
-fn release_platform_dma(paddr: PhysAddr, size: usize) -> AllocResult<()> {
-    kplat::dma::release(paddr.as_usize(), size).map_err(|_| {
+fn release_platform_dma(paddr: PhysAddr, size_bytes: usize) -> AllocResult<()> {
+    kplat::dma::release(paddr.as_usize(), size_bytes).map_err(|_| {
         error!("platform dma release failed");
         AllocError::NoMemory
     })
