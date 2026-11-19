@@ -162,8 +162,8 @@ count can change immediately after observation and grants no admission guarantee
   to `ktracing`; SysRq accepts the first non-whitespace byte only when it is
   `t`. `sys/kernel/hostname` and `sys/kernel/domainname` are also writable:
   both are `0644` and their write path requires `kprocess::current_cred()
-  .has_sys_admin()` (the `CAP_SYS_ADMIN` check `sethostname(2)` makes) and
-  fails with `OperationNotPermitted` otherwise. An accepted write replaces the
+  .has_root_euid()` (Linux `test_perm()`'s GLOBAL_ROOT_UID check, not a
+  capability) and fails with `OperationNotPermitted` otherwise. An accepted write replaces the
   caller's UTS namespace value following Linux `proc_dostring` strict
   semantics — it starts at the file position, stops at the first NUL or
   newline, truncates the stored value there, and silently accepts a write that

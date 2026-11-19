@@ -268,8 +268,8 @@ Writes follow Linux `proc_dostring` under the default strict mode: they start
 at the file position, stop at the first NUL or newline, truncate the stored
 value there, and accept a write that begins past the current value as a
 successful no-op. Both directions require a caller with a UTS namespace, so a
-kernel task gets `ENOENT`, and writing requires `CAP_SYS_ADMIN` like
-sethostname(2).
+kernel task gets `ENOENT`; writing requires global root euid
+(`has_root_euid()`, Linux `test_perm()`), not a namespace capability.
 
 `/proc/sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches}`
 are `0644` nodes with a per-inode permission hook that authorizes an open for
