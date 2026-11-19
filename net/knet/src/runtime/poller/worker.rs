@@ -95,6 +95,16 @@ impl NetworkPoller {
         self.run(ASSIST_BUDGET, 1);
     }
 
+    /// Records task-context demand and assists before submitting background work.
+    ///
+    /// An existing executor schedules follow-up work when it finishes. Otherwise,
+    /// this round submits unfinished work and concurrent notifications to the queue.
+    pub(crate) fn notify_and_assist(&'static self, _: PollReason) {
+        if self.try_claim(true) {
+            self.run_claimed(ASSIST_BUDGET, 1);
+        }
+    }
+
     fn kick(&'static self) {
         let queue = {
             let state = self.state.lock();
@@ -111,12 +121,19 @@ impl NetworkPoller {
     }
 
     fn run(&'static self, budget: PollBudget, rounds: usize) {
-        {
-            let mut state = self.state.lock();
-            if state.queue.is_none() || !state.claim() {
-                return;
-            }
+        if self.try_claim(false) {
+            self.run_claimed(budget, rounds);
         }
+    }
+
+    fn try_claim(&self, has_new_demand: bool) -> bool {
+        let mut state = self.state.lock();
+        state.has_pending |= has_new_demand;
+        state.queue.is_some() && state.claim()
+    }
+
+    /// Runs only after this executor has claimed the poller under the state lock.
+    fn run_claimed(&'static self, budget: PollBudget, rounds: usize) {
         let mut has_more = false;
         for _ in 0..rounds {
             has_more = super::poll_network_once(budget).has_more;
