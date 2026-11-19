@@ -62,13 +62,13 @@ fn unprivileged_child_can_write_its_own_single_extent_maps() {
 
     assert!(!namespace.is_ready());
     assert_eq!(
-        LinuxError::from(namespace.write_uid_map(&writer, alloc::vec![]).unwrap_err()),
+        LinuxError::from(namespace.write_uid_map(&writer, &writer, alloc::vec![]).unwrap_err()),
         LinuxError::EINVAL
     );
     assert!(!namespace.has_uid_map());
 
     namespace
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     assert!(namespace.has_uid_map());
     assert!(!namespace.is_ready());
@@ -78,14 +78,14 @@ fn unprivileged_child_can_write_its_own_single_extent_maps() {
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+                .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
                 .unwrap_err()
         ),
         LinuxError::EPERM
     );
     namespace.set_setgroups_allowed(false).unwrap();
     namespace
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     assert!(namespace.is_ready());
     assert_eq!(namespace.map_gid_to_initial(0), Some(1000));
@@ -99,12 +99,12 @@ fn id_map_is_write_once_per_kind() {
     let extent = IdMapExtent::new(0, 1000, 1).unwrap();
 
     namespace
-        .write_uid_map(&writer, alloc::vec![extent])
+        .write_uid_map(&writer, &writer, alloc::vec![extent])
         .unwrap();
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_uid_map(&writer, alloc::vec![extent])
+                .write_uid_map(&writer, &writer, alloc::vec![extent])
                 .unwrap_err()
         ),
         LinuxError::EPERM
@@ -112,7 +112,7 @@ fn id_map_is_write_once_per_kind() {
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_gid_map(&writer, alloc::vec![extent])
+                .write_gid_map(&writer, &writer, alloc::vec![extent])
                 .unwrap_err()
         ),
         LinuxError::EPERM
@@ -120,12 +120,12 @@ fn id_map_is_write_once_per_kind() {
 
     namespace.set_setgroups_allowed(false).unwrap();
     namespace
-        .write_gid_map(&writer, alloc::vec![extent])
+        .write_gid_map(&writer, &writer, alloc::vec![extent])
         .unwrap();
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_gid_map(&writer, alloc::vec![extent])
+                .write_gid_map(&writer, &writer, alloc::vec![extent])
                 .unwrap_err()
         ),
         LinuxError::EPERM
@@ -141,8 +141,7 @@ fn id_map_validation_rejects_overlapping_extents() {
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_uid_map(
-                    &writer,
+                .write_uid_map(&writer, &writer,
                     alloc::vec![
                         IdMapExtent::new(0, 1000, 2).unwrap(),
                         IdMapExtent::new(1, 1002, 1).unwrap(),
@@ -172,7 +171,7 @@ fn setgroups_state_machine_matches_linux() {
     let mapped = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = Cred::root();
     mapped
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
         .unwrap();
     assert_eq!(
         LinuxError::from(mapped.set_setgroups_allowed(false).unwrap_err()),
@@ -204,7 +203,7 @@ fn mapping_host_root_requires_setfcap() {
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_uid_map(&owner, alloc::vec![root_extent])
+                .write_uid_map(&owner, &owner, alloc::vec![root_extent])
                 .unwrap_err()
         ),
         LinuxError::EPERM
@@ -212,7 +211,7 @@ fn mapping_host_root_requires_setfcap() {
     assert!(!namespace.has_uid_map());
 
     namespace
-        .write_uid_map(&Cred::root(), alloc::vec![root_extent])
+        .write_uid_map(&Cred::root(), &Cred::root(), alloc::vec![root_extent])
         .unwrap();
 }
 
@@ -231,7 +230,7 @@ fn mapping_host_root_requires_setfcap_independently() {
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+                .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
                 .unwrap_err()
         ),
         LinuxError::EPERM
@@ -242,7 +241,7 @@ fn mapping_host_root_requires_setfcap_independently() {
     let privileged = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false)
         .unwrap();
     privileged
-        .write_uid_map(&Cred::root(), alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+        .write_uid_map(&Cred::root(), &Cred::root(), alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
         .unwrap();
 }
 
@@ -255,10 +254,10 @@ fn parent_namespace_with_map() -> Arc<UserNamespace> {
     let parent = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false).unwrap();
     let writer = Cred::root();
     parent
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     parent
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     parent
 }
@@ -276,13 +275,13 @@ fn nested_map_must_be_covered_by_the_parent_map() {
     assert_eq!(
         LinuxError::from(
             namespace
-                .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1, 1).unwrap()])
+                .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1, 1).unwrap()])
                 .unwrap_err()
         ),
         LinuxError::EPERM
     );
     namespace
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
         .unwrap();
     assert_eq!(namespace.map_uid_to_initial(0), Some(1000));
     assert_eq!(namespace.map_uid_from_initial(1000), Some(0));
@@ -293,19 +292,19 @@ fn nested_maps_are_translated_through_every_ancestor() {
     let writer = Cred::root();
     let first = UserNamespace::new_child(&initial_user_namespace(), 5, 5, false).unwrap();
     first
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(5, 100, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(5, 100, 1).unwrap()])
         .unwrap();
     first
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(5, 100, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(5, 100, 1).unwrap()])
         .unwrap();
 
     // The owner is global 100, which `first` maps to local 5.
     let second = UserNamespace::new_child(&first, 100, 100, false).unwrap();
     second
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
         .unwrap();
     second
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
         .unwrap();
 
     let third = UserNamespace::new_child(&second, 100, 100, false).unwrap();
@@ -314,14 +313,14 @@ fn nested_maps_are_translated_through_every_ancestor() {
     assert_eq!(
         LinuxError::from(
             third
-                .write_uid_map(&writer, alloc::vec![IdMapExtent::new(9, 8, 1).unwrap()])
+                .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(9, 8, 1).unwrap()])
                 .unwrap_err()
         ),
         LinuxError::EPERM
     );
 
     third
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(9, 7, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(9, 7, 1).unwrap()])
         .unwrap();
     assert!(third.maps_range_to_parent(MapKind::Uid, 9, 1));
     assert!(!third.maps_range_to_parent(MapKind::Uid, 8, 1));
@@ -351,17 +350,16 @@ fn nested_owner_can_write_its_own_single_extent_map() {
     let writer = Cred::root();
     let parent = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false).unwrap();
     parent
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
         .unwrap();
     parent
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
         .unwrap();
 
     let child = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let child_owner = Cred::new(1000, 1000).with_user_namespace(child.clone());
     child
-        .write_uid_map(
-            &child_owner,
+        .write_uid_map(&child_owner, &child_owner,
             alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()],
         )
         .unwrap();
@@ -374,10 +372,10 @@ fn capabilities_never_flow_toward_ancestors() {
     let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
     let writer = Cred::root();
     child
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     child
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     let grandchild = UserNamespace::new_child(&child, 1000, 1000, false).unwrap();
 
@@ -400,10 +398,10 @@ fn grandchild_owner_grant_requires_the_direct_parent() {
     let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
     let writer = Cred::root();
     child
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     child
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     // Global UID 1000 (local 0 in the child) creates the grandchild.
     let grandchild = UserNamespace::new_child(&child, 1000, 1000, false).unwrap();
@@ -429,10 +427,10 @@ fn namespace_nesting_is_capped_at_linux_depth() {
     for _ in 0..33 {
         let child = UserNamespace::new_child(&namespace, 0, 0, false).unwrap();
         child
-            .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+            .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
             .unwrap();
         child
-            .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
+            .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()])
             .unwrap();
         namespace = child;
     }

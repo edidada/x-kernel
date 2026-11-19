@@ -1682,10 +1682,11 @@ impl Path {
     /// set-ID bits untouched does not pass through the mode path.
     fn chown_mode(
         mode: Umode,
+        old_uid: u32,
         old_gid: u32,
         new_gid: Option<crate::kid::Kgid>,
         cred: &Cred,
-        caller_ns: &Arc<kcred::UserNamespace>,
+        _caller_ns: &Arc<kcred::UserNamespace>,
     ) -> NodePermission {
         let permission = mode.permission();
         if mode.node_type() == NodeType::Directory {
@@ -1696,14 +1697,20 @@ impl Path {
         result.remove(NodePermission::SET_UID);
         if permission.contains(NodePermission::SET_GID) {
             let old_group_ok =
-                cred.has_cap_in(caller_ns, kcred::CAP_FSETID) || cred.in_group(old_gid);
+                crate::permission::capable_wrt_inode_ids(cred, old_uid, old_gid, kcred::CAP_FSETID)
+                    || cred.in_group(old_gid);
             if permission.contains(NodePermission::GROUP_EXEC) || !old_group_ok {
                 result.remove(NodePermission::SET_GID);
             }
         }
         if result.bits() != permission.bits()
             && new_gid.is_some_and(|gid| {
-                !cred.has_cap_in(caller_ns, kcred::CAP_FSETID) && !cred.in_group(gid.as_raw())
+                !crate::permission::capable_wrt_inode_ids(
+                    cred,
+                    old_uid,
+                    gid.as_raw(),
+                    kcred::CAP_FSETID,
+                ) && !cred.in_group(gid.as_raw())
             })
         {
             result.remove(NodePermission::SET_GID);
@@ -1761,7 +1768,14 @@ impl Path {
         }
 
         let new_gid = gid_kgid.map_or(metadata.gid, crate::kid::Kgid::as_raw);
-        let mode = Self::chown_mode(metadata.mode, metadata.gid, gid_kgid, cred, &caller_ns);
+        let mode = Self::chown_mode(
+            metadata.mode,
+            metadata.uid,
+            metadata.gid,
+            gid_kgid,
+            cred,
+            &caller_ns,
+        );
         // Linux `chown_common()` turns the set-ID cleanup into an `ATTR_MODE`
         // update, and `setattr_prepare()` authorizes that generated mode change
         // through inode ownership or effective `CAP_FOWNER` — not through

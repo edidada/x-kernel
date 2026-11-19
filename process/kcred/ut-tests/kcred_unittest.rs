@@ -98,10 +98,18 @@ fn root_euid_is_global_root_not_namespace_root() {
     let child = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = Cred::root();
     child
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(
+            &writer,
+            &writer,
+            alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()],
+        )
         .unwrap();
     child
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_gid_map(
+            &writer,
+            &writer,
+            alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()],
+        )
         .unwrap();
 
     // Linux `test_perm()` compares `GLOBAL_ROOT_UID`: a task that entered a

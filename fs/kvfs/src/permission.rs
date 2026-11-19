@@ -42,9 +42,15 @@ pub(crate) fn capable_wrt_inode_uidgid(
     metadata: &Metadata,
     cap: u32,
 ) -> bool {
+    capable_wrt_inode_ids(cred, metadata.uid, metadata.gid, cap)
+}
+
+/// The uid/gid form of [`capable_wrt_inode_uidgid`], for callers that already
+/// have the inode IDs without a full `Metadata` value.
+pub(crate) fn capable_wrt_inode_ids(cred: &Cred, uid: u32, gid: u32, cap: u32) -> bool {
     let caller_ns = cred.user_ns();
-    caller_ns.map_uid_from_initial(metadata.uid).is_some()
-        && caller_ns.map_gid_from_initial(metadata.gid).is_some()
+    caller_ns.map_uid_from_initial(uid).is_some()
+        && caller_ns.map_gid_from_initial(gid).is_some()
         && cred.has_cap_in(caller_ns, cap)
 }
 

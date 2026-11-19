@@ -594,3 +594,26 @@ fn test_fork_enters_time_ns_for_children() {
     ));
     assert!(!Arc::ptr_eq(&child.time_ns, &parent.time_ns));
 }
+
+#[def_test]
+fn test_newuser_rejects_a_chrooted_fs_root() {
+    let proxy = make_nsproxy();
+    let base = make_fs(&proxy);
+    let sub = base.root().dentry().lookup("mnt").unwrap();
+    let chroot_fs = FsStruct::new(kvfs::Path::new(
+        base.root().mount().clone(),
+        sub,
+    ));
+    let context = UnshareContext {
+        cred: test_cred(),
+        fs_shared_with_others: false,
+        unshare_fs: false,
+        unshare_files: false,
+        current_cgroup: Some(test_cgroup()),
+    };
+
+    assert!(matches!(
+        proxy.prepare_unshare(NamespaceFlags::NEWUSER, context, &chroot_fs),
+        Err(UnshareError::NotPermitted)
+    ));
+}

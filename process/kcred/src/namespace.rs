@@ -375,17 +375,23 @@ impl UserNamespace {
     /// Installs the UID map on behalf of a map-file writer.
     ///
     /// `writer` is the credential captured when the map file was opened
-    /// (`file->f_cred`), not the task currently issuing `write(2)`. Linux uses
-    /// that credential for both `ns_capable()` and `file_ns_capable()`, so a
-    /// descriptor passed to a less-privileged task keeps the opener's
-    /// authority.
+    /// (`file->f_cred`); `current` is the credential of the task issuing
+    /// `write(2)`. Linux `new_idmap_permitted()` checks the parent-namespace
+    /// capability on both the opener (`file_ns_capable`) and the current task
+    /// (`ns_capable`), so dropping privilege after open cannot authorize a map
+    /// write.
     ///
     /// The map may be written successfully once. Shape, overlap, capability,
     /// ownership, parent coverage, and single-write rules are enforced here;
     /// the caller only has to verify that the target namespace is the opener's
     /// namespace or its immediate parent before passing `file->f_cred`.
-    pub fn write_uid_map(&self, writer: &Cred, extents: Vec<IdMapExtent>) -> KResult<()> {
-        self.write_map(MapKind::Uid, writer, extents)
+    pub fn write_uid_map(
+        &self,
+        writer: &Cred,
+        current: &Cred,
+        extents: Vec<IdMapExtent>,
+    ) -> KResult<()> {
+        self.write_map(MapKind::Uid, writer, current, extents)
     }
 
     /// Installs the GID map on behalf of a map-file writer.
@@ -394,14 +400,20 @@ impl UserNamespace {
     /// `CAP_SETGID` in place of `CAP_SETUID`. A GID map is writable regardless
     /// of the namespace's `setgroups` policy; an unprivileged writer using the
     /// single-extent self-map shortcut must have disabled `setgroups` first.
-    pub fn write_gid_map(&self, writer: &Cred, extents: Vec<IdMapExtent>) -> KResult<()> {
-        self.write_map(MapKind::Gid, writer, extents)
+    pub fn write_gid_map(
+        &self,
+        writer: &Cred,
+        current: &Cred,
+        extents: Vec<IdMapExtent>,
+    ) -> KResult<()> {
+        self.write_map(MapKind::Gid, writer, current, extents)
     }
 
     fn write_map(
         &self,
         kind: MapKind,
         writer: &Cred,
+        current: &Cred,
         mut extents: Vec<IdMapExtent>,
     ) -> KResult<()> {
         let Some(parent) = self.parent.as_ref() else {
@@ -416,7 +428,7 @@ impl UserNamespace {
         // An empty write is rejected as malformed and leaves the map writable,
         // so the writer can retry with real extents.
         validate_id_map(&mut extents)?;
-        if !self.id_map_write_permitted(kind, writer, &extents) {
+        if !self.id_map_write_permitted(kind, writer, current, &extents) {
             return Err(KError::OperationNotPermitted);
         }
         for extent in &extents {
@@ -451,6 +463,7 @@ impl UserNamespace {
         &self,
         kind: MapKind,
         writer: &Cred,
+        current: &Cred,
         extents: &[IdMapExtent],
     ) -> bool {
         let Some(parent) = self.parent.as_ref() else {
@@ -497,7 +510,7 @@ impl UserNamespace {
             MapKind::Uid => CAP_SETUID,
             MapKind::Gid => CAP_SETGID,
         };
-        writer.has_cap_in(parent, capability)
+        current.has_cap_in(parent, capability) && writer.has_cap_in(parent, capability)
     }
 
     /// Linux `verify_root_map()`: mapping parent UID 0 into a namespace can

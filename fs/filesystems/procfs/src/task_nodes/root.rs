@@ -82,18 +82,36 @@ impl SimpleDirOps for ProcessTaskDir {
         let Some(process) = self.process.upgrade() else {
             return Ok(KBox::new(iter::empty())?);
         };
-        Ok(KBox::new(
-            process
-                .threads()
-                .into_iter()
-                .map(|tid| tid.to_string().into()),
-        )?)
+        let names: Vec<Cow<'_, str>> = process
+            .threads()
+            .into_iter()
+            .filter_map(|tid| {
+                let task = procfs::thread_task(tid).ok()?;
+                let visible = self
+                    .observer_ns
+                    .as_ref()
+                    .and_then(|ns| task.as_thread().task_number().nr_in(ns))
+                    .unwrap_or(tid);
+                Some(visible.to_string().into())
+            })
+            .collect();
+        Ok(KBox::new(names.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let process = self.process.upgrade().ok_or(VfsError::NotFound)?;
         let tid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
-        let task = procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?;
+        let task = match self.observer_ns.as_ref() {
+            Some(ns) => process
+                .threads()
+                .into_iter()
+                .find_map(|root_tid| {
+                    let task = procfs::thread_task(root_tid).ok()?;
+                    (task.as_thread().task_number().nr_in(ns) == Some(tid)).then_some(task)
+                })
+                .ok_or(VfsError::NotFound)?,
+            None => procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?,
+        };
         if task.as_thread().process().pid() != process.pid() {
             return Err(VfsError::NotFound);
         }

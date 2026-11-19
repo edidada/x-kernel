@@ -40,11 +40,12 @@ impl IdMapKind {
         self,
         ns: &UserNamespace,
         writer: &kcred::Cred,
+        current: &kcred::Cred,
         extents: Vec<IdMapExtent>,
     ) -> VfsResult<()> {
         match self {
-            Self::Uid => ns.write_uid_map(writer, extents),
-            Self::Gid => ns.write_gid_map(writer, extents),
+            Self::Uid => ns.write_uid_map(writer, current, extents),
+            Self::Gid => ns.write_gid_map(writer, current, extents),
         }
     }
 }
@@ -124,6 +125,7 @@ impl SimpleFileOps for IdMapFile {
         let task = upgrade_task(&self.task)?;
         let target = task.as_thread().real_cred().user_ns_arc().clone();
         let writer = file.cred().clone();
+        let current = kprocess::current_cred();
 
         let Some(parent) = target.parent() else {
             return Err(VfsError::OperationNotPermitted);
@@ -143,7 +145,7 @@ impl SimpleFileOps for IdMapFile {
         }
 
         let extents = parse_id_map(data)?;
-        self.kind.write(&target, &writer, extents)?;
+        self.kind.write(&target, &writer, &current, extents)?;
         Ok(data.len())
     }
 }

@@ -17,12 +17,12 @@ fn child_namespace() -> Arc<UserNamespace> {
     let namespace = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     let writer = kcred::Cred::new(1000, 1000).with_user_namespace(namespace.clone());
     namespace
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     // The unprivileged GID self-map requires `setgroups=deny` first.
     namespace.set_setgroups_allowed(false).unwrap();
     namespace
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     namespace
 }

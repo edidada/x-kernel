@@ -12,7 +12,7 @@ fn id_map_reader_inside_target_sees_parent_coordinates() {
     let initial = initial_user_namespace();
     let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
     child
-        .write_uid_map(&Cred::root(), alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(&Cred::root(), &Cred::root(), alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
 
     // A reader inside the target namespace must see the parent coordinate
@@ -34,7 +34,7 @@ fn id_map_renders_overflow_for_unmapped_reader() {
     let initial = initial_user_namespace();
     let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
     child
-        .write_uid_map(&Cred::root(), alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .write_uid_map(&Cred::root(), &Cred::root(), alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
         .unwrap();
     let sibling = UserNamespace::new_child(&initial, 2000, 2000, false).unwrap();
 
@@ -53,14 +53,14 @@ fn id_map_renders_through_a_non_initial_parent() {
     let writer = Cred::root();
     let parent = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
     parent
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
         .unwrap();
     parent
-        .write_gid_map(&writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
+        .write_gid_map(&writer, &writer, alloc::vec![IdMapExtent::new(5, 1000, 1).unwrap()])
         .unwrap();
     let child = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
     child
-        .write_uid_map(&writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
+        .write_uid_map(&writer, &writer, alloc::vec![IdMapExtent::new(7, 5, 1).unwrap()])
         .unwrap();
 
     // Parent-local 5 maps to global 1000, so an initial-namespace reader sees
