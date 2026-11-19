@@ -211,7 +211,20 @@ impl ProcessExecUpdate {
 impl Process {
     /// Records a weak reference to the runtime owned by this process.
     pub(crate) fn set_runtime_ref(&self, runtime: &Arc<ProcessRuntime>) {
+        if let Some(nsproxy) = runtime.nsproxy() {
+            *self.retained_nsproxy.lock() = Some(nsproxy);
+        }
         *self.runtime_ref.lock() = Some(Arc::downgrade(runtime));
+    }
+
+    /// Returns the namespace owner retained through the zombie window.
+    pub(crate) fn retained_nsproxy(&self) -> Option<Arc<kns::NsProxy>> {
+        self.retained_nsproxy.lock().clone()
+    }
+
+    /// Replaces the retained namespace owner after a namespace switch.
+    pub(crate) fn set_retained_nsproxy(&self, nsproxy: Option<Arc<kns::NsProxy>>) {
+        *self.retained_nsproxy.lock() = nsproxy;
     }
 
     /// Returns the current task's IPC namespace while its owner is attached.
@@ -273,7 +286,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn uts_ns(&self) -> KResult<Arc<kns::UtsNamespace>> {
-        self.runtime()?.uts_ns().ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.uts_ns().clone())
     }
 
     /// Returns the process namespace bundle while the runtime remains attached.
@@ -283,6 +296,9 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn nsproxy(&self) -> KResult<Arc<kns::NsProxy>> {
+        if let Some(nsproxy) = self.retained_nsproxy() {
+            return Ok(nsproxy);
+        }
         self.runtime()?.nsproxy().ok_or(KError::NoSuchProcess)
     }
 
@@ -293,10 +309,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn ipc_ns(&self) -> KResult<Arc<kns::IpcNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.ipc_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.ipc_ns().clone())
     }
 
     /// Returns the process network namespace identity while its owner is attached.
@@ -306,10 +319,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn net_ns(&self) -> KResult<Arc<kns::NetNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.net_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.net_ns().clone())
     }
 
     /// Returns the PID namespace used for future children of this process.
@@ -319,10 +329,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn pid_ns_for_children(&self) -> KResult<Arc<kns::PidNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.pid_ns_for_children().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.pid_ns_for_children().clone())
     }
 
     /// Returns the process mount namespace while its namespace owner is attached.
@@ -332,10 +339,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn mnt_ns(&self) -> KResult<Arc<kns::MntNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.mnt_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.mnt_ns().clone())
     }
 
     /// Returns the process cgroup namespace while runtime remains attached.
@@ -345,10 +349,7 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when the runtime or the required namespace/mm
     /// owner has been detached.
     pub fn cgroup_ns(&self) -> KResult<Arc<kns::CgroupNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.cgroup_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.cgroup_ns().clone())
     }
 
     /// Returns whether this process's `fs_struct` has another process owner.
@@ -968,7 +969,10 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
     /// reachable.
     pub fn exit_namespaces(&self) -> KResult<()> {
-        self.runtime()?.exit_namespaces();
+        self.set_retained_nsproxy(None);
+        if let Some(runtime) = self.runtime_ref() {
+            runtime.exit_namespaces();
+        }
         Ok(())
     }
 

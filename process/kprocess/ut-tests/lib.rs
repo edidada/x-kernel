@@ -2331,6 +2331,11 @@ fn test_zombie_keeps_namespaces_until_reap() {
     let autoreap = process_exit::complete_process_exit(&child);
     assert!(!autoreap, "default SIGCHLD must leave a waitable child");
 
+    // Production drops the exited Task (and its strong ProcessRuntime owner)
+    // in the final context switch; the zombie must still retain its namespace
+    // owner independently of that runtime.
+    drop(task);
+
     // Linux releases nsproxy in release_task(), not do_exit(), so an unreaped
     // zombie still serves /proc/<pid>/ns/* lookups (runc/kata pin namespaces
     // of an already-exited container init through those files).

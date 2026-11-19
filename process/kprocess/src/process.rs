@@ -114,6 +114,13 @@ pub struct Process {
     group_membership: GroupMembership,
     /// Weak runtime handle. A process identity can outlive its live runtime.
     runtime_ref: SpinNoIrq<Option<Weak<ProcessRuntime>>>,
+    /// Strong namespace owner retained through the zombie window.
+    ///
+    /// The live runtime keeps the same `Arc`; copying it here lets an
+    /// unreaped zombie keep serving `/proc/<pid>/ns/*` after the last Thread
+    /// (and thus `ProcessRuntime`) is destroyed. `exit_namespaces` clears it
+    /// at reap.
+    retained_nsproxy: SpinNoIrq<Option<Arc<kns::NsProxy>>>,
     /// Published PID slot, retained so exit/reap can retire visibility without
     /// taking the publication table lock inside `process_domain`.
     pid_publication_slot: SpinNoIrq<Option<Weak<PublishedProcessSlot>>>,
@@ -455,6 +462,7 @@ impl Process {
             visible_parent: AtomicU32::new(visible_parent),
             group_membership,
             runtime_ref: SpinNoIrq::new(None),
+            retained_nsproxy: SpinNoIrq::new(None),
             pid_publication_slot: SpinNoIrq::new(None),
         })
     }

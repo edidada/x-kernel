@@ -447,6 +447,7 @@ impl ProcessRuntime {
     /// thread resolving `nsproxy()` would block behind it. `exit_namespaces`
     /// releases its bundle the same way.
     pub(crate) fn set_nsproxy(&self, nsproxy: Arc<NsProxy>) {
+        self.process.set_retained_nsproxy(Some(nsproxy.clone()));
         let previous = self.nsproxy.write().replace(nsproxy);
         drop(previous);
     }
@@ -467,11 +468,6 @@ impl ProcessRuntime {
             .expect("replacing the filesystem context must accept its new owner");
         let previous = self.fs_context.write().replace(binding);
         drop(previous);
-    }
-
-    /// Returns the UTS namespace while the namespace proxy remains attached.
-    pub(crate) fn uts_ns(&self) -> Option<Arc<kns::UtsNamespace>> {
-        self.nsproxy().map(|nsproxy| nsproxy.uts_ns().clone())
     }
 
     pub(crate) fn exit_fs(&self) {

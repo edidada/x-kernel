@@ -572,7 +572,7 @@ impl Cred {
     /// Same-thread-group callers are exempted by the process-layer access
     /// checks, not here.
     pub fn can_read_ptrace(&self, target: &Self, mode: PtraceAccessMode) -> bool {
-        if self.has_cap(CAP_SYS_PTRACE) {
+        if self.has_cap_in(target.user_ns(), CAP_SYS_PTRACE) {
             return true;
         }
         let (caller_uid, caller_gid) = match mode {
