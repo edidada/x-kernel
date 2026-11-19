@@ -34,7 +34,10 @@ their prior policies, and setns failure injection is not covered here.
 
 The entry allocation precedes both process and thread clone preparation. Its
 KERNEL policy requires sleepable syscall context without reclaim-dependent locks.
-Invalid flags, namespace permissions and exit signals are checked first.
+Invalid flags and exit signals are checked first; namespace capability
+authorization now runs later, inside `prepare_process_fork` via
+`kns::NamespacePlan::build` (after entry allocation), because a new user
+namespace must exist before the other namespaces are authorized.
 Later preparation failure drops the unused closure without running it; entry
 allocation failure cannot leave a child relation or thread registration.
 User-context tests inject NoMemory through a local preparation factory for fork
