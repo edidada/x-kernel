@@ -556,3 +556,41 @@ fn test_with_namespace_replaces_both_time_slots() {
     assert!(Arc::ptr_eq(swapped.time_ns(), &target));
     assert!(Arc::ptr_eq(swapped.time_ns_for_children(), &target));
 }
+
+#[def_test]
+fn test_fork_enters_time_ns_for_children() {
+    let proxy = make_nsproxy();
+    let fs = make_fs(&proxy);
+    let context = UnshareContext {
+        cred: test_cred(),
+        fs_shared_with_others: false,
+        unshare_fs: false,
+        unshare_files: false,
+        current_cgroup: Some(test_cgroup()),
+    };
+    let prepared = proxy
+        .prepare_unshare(NamespaceFlags::NEWTIME, context, &fs)
+        .expect("NEWTIME unshare is supported");
+    let parent = prepared.nsproxy();
+    assert!(!Arc::ptr_eq(
+        &parent.time_ns,
+        &parent.time_ns_for_children
+    ));
+
+    // A plain fork after unshare(CLONE_NEWTIME) must enter the namespace
+    // selected for children, not the parent's old active time namespace.
+    let child = parent
+        .clone_for_child(
+            NamespaceFlags::empty(),
+            NamespaceFsContext::Shared,
+            &test_cred(),
+            Some(&test_cgroup()),
+        )
+        .expect("plain fork should clone the namespace bundle")
+        .0;
+    assert!(Arc::ptr_eq(
+        &child.time_ns,
+        &parent.time_ns_for_children
+    ));
+    assert!(!Arc::ptr_eq(&child.time_ns, &parent.time_ns));
+}

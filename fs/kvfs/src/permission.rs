@@ -32,24 +32,20 @@ bitflags::bitflags! {
 
 /// Linux `capable_wrt_inode_uidgid()`.
 ///
-/// If the inode's global uid/gid are mapped into the caller's user namespace,
-/// the capability is checked there. Otherwise Linux falls back to the inode's
-/// `s_user_ns`, which lets the initial namespace administer inodes whose IDs
-/// are not visible to a child namespace.
+/// The capability is checked in the caller's user namespace and only counts
+/// when the inode's global uid/gid are both mapped into that namespace. There
+/// is deliberately no fallback to the inode's `s_user_ns`: Linux
+/// `privileged_wrt_inode_uidgid()` fails for an unmapped ID.
 pub(crate) fn capable_wrt_inode_uidgid(
     cred: &Cred,
-    inode_ns: &kcred::UserNamespace,
+    _inode_ns: &kcred::UserNamespace,
     metadata: &Metadata,
     cap: u32,
 ) -> bool {
     let caller_ns = cred.user_ns();
-    if caller_ns.map_uid_from_initial(metadata.uid).is_some()
+    caller_ns.map_uid_from_initial(metadata.uid).is_some()
         && caller_ns.map_gid_from_initial(metadata.gid).is_some()
-    {
-        cred.has_cap_in(caller_ns, cap)
-    } else {
-        cred.has_cap_in(inode_ns, cap)
-    }
+        && cred.has_cap_in(caller_ns, cap)
 }
 
 /// Applies the generic DAC permission policy to an inode.
@@ -59,8 +55,7 @@ pub(crate) fn capable_wrt_inode_uidgid(
 pub fn generic_permission(inode: &VfsInode, permission: Permission, cred: &Cred) -> KResult<()> {
     // Linux `capable_wrt_inode_uidgid()` checks the capability in the caller's
     // user namespace and additionally requires the inode's uid/gid to be
-    // mapped there. Using the superblock's `s_user_ns` here would deny a
-    // namespaced root that owns a mapped ID on a host-mounted filesystem.
+    // mapped there.
     let inode_ns = inode
         .super_block()
         .map(|super_block| super_block.user_ns())

@@ -1715,10 +1715,10 @@ impl Path {
     ///
     /// The `uid`/`gid` arguments are interpreted in the caller's user
     /// namespace and stored as global values (`Kuid`/`Kgid` projection).
-    /// Unmapped IDs fail with `EOVERFLOW` instead of being stored raw. The
-    /// `CAP_CHOWN` override is evaluated in the inode's owning namespace
-    /// (Linux `s_user_ns`), so a child-namespace capability cannot reown
-    /// files whose superblock belongs to the initial namespace.
+    /// Unmapped IDs fail with `EINVAL` instead of being stored raw. The
+    /// `CAP_CHOWN` override uses Linux `capable_wrt_inode_uidgid`: it is
+    /// evaluated in the caller's user namespace and requires the inode IDs to
+    /// be mapped there.
     pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
