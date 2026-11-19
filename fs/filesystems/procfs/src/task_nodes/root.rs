@@ -158,6 +158,10 @@ impl TaskStatus {
                 .number_in_namespace(ns)
                 .unwrap_or_else(|| process.pid());
             stat.pid = pid;
+            stat.ppid = process
+                .parent()
+                .and_then(|parent| parent.number_in_namespace(ns))
+                .unwrap_or(0);
             pid
         } else {
             process.pid()

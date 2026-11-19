@@ -1681,29 +1681,20 @@ impl Path {
         let mut result = permission;
         result.remove(NodePermission::SET_UID);
         if permission.contains(NodePermission::SET_GID) {
-            let old_group_ok = cred.has_cap_in(caller_ns, kcred::CAP_FSETID)
-                || Self::fsgid_in_group(cred, caller_ns, old_gid);
+            let old_group_ok =
+                cred.has_cap_in(caller_ns, kcred::CAP_FSETID) || cred.in_group(old_gid);
             if permission.contains(NodePermission::GROUP_EXEC) || !old_group_ok {
                 result.remove(NodePermission::SET_GID);
             }
         }
         if result.bits() != permission.bits()
             && new_gid.is_some_and(|gid| {
-                !cred.has_cap_in(caller_ns, kcred::CAP_FSETID)
-                    && !Self::fsgid_in_group(cred, caller_ns, gid.as_raw())
+                !cred.has_cap_in(caller_ns, kcred::CAP_FSETID) && !cred.in_group(gid.as_raw())
             })
         {
             result.remove(NodePermission::SET_GID);
         }
         result
-    }
-
-    fn fsgid_in_group(cred: &Cred, _ns: &Arc<kcred::UserNamespace>, global_gid: u32) -> bool {
-        cred.fsgid() == global_gid
-            || cred
-                .supplementary_groups()
-                .binary_search(&global_gid)
-                .is_ok()
     }
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
@@ -1740,8 +1731,7 @@ impl Path {
         }) {
             return Err(VfsError::OperationNotPermitted);
         }
-        let new_gid_in_group =
-            gid_kgid.is_some_and(|gid| Self::fsgid_in_group(cred, &caller_ns, gid.as_raw()));
+        let new_gid_in_group = gid_kgid.is_some_and(|gid| cred.in_group(gid.as_raw()));
         if gid.is_some_and(|_| {
             !can_chown
                 && (!is_owner

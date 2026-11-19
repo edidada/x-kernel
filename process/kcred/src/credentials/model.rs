@@ -200,8 +200,7 @@ impl Cred {
     /// participate. It is not a general privilege predicate; capability-gated
     /// operations must use [`Cred::has_cap`] instead.
     pub fn has_root_euid(&self) -> bool {
-        core::ptr::eq(&*self.user_ns, &*crate::initial_user_namespace())
-            && self.is_root_id(self.euid)
+        self.euid == 0
     }
 
     /// Returns the saved set-user-ID.
