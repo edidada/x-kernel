@@ -55,7 +55,7 @@ impl Default for ProcessRuntimeConfig {
 }
 
 /// Fork-time options for constructing a child process.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ProcessForkConfig {
     /// Wait-parent selection for the new process.
     pub parent: ForkParent,
@@ -71,6 +71,13 @@ pub struct ProcessForkConfig {
     pub namespace_flags: kns::NamespaceFlags,
     /// Exit signal configured for the new process.
     pub exit_signal: Option<Signo>,
+    /// Target cgroup for `clone3(CLONE_INTO_CGROUP)`.
+    ///
+    /// `Some` charges the child's membership reservation against this node
+    /// instead of the caller's cgroup; the adapter must already have
+    /// resolved and authorized the target. `None` inherits the caller's
+    /// cgroup like a plain fork.
+    pub cgroup_target: Option<Arc<kcgroup::Cgroup>>,
 }
 
 /// Wait-parent selection for a forked process.
@@ -107,6 +114,9 @@ pub enum ForkSignalActions {
     Private,
     /// Share the caller's signal actions.
     Shared,
+    /// Clone the caller's signal actions, then reset every non-ignored
+    /// handler to its default disposition (`clone3(CLONE_CLEAR_SIGHAND)`).
+    Cleared,
 }
 
 /// File-descriptor table clone mode for a forked process.
@@ -548,15 +558,15 @@ impl ksignal::TimerSignalOrigin for ProcessRuntime {
             .timer_manager()
             .lock()
             .posix_timer_record_needs_cpu_times(timer_id, record);
-        let (process_utime, process_stime) = if needs_cpu_times {
-            self.process.process_cpu_times()
+        let process_sched_runtime = if needs_cpu_times {
+            self.process.process_cpu_time()
         } else {
-            (ktime_types::TimeSpan::ZERO, ktime_types::TimeSpan::ZERO)
+            ktime_types::TimeSpan::ZERO
         };
         let delivery = {
             let mut manager = self.timer_manager().lock();
             let delivery =
-                manager.progress_posix_timer_record(timer_id, record, process_utime, process_stime);
+                manager.progress_posix_timer_record(timer_id, record, process_sched_runtime);
             self.process
                 .set_cpu_timers_armed(manager.any_cpu_timer_armed());
             delivery
@@ -571,14 +581,14 @@ impl ksignal::TimerSignalOrigin for ProcessRuntime {
             .timer_manager()
             .lock()
             .posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq);
-        let (process_utime, process_stime) = if needs_cpu_times {
-            self.process.process_cpu_times()
+        let process_sched_runtime = if needs_cpu_times {
+            self.process.process_cpu_time()
         } else {
-            (ktime_types::TimeSpan::ZERO, ktime_types::TimeSpan::ZERO)
+            ktime_types::TimeSpan::ZERO
         };
         let mut manager = self.timer_manager().lock();
         let should_deliver =
-            manager.on_timer_signal_dequeued(timer_id, signal_seq, process_utime, process_stime);
+            manager.on_timer_signal_dequeued(timer_id, signal_seq, process_sched_runtime);
         self.process
             .set_cpu_timers_armed(manager.any_cpu_timer_armed());
         if should_deliver {
@@ -630,6 +640,10 @@ pub(crate) fn fork_process_runtime<R>(
         config.parent,
         config.exit_signal,
     )?;
+    // CLONE_PARENT changes the tree parent, but the new mm (and therefore the
+    // exec-time auxv) comes from the caller. Overwrite the tree-parent copy
+    // with the actual runtime donor.
+    process.set_saved_aux(parent.process().saved_aux().as_ref().clone());
     // Linux `copy_process()`: the process that receives number 1 in its
     // namespace becomes that namespace's child reaper (`is_child_reaper()` in
     // `kernel/fork.c`) — the fallback adoption target of `find_child_reaper`.
@@ -643,6 +657,7 @@ pub(crate) fn fork_process_runtime<R>(
     let signal_manager = match config.signal_actions {
         ForkSignalActions::Shared => parent.signal_manager().fork_shared()?,
         ForkSignalActions::Private => parent.signal_manager().fork_private()?,
+        ForkSignalActions::Cleared => parent.signal_manager().fork_cleared()?,
     };
     let process_runtime = finish_fork_runtime(
         parent,

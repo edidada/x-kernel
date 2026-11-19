@@ -42,7 +42,7 @@ macro_rules! define_options {
 /// and resolves it at `getsockopt` time, because the peer PID must be
 /// projected into the observer's active PID namespace.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct UnixCredentials {
     pub pid: u32,
     pub uid: u32,
@@ -73,12 +73,12 @@ impl UnixCredentials {
 /// observer can apply Linux's `pid_vnr` projection at `getsockopt` time.
 /// `SO_PEERCRED` records effective credentials, unlike per-message
 /// `SCM_CREDENTIALS`, which uses real credentials.
-#[derive(Default, Debug, Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct PeerCredentials {
     identity: Option<PeerIdentity>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct PeerIdentity {
     pid: Arc<PidHandle>,
     uid: u32,
@@ -115,13 +115,13 @@ impl PeerCredentials {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PacketStatistics {
     pub packets: u32,
     pub drops: u32,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PacketMembership {
     pub ifindex: i32,
     pub membership_type: u16,
@@ -145,14 +145,51 @@ define_options! {
     ReceiveTimeout(TimeSpan),
     SendBufferForce(usize),
     PassCredentials(bool),
+    PassSecurity(bool),
+    PassRights(bool),
+    Timestamp(bool),
+    TimestampNs(bool),
+    Timestamping(u32),
     PeerCredentials(PeerCredentials),
     /// `NETLINK_CAP_ACK`: omit the original request payload from error
     /// acknowledgements and mark them `NLM_F_CAPPED`.
     NetlinkCapAck(bool),
+    /// `NETLINK_EXT_ACK`: request extended ACK error reporting. Tracked only.
+    NetlinkExtAck(bool),
+    /// `NETLINK_GET_STRICT_CHK`: strict dump checking. Tracked only.
+    NetlinkGetStrictChk(bool),
+    /// `NETLINK_PKTINFO`: receive packet info ancillary data. Tracked only.
+    NetlinkPktinfo(bool),
+    /// `NETLINK_ADD_MEMBERSHIP` / `NETLINK_DROP_MEMBERSHIP`: multicast group id.
+    NetlinkAddMembership(u32),
+    NetlinkDropMembership(u32),
+    /// `NETLINK_LIST_MEMBERSHIPS`: the socket's bound multicast group mask,
+    /// zero-based bit per group (`netlink_getsockopt` copies `nlk->groups`).
+    NetlinkMemberships(u32),
+    /// `IP_PKTINFO`: receive packet-info ancillary data on UDP. Tracked only.
+    IpPktinfo(bool),
+    /// `IP_RECVTTL` / `IP_RECVTOS`: receive TTL/TOS ancillary data. Tracked only.
+    IpRecvTtl(bool),
+    IpRecvTos(bool),
+    /// `SO_BINDTOIFINDEX`: bind to a device by ifindex (like SO_BINDTODEVICE).
+    BindToIfindex(i32),
+    /// `TCP_FASTOPEN`: fast-open queue length. Tracked only.
+    TcpFastopen(u32),
+    /// `SO_ACCEPTCONN`: whether the socket is listening (read-only).
+    AcceptConn(bool),
+    /// `SO_RCVBUFFORCE`: privileged receive-buffer override.
+    ReceiveBufferForce(usize),
+    /// `IP_MULTICAST_TTL`: multicast TTL. Tracked only.
+    IpMulticastTtl(u32),
+    /// `IP_RECVFRAGSIZE`: receive fragment-size ancillary data. Tracked only.
+    IpRecvFragsize(bool),
+    /// `SO_PASSPIDFD`: pass peer pidfd ancillary data. Tracked only.
+    PassPidfd(bool),
 
     // ---- TCP options ----
     NoDelay(bool),
     MaxSegment(usize),
+    /// TCP diagnostics are not available; queries return `OperationNotSupported`.
     TcpInfo(()),
     /// Seconds an idle connection waits before the first keep-alive probe.
     ///

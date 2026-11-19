@@ -7,9 +7,8 @@ pub(crate) mod dgram;
 pub(crate) mod seqpacket;
 pub(crate) mod stream;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
-use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
 use kalloc_types::KBox;
@@ -27,8 +26,8 @@ use kvfs::{
 
 pub use self::{dgram::DgramTransport, seqpacket::SeqpacketTransport, stream::StreamTransport};
 use crate::{
-    AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
-    SocketOps,
+    AcceptOptions, ConnectOptions, QueueLengths, RecvOptions, SendOptions, Shutdown, Socket,
+    SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
 };
 
@@ -90,7 +89,7 @@ pub fn current_sender_credentials() -> Option<crate::SenderCredentials> {
     })
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum UnixAddr {
     #[default]
     Unbound,
@@ -98,8 +97,8 @@ pub enum UnixAddr {
     Path(Arc<str>),
 }
 
-/// Transport interface for Unix-domain sockets.
-#[async_trait]
+/// Synchronous transport operations for Unix-domain sockets.
+/// Accept uses the inherent [`UnixTransport::accept`] method.
 #[enum_dispatch]
 pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     fn bind(&self, slot: &BindEntry, local_endpoint: &UnixAddr) -> KResult;
@@ -124,13 +123,22 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
         _credentials: &PeerCredentials,
     ) -> KResult;
 
-    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)>;
-
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize>;
     fn recv(&self, dst: impl Write + IoBufMut, options: RecvOptions<'_>) -> KResult<usize>;
 
     fn shutdown(&self, _how: Shutdown) -> KResult {
         Ok(())
+    }
+
+    /// Byte counts for `SIOCOUTQ`/`SIOCINQ`, or `None` when this transport
+    /// keeps its receive queue somewhere the socket layer cannot peek into.
+    fn queue_lengths(&self) -> Option<QueueLengths> {
+        None
+    }
+
+    /// Whether this transport has reached the listening state.
+    fn is_listening(&self) -> bool {
+        false
     }
 }
 
@@ -140,6 +148,20 @@ pub enum UnixTransport {
     Dgram(DgramTransport),
     Seqpacket(SeqpacketTransport),
 }
+impl UnixTransport {
+    /// Accepts through static dispatch without boxing the future.
+    ///
+    /// Polling requires sleepable task context. Dropping a pending future
+    /// cancels its wait; socket owner reservation remains the caller's job.
+    pub async fn accept(&self, nonblocking: bool) -> KResult<(Self, UnixAddr)> {
+        match self {
+            Self::Stream(transport) => transport.accept(nonblocking).await,
+            Self::Dgram(transport) => transport.accept(nonblocking).await,
+            Self::Seqpacket(transport) => transport.accept(nonblocking).await,
+        }
+    }
+}
+
 impl Pollable for UnixTransport {
     fn poll(&self) -> IoEvents {
         match self {
@@ -656,6 +678,14 @@ impl SocketOps for UnixDomainSocket {
 
     fn shutdown(&self, how: Shutdown) -> KResult {
         self.transport.shutdown(how)
+    }
+
+    fn queue_lengths(&self) -> KResult<Option<QueueLengths>> {
+        Ok(self.transport.queue_lengths())
+    }
+
+    fn is_listening(&self) -> bool {
+        self.transport.is_listening()
     }
 }
 

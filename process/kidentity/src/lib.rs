@@ -96,6 +96,24 @@ impl PidNamespace {
         self.level
     }
 
+    /// Returns `true` when `other` is this namespace or one of its
+    /// descendants.
+    ///
+    /// A pid's number is projected into its own namespace and every ancestor
+    /// (Linux `struct pid` `numbers`), so an observer that is an
+    /// ancestor-or-self of the pid's namespace names the pid, while an
+    /// observer below it or in a sibling branch does not (`pid_nr_ns` → 0).
+    pub fn is_ancestor_or_self(&self, other: &Arc<PidNamespace>) -> bool {
+        let mut current = Some(other);
+        while let Some(ns) = current {
+            if core::ptr::eq(self, ns.as_ref()) {
+                return true;
+            }
+            current = ns.parent();
+        }
+        false
+    }
+
     /// Returns `true` if this is the root PID namespace.
     pub fn is_root(&self) -> bool {
         self.parent.is_none()
@@ -128,8 +146,8 @@ impl PidNamespace {
 ///
 /// The transition table is closed: any other transition is rejected by
 /// [`PidLifecycleState::try_transition`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PidLifecycleState {
     /// Number allocated but not yet published.
     Reserved  = 0,
@@ -183,7 +201,7 @@ fn state_from_u8(value: u8) -> Option<PidLifecycleState> {
 }
 
 /// A namespace-scoped task number.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Upid {
     nr: u32,
     ns: Arc<PidNamespace>,

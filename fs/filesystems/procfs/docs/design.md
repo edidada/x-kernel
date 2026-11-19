@@ -1,5 +1,14 @@
 # procfs - Design
 
+## Private commitment reporting
+
+`/proc/meminfo` reports `Committed_AS` from `memspace::committed_pages()` in
+KiB. It counts outstanding private anonymous/file COW commitments across MMs,
+including inherited accounted mappings. It is independent of page residency,
+`MemFree` and `RLIMIT_AS`; the default overcommit policy does not enforce it as
+a global hard limit. Shared object quota/residency is not included in this
+private commitment counter.
+
 ## CPU information
 
 `src/basic_nodes/cpuinfo.rs` formats `/proc/cpuinfo`; `root.rs` only registers
@@ -50,6 +59,91 @@ cases without depending on the test host's CPU model. Cross-architecture tests
 check field presence, unknown identities, feature spelling uniqueness and
 state-policy filtering; common kcpu tests cover sparse snapshot slots.
 
+
+## IRQ affinity view
+
+`/proc/irq` is a non-cacheable sparse `SimpleDir` rooted in a per-superblock
+`IrqNamespace`. The sparse source walks `next_irq_line` and publishes only
+current Lines whose KIRQ `has_action_history` is true. It has no fixed 4096-name
+or 64 KiB name cap; names come from the same sparse Virq walk and are formatted
+as canonical decimal. Enumeration is deliberately weak: insert/remove between
+getdents calls can shift or repeat ordinal results. The root source does not
+retain a Line handle.
+
+`IrqNamespace` is owned by the root source and holds strong `LineRecord`s for
+stable metadata. Each record owns the stable Line directory, four stable file
+inodes, a strong `IrqLineHandle`, and a weak retirement observer/subscription.
+Inodes never hold a strong record reference, so record -> inode -> record cycles
+are absent. The first lookup while KIRQ still exposes the same current Line
+creates the record; subsequent lookups reuse it. Candidate construction, inode
+creation and subscription registration happen outside the namespace lock. The
+commit itself is one namespace critical section: it re-queries KIRQ's
+authoritative current Line, reuses an existing record for that exact Line, and
+only inserts a candidate whose handle still equals the authoritative Line.
+Otherwise it leaves the map untouched and the caller retries a bounded number of
+times. A stale lookup never replaces or deletes a successor record. `is_same_line`
+compares underlying Line identity, not wrapper allocation. Unadopted records and
+subscriptions are destroyed only after the namespace guard is released.
+
+The Line directory is a non-cacheable `SimpleDir` over a four-entry
+`DirMapping`; file inodes are created once and installed as persistent mapping
+entries. Names and modes are:
+
+| File | Mode | Owner |
+| --- | --- | --- |
+| `smp_affinity` | 0644 ordinary / 0444 fixed+source-managed | requested bitmap |
+| `smp_affinity_list` | 0644 ordinary / 0444 fixed+source-managed | requested CPU list |
+| `effective_affinity` | 0444 | effective bitmap |
+| `effective_affinity_list` | 0444 | effective CPU list |
+
+Initial requested mode is selected once from KIRQ's static source capability:
+ordinary immediate/deferred `Any` sources may start 0644; fixed, PerCpu/NMI/MSI,
+no-flow and controllerless sources start 0444. Action restrictions, action
+removal and later writes do not rewrite mode/uid/gid.
+
+There is no `affinity_status` file.
+
+All four files use `SeqFileInode` with one scalar record and lazy open. Open
+checks the retained identity but does not read affinity. A missing requested or
+effective observation fails the first read with `ENODATA`; no status text is
+fabricated. The runtime `CpuTextDomain` is captured once at `LineRecord`
+creation and is shared by all four stable files; parser and formatter live in
+`kcpu_id_map::text`, not procfs. The current domain is present-only:
+`possible == present` and no hotplug/possible expansion is claimed. A requested
+file accepts a complete bounded
+command through the existing kvfs command transport. Write offset is ignored,
+commands over the 128-byte procfs budget return `FileTooLarge`, empty commands
+reach the parser and then KIRQ's checked setter (`EINVAL` for a settable line),
+and `set_user_affinity` is the only mutation path. The policy precheck maps
+unsupported/fixed/owner-restricted writes to `EPERM`; read-side
+unsupported/fixed observations remain `EOPNOTSUPP`. Effective files are
+read-only. `SEEK_END` is rejected because reported size is zero.
+
+Retirement moves the KIRQ subscription list under the Line lock and invokes the
+namespace observer only after KIRQ locks are released. The observer removes the
+record only when its handle is still the exact Line recorded for that Virq.
+Already-open old directories/files keep their stable inodes and old handle;
+fresh lookup of the retired Virq fails. A successor gets a new record and new
+inode because the old record's inode is never reused.
+
+`LineDirOps::validate_open` and child lookup use `IrqLineHandle::affinity_snapshot`
+through `ensure_live`; unsupported/owner-fixed live Lines remain readable, while
+retired A returns `ENOENT`. The requested/effective iterators also read
+`affinity_snapshot` directly and do not require settable capability.
+
+Tests in `ut-tests/irq_nodes.rs` cover sparse root enumeration and short
+cookies, insert/remove visibility, stable inode reuse, actionless Line
+hiding, maximum Virq, retirement/record removal, old dentry/file isolation,
+successor inode replacement, lazy requested files, effective `ENODATA`, DAC,
+protected/deferred/hardware/owner-fixed writes, policy recheck after action
+replacement, chmod/chown persistence across full-path reopen and superblock
+isolation, successor mode reset, source-class initial modes, an end-to-end
+synthetic MSI `free_msi_if_unused()` path whose observer sees the namespace
+record removed, and direct `ut-tests/irq_namespace.rs` strong-record-count/
+observer-delay tests. Those namespace tests also order pre-built same-Line and
+stale-A candidates deterministically; they do not run two threads, so real
+concurrent stress remains an integration concern. Generic generation, copy
+fault, readv, poll and concurrent replacement tests live in kvfs.
 
 ## Fallible superblock preparation
 
@@ -104,11 +198,13 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
 | `src/basic_nodes/root.rs` | Boot command line, root entry registration, filesystem information, kernel settings and the `/proc/sys/fs/inotify` live limits |
 | `src/basic_nodes/cpuinfo.rs` | Per-CPU text formatting and Linux feature-name table over kcpu snapshots |
+| `src/boot_id.rs` | Per-boot random UUID behind `/proc/sys/kernel/random/boot_id`, drawn once from the entropy pool |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
 | `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |
 | `src/sysrq_nodes/root.rs` | Optional task-backtrace trigger |
-| `src/irq_nodes/root.rs` | Empty registration stub; no interrupts file yet |
+| `src/irq_nodes/{root,dir,namespace,file,error}.rs` | Stable per-superblock `/proc/irq/<virq>/` namespace, KIRQ error mapping and checked write entrance |
+| `src/cpu_text_error.rs` | procfs errno adaptation shared by task/status and IRQ; does not depend on either consumer module |
 
 Numeric entry names (`<pid>`, `<tid>`, `fd`, and `fdinfo`) are parsed by
 `src/name.rs`, a port of Linux's `name_to_int()`. Only canonical decimal text is
@@ -151,6 +247,28 @@ read-time `files_lookup_fd_locked()`. It then runs
 inotify file appends one `inotify wd:... ino:... sdev:... mask:...
 ignored_mask:...` line per live watch, using the instance's watch snapshot.
 
+A pidfd appends Linux's `Pid:` line for glibc/systemd pidfd-to-pid resolution.
+The value is the `pid_nr_ns` view: the process's number in the reading task's
+active PID namespace, and `0` when it has no projection there. This procfs does
+not model a per-mount PID namespace, so the reader's namespace stands in for
+the procfs instance's; a kernel-task reader has none and falls back to the
+internal number instead of panicking. A pidfd reports `-1` only once its process has been
+reaped: Linux computes the number while the pid still has a task attached
+(`pid_has_task`), which includes an exited child that has not been waited for,
+so a waitable zombie keeps naming its pid and only the reaped state reads as
+unidentifiable.
+
+`/proc/sys/kernel/{hostname,domainname}` are `0644` nodes backed by the
+caller's UTS namespace, so `uname(2)` and the sysctl always agree. Reads report
+the namespace bytes verbatim plus one newline — the UTS owner accepts non-UTF-8
+names and `uname(2)` returns them unchanged, so no decoding happens here.
+Writes follow Linux `proc_dostring` under the default strict mode: they start
+at the file position, stop at the first NUL or newline, truncate the stored
+value there, and accept a write that begins past the current value as a
+successful no-op. Both directions require a caller with a UTS namespace, so a
+kernel task gets `ENOENT`, and writing requires `CAP_SYS_ADMIN` like
+sethostname(2).
+
 `/proc/sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches}`
 are `0644` nodes with a per-inode permission hook that authorizes an open for
 write on the opener's euid, matching Linux's `proc_sys_permission` rather than
@@ -172,7 +290,12 @@ opening alone does not capture credentials. No procfs credential cache is added,
 and unrelated fields are not a globally atomic task snapshot. Current `kcred` IDs belong
 to the initial user namespace; reader-namespace ID translation is not implemented.
 
-`status` emits a Linux-compatible subset in Linux field order. `SigPnd`,
+`status` uses the shared `kcpu_id_map::text` formatter for
+`Cpus_allowed`/`Cpus_allowed_list`, with a domain sampled once per status record;
+the former private formatter is removed. CPU text errors are mapped through the
+procfs `cpu_text_error` adapter, never through IRQ's private error module. It
+emits a Linux-compatible subset in
+Linux field order. `SigPnd`,
 `ShdPnd`, and `SigBlk` come from one `ThreadSignalManager::masks()` snapshot, so
 they describe one `SigLock` critical section; `SigIgn`/`SigCgt` need the separate
 handler lock and may reflect a different instant. `VmSize` is the sum of VMA

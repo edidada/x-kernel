@@ -1,5 +1,9 @@
 # ktty — Design
 
+The native-TTY runtime fixture retains a narrow standard Box lint exception in
+its connection constructor because `CharDeviceImpl` still requires that owner.
+This does not change the production driver ownership or fallible poller policy.
+
 ## Fallible Input Callback Ownership
 
 `TtyPort::new` returns `KResult` and prepares a `KBox<dyn Fn() + Send + Sync>`
@@ -309,6 +313,46 @@ An in-flight snapshot may complete while another caller falls back, but both
 access paths share the same port and receive queue. The no-port case retains HAL
 fallback and manual processing. No dynamic rebinding or hot-unplug is added.
 
+## Native Console ioctl Compatibility
+
+The native serial console accepts the console/keyboard/VT ioctl class that
+userspace console setup (systemd-executor) probes: `KD*` keyboard mode/LEDs/type
+tables, `VT_*` mode/state/resize requests, `TIOCPKT`/`TIOCGEXCL`/`TIOCEXCL`,
+locked termios and modem lines. A dedicated `console_ioctl` helper serves them
+with fixed serial-console defaults (text mode, XLATE keyboard, no
+LEDs/packet/exclusive mode) instead of failing `ENOTTY`; commands outside that
+class fall through to the generic termios/PTY dispatch in `Tty::ioctl`.
+Struct-writing getters follow the Linux buffer layouts (`vt_stat` 3×u16,
+`vt_mode` 8 bytes, `serial_icounter_struct` 20 ints, one `char` for
+`KDGKBTYPE`/`KDGKBLED`), and the keyboard-table getters keep returning `ENOTTY`
+because there is no serial keyboard table to report.
+
+Requests that Linux serves for every tty running `N_TTY` stay in
+`terminal_ioctl`, independent of the console gate: `FIONREAD`/`TIOCINQ`
+(queued input bytes from the port ingress), `TIOCOUTQ` (no kernel output buffer
+to drain) and `TIOCGETD` (`N_TTY`). PTY endpoints and the virtual console
+therefore keep those answers, and the virtual console adds `KDGKBTYPE` and
+`KDGKBLED` beside its own `KDGETMODE`/`KDGKBMODE` handling in `vt::ioctl`.
+
+The helper is gated on the native console identity, not on `TtyKind`: a PTY
+slave shares `TtyKind::Terminal` with the serial console, so the gate also
+requires the absence of a PTY pair. PTY masters and slaves therefore keep
+returning `ENOTTY` for the console class — Linux keeps packet mode and VT
+requests off PTYs, and `TIOCPKT` on a master would otherwise report success
+while never enabling framing. The virtual console keeps its own `vt::ioctl`
+path and does not use this table.
+
+Acquiring compatibility rather than capability, the following requests are
+accepted as successful no-ops because their operation has no serial-console
+effect: `VT_SETMODE`, `KDSETMODE`, `KDSKBMODE`, `KDSKBMETA`, `KDSKBLED`,
+`TIOCPKT`, `TIOCEXCL`, `TIOCNXCL`, `TIOCVHANGUP`, `TIOCMIWAIT`, `KDENABIO`,
+`KDDISABIO`, `KDADDIO`, `KDDELIO`, `KDSIGACCEPT`, `TIOCCONS`,
+`TIOCSLCKTRMIOS`, `TIOCMSET`, `TIOCMBIS`, `TIOCMBIC`, `TIOCSETD` and
+`TIOCSSOFTCAR`. They report success so console setup and teardown proceed, but
+they do not revoke other openers (`TIOCVHANGUP`), reprogram a keyboard, or
+establish packet/exclusive/console-redirect state; real VT keyboard state and
+full vhangup revoke remain follow-ups.
+
 ## Terminal Layer
 
 `ktty` implements the X-Kernel terminal layer: terminal devices, the line
@@ -418,13 +462,26 @@ This matches Linux's observable behavior after acquiring a controlling
 terminal, so a shell started afterwards obtains a valid foreground PGID
 through `TIOCGPGRP`.
 
-Known limitation: Linux's privileged cross-session forced acquisition
-(`TIOCSCTTY` with `arg == 1`) is not implemented; that request returns
-`EPERM`, and other non-zero `arg` values return `EINVAL` (see the Known
-Limitations section of `docs/security.md`). If any step fails, the newly installed
-session/terminal state is rolled back. A per-TTY association-transaction
-lock serializes bind, unbind, and rollback, preventing an older
-transaction from undoing a newer successful binding on the same TTY.
+`arg == 1` is Linux's privileged cross-session forced acquisition, which
+greetd needs to take a VT that a getty already owns. `steal_for` serves it: the
+caller must still be its session's leader (`sid == pid`) and hold
+`CAP_SYS_ADMIN`.
+
+A steal *replaces* the current owner, so it cannot install the new claim while
+the old one is still there: the two are mutually exclusive and
+`ensure_session` would answer `EBUSY`, which is the very case this path exists
+for. The previous owner is therefore released first, and the whole acquisition
+is rolled back if a later step fails — the session may already name a different
+terminal (`EBUSY`), or the foreground update may fail. Rollback restores the
+previous session *and* its foreground group, because clearing a session also
+drops the terminal's foreground pointer; a partial restore would leave the VT
+owned but with no foreground group, which is the half-state this ordering
+prevents. Any other non-zero `arg` returns `EINVAL`.
+
+Both `bind_to` and `steal_for` run under the same per-TTY
+association-transaction lock, so a bind, an unbind and a steal on one TTY
+cannot interleave, and an older transaction cannot undo a newer successful
+binding.
 
 `TIOCSPGRP` reads the target PGID from user space, resolves the target
 process group in the process table, and requires:

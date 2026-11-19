@@ -17,8 +17,27 @@ The `virtio-9p` feature still depends on and re-exports the concrete
 After a successful probe, a driver publishes its runtime capability into
 the matching class registry through `publish_<class>()`; subsystems (such
 as `knet`, `fs_boot`, or the input subsystem) discover and use runtime
-devices through `*_devices()` / `find_*_device()` /
-`subscribe_*_available()`, without depending on probe order.
+devices through `*_devices()` / `find_*_publication()` /
+`*_publications_for_device()` / `subscribe_*_available()`, without depending on
+probe order. The deprecated single-value `find_*_device(DeviceId)` lookup is
+gone because one stable device/binding may publish several capabilities of the
+same class.
+
+Publication is binding-scoped and has its own `PublicationId`. The parent
+`DeviceObject` is stable across rebinds, but each publication captures the
+exact `BindingRef` that published it. `publish_*()` returns a non-Clone
+`ClassPublication<T>` credential; `ClassDevice<T>` is the cloneable consumer
+handle. Dropping the credential does not revoke; a publisher that needs an
+explicit lifetime must retain it and call `revoke(&self)`.
+
+Publication state is `Published -> Activating -> Notifying -> Available`, with
+`Revoking`, retryable `RevokeFailed`, and terminal `Revoked`. `is_available()`
+is false as soon as a revoke request is accepted, even while activation or
+callback cleanup is still pending. A revoke during `Activating`/`Notifying`
+sets `revoke_requested` and returns `Deferred`; the activation executor owns
+the handoff. `Revoked` is set only after backend unpublish and removed
+callbacks complete. Node removal, unpublish and callbacks never run under the
+class registry spinlock.
 
 The intended audience is developers implementing device class adapters,
 modifying class registry semantics, or adding new device categories.
@@ -65,9 +84,11 @@ drivers/base/kclass/
 ├── docs/
 │   ├── design.md
 │   └── security.md
+├── ut-tests/        # publication/revoke tests mounted as cfg(unittest)
 └── src/
-    ├── lib.rs       # macro-driven class registries + device trait delegation + prelude
-    └── generic.rs   # ClassDevice<T>, ClassRegistry<T> generic primitives
+    ├── lib.rs       # macro-driven class registries + event bridge + delegation + prelude
+    ├── generic.rs   # ClassPublication<T>, ClassDevice<T>, publication state/registry
+    └── retirement_hooks.rs # cfg(unittest) publication pause seams
 ```
 
 ## Architecture
@@ -85,8 +106,9 @@ drivers/base/kclass/
     │  │  (kdevice event subscriber)     │    │
     │  │  Activated → notify_class_avail │    │
     │  │              + register node     │    │
-    │  │  Removed   → remove_class_device│    │
-    │  │              + unregister node   │    │
+    │  │  Removed / BindingRetired       │    │
+    │  │            → remove_class_device│    │
+    │  │              + retire by binding │    │
     │  └─────────────┬───────────────────┘    │
     │                │                        │
     │  ┌─────────────┴───────────────────┐    │
@@ -104,8 +126,9 @@ drivers/base/kclass/
     │  └─────────────┬───────────────────┘    │
     │                │                        │
     │  ┌─────────────┴───────────────────┐    │
-    │  │  ClassDevice<T>                 │    │
-    │  │   Arc<ClassDeviceInner<T>>      │    │
+    │  │  ClassPublication<T>            │    │
+    │  │   └─ ClassDevice<T>             │    │
+    │  │      Arc<ClassDeviceInner<T>>   │    │
     │  │   ├─ parent: Arc<DeviceObject>  │    │
     │  │   ├─ binding: BindingRef        │    │
     │  │   ├─ runtime: T (Box<dyn Trait>)│    │
@@ -130,10 +153,13 @@ drivers/base/kclass/
 
 | Component | Responsibility |
 |------|------|
-| `ClassDevice<T>` | Typed runtime device handle; wraps `DeviceObject`, the captured binding reference and the trait object, and delegates trait method calls |
-| `ClassDeviceInner<T>` | `ClassDevice` internal shared state: parent, captured `BindingRef`, runtime, name, kind, irq, metadata. Driver identity is the binding snapshot; availability reads the captured binding |
-| `ClassRegistry<T>` | Typed registry: publish (unique publication), devices (enumerate available), find (lookup by id), subscribe (availability notification), remove (remove by id) |
-| `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` events and drives class-level notify/remove |
+| `ClassPublication<T>` | Non-Clone publisher credential; owns explicit `revoke(&self)` and wraps the consumer handle. Drop does not revoke |
+| `ClassDevice<T>` | Cloneable typed consumer handle; wraps `DeviceObject`, the captured binding reference, `PublicationId`, runtime and publication state; delegates trait calls |
+| `ClassDeviceInner<T>` | Shared state: parent, captured `BindingRef`, immutable `PublicationId`, atomic state/`revoke_requested`, runtime, name, kind, irq, metadata |
+| `ClassRegistry<T>` | Typed registry: publish exact publications, enumerate available devices, lookup by `PublicationId`, list by `DeviceId`, subscribe to availability/removal, exact revocation orchestration |
+| `RevocationOutcome` | `Completed` (unpublish and removed callbacks done), `Deferred` (a live activation/revocation executor owns completion), `AlreadyRevoked` |
+| `ACTIVATION_BRIDGE` | Global event bridge: subscribes to `kdevice` `Activated` / `Removed` / `BindingRetired` events and drives class-level notify/remove; removable for tests via `reinstall_event_bridge_for_tests` |
+| `ClassPublication::revoke` | Exact `PublicationId` request; `Deferred` means a live activation/revoke executor owns cleanup, not that the publication remains available |
 | `ClassRuntimeMetadata::device_node_class` | Supplies input capability metadata or the DRM primary class to `kdevice`; other runtime classes return no node request |
 | `class_registries!` macro | Declaratively generates all 8 class registries and their companion functions |
 | `ClassDeviceMetadata` | Optional class-specific metadata (currently only the input class carries physical_location / unique_id) |
@@ -142,79 +168,33 @@ drivers/base/kclass/
 
 ## State Machine
 
-### ClassDevice lifecycle
+### Publication lifecycle
 
 ```text
-                    driver probe_device()
-                         │
-                         │ publish_<class>(parent, runtime)
-                         v
-                    ┌──────────┐
-                    │Published │  ← ClassDevice created, held by registry;
-                    │(pending) │     captured binding not Active
-                    └────┬─────┘
-                         │ kdevice Activated event
-                         ▼
-                    ┌──────────┐
-                    │Available │  ← captured binding is Active;
-                    │(active)  │     DeviceNode assigned, then callbacks fired
-                    └────┬─────┘
-                         │ kdevice Removed event
-                         ▼
-                    ┌──────────┐
-                    │ Removed  │  ← swap_remove from the registry
-                    └──────────┘
+Published --Activated--> Activating --callback commit--> Notifying --done--> Available
+    |                         |                              |
+    | revoke                  | revoke request               | revoke request
+    v                         v                              v
+ Revoking <----------- Activating/Notifying (activation owns handoff)
+ Revoking --node NotOwner/unrecoverable--> RevokeFailed --retry--> Revoking
+ Revoking --unpublish + removed callbacks--> Revoked
 ```
 
-| From | To | Trigger |
-|----|----|----------|
-| — | Published | Driver calls `publish_<class>(parent, runtime)` |
-| Published | Available | `kdevice` dispatches `Activated`; `notify_class_available` registers any class node and then invokes subscriber callbacks |
-| Published | Available (immediate) | Captured binding is already `Active` at publish time (desc-adoption path) |
-| Available | Removed | `kdevice` dispatches the `Removed` event; `remove_class_device` removes the entry |
-| Published | — | Publishing the same `DeviceId` again returns `AlreadyExists` |
-
-### Registry publish semantics
-
-`ClassRegistry::publish` rejects duplicate identity, as Linux device
-registration does. Hotplug re-registration must first remove the old
-object through the `Removed` lifecycle and then publish a new object; a
-resident runtime is never silently replaced.
-
-Publishing is all-or-nothing from the driver's point of view: a driver that
-returns an error from `probe_device` after calling `publish_<class>` must
-revoke every capability it already published before returning. The framework
-performs no rollback of class publications after the hook returns, and
-residue that is merely invisible to callers (for example because the parent
-is not yet active) is not a rollback. Every successful publish must therefore
-be undone explicitly on the error path.
-
-## Flows
-
-### Publish flow
-
-1. The driver creates the runtime device inside `DeviceDriver::probe_device`
-   (e.g. `VirtIoNet::try_new`).
-2. It calls `publish_<class>(parent, runtime)` (macro-generated).
-3. `name()`, `device_kind()`, and `irq()` are extracted from the runtime.
-4. The `device_kind` is checked against the registry type;
-   a mismatch returns `InvalidInput`.
-5. `class_metadata()` is extracted from the runtime (only the input class
-   returns meaningful metadata).
-6. `ClassDevice::try_new_with_class_metadata` captures a `BindingRef`:
-   - the parent must expose complete binding metadata and must not be
-     observed as `Removing`/`Removed`, otherwise `BadState` is returned;
-   - `driver_name()`/`driver_id()` become the immutable identity snapshot,
-     and `is_available()` reads the captured runtime. A successful capture is
-     **not** a publish permission: the normal probe/adoption path relies on
-     the descriptor binding lock to serialize publication with removal.
-7. The registry publishes under the `SpinNoPreempt` lock:
-   - if the same id already exists → `AlreadyExists`, and the
-     class-specific publish already performed is undone;
-   - otherwise → push.
-8. If the device is already `Active`, `notify_class_available` runs
-   synchronously. Input and display classes first register a `DeviceNode` in
-   `kdevice`, then notify class subscribers.
+- `Published` is registry-visible only for internal activation; `is_available()`
+  is false.
+- `Activating`/`Notifying` are activated but callback delivery is not final.
+  A revoke request stores `revoke_requested` with Release ordering and closes
+  `is_available()` immediately; activation owns node cleanup/unpublish.
+- `Available` is set only after callbacks complete. It is capability
+  availability, not proof that node projection succeeded; a node registration
+  failure is logged and leaves the publication available with no node.
+- `Revoking` keeps the entry hidden while unpublish/removed callbacks run.
+  A second revoke returns `Deferred`, never a premature `AlreadyRevoked`.
+- `RevokeFailed` means the executor exited and nobody owns completion. It is
+  not available and never resurrects; a later revoke/binding retirement may
+  CAS it back to `Revoking`.
+- Node removal, `unpublish_class`, callbacks and last-Arc drop never run under
+  the class registry spinlock.
 
 ### Captured binding reference
 
@@ -224,22 +204,29 @@ be undone explicitly on the error path.
   created this class device; after unbind/removal it stays readable and never
   falls back to the parent's current metadata;
 - `is_available()` observes only that captured runtime. It is a lock-free,
-  instantaneous availability check, not operation admission;
+  instantaneous availability check, not operation admission. If the binding is
+  replaced by a rebind, an old class handle keeps reporting unavailable and can
+  never start following the replacement;
 - the reference retains the runtime but does not increment `usage`, so a
   resident class handle or clone cannot make removal return `ResourceBusy`;
-- construction succeeds at the Bound stage used by normal in-probe
-  publication, and at Active; terminal or detached bindings return `BadState`;
+- construction succeeds for a live binding (Bound stage used by in-probe
+  publication, or Active); terminal or detached bindings return `BadState`;
 - capture is not a publication permission. Publication serialization with
-  removal still comes from the descriptor binding lock.
+  removal still comes from the descriptor binding lock, and removal is matched
+  back to the entry with `BindingRef::same_binding`, never by device ID alone.
 
 ### Device enumeration and lookup
 
-1. `*_devices()`: take the registry lock, iterate all entries, filter by
-   `is_available()` (the captured binding is Active), and return clones.
-2. `find_*_device(id)`: take the registry lock and find the entry matching
-   the id and `is_available()`.
-3. Both operations return clones of `ClassDevice<T>` (`Arc`-shared), so
-   callers can safely use them across the lock boundary.
+1. `*_devices()`: lock the registry, iterate entries, filter by
+   `is_available()` and return `ClassDevice<T>` clones.
+2. `find_*_publication(PublicationId)`: exact lookup, filtered by
+   `is_available()`; a revoke-requested publication is immediately absent.
+3. `*_publications_for_device(DeviceId)`: public diagnostic enumeration of
+   currently available publications for a stable device; unavailable entries
+   are hidden. Internal activation/retirement scans use the private
+   `all_publications_for_device` snapshot.
+4. All operations return clones of `ClassDevice<T>` (`Arc`-shared); the
+   non-Clone `ClassPublication<T>` is never handed out by a query.
 
 ### Availability subscription
 
@@ -262,13 +249,41 @@ be undone explicitly on the error path.
    it calls `notify_class_available(kind, id)`, dispatching on
    `DeviceKind` to the matching class notify function. Input and display
    notify functions capture their class metadata and call
-   `kdevice::register_device_node` before availability callbacks.
-2. A `DeviceEventKind::Removed` subscriber is registered: on each event it
-   calls `remove_class_device(id)`, which walks every class registry, removes
-   the id, unregisters its optional `DeviceNode`, and then runs class-specific
-   unpublish cleanup.
+   `kdevice::register_device_node_for_publication` for the entry's exact
+   `PublicationId` and captured binding before availability callbacks.
+2. `DeviceEventKind::Removed` and `DeviceEventKind::BindingRetired`
+   subscribers are registered: on each event they call
+   `remove_class_device(id)`, which walks every class registry and retires
+   terminal entries whose captured binding is the instance being removed.
+   Unbinding (which keeps the stable device object) and retirement of a failed
+   candidate that already published a runtime both use this path; the event
+   name does not select an entry, the exact binding reference does.
 3. The bridge completes inside `LazyInit::call_once`, guaranteeing a
-   single registration.
+   single registration. `reinstall_event_bridge_for_tests` restores the
+   subscriptions after a test reset clears the subscriber buckets.
+
+### Exact publication retirement
+
+Retirement never removes a publication with a live binding and never lets a
+replacement binding inherit an old one.
+
+1. Binding retirement scans the internal all-state snapshot for entries whose
+   captured binding is `Removed`; the public device-level enumeration only
+   sees available entries.
+2. For each exact publication, the optional node is revoked with
+   `unregister_device_node_for_publication(id, publication, &binding,
+   on_deferred)`. `Removed`/`NotFound` continues, `Deferred` keeps the
+   publication in `Revoking` and the node completion callback resumes the same
+   exact publication, and `NotOwner` enters retryable `RevokeFailed` without
+   touching another owner's node.
+3. The backend `unpublish_class` and removed callbacks run outside the
+   registry lock. Only after both complete is the registry entry removed and
+   `Revoked` exposed.
+4. A second revoke during `Revoking` returns `Deferred`; a stale callback is
+   matched by `PublicationId`, never by `DeviceId`.
+5. Test pause hooks expose activation claim, node registration, callback
+   commit, available finalize, unpublish, removed callback and final Revoked
+   points. They run outside registry/node locks.
 
 ### Device trait delegation
 
@@ -327,8 +342,24 @@ before publication; kclass does not implement waiting or entropy trust policy.
 
 ## Concurrency Model
 
-- Each class registry is protected by `SpinNoPreempt<ClassRegistry<T>>`:
-  publish / devices / find / subscribe / remove complete inside the lock.
+- Each class registry is protected by `SpinNoPreempt<ClassRegistry<T>>`.
+  Membership and publication state handoff change inside the lock;
+  class-specific `publish_class` / `unpublish_class`, node work and subscriber
+  callbacks always run outside it.
+- An activation owns `Activating -> Notifying`; a revoke request during that
+  window sets `revoke_requested` (Release) under the registry lock and returns
+  `Deferred`. The activation executor performs the handoff to `Revoking` and
+  exact node cleanup. `is_available`/find/device enumeration read the flag
+  with Acquire and hide the publication immediately.
+- Revocation has two lock regions (claim, terminal removal) with node removal,
+  unpublish and removed callbacks in between. A second revoke during
+  `Revoking` returns `Deferred`; `Revoked` is exposed only after callbacks.
+- Spin-lock sections never sleep. Deferred node callbacks may run later in a
+  different context; they resume the exact `PublicationId` and binding.
+- Driver probes and removals call the registry while holding the descriptor
+  binding lock, which is a sleeping `kmutex::Mutex`. The two are never held in
+  the opposite order, and no class-registry `SpinNoPreempt` is held while
+  taking the descriptor lock.
 - `notify_class_available` uses the "find device inside the lock, call
   callbacks outside" pattern:
   - find the device and clone the subscriber list under the lock;
@@ -399,6 +430,31 @@ exchange for:
 init-order dependency — kdevice would have to be initialized whenever
 kclass constructs.
 
+### Exact publication identity replaces same-ID retirement reservation
+
+**Choice**: every publication has a globally unique `PublicationId` allocated
+by `kdevice`, and node ownership is keyed by
+`DeviceNodeKey(DeviceId, PublicationId)`. kclass owns the publication state
+machine and credential; kdevice only owns the identity space required by the
+node registry.
+
+**Trade-off**: one identity allocation and a slightly larger
+`ClassDeviceInner`, in exchange for:
+
+- two capabilities published by the same device and binding can coexist and
+  revoke independently;
+- a stale credential cannot match or delete a newer publication;
+- binding retirement can revoke every publication whose captured binding is
+  exactly terminal without a device-ID sweep;
+- node removal is exact and cannot erase a sibling publication's node.
+
+**Rejected alternative**: keying only by `DeviceId`. Rebind and multi-publish
+both make a device ID ambiguous; stale events would delete a newer entry.
+
+**Rejected alternative**: holding the registry spinlock across
+`unpublish_class`. That violates the no-sleep rule and runs subscriber-adjacent
+teardown in atomic context.
+
 ### Input class carries runtime identity metadata
 
 **Choice**: only the input class carries `physical_location` and
@@ -419,16 +475,22 @@ input-specific concepts.
 
 ### Arc<DeviceObject> prevents use-after-remove
 
-**Choice**: `ClassDevice` holds a strong `Arc<DeviceObject>`.
+**Choice**: `ClassDevice` holds a strong `Arc<DeviceObject>` plus the
+`BindingRef` captured at construction.
 
 **Trade-off**: clones of a `ClassDevice` held outside the registry still
-reach the trait methods after the device is removed from the registry.
-This is necessary for:
+reach the trait methods after the device is removed from the registry. This is
+necessary for:
 
 - pollers / async tasks holding a device reference that must finish a last
   I/O after hot removal;
 - references obtained inside subscriber callbacks that may outlive the
   removal.
+
+The strong parent keeps descriptor facts (id, name, location) readable. It
+does **not** make the handle current: `is_available()` reads the captured
+binding, so after unbind or rebind an old handle stays unavailable and cannot
+follow the new instance.
 
 **Rejected alternative**: `ClassDevice` holding `Weak<DeviceObject>`. That
 would free the `DeviceObject` immediately on removal but requires
@@ -437,14 +499,18 @@ path (device already freed).
 
 ## Drop / Resource Release
 
-- Dropping a `ClassDevice` only decrements the `Arc` count; it performs no
-  device operations.
-- Registry removal is a `Vec::swap_remove` of the `ClassDevice` entry.
-- When the last `ClassDevice` and `DeviceObject` references are released,
-  the `DeviceObject` devres (MMIO mappings, IRQs, DMA buffers) is cleaned
-  up in LIFO order.
-- The runtime trait object is dropped by its `Box<T>` when
-  `ClassDeviceInner` drops.
+- Dropping `ClassDevice` or `ClassPublication` only decrements an `Arc`; it
+  performs no device operation and releases no binding. Drop is not revoke.
+- The unique executor first removes the exact publication node, then calls
+  `unpublish_class` outside the registry lock, then invokes removed callbacks,
+  and only then removes the registry entry and sets `Revoked`.
+- A deferred node removal keeps the publication in `Revoking`; the node
+  completion callback resumes the same executor. A second revoke returns
+  `Deferred`. A node `NotOwner`/unrecoverable failure enters `RevokeFailed`
+  instead of silently unpublishing another owner's node.
+- When the last `Arc` (consumer, credential, registry or node callback) is
+  released, the runtime and `DeviceObject` references are dropped. The last
+  drop never runs under the class registry spinlock.
 
 ## Input readiness forwarding
 
@@ -452,3 +518,10 @@ The input class adapter forwards the optional readiness hint without taking a
 class lock or allocating. The devfs consumer separately checks device
 availability before probing, and a retained class handle keeps the underlying
 driver storage alive.
+
+## Probe-context publication
+
+`publish_*` accepts the kdevice `ProbeContext` rather than a raw stable object.
+The class handle captures the context's exact `BindingRef`; publication never
+queries the current binding slot itself. Remove/PM contexts cannot call the
+publish API, so class publication cannot be smuggled into teardown.

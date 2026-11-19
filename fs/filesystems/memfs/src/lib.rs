@@ -31,7 +31,7 @@ use kvfs::{
     InodeOperations, InodeSymlinkOperations, Kiocb, LockedDentry, Metadata, MetadataUpdate,
     NodeFlags, NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
     Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, get_tree_nodev, inode_init_owner,
+    WriteEndRequest, WriteReservation, get_tree_nodev, inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
 use pagecache::{CacheResidency, FolioRead};
@@ -244,7 +244,7 @@ fn init_memory_filesystems() {
     kvfs::register_filesystem(&MQUEUE_TYPE).expect("mqueue filesystem type must register once");
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 struct FileName(String);
 
 impl PartialOrd for FileName {
@@ -476,7 +476,12 @@ impl Inode {
             uid,
             gid,
             size: 0,
-            block_size: 0,
+            // The inode I/O block size is the superblock block size (PAGE_SIZE_4K,
+            // installed in new_with_name_superblock_flags_root_metadata_and_accounting),
+            // mirroring Linux tmpfs where inode->i_blkbits = sb->s_blocksize_bits.
+            // Leaving this 0 collapsed st_blksize to 1 through inode_blkbits() and
+            // forced byte-at-a-time userspace reads (e.g. GNU cmp on /tmp).
+            block_size: memaddr::PAGE_SIZE_4K as u64,
             blocks: 0,
             rdev,
             atime: SystemTime::UNIX_EPOCH,
@@ -1247,13 +1252,22 @@ impl AddressSpaceOperations for MemoryAddressSpaceOperations {
         Ok(())
     }
 
-    fn write_begin(&self, mapping: &AddressSpace, _request: WriteBeginRequest) -> VfsResult<()> {
+    fn write_begin(
+        &self,
+        mapping: &AddressSpace,
+        _request: WriteBeginRequest,
+    ) -> VfsResult<WriteReservation> {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         vfs_inode.private::<MemoryNode>()?.inode.as_file()?;
-        Ok(())
+        Ok(WriteReservation::new())
     }
 
-    fn write_end(&self, mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
+    fn write_end(
+        &self,
+        mapping: &AddressSpace,
+        request: WriteEndRequest,
+        _reservation: &WriteReservation,
+    ) -> VfsResult<usize> {
         let copied = simple_write_end(mapping, request)?;
         if copied != 0 {
             let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;

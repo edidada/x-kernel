@@ -101,6 +101,18 @@ fn check_source(entry: &IrqStateDesc) -> Result<AffinitySource, IrqAffinityError
         .ok_or(IrqAffinityError::Unsupported)
 }
 
+/// Classifies the static source capability used to seed requested file modes.
+///
+/// This intentionally does not consult action presence, restrictions or the
+/// affinity snapshot. The caller owns the Line lock.
+pub(super) fn source_is_user_settable(entry: &IrqStateDesc) -> Result<bool, IrqAffinityError> {
+    match check_source(entry) {
+        Ok(_) => Ok(true),
+        Err(IrqAffinityError::Unsupported | IrqAffinityError::OwnerFixed) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Copies affinity from an already locked Line state.
 ///
 /// The caller owns the short Line lock. This helper never reacquires it and only
@@ -110,6 +122,48 @@ pub(super) fn snapshot_locked(
 ) -> Result<IrqAffinitySnapshot, IrqAffinityError> {
     check_source(entry)?;
     Ok(entry.affinity)
+}
+
+/// Checks whether a user-originated routing change is currently admissible.
+///
+/// The caller holds the Line lock. Source/flow eligibility comes first, then
+/// teardown/action presence, then owner policy. This is a sampled control-plane
+/// result, not an authorization token: a later setter repeats all checks, and a
+/// success does not promise any particular ready CPU or hardware target.
+pub(super) fn check_user_affinity_change_locked(
+    entry: &IrqStateDesc,
+) -> Result<(), IrqAffinityError> {
+    check_source(entry)?;
+    if entry.is_teardown_in_progress() || entry.is_nmi_closing() {
+        return Err(IrqAffinityError::Management(
+            IrqDescError::TeardownInProgress {
+                virq: entry.desc.logical_irq().unwrap_or(entry.desc.hwirq),
+            },
+        ));
+    }
+    if !entry.has_actions() {
+        return Err(IrqAffinityError::Management(IrqDescError::NoIrqAction {
+            virq: entry.desc.logical_irq().unwrap_or(entry.desc.hwirq),
+        }));
+    }
+    if entry.has_user_affinity_restriction() {
+        return Err(IrqAffinityError::UserRestricted);
+    }
+    Ok(())
+}
+
+/// Applies a user-originated routing change to an already locked Line state.
+///
+/// The caller must hold management admission and the Line lock. Policy denial
+/// happens before the existing routing transaction and therefore before any
+/// chip callback.
+pub(super) fn apply_user_locked(
+    entry: &mut IrqStateDesc,
+    requested: &KCpuMask,
+    ready: KCpuMask,
+) -> Result<IrqAffinitySnapshot, IrqAffinityError> {
+    check_user_affinity_change_locked(entry)?;
+    apply_locked(entry, requested, ready)
 }
 
 /// Applies one affinity transaction to an already locked Line state.

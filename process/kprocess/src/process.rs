@@ -10,7 +10,10 @@ mod runtime_access;
 mod thread_membership;
 mod tree;
 
-use alloc::sync::{Arc, Weak};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
@@ -22,16 +25,16 @@ pub use exit::{
     ProcessExitPublication, WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode,
     WaitedChild,
 };
+use intrusive_collections::LinkedList;
 use kidentity::{PidHandle, PidNamespace};
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ksync::{Mutex, MutexGuard};
 use lazyinit::LazyInit;
-use linked_list_r4l::List;
 pub use runtime_access::{LiveAddressSpace, ProcessExecUpdate};
 pub(crate) use thread_membership::ThreadMemberSlot;
 use thread_membership::{ThreadGroupExitState, ThreadMembership};
-use tree::{ChildRelationSlot, GroupMembership, ParentRelation};
+use tree::{ChildSlotAdapter, GroupMembership, ParentRelation};
 
 use crate::{
     AsThread, Pid, ProcessGroup, ProcessRuntime, Session, lifecycle::ProcessLifecycleState,
@@ -61,15 +64,19 @@ pub struct Process {
     /// Signal delivered to the parent's `wait` when this process's parent dies
     /// first (`prctl(PR_SET_PDEATHSIG)`).
     pdeath_signal: AtomicU32,
-    /// Fast-path gate for per-trap CPU-timer polling.
+    /// Exec-time auxiliary vector, flattened as `(type, value)` words with the
+    /// trailing NULL entry last. Written once per exec, read by
+    /// `prctl(PR_GET_AUXV)` and `/proc/<pid>/auxv` (Linux `mm->saved_aux`).
+    saved_aux: SpinNoIrq<Arc<Vec<u64>>>,
+    /// Fast-path gate for periodic CPU-timer checks.
     ///
     /// True while any CPU-time-driven timer (ITIMER_VIRTUAL, ITIMER_PROF,
     /// process-CPU POSIX timer) may be armed. Arm paths and each real poll
     /// re-derive it, so expiry clears it without an explicit disarm.
     ///
     /// Read without the timer-manager lock, like Linux `timers_active`: a
-    /// concurrent arm may be delayed by one trap, never lost. Living on
-    /// `Process` lets the return path skip the runtime weak upgrade.
+    /// concurrent arm may be delayed until the next tick. Living on `Process`
+    /// lets the IRQ path skip the runtime weak upgrade.
     cpu_timers_armed: AtomicBool,
 
     /// Whether this thread group is a child subreaper (`PR_SET_CHILD_SUBREAPER`).
@@ -80,7 +87,7 @@ pub struct Process {
     child_subreaper: AtomicBool,
     /// Current children linked under this process. Mutate only under
     /// `process_domain` write lock.
-    children: SpinNoIrq<List<Arc<ChildRelationSlot>>>,
+    children: SpinNoIrq<LinkedList<ChildSlotAdapter>>,
     /// Wait parent contract and preallocated child-list relation slots. Mutate
     /// only under `process_domain` write lock.
     parent_relation: ParentRelation,
@@ -264,11 +271,11 @@ impl Process {
         self.child_subreaper.store(enabled, Ordering::Relaxed)
     }
 
-    /// Returns whether per-trap CPU-timer polling must run for this process.
+    /// Returns whether a periodic tick must request CPU-timer work.
     ///
     /// Returns:
     /// - `true`: at least one CPU-time-driven timer may be armed, so the
-    ///   return path polls the timer manager.
+    ///   interrupted thread requests a timer-manager poll on user return.
     /// - `false`: no CPU-time timer can produce a delivery, so the poll is
     ///   skipped.
     ///
@@ -421,10 +428,15 @@ impl Process {
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             exec_gate: exec_gate::ExecGate::new(),
             pdeath_signal: AtomicU32::new(0),
+            saved_aux: SpinNoIrq::new(
+                parent
+                    .as_ref()
+                    .map_or_else(|| Arc::new(Vec::new()), |parent| parent.saved_aux()),
+            ),
             cpu_timers_armed: AtomicBool::new(false),
             lifecycle: ProcessLifecycleState::new(),
             child_subreaper: AtomicBool::new(false),
-            children: SpinNoIrq::new(List::new()),
+            children: SpinNoIrq::new(LinkedList::new(ChildSlotAdapter::NEW)),
             parent_relation,
             visible_parent: AtomicU32::new(visible_parent),
             group_membership,
@@ -509,6 +521,9 @@ pub(crate) static INIT_PROC: LazyInit<Arc<Process>> = LazyInit::new();
 ///
 /// Panics when no initial process has been constructed.
 pub fn init_proc() -> Arc<Process> {
+    kcgroup::refresh_root_cpuset_universe();
+    kcgroup::install_bandwidth_release_hook(ktask::release_bandwidth_tracker);
+    let _ = memacct::install_current_memcg_provider(crate::current_memcg);
     #[expect(
         clippy::unwrap_used,
         reason = "CG-021-no-panic-on-reachable-failure: init_proc requires the initial process to \

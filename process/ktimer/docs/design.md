@@ -756,14 +756,20 @@ interval and an `Option<TimerInstant>` deadline — never bare unitless
 integers. POSIX timers reuse `ITimer` as their specification and add
 notification and overrun state.
 
+For explicit POSIX timer notifications, `ksyscall` copies the complete
+`sigevent` and converts its `sigval` to pointer-sized opaque bits. `ktimer`
+keeps those bits in `TimerSigValue` and `TimerSignal`; `ksignal` builds the
+outbound `siginfo` union using its full-width pointer member.
+
 ## Execution context
 
 - `ProcessTimerManager` is serialized by the owning `ProcessRuntime`'s
   `Arc<Mutex<..>>` (`kprocess::process_runtime`). Its methods run on
   syscall and user-return paths; they do not sleep.
-- `poll_cpu_timers` relies on caller-supplied sampled `TimeSpan` user and
-  kernel CPU totals of the same process; CPU timers are pure polling, no
-  interrupts.
+- `poll_cpu_timers` relies on caller-supplied totals for the same process.
+  `ITIMER_VIRTUAL` uses user time, `ITIMER_PROF` uses user plus system, and
+  POSIX process-CPU timers use scheduler runtime. CPU timers are polled at
+  user return; a periodic timer IRQ gives a busy userspace task return points.
 - The alarm task (`spawn_alarm_task`) is a sleepable kernel task using
   `timeout_at` on the current conversion of the earliest deadline; the expired-owner
   callback re-enters `kprocess` polling and may therefore block on the

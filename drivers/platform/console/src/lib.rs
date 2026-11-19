@@ -38,7 +38,9 @@ use alloc::sync::Arc;
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
-use kirq::{IrqActionToken, IrqDesc};
+use kirq::IrqActionToken;
+#[cfg(any(all(feature = "ns16550-ioport", target_arch = "x86_64"), unittest))]
+use kirq::IrqDesc;
 use kspin::{SpinNoIrq, static_lock};
 #[cfg(feature = "ns16550-mmio")]
 pub use ns16550_mmio::SerialRegWidth;
@@ -92,7 +94,7 @@ struct StdoutDesc {
 
 /// Device-tree MMIO layout for an NS16550-compatible UART.
 #[cfg(feature = "ns16550-mmio")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerialMmioLayout {
     /// Device-tree `reg-shift`: adjacent register offset is `1 << reg_shift`.
     pub reg_shift: u32,
@@ -412,6 +414,7 @@ fn map_console_irq(irq: serial::EarlyIrq) -> Option<usize> {
                 None
             }
         },
+        #[cfg(any(all(feature = "ns16550-ioport", target_arch = "x86_64"), unittest))]
         serial::EarlyIrq::Legacy(desc) => match kirq::try_map(desc) {
             Ok(virq) => Some(virq),
             Err(error) => {

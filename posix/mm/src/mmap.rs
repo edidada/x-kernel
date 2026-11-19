@@ -8,8 +8,10 @@ use khal::paging::{MappingFlags, PageSize};
 use kprocess::current_user_process;
 use kvfs::{FMode, VfsFile};
 use linux_raw_sys::general::*;
-use memaddr::{MemoryAddr, VirtAddr, align_up_4k};
-use memspace::{AddrPolicy, MsyncPolicy, MsyncWriteback, VmRuntimeRef};
+use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange, align_up_4k};
+use memspace::{AddrPolicy, MmSpace, MsyncPolicy, MsyncWriteback, VmRuntimeRef};
+
+use crate::limits::check_address_space_limit;
 
 bitflags::bitflags! {
     /// `PROT_*` flags for use with [`sys_mmap`].
@@ -30,7 +32,7 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MappingPermissions {
     pub(crate) current: MappingFlags,
     pub(crate) maximum: MappingFlags,
@@ -155,6 +157,38 @@ impl MremapFlags {
         }
         Ok(())
     }
+
+    fn validate_fixed_target(
+        self,
+        addr: usize,
+        old_size: usize,
+        new_addr: usize,
+        new_size: usize,
+    ) -> KResult<()> {
+        if self.is_fixed() {
+            if !new_addr.is_multiple_of(PageSize::Size4K as usize) {
+                return Err(KError::InvalidInput);
+            }
+            let new_end = new_addr.checked_add(new_size).ok_or(KError::InvalidInput)?;
+            let old_end = addr.checked_add(old_size).ok_or(KError::InvalidInput)?;
+            if new_addr < old_end && addr < new_end {
+                return Err(KError::InvalidInput);
+            }
+        }
+        Ok(())
+    }
+
+    fn check_growth_limit(
+        aspace: &MmSpace,
+        old_size: usize,
+        new_size: usize,
+        limit_bytes: u64,
+    ) -> KResult<()> {
+        if new_size > old_size {
+            check_address_space_limit(aspace, new_size - old_size, None, limit_bytes)?;
+        }
+        Ok(())
+    }
 }
 
 impl MmapFlags {
@@ -207,7 +241,7 @@ impl MmapFlags {
 }
 
 /// Whether the mapping is shared or private.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum MapType {
     Shared,
     Private,
@@ -320,6 +354,48 @@ impl MmapRequest {
         } else {
             PageSize::Size4K
         }
+    }
+
+    fn resolve_address_with_limit(
+        &self,
+        aspace: &mut MmSpace,
+        hint: VirtAddr,
+        length_bytes: usize,
+        page_size: PageSize,
+        limit_bytes: u64,
+    ) -> KResult<VirtAddr> {
+        let is_fixed = matches!(self.flags.addr_policy(), AddrPolicy::Fixed);
+        let start = if is_fixed {
+            hint
+        } else {
+            aspace.mmap_resolve_addr(
+                hint,
+                length_bytes,
+                page_size as usize,
+                self.flags.addr_policy(),
+            )?
+        };
+        let replacement = if is_fixed {
+            let end = hint
+                .as_usize()
+                .checked_add(length_bytes)
+                .ok_or(KError::NoMemory)?;
+            Some(VirtAddrRange::new(hint, VirtAddr::from_usize(end)))
+        } else {
+            None
+        };
+        check_address_space_limit(aspace, length_bytes, replacement, limit_bytes)?;
+        if matches!(self.map_type, MapType::Private)
+            && self.permissions.current.contains(MappingFlags::WRITE)
+            && !self.flags.contains(MmapFlags::NORESERVE)
+        {
+            memspace::check_memory_commitment(length_bytes)?;
+        }
+        // MAP_FIXED must not discard the old mappings before budget admission.
+        if is_fixed {
+            aspace.mmap_resolve_addr(hint, length_bytes, page_size as usize, AddrPolicy::Fixed)?;
+        }
+        Ok(start)
     }
 
     fn resolved_range(&self) -> KResult<(VirtAddr, usize, PageSize)> {
@@ -509,14 +585,19 @@ pub fn sys_mmap(
 
     // --- Resolve the mapping address ---
     let (hint, mut length, page_size) = request.resolved_range()?;
+    if let Some(file) = file.as_ref() {
+        validate_file_mapping_access(file, request.map_type, request.permissions.current)?;
+    }
 
+    let address_space_limit = process.resources()?.rlimit(RLIMIT_AS)?.current;
     let aspace_ref = process.address_space()?;
     aspace_ref.with_mapping_owner(|mut mapping| {
-        let start = mapping.aspace_mut().mmap_resolve_addr(
+        let start = request.resolve_address_with_limit(
+            mapping.aspace_mut(),
             hint,
             length,
-            page_size as usize,
-            request.flags.addr_policy(),
+            page_size,
+            address_space_limit,
         )?;
 
         debug!(
@@ -531,7 +612,6 @@ pub fn sys_mmap(
                 None
             }
             Some(file) => {
-                validate_file_mapping_access(file, request.map_type, request.permissions.current)?;
                 let max_flags = if request.map_type.is_shared() {
                     shared_file_max_permissions(file)
                 } else {
@@ -564,22 +644,29 @@ pub fn sys_mmap(
         };
 
         if let Some((vma, runtime)) = file_vma {
-            mapping
-                .aspace_mut()
-                .map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
+            mapping.aspace_mut().map_runtime_vma(
+                vma.with_noreserve(request.flags.contains(MmapFlags::NORESERVE)),
+                request.flags.is_populate(),
+                runtime,
+            )?;
         } else {
             let runtime = match request.map_type {
                 MapType::Shared => VmRuntimeRef::new_anon_shared(start, length, page_size)?,
                 MapType::Private => VmRuntimeRef::new_anon_private(start, page_size),
             };
-            mapping.aspace_mut().map_with_max_flags(
+            let vma = memspace::VmArea::new(
                 start,
                 length,
                 request.permissions.current,
                 request.permissions.maximum,
-                request.flags.is_populate(),
-                runtime,
-            )?;
+                runtime.backing_info(),
+                0,
+                None,
+            )
+            .with_noreserve(request.flags.contains(MmapFlags::NORESERVE));
+            mapping
+                .aspace_mut()
+                .map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
         }
 
         Ok(start.as_usize() as _)
@@ -649,29 +736,22 @@ pub fn sys_mremap(
     let old_size = align_up_4k(old_size);
     let new_size = align_up_4k(new_size);
 
-    if mremap_flags.is_fixed() {
-        if !new_addr.is_multiple_of(PageSize::Size4K as usize) {
-            return Err(KError::InvalidInput);
-        }
-        let new_end = new_addr.checked_add(new_size).ok_or(KError::InvalidInput)?;
-        let old_end = addr.checked_add(old_size).ok_or(KError::InvalidInput)?;
-        if new_addr < old_end && addr < new_end {
-            return Err(KError::InvalidInput);
-        }
-    }
+    mremap_flags.validate_fixed_target(addr, old_size, new_addr, new_size)?;
 
     let addr = VirtAddr::from(addr);
 
     // --- 2. Find the VMA ---
 
     let process = current_user_process();
+    let address_space_limit = process.resources()?.rlimit(RLIMIT_AS)?.current;
     let aspace_ref = process.address_space()?;
     aspace_ref.with_mapping_owner(|mut mapping| {
-        let source = mapping.aspace_mut().resolve_mremap_source(addr, old_size)?;
+        let mut source = mapping.aspace_mut().resolve_mremap_source(addr, old_size)?;
         let vma_end = source.end();
-        let mapping_flags = source.flags();
-        let max_flags = source.max_flags();
         let page_size = source.page_size();
+
+        // Linux checks growth before MREMAP_FIXED removes the destination.
+        MremapFlags::check_growth_limit(mapping.aspace(), old_size, new_size, address_space_limit)?;
 
         // --- 3. Dispatch ---
 
@@ -679,39 +759,46 @@ pub fn sys_mremap(
         if mremap_flags.is_fixed() {
             let move_size = old_size.min(new_size);
             let target_addr = VirtAddr::from(new_addr);
-            mapping.relocate_mapping(&source, target_addr, new_size, true)?;
             if mremap_flags.keeps_source_mapping() {
-                let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-                mapping.aspace_mut().map_with_max_flags(
-                    addr,
-                    move_size,
-                    mapping_flags,
-                    max_flags,
-                    false,
-                    fresh_runtime,
-                )?;
+                // Linux unmaps the fixed destination before charging the
+                // retained source for MREMAP_DONTUNMAP, even on admission failure.
+                mapping.aspace_mut().unmap(target_addr, new_size)?;
+                source = mapping.aspace().resolve_mremap_source(addr, old_size)?;
+                check_address_space_limit(mapping.aspace(), new_size, None, address_space_limit)?;
+            }
+            let retained = if mremap_flags.keeps_source_mapping() {
+                let runtime = VmRuntimeRef::new_anon_private(addr, page_size);
+                Some((source.fresh_mapping(move_size, &runtime)?, runtime))
+            } else {
+                None
+            };
+            mapping.relocate_mapping(
+                &source,
+                target_addr,
+                new_size,
+                !mremap_flags.keeps_source_mapping(),
+            )?;
+            if let Some((vma, runtime)) = retained {
+                mapping.aspace_mut().map_runtime_vma(vma, false, runtime)?;
             }
             return Ok(target_addr.as_usize() as _);
         }
 
         // DONTUNMAP path: move, leave old as fresh anonymous
         if mremap_flags.keeps_source_mapping() {
+            check_address_space_limit(mapping.aspace(), new_size, None, address_space_limit)?;
             let target_addr = mapping
                 .aspace_mut()
                 .find_relocation_target(addr, new_size, page_size)?;
 
+            let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
+            let fresh_vma = source.fresh_mapping(old_size, &fresh_runtime)?;
             mapping.relocate_mapping(&source, target_addr, new_size, false)?;
             // The old mapping's role was retired after the PTE transfer; install
             // fresh anonymous backing at the original address.
-            let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-            mapping.aspace_mut().map_with_max_flags(
-                addr,
-                old_size,
-                mapping_flags,
-                max_flags,
-                false,
-                fresh_runtime,
-            )?;
+            mapping
+                .aspace_mut()
+                .map_runtime_vma(fresh_vma, false, fresh_runtime)?;
             return Ok(target_addr.as_usize() as _);
         }
 
@@ -797,6 +884,28 @@ pub fn sys_mlock(addr: usize, length: usize) -> KResult<isize> {
 }
 
 pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> KResult<isize> {
+    Ok(0)
+}
+
+/// Locks all of the caller's memory. X-Kernel has no swap, so every page is
+/// already resident; accept the request as a no-op (greetd and other daemons
+/// call `mlockall` for hardening and abort if it fails).
+///
+/// The flag word is still validated: Linux's `mlockall` rejects an empty word,
+/// an unknown bit, and `MCL_ONFAULT` on its own with `EINVAL`. Accepting those
+/// would report success for a request Linux refuses.
+pub fn sys_mlockall(flags: u32) -> KResult<isize> {
+    const MCL_CURRENT: u32 = 0x1;
+    const MCL_FUTURE: u32 = 0x2;
+    const MCL_ONFAULT: u32 = 0x4;
+    if flags == 0 || flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 || flags == MCL_ONFAULT
+    {
+        return Err(KError::InvalidInput);
+    }
+    Ok(0)
+}
+
+pub fn sys_munlockall() -> KResult<isize> {
     Ok(0)
 }
 

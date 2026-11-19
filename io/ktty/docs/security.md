@@ -77,8 +77,11 @@ hardware blanking or complete VT keyboard translation. Registry-owned named
 identities are projected by devfs/procfs/sysfs, with failed/retired registrations
 excluded as described in KVFS's registration contract.
 
-- `TC*`/`TIOC*` ioctls carry user addresses and must be copied through
-  the `osvm` user-memory access interface.
+- `TC*`/`TIOC*` ioctls carry user addresses and must be copied through the
+  typed `posix_types::UserPtr`/`UserConstPtr` interface (`UserPtr::<T>::from`
+  plus `read_vm`/`write_vm`), which wraps the `osvm` user-memory access
+  interface. Raw `arg as *mut T`/`arg as *const T` casts are not used; the
+  payload type is stated at the ABI boundary.
 - The PGID passed to `TIOCSPGRP` may be invalid, exited, or belong to
   another session.
 - `O_NOCTTY` controls whether opening a TTY may implicitly acquire the
@@ -91,9 +94,23 @@ excluded as described in KVFS's registration contract.
 ## Memory-Safety Invariants
 
 ioctl user pointers are dereferenced only at the ABI boundary in
-`src/tty/mod.rs` and `src/tty/vt.rs`, through `read_vm`/`write_vm` with user-address
-validation. The job-control layer stores no user pointers — only weak
-references to `Session` and `ProcessGroup` objects.
+`src/tty/mod.rs` and `src/tty/vt.rs`, through `UserPtr`/`UserConstPtr`
+`read_vm`/`write_vm` with user-address validation. The job-control layer stores
+no user pointers — only weak references to `Session` and `ProcessGroup`
+objects.
+
+Copying a payload by value additionally requires `T: UserRead`/`UserWrite`, so
+each type stored to or read from user memory opts in explicitly. The console and
+VT payload types (`WindowSize` in `src/terminal/mod.rs`; `Termios`/`Termios2` in
+`src/terminal/termios.rs`; `VtMode`/`VtState` in `src/tty/vt.rs`) take
+`#[derive(UserRead, UserWrite)]`, the same marker derives `posix_types` applies
+to its own ABI types. Each is a `repr(C)` aggregate whose size is a multiple of
+its alignment and which has no interior padding (8, 36, 44, 8 and 6 bytes
+respectively), so every byte pattern read from user memory is a valid value and
+every value written back is fully initialized. Array payloads that have no named
+local type (`[i32; 20]`, `[u16; 3]`, `[u8; 8]`) use the blanket array impls.
+The markers assert the layout only; they do not validate a caller's buffer size,
+alignment or contents, which remain the ioctl handler's responsibility.
 
 ## Thread Safety
 
@@ -261,9 +278,28 @@ open. After peer closure, background reads return EIO without consuming input
 reserved for foreground readers. Linux's full
 `SIGTTIN`/orphaned-process-group semantics are not implemented yet.
 
-`TIOCSCTTY` does not yet support Linux's privileged `arg == 1`
-cross-session forced acquisition; that request returns `EPERM`, and other
-non-zero arguments return `EINVAL`.
+`TIOCSCTTY` with `arg == 1` performs Linux's privileged cross-session forced
+acquisition. `tiocsctty`'s conditions are applied before any state changes:
+
+- a caller that is its session's leader *and* whose session already owns the
+  terminal succeeds without changing anything;
+- otherwise the caller must be its session's leader **and** have no controlling
+  terminal yet (the `signal->tty` test), else `EPERM`;
+- `CAP_SYS_ADMIN` is required only for taking the terminal away from a live
+  session; claiming one that no session owns needs no capability.
+
+A steal replaces the current owner, so the
+previous claim is released before the new one is installed - the two are mutually
+exclusive and `ensure_session` would otherwise answer `EBUSY`, which is the case
+this path exists for. Everything the call changes is rolled back on failure,
+including the previous owner's foreground group (clearing a session drops it too),
+so a rejected steal leaves the terminal exactly as it was rather than stranding
+it without a session; a session that already names a different terminal yields
+`EBUSY`. Other non-zero arguments return `EINVAL`.
+
+This is the only `TIOCSCTTY` path that reassigns a terminal an existing getty
+holds, which is why it is capability-gated rather than merely
+session-leader-gated.
 
 ## Audit Checklist
 

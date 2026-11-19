@@ -18,8 +18,8 @@ triggers:
   remaining true while a lock is released and reacquired, including read-to-write
   lock transitions.
   Not this rule: [CG-001](CG-001-static-spinlock-registration.md),
-  the pending Dylint lint `unregistered_static_lock` ([pending](pending.md)) and
-  the pending Dylint lint `untracked_runtime_lock` ([pending](pending.md)) own registration and runtime
+  the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) and
+  the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) own registration and runtime
   constructor tracking; this rule owns an invariant broken between
   acquisitions. Sleeping under a live guard belongs to
   [CG-013](CG-013-no-sleep-under-spinlock.md), and unnecessary IRQ masking to
@@ -28,7 +28,9 @@ triggers:
   producing a time-of-check/time-of-use bug or inconsistent state.
 - **How to check**:
   1. Identify the protected invariant and each acquisition and release around
-     the operation.
+     the operation. Confirm where each guard drops (a temporary at the end of
+     its statement, a block-scoped guard at the block end) before claiming a
+     lock is held or released across the gap.
   2. Check whether another accessor can change state in a gap so that a later
      read or update relies on stale information.
   3. Keep dependent checks and updates within one critical section; separate

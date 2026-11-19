@@ -65,6 +65,32 @@ It uses quiescent fixture removal, not GP-delayed retirement, so the caller must
 exclude all borrowed readers of the removed key, not only active actions.
 It is not a production dynamic mapping-disposal API or proof of source vacancy.
 
+## Initial Policy And Retirement Notification
+
+An ordinary first action may establish a requested policy only after the CPU
+present map is ready. `present_mask()` is present, not ready; it does not write
+hardware. If the map is unavailable, registration returns `NotReady` before
+publishing an action or history. Fixed owner affinity is independent of that
+default. No procfs read or user setter supplies the initial policy.
+
+Action-history publication is a separate core fact: successful regular/shared/
+NMI publication sets it, failures do not, and action removal does not clear it.
+It is not a filesystem visibility flag; procfs applies its own display policy.
+
+Static user-routing source capability is a separate classification used for
+initial inode permissions. It is independent of action presence, per-action
+restriction and temporary routing state; every actual write still revalidates
+the complete checked setter.
+
+Retirement observers are weak, per-subscription intrusive slots allocated
+outside the Line lock. Subscription verifies the original Line is current under
+`IRQ_STATE -> Line`. Retirement moves the list under the Line lock and invokes
+callbacks only after KIRQ locks are released. A cancellation after that move
+does not access links and does not wait for a captured callback. Callback code
+does not hold KIRQ locks; dropping a namespace record may indirectly acquire
+the Line lock through subscription Drop, which is permitted outside the callback's
+KIRQ operation. Only real Line retirement notifies, not ordinary action removal.
+
 ## Sparse Handle Identity Boundary
 
 `runtime/handle.rs` is an identity and enumeration boundary, not a new routing
@@ -91,6 +117,37 @@ eligible retirement between short-lock scopes. The controller transaction
 remains the existing `apply_locked` path with all source, ready-CPU, failure and
 deferred rules unchanged. The handle API provides no credentials and no
 capability bypass; procfs and source-owner policy remain outside this module.
+
+## User Routing Protection Boundary
+
+User routing protection is a change-admission policy, not an information-access
+rule. A protected ordinary Line remains readable through `irq_affinity`; a
+future procfs consumer may expose that snapshot read-only. Only
+`check_user_affinity_change` and `set_user_affinity` apply the action policy.
+
+The restriction belongs to the regular action and cannot outlive it. Before
+action publication, lookup/configuration failure leaves no policy. Once the
+action is published, its existing lifetime is authoritative; a post-publication
+platform failure does not create a second policy state. Last-action removal
+removes the policy with the existing pending cancellation. Re-registration uses
+fresh options. The policy scan runs under Line exclusion and is not a dispatch
+path check.
+
+The trusted kernel setter is intentionally not blocked by this user-only
+policy. It still enforces fixed, PerCpu, NMI, MSI, source and context rules, and
+is not proof of caller ownership. Future generic balancing adapters must use
+the checked user path or the user-only promise is incomplete.
+
+`check_user_affinity_change` is a sampled eligibility observation and never a
+capability token. The setter repeats the checks after management admission.
+Denial changes no affinity snapshot, requested/effective/pending state, disable
+depth, action membership or hardware. No-action and teardown reject the user
+change entrance; read observation remains unchanged.
+
+PMU ordinary SPI and unavailable-NMI fallback declare the restriction through
+their existing registration options. PPI and real-NMI lifecycle paths are
+unchanged. PMU initial SPI-CPU association and real delivery remain owner
+integration obligations; no CPU0 fallback or fake fixed affinity is introduced.
 
 ## NMI Action Lifetime Boundary
 

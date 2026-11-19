@@ -2,8 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use driver_base::{DeviceKind, DriverError, DriverResult};
 use fwnode::{FwError, FwIrqSpec, FwNode, FwNodeId, FwNodeOps, FwProperty, FwReference};
@@ -13,11 +13,12 @@ use lazyinit::LazyInit;
 use unittest::{assert_eq, def_test};
 
 use super::*;
-use crate::{DeviceDriver, DeviceState, IntxRouteStatus, PlatformIdentity};
+use crate::{DeviceDriver, DeviceState, IntxRouteStatus, PlatformIdentity, find_device};
 
 struct MatchingDriver;
 
 impl DeviceDriver for MatchingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "matching-test"
     }
@@ -35,7 +36,7 @@ impl DeviceDriver for MatchingDriver {
         &M
     }
 
-    fn probe_device(&self, _device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, _ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
         Ok(())
     }
 }
@@ -107,7 +108,7 @@ fn test_intx_status_reaches_descriptor_and_device() {
 }
 
 #[def_test(serial)]
-fn test_unmatched_descriptor_probe_does_not_create_runtime_object() {
+fn test_unmatched_descriptor_keeps_stable_discovered_object() {
     let bus = reset_model();
     let desc = device_desc_add(DeviceDescSpec {
         bus_id: bus.id(),
@@ -126,9 +127,19 @@ fn test_unmatched_descriptor_probe_does_not_create_runtime_object() {
     })
     .unwrap();
 
-    assert_eq!(crate::device_records_snapshot().len(), 0);
+    // Registration publishes the stable object immediately; it has no current
+    // binding and projects `Discovered`.
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, desc.device_id());
+    assert_eq!(records[0].state, DeviceState::Discovered);
+    assert_eq!(records[0].driver_name, None);
+
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unmatched);
-    assert_eq!(crate::device_records_snapshot().len(), 0);
+    let device = device_for_desc(desc.id()).expect("stable object survives an unmatched probe");
+    assert_eq!(device.id(), desc.device_id());
+    assert_eq!(device.state(), DeviceState::Discovered);
+    assert!(device.binding_ref().is_none());
 }
 
 #[def_test(serial)]
@@ -151,7 +162,10 @@ fn test_driver_registration_scans_existing_descriptors() {
     })
     .unwrap();
 
-    assert_eq!(crate::device_records_snapshot().len(), 0);
+    assert_eq!(
+        crate::device_records_snapshot()[0].state,
+        DeviceState::Discovered
+    );
     register_driver_object(Arc::new(MatchingDriver));
 
     let records = crate::device_records_snapshot();
@@ -163,7 +177,24 @@ fn test_driver_registration_scans_existing_descriptors() {
 #[def_test(serial)]
 fn test_adopt_active_device_registers_bound_object() {
     let bus = reset_model();
-    let driver = register_driver_object(Arc::new(MatchingDriver));
+    let rejected_driver = register_driver_object(Arc::new(MatchingDriver));
+    let rejected = adopt_active_device(ActiveDeviceAdoption {
+        bus_id: bus.id(),
+        parent: None,
+        location: DeviceLocation::PlatformStatic { id: 2 },
+        origin: DiscoveryOrigin::PlatformStatic,
+        identity: DeviceIdentity::Platform(PlatformIdentity {
+            alias: Some("rejected"),
+            firmware_id: None,
+        }),
+        transport: None,
+        resources: ResourceSet::new(),
+        dma: None,
+        driver: rejected_driver,
+    });
+    assert!(matches!(rejected, Err(DriverError::Unsupported)));
+
+    let driver = register_driver_object(crate::BoxedDriver::new_adoptable(MatchingDriver));
     let dma = DmaInfo::new(0xffff_ffff, DmaWindow::IDENTITY, true).unwrap();
 
     let device = adopt_active_device(ActiveDeviceAdoption {
@@ -319,6 +350,7 @@ struct RetryRecordingDriver;
 struct FailingDriver;
 
 impl DeviceDriver for RecordingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "node-recording-test"
     }
@@ -336,13 +368,15 @@ impl DeviceDriver for RecordingDriver {
         &M
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         record_probe_node(&device);
         Ok(())
     }
 }
 
 impl DeviceDriver for RetryRecordingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "node-retry-recording-test"
     }
@@ -360,13 +394,15 @@ impl DeviceDriver for RetryRecordingDriver {
         &M
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         record_probe_node(&device);
         Ok(())
     }
 }
 
 impl DeviceDriver for FailingDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "node-failing-test"
     }
@@ -384,7 +420,8 @@ impl DeviceDriver for FailingDriver {
         &M
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         // The first, failing probe must already see the discovery association.
         record_probe_node(&device);
         Err(DriverError::Io)
@@ -469,11 +506,14 @@ fn test_failed_probe_retry_preserves_descriptor_and_node() {
         probe_device_desc(desc.id()).unwrap(),
         ProbeOutcome::Unclaimed
     );
-    assert!(
-        crate::device_registry()
-            .find_device_for_desc(desc.id())
-            .is_none()
-    );
+    // A failed round clears the binding but keeps the stable object, so the
+    // retry below must observe the same object and descriptor identity.
+    let failed = crate::device_registry()
+        .find_device_for_desc(desc.id())
+        .expect("stable object survives a failed round");
+    assert_eq!(failed.id(), desc.device_id());
+    assert_eq!(failed.state(), DeviceState::Discovered);
+    assert!(failed.binding_ref().is_none());
     assert_eq!(OBSERVED_NODE.load(Ordering::SeqCst), FAKE_NODE_RAW);
 
     // Reset the observation so the retry assertion below cannot pass on the
@@ -488,6 +528,7 @@ fn test_failed_probe_retry_preserves_descriptor_and_node() {
     let bound = crate::device_registry()
         .find_device_for_desc(desc.id())
         .unwrap();
+    assert_eq!(bound.id(), failed.id());
     assert_eq!(bound.firmware_node(), Some(node));
     assert_eq!(
         crate::device_registry().find_device_desc(desc.id()).unwrap().id(),
@@ -501,15 +542,16 @@ fn test_failed_probe_retry_preserves_descriptor_and_node() {
 
 type ProbeFn = dyn Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync;
 
-struct TestDriver {
+struct TestDriver<Matcher> {
     name: &'static str,
     bus_types: &'static [BusTypeId],
-    matcher: Box<dyn crate::DeviceMatcher>,
+    matcher: Matcher,
     probe: Arc<ProbeFn>,
     remove: Option<Arc<ProbeFn>>,
 }
 
-impl DeviceDriver for TestDriver {
+impl<Matcher: crate::DeviceMatcher> DeviceDriver for TestDriver<Matcher> {
+    type Data = ();
     fn name(&self) -> &'static str {
         self.name
     }
@@ -523,16 +565,21 @@ impl DeviceDriver for TestDriver {
     }
 
     fn matcher(&self) -> &dyn crate::DeviceMatcher {
-        self.matcher.as_ref()
+        &self.matcher
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<()> {
+        let device = ctx.device().clone();
         (self.probe)(device)
     }
 
-    fn remove(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn remove(
+        &self,
+        ctx: &crate::RemoveContext<'_>,
+        _data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
         match &self.remove {
-            Some(remove) => remove(device),
+            Some(remove) => remove(ctx.device().clone()),
             None => Ok(()),
         }
     }
@@ -542,7 +589,7 @@ fn platform_driver(
     name: &'static str,
     matcher: impl crate::DeviceMatcher,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
-) -> Arc<dyn DeviceDriver> {
+) -> crate::BoxedDriver {
     platform_driver_with_remove(name, matcher, probe, |_| Ok(()))
 }
 
@@ -551,11 +598,11 @@ fn platform_driver_with_remove(
     matcher: impl crate::DeviceMatcher,
     probe: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
     remove: impl Fn(Arc<DeviceObject>) -> DriverResult<()> + Send + Sync + 'static,
-) -> Arc<dyn DeviceDriver> {
-    Arc::new(TestDriver {
+) -> crate::BoxedDriver {
+    crate::BoxedDriver::new_adoptable(TestDriver {
         name,
         bus_types: &[BusTypeId::PLATFORM],
-        matcher: Box::new(matcher),
+        matcher,
         probe: Arc::new(probe),
         remove: Some(Arc::new(remove)),
     })
@@ -701,7 +748,19 @@ fn test_unmatched_descriptor_does_not_call_probe() {
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unmatched);
     assert_eq!(driver.probe_stats().attempts, 0);
     assert!(trace_snapshot().is_empty());
-    assert!(crate::device_records_snapshot().is_empty());
+    // Registration publishes the stable object even when no driver matches;
+    // it stays Discovered with no binding.
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, desc.device_id());
+    assert_eq!(records[0].state, DeviceState::Discovered);
+    assert!(records[0].driver_id.is_none());
+    assert!(
+        crate::find_device(desc.device_id())
+            .unwrap()
+            .binding_ref()
+            .is_none()
+    );
 }
 
 #[def_test(serial)]
@@ -747,7 +806,12 @@ fn test_failed_candidate_cleanup_precedes_next_probe() {
         crate::CompatibleAliasMatcher("cleanup"),
         |device| {
             trace_push("A-probe");
-            device.add_cleanup(|| trace_push("A-cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("A-cleanup"))
+                .expect("probe may register cleanup");
             Err(DriverError::Io)
         },
     ));
@@ -809,7 +873,12 @@ fn test_all_candidates_fail_leaves_no_runtime_residue() {
         crate::CompatibleAliasMatcher("allfail"),
         |device| {
             trace_push("A-probe");
-            device.add_cleanup(|| trace_push("A-cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("A-cleanup"))
+                .expect("probe may register cleanup");
             Err(DriverError::Io)
         },
     ));
@@ -818,7 +887,12 @@ fn test_all_candidates_fail_leaves_no_runtime_residue() {
         crate::CompatibleAliasMatcher("allfail"),
         |device| {
             trace_push("B-probe");
-            device.add_cleanup(|| trace_push("B-cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("B-cleanup"))
+                .expect("probe may register cleanup");
             Err(DriverError::Io)
         },
     ));
@@ -826,8 +900,14 @@ fn test_all_candidates_fail_leaves_no_runtime_residue() {
     let desc = platform_desc(&bus, 24, "allfail");
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Unclaimed);
     assert_trace!(&["A-probe", "A-cleanup", "B-probe", "B-cleanup"]);
-    assert!(crate::device_records_snapshot().is_empty());
-    assert!(device_for_desc(desc.id()).is_none());
+    // All bindings are retired, but the stable registration object stays.
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, desc.device_id());
+    assert_eq!(records[0].state, DeviceState::Discovered);
+    assert_eq!(records[0].driver_name, None);
+    let device = device_for_desc(desc.id()).expect("stable object survives an all-fail round");
+    assert!(device.binding_ref().is_none());
     assert!(a.bound_devices_snapshot().is_empty());
     assert!(b.bound_devices_snapshot().is_empty());
     assert!(bus.devices_snapshot().is_empty());
@@ -1078,7 +1158,10 @@ fn test_probe_registers_child_without_binding_lock() {
 
     let child_id = DeviceDescId::new(CHILD_DESC.load(Ordering::SeqCst));
     assert_desc_pending!(child_id);
-    assert!(device_for_desc(child_id).is_none());
+    // Registration publishes the child's stable object even though the probe
+    // that created it never held the child's binding lock.
+    let child = device_for_desc(child_id).expect("registered child has a stable object");
+    assert_eq!(child.state(), DeviceState::Discovered);
 }
 
 #[def_test(serial)]
@@ -1130,7 +1213,12 @@ fn test_core_preparation_failure_is_an_error() {
         crate::CompatibleAliasMatcher("core"),
         |device| {
             trace_push("A-probe");
-            device.add_cleanup(|| trace_push("A-cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("A-cleanup"))
+                .expect("probe may register cleanup");
             Err(DriverError::Io)
         },
     ));
@@ -1145,13 +1233,17 @@ fn test_core_preparation_failure_is_an_error() {
 
     let desc = platform_desc(&bus, 46, "core");
     // Let A's candidate be built and probed; fail B's construction.
-    crate::test_hooks::fail_device_construction_after(1);
+    crate::test_hooks::fail_candidate_setup_after(1);
     assert_eq!(
         probe_device_desc(desc.id()),
         Err(DriverError::NoMemory)
     );
     assert_trace!(&["A-probe", "A-cleanup"]);
-    assert!(crate::device_records_snapshot().is_empty());
+    // The core error aborts the round but never discards the registration.
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, desc.device_id());
+    assert_eq!(records[0].state, DeviceState::Discovered);
     assert!(a.bound_devices_snapshot().is_empty());
     assert!(b.bound_devices_snapshot().is_empty());
     assert_desc_pending!(desc.id());
@@ -1164,8 +1256,12 @@ fn test_no_candidate_does_not_report_success() {
     let outcome = probe_device_desc(desc.id()).unwrap();
     assert_eq!(outcome, ProbeOutcome::Unmatched);
     assert!(!outcome.activated());
-    assert!(crate::device_records_snapshot().is_empty());
-    assert!(device_for_desc(desc.id()).is_none());
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].state, DeviceState::Discovered);
+    let device = device_for_desc(desc.id()).unwrap();
+    assert_eq!(device.state(), DeviceState::Discovered);
+    assert!(device.binding_ref().is_none());
 }
 
 static NODE_OBSERVATIONS: LazyInit<SpinNoPreempt<Vec<u32>>> = LazyInit::new();
@@ -1229,7 +1325,8 @@ fn event_id(event: crate::DeviceEvent) -> DeviceId {
     match event {
         crate::DeviceEvent::Published { id }
         | crate::DeviceEvent::Matched { id }
-        | crate::DeviceEvent::Removed { id } => id,
+        | crate::DeviceEvent::Removed { id }
+        | crate::DeviceEvent::BindingRetired { id } => id,
         crate::DeviceEvent::Bound { id, .. } | crate::DeviceEvent::Activated { id, .. } => id,
     }
 }
@@ -1241,6 +1338,7 @@ fn subscribe_all_events() {
         crate::DeviceEventKind::Bound,
         crate::DeviceEventKind::Activated,
         crate::DeviceEventKind::Removed,
+        crate::DeviceEventKind::BindingRetired,
     ] {
         crate::subscribe_device_event_kind(
             kind,
@@ -1252,7 +1350,7 @@ fn subscribe_all_events() {
 static FAILED_EVENT_ID: AtomicU64 = AtomicU64::new(u64::MAX);
 
 #[def_test(serial)]
-fn test_failed_attempt_has_no_lifecycle_events() {
+fn test_failed_attempt_emits_only_binding_retired() {
     let bus = reset_model();
     event_trace_slot().lock().clear();
     subscribe_all_events();
@@ -1275,45 +1373,60 @@ fn test_failed_attempt_has_no_lifecycle_events() {
     let desc = platform_desc(&bus, 49, "events");
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
 
-    let failed_id = DeviceId::new(FAILED_EVENT_ID.load(Ordering::SeqCst));
     let bound = device_for_desc(desc.id()).unwrap();
-    let trace = event_trace_slot().lock().clone();
-    assert!(
-        trace.iter().all(|(_, id)| *id != failed_id),
-        "failed candidate leaked an event: {trace:?}"
+    // The failing and winning candidates share the stable device identity:
+    // the failed attempt retires a binding, not a device.
+    assert_eq!(
+        DeviceId::new(FAILED_EVENT_ID.load(Ordering::SeqCst)),
+        bound.id()
     );
-    let success_kinds = trace
+    let trace = event_trace_slot().lock().clone();
+    let kinds = trace
         .iter()
         .filter(|(_, id)| *id == bound.id())
         .map(|(kind, _)| *kind)
         .collect::<Vec<_>>();
     assert_eq!(
-        success_kinds.as_slice(),
+        kinds.as_slice(),
         [
+            crate::DeviceEventKind::BindingRetired,
             crate::DeviceEventKind::Matched,
             crate::DeviceEventKind::Bound,
             crate::DeviceEventKind::Published,
             crate::DeviceEventKind::Activated,
         ]
     );
+    // The failed candidate itself published nothing for any other identity.
+    assert!(
+        trace.iter().all(|(_, id)| *id == bound.id()),
+        "failed candidate leaked an event: {trace:?}"
+    );
 }
 
 static FAILED_DEVICE: LazyInit<SpinNoPreempt<Option<Arc<DeviceObject>>>> = LazyInit::new();
+static FAILED_BINDING: LazyInit<SpinNoPreempt<Option<crate::BindingRef>>> = LazyInit::new();
 
 fn failed_device_slot() -> &'static SpinNoPreempt<Option<Arc<DeviceObject>>> {
     FAILED_DEVICE.call_once(|| SpinNoPreempt::new(None));
     FAILED_DEVICE.get().unwrap()
 }
 
+fn failed_binding_slot() -> &'static SpinNoPreempt<Option<crate::BindingRef>> {
+    FAILED_BINDING.call_once(|| SpinNoPreempt::new(None));
+    FAILED_BINDING.get().unwrap()
+}
+
 #[def_test(serial)]
-fn test_failed_object_external_reference_is_terminal() {
+fn test_failed_binding_reference_cannot_follow_replacement() {
     let bus = reset_model();
     *failed_device_slot().lock() = None;
+    *failed_binding_slot().lock() = None;
 
     register_driver_object(platform_driver(
         "terminal-fail",
         crate::CompatibleAliasMatcher("terminal"),
         |device| {
+            *failed_binding_slot().lock() = device.binding_ref_for_lifecycle_write();
             *failed_device_slot().lock() = Some(device.clone());
             Err(DriverError::Io)
         },
@@ -1327,15 +1440,159 @@ fn test_failed_object_external_reference_is_terminal() {
     let desc = platform_desc(&bus, 50, "terminal");
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
 
-    let failed = failed_device_slot().lock().take().unwrap();
-    let failed_id = failed.id();
-    assert_eq!(failed.state(), DeviceState::Removed);
-    assert_eq!(failed.driver_id(), None);
-    assert!(failed.try_acquire().is_none());
-    assert!(crate::find_device(failed_id).is_none());
-
+    let device = failed_device_slot().lock().take().unwrap();
+    let stale = failed_binding_slot()
+        .lock()
+        .take()
+        .expect("failing probe captured a binding handle");
     let bound = device_for_desc(desc.id()).unwrap();
-    assert_ne!(bound.id(), failed_id);
+
+    // Replacement happens inside the same stable object, so the stale handle
+    // is terminal and can never act on the replacement binding.
+    assert_eq!(bound.id(), device.id());
+    assert_eq!(stale.driver_name(), "terminal-fail");
+    assert_eq!(stale.state(), DeviceState::Removed);
+    assert!(stale.is_terminal());
+    assert!(!stale.is_active());
+    assert!(stale.try_acquire(&device).is_none());
+    assert_eq!(
+        stale.add_cleanup(&device, || {}),
+        Err(DriverError::BadState)
+    );
+
+    let current = bound.binding_ref().expect("replacement binding is active");
+    assert!(!stale.same_binding(&current));
+    assert_eq!(current.driver_name(), "terminal-win");
+    assert!(current.try_acquire(&bound).is_some());
+    assert!(crate::find_device(device.id()).is_some());
+}
+
+/// A `BindingRef` may only add cleanups to the device whose slot currently
+/// holds that exact runtime, even when the caller is in a valid lifecycle
+/// write context for the *other* device.
+#[def_test(serial)]
+fn test_foreign_binding_cleanup_is_rejected_on_another_device() {
+    let bus = reset_model();
+    let foreign_cleanups = Arc::new(AtomicUsize::new(0));
+    let own_cleanups = Arc::new(AtomicUsize::new(0));
+
+    register_driver_object(platform_driver(
+        "foreign-cleanup",
+        crate::CompatibleAliasMatcher("foreign-cleanup"),
+        |_| Ok(()),
+    ));
+    let a_desc = platform_desc(&bus, 60, "foreign-cleanup");
+    let b_desc = platform_desc(&bus, 61, "foreign-cleanup");
+    assert_eq!(
+        probe_device_desc(a_desc.id()).unwrap(),
+        ProbeOutcome::Activated
+    );
+    assert_eq!(
+        probe_device_desc(b_desc.id()).unwrap(),
+        ProbeOutcome::Activated
+    );
+    let a = device_for_desc(a_desc.id()).expect("A is active");
+    let b = device_for_desc(b_desc.id()).expect("B is active");
+    let a_binding = a.binding_ref().expect("A has an active binding");
+
+    let (foreign_result, own_result) = crate::test_hooks::with_binding_lock(b.id(), || {
+        let b_write = b
+            .binding_ref_for_lifecycle_write()
+            .expect("B holds a lifecycle write context");
+        let foreign = foreign_cleanups.clone();
+        let foreign_result = a_binding.add_cleanup(&b, move || {
+            foreign.fetch_add(1, Ordering::SeqCst);
+        });
+        let own = own_cleanups.clone();
+        let own_result = b_write.add_cleanup(&b, move || {
+            own.fetch_add(1, Ordering::SeqCst);
+        });
+        (foreign_result, own_result)
+    })
+    .expect("B's binding lock is available");
+    assert_eq!(
+        foreign_result,
+        Err(DriverError::BadState),
+        "a foreign live binding must not register a cleanup on B"
+    );
+    own_result.expect("B's own binding may register a cleanup");
+
+    remove_device_managed(b.id()).unwrap();
+    assert_eq!(own_cleanups.load(Ordering::SeqCst), 1);
+    assert_eq!(foreign_cleanups.load(Ordering::SeqCst), 0);
+
+    remove_device_managed(a.id()).unwrap();
+    assert_eq!(
+        foreign_cleanups.load(Ordering::SeqCst),
+        0,
+        "the rejected cleanup must not run with A's retirement"
+    );
+}
+
+/// A remove that waited on the binding lock must not tear down a binding
+/// installed after its pre-wait observation.
+#[def_test(serial)]
+fn test_stale_remove_observation_does_not_tear_down_rebound_binding() {
+    let bus = reset_model();
+    register_driver_object(platform_driver(
+        "stale-remove-a",
+        crate::CompatibleAliasMatcher("stale-remove"),
+        |_| Ok(()),
+    ));
+    let desc = platform_desc(&bus, 62, "stale-remove");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let id = desc.device_id();
+    let old = device_for_desc(desc.id())
+        .expect("the first binding publishes an object")
+        .binding_ref()
+        .expect("the first binding is active");
+
+    remove_device_managed(id).unwrap();
+    register_driver_object(platform_driver(
+        "stale-remove-b",
+        crate::CompatibleAliasMatcher("stale-remove"),
+        |_| Ok(()),
+    ));
+    // Registration scans the Pending descriptor; probe explicitly if that
+    // scan did not run for this configuration.
+    let outcome = probe_device_desc(desc.id()).unwrap();
+    assert!(matches!(
+        outcome,
+        ProbeOutcome::Activated | ProbeOutcome::Skipped
+    ));
+    let device = device_for_desc(desc.id()).expect("the stable object is registered");
+    let current = device.binding_ref().expect("the rebound binding is active");
+    assert!(!current.same_binding(&old));
+    assert_eq!(device.state(), DeviceState::Active);
+
+    let binding_lock = crate::device_registry()
+        .binding_for_desc(desc.id())
+        .expect("the descriptor has a binding lock");
+    {
+        let guard = binding_lock.lock();
+        let permit = crate::driver::ContextPermit::new(&guard);
+        assert_eq!(
+            remove_bound_device_locked(
+                desc.id(),
+                id,
+                DescDisposition::Requeue,
+                Some(&old),
+                &permit,
+            ),
+            Err(DriverError::ResourceBusy),
+            "a stale observation must not remove the replacement binding"
+        );
+    }
+
+    let device = device_for_desc(desc.id()).expect("the device survives the stale remove");
+    assert!(
+        device
+            .binding_ref()
+            .is_some_and(|binding| binding.same_binding(&current)),
+        "the replacement binding is still installed"
+    );
+    assert_eq!(device.state(), DeviceState::Active);
+    remove_device_managed(id).unwrap();
 }
 
 static RECURSIVE_DESC: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -1381,7 +1638,12 @@ fn test_remove_unbinds_and_requeues_descriptor() {
         crate::CompatibleAliasMatcher("remove"),
         |device| {
             trace_push("probe");
-            device.add_cleanup(|| trace_push("cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("cleanup"))
+                .expect("probe may register cleanup");
             Ok(())
         },
     ));
@@ -1390,38 +1652,52 @@ fn test_remove_unbinds_and_requeues_descriptor() {
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
     let old_device = device_for_desc(desc.id()).unwrap();
     let old_id = old_device.id();
+    let old_binding = old_device.binding_ref().expect("bound device captures a ref");
 
     assert_eq!(remove_device_managed(old_id), Ok(()));
-    assert!(crate::find_device(old_id).is_none());
-    assert!(crate::device_records_snapshot().is_empty());
+    // Unbind keeps the stable registration object; only the binding slot is
+    // cleared. The object stays registered with its discovery facts intact.
+    let device = crate::find_device(old_id).expect("unbind keeps the stable object");
+    assert_eq!(device.id(), old_id);
+    assert_eq!(device.state(), DeviceState::Discovered);
+    assert!(device.binding_ref().is_none());
+    let records = crate::device_records_snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, old_id);
+    assert_eq!(records[0].state, DeviceState::Discovered);
+    assert_eq!(records[0].driver_name, None);
     assert!(bus.devices_snapshot().is_empty());
     assert!(bus.drivers_snapshot().is_empty());
     assert!(driver.bound_devices_snapshot().is_empty());
     assert_desc_pending!(desc.id());
     assert_trace!(&["probe", "cleanup"]);
 
-    // An external holder of the old object observes a terminal binding: the
-    // old binding's cleanup has run and no new reference can be admitted.
-    assert_eq!(old_device.state(), DeviceState::Removed);
-    assert!(old_device.try_acquire().is_none());
+    // The retired binding handle is terminal: cleanup has run and it cannot
+    // admit hardware use.
+    assert_eq!(old_binding.state(), DeviceState::Removed);
+    assert!(old_binding.try_acquire(&device).is_none());
 
-    // The descriptor identity survives removal and may be bound again; the
-    // new runtime object gets a fresh `DeviceId` and an independent binding.
+    // The descriptor and stable object identity survive unbind, and a fresh
+    // binding is installed into the same object.
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
     let new_device = device_for_desc(desc.id()).unwrap();
-    assert_ne!(new_device.id(), old_id);
+    assert_eq!(new_device.id(), old_id);
     assert_eq!(new_device.state(), DeviceState::Active);
-    assert!(new_device.try_acquire().is_some());
+    let new_binding = new_device
+        .binding_ref()
+        .expect("rebound device captures a ref");
+    assert!(!old_binding.same_binding(&new_binding));
+    assert!(new_binding.try_acquire(&new_device).is_some());
 
     // Rebinding never revives the old binding or re-runs its cleanup: the
     // trace is the first probe, the old binding's cleanup, and the new probe.
-    assert_eq!(old_device.state(), DeviceState::Removed);
-    assert!(old_device.try_acquire().is_none());
+    assert_eq!(old_binding.state(), DeviceState::Removed);
+    assert!(old_binding.try_acquire(&device).is_none());
     assert_trace!(&["probe", "cleanup", "probe"]);
 }
 
 #[def_test(serial)]
-fn test_unregister_pending_removes_registration_without_objects() {
+fn test_unregister_pending_removes_registration_and_stable_object() {
     let bus = reset_model();
     trace_reset();
     event_trace_slot().lock().clear();
@@ -1441,7 +1717,17 @@ fn test_unregister_pending_removes_registration_without_objects() {
     ));
 
     let desc = platform_desc(&bus, 60, "unreg-pending");
+    // Registration publishes the stable object even before the first probe.
+    assert_eq!(
+        crate::find_device(desc.device_id())
+            .expect("registration publishes the stable object")
+            .state(),
+        DeviceState::Discovered
+    );
+    assert_eq!(crate::device_records_snapshot().len(), 1);
+
     assert_eq!(unregister_device_desc(desc.id()), Ok(()));
+    assert!(crate::find_device(desc.device_id()).is_none());
     assert!(crate::find_device_desc(desc.id()).is_none());
     assert!(
         crate::device_descs_snapshot()
@@ -1481,7 +1767,12 @@ fn test_unregister_bound_runs_exactly_one_teardown() {
         crate::CompatibleAliasMatcher("unreg-bound"),
         |device| {
             trace_push("probe");
-            device.add_cleanup(|| trace_push("cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("cleanup"))
+                .expect("probe may register cleanup");
             Ok(())
         },
         |_| {
@@ -1494,6 +1785,7 @@ fn test_unregister_bound_runs_exactly_one_teardown() {
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
     let device = device_for_desc(desc.id()).unwrap();
     let id = device.id();
+    let binding = device.binding_ref().expect("bound device captures a ref");
     assert_eq!(
         event_trace_slot().lock().len(),
         4,
@@ -1511,7 +1803,9 @@ fn test_unregister_bound_runs_exactly_one_teardown() {
     assert_eq!(trace_snapshot(), alloc::vec!["probe", "remove", "cleanup"]);
     assert_eq!(device.state(), DeviceState::Removed);
     assert_eq!(device.driver_id(), None);
-    assert!(device.try_acquire().is_none());
+    assert!(device.binding_ref().is_none());
+    assert_eq!(binding.state(), DeviceState::Removed);
+    assert!(binding.try_acquire(&device).is_none());
     let events = event_trace_slot().lock().clone();
     assert_eq!(
         events.as_slice(),
@@ -1536,7 +1830,12 @@ fn test_unregister_busy_with_live_device_use() {
         crate::CompatibleAliasMatcher("unreg-busy"),
         |device| {
             trace_push("probe");
-            device.add_cleanup(|| trace_push("cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("cleanup"))
+                .expect("probe may register cleanup");
             Ok(())
         },
     ));
@@ -1545,7 +1844,10 @@ fn test_unregister_busy_with_live_device_use() {
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
     let device = device_for_desc(desc.id()).unwrap();
     let id = device.id();
-    let lease = device.try_acquire().unwrap();
+    let binding = device.binding_ref().expect("bound device captures a ref");
+    let lease = binding
+        .try_acquire(&device)
+        .expect("active device admits a use");
 
     assert_eq!(
         unregister_device_desc(desc.id()),
@@ -1560,7 +1862,69 @@ fn test_unregister_busy_with_live_device_use() {
     assert_eq!(unregister_device_desc(desc.id()), Ok(()));
     assert!(crate::find_device(id).is_none());
     assert!(crate::find_device_desc(desc.id()).is_none());
+    assert_eq!(binding.state(), DeviceState::Removed);
+    assert!(binding.try_acquire(&device).is_none());
     assert_eq!(trace_snapshot(), alloc::vec!["probe", "cleanup"]);
+}
+
+#[def_test(serial)]
+fn test_terminal_state_is_removed_only() {
+    use core::sync::atomic::AtomicBool;
+
+    let bus = reset_model();
+    register_driver_object(platform_driver(
+        "terminal-state",
+        crate::CompatibleAliasMatcher("terminal-state"),
+        |_| Ok(()),
+    ));
+    let desc = platform_desc(&bus, 63, "terminal-state");
+    assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
+    let device = device_for_desc(desc.id()).unwrap();
+    let binding = device.binding_ref().expect("bound device captures a ref");
+    let lease = binding
+        .try_acquire(&device)
+        .expect("active device admits a use");
+
+    // The busy-removal window is the only place a binding is `Removing`; it is
+    // not terminal and a rollback must return it to `Active`.
+    let paused = Arc::new(AtomicBool::new(false));
+    let terminal_at_pause = Arc::new(AtomicBool::new(false));
+    let active_at_pause = Arc::new(AtomicBool::new(false));
+    {
+        let paused = paused.clone();
+        let terminal_at_pause = terminal_at_pause.clone();
+        let active_at_pause = active_at_pause.clone();
+        let binding = binding.clone();
+        crate::test_hooks::install_pause_hook(Arc::new(move |point| {
+            if matches!(
+                point,
+                crate::test_hooks::BindingPause::BindingRemovingBeforeUseCheck
+            ) {
+                paused.store(true, Ordering::SeqCst);
+                terminal_at_pause.store(binding.is_terminal(), Ordering::SeqCst);
+                active_at_pause.store(binding.is_active(), Ordering::SeqCst);
+            }
+        }));
+    }
+
+    assert_eq!(
+        crate::remove_device_managed(device.id()),
+        Err(DriverError::ResourceBusy)
+    );
+    crate::test_hooks::clear_pause_hook();
+    assert!(paused.load(Ordering::SeqCst));
+    assert!(
+        !terminal_at_pause.load(Ordering::SeqCst),
+        "a transient Removing binding is not terminal"
+    );
+    assert!(!active_at_pause.load(Ordering::SeqCst));
+    assert_eq!(binding.state(), DeviceState::Active);
+    assert!(!binding.is_terminal());
+
+    drop(lease);
+    crate::remove_device_managed(device.id()).unwrap();
+    assert_eq!(binding.state(), DeviceState::Removed);
+    assert!(binding.is_terminal());
 }
 
 static SAME_TASK_UNREGISTER_DESC: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -1610,26 +1974,48 @@ fn test_unbind_semantics_survive_and_unregister_is_final() {
         crate::CompatibleAliasMatcher("unreg-after-unbind"),
         |device| {
             trace_push("probe");
-            device.add_cleanup(|| trace_push("cleanup"));
+            let binding = device
+                .binding_ref_for_lifecycle_write()
+                .expect("probe holds the binding write context");
+            binding
+                .add_cleanup(&device, || trace_push("cleanup"))
+                .expect("probe may register cleanup");
             Ok(())
         },
     ));
 
     let desc = platform_desc(&bus, 64, "unreg-after-unbind");
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
-    let old_id = device_for_desc(desc.id()).unwrap().id();
+    let device = device_for_desc(desc.id()).unwrap();
+    let old_id = device.id();
+    let old_binding = device.binding_ref().expect("bound device captures a ref");
 
-    // The existing unbind path still requeues and permits a fresh binding.
+    // The existing unbind path still requeues and permits a fresh binding on
+    // the same stable object.
     assert_eq!(remove_device_managed(old_id), Ok(()));
     assert_desc_pending!(desc.id());
+    assert_eq!(
+        crate::find_device(old_id).unwrap().state(),
+        DeviceState::Discovered
+    );
     assert_eq!(probe_device_desc(desc.id()).unwrap(), ProbeOutcome::Activated);
-    let new_id = device_for_desc(desc.id()).unwrap().id();
-    assert_ne!(new_id, old_id);
+    let new_device = device_for_desc(desc.id()).unwrap();
+    let new_id = new_device.id();
+    assert_eq!(new_id, old_id);
+    let new_binding = new_device
+        .binding_ref()
+        .expect("rebound device captures a ref");
+    assert!(!old_binding.same_binding(&new_binding));
+    assert_eq!(old_binding.state(), DeviceState::Removed);
 
-    // Unregister is final: no requeue, no old-ID rebinding.
+    // Unregister is final: no requeue, no rebinding, and both binding
+    // generations stay terminal.
     assert_eq!(unregister_device_desc(desc.id()), Ok(()));
     assert!(crate::find_device(new_id).is_none());
     assert!(crate::find_device_desc(desc.id()).is_none());
+    assert_eq!(new_binding.state(), DeviceState::Removed);
+    assert!(old_binding.try_acquire(&device).is_none());
+    assert!(new_binding.try_acquire(&device).is_none());
     assert_eq!(
         probe_device_desc(desc.id()),
         Err(DriverError::InvalidInput)
@@ -1662,13 +2048,16 @@ fn test_unregister_adopted_nodeless_device() {
     .unwrap();
     let id = device.id();
     assert!(device.firmware_node().is_none());
+    let binding = device.binding_ref().expect("adopted device captures a ref");
     let desc_id = crate::device_descs_snapshot()[0].id();
 
     assert_eq!(unregister_device_desc(desc_id), Ok(()));
     assert!(crate::find_device(id).is_none());
     assert!(crate::find_device_desc(desc_id).is_none());
     assert_eq!(device.state(), DeviceState::Removed);
-    assert!(device.try_acquire().is_none());
+    assert!(device.binding_ref().is_none());
+    assert_eq!(binding.state(), DeviceState::Removed);
+    assert!(binding.try_acquire(&device).is_none());
 }
 
 #[def_test(serial)]
@@ -1676,7 +2065,7 @@ fn test_registry_descriptor_delete_requires_expected_state() {
     let bus = reset_model();
     let desc = platform_desc(&bus, 66, "delete-state");
 
-    let wrong = crate::registry::DeviceDescState::Bound(DeviceId::new(9999));
+    let wrong = crate::registry::DeviceDescState::Probing;
     assert!(
         crate::device_registry()
             .remove_device_desc_if_state(desc.id(), wrong)
@@ -1765,4 +2154,418 @@ fn test_bus_attach_sees_binding_metadata() {
     let listed = bus.devices_snapshot();
     assert_eq!(listed.len(), 2);
     assert!(listed.iter().all(|device| device.driver_id().is_some()));
+}
+
+static TYPED_MATCHER: crate::CompatibleAliasMatcher =
+    crate::CompatibleAliasMatcher("typed-data");
+static NEXT_TYPED_DATA: AtomicUsize = AtomicUsize::new(0);
+static FAIL_NEXT_PM_SUSPEND: AtomicBool = AtomicBool::new(false);
+static FAIL_NEXT_DRIVER_REMOVE: AtomicBool = AtomicBool::new(false);
+static DROP_SAW_DATA_LOCK: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedEvent {
+    Remove(u64, usize),
+    Cleanup(u64),
+    Drop(usize),
+    Suspend(usize),
+    Resume(usize),
+    Shutdown(usize),
+}
+
+fn typed_events() -> &'static SpinNoPreempt<Vec<TypedEvent>> {
+    static EVENTS: LazyInit<SpinNoPreempt<Vec<TypedEvent>>> = LazyInit::new();
+    EVENTS.call_once(|| SpinNoPreempt::new(Vec::new()));
+    EVENTS.get().unwrap()
+}
+
+fn record_typed(event: TypedEvent) {
+    typed_events().lock().push(event);
+}
+
+struct TypedData {
+    id: usize,
+    pm_visits: usize,
+    binding: crate::BindingRef,
+}
+
+impl Drop for TypedData {
+    fn drop(&mut self) {
+        if self.binding.data_lock_is_locked_for_test() {
+            DROP_SAW_DATA_LOCK.store(true, Ordering::SeqCst);
+        }
+        record_typed(TypedEvent::Drop(self.id));
+    }
+}
+
+struct TypedDataDriver;
+
+impl DeviceDriver for TypedDataDriver {
+    type Data = TypedData;
+
+    fn name(&self) -> &'static str {
+        "typed-data"
+    }
+
+    fn device_kind(&self) -> DeviceKind {
+        DeviceKind::Char
+    }
+
+    fn bus_types(&self) -> &'static [BusTypeId] {
+        &[BusTypeId::PLATFORM]
+    }
+
+    fn matcher(&self) -> &dyn crate::DeviceMatcher {
+        &TYPED_MATCHER
+    }
+
+    fn probe_device(&self, ctx: &crate::ProbeContext<'_>) -> DriverResult<Self::Data> {
+        let id = NEXT_TYPED_DATA.fetch_add(1, Ordering::SeqCst) + 1;
+        let device_id = ctx.device().id().raw();
+        ctx.add_cleanup(move || record_typed(TypedEvent::Cleanup(device_id)))?;
+        Ok(TypedData {
+            id,
+            pm_visits: 0,
+            binding: ctx.binding().clone(),
+        })
+    }
+
+    fn remove(
+        &self,
+        ctx: &crate::RemoveContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        let Some(data) = data else {
+            return Err(DriverError::BadState);
+        };
+        record_typed(TypedEvent::Remove(ctx.device().id().raw(), data.id));
+        if FAIL_NEXT_DRIVER_REMOVE.swap(false, Ordering::SeqCst) {
+            return Err(DriverError::Io);
+        }
+        Ok(())
+    }
+
+    fn suspend(
+        &self,
+        _ctx: &crate::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        let Some(data) = data else {
+            return Err(DriverError::BadState);
+        };
+        data.pm_visits += 1;
+        record_typed(TypedEvent::Suspend(data.id));
+        if FAIL_NEXT_PM_SUSPEND.swap(false, Ordering::SeqCst) {
+            return Err(DriverError::Io);
+        }
+        Ok(())
+    }
+
+    fn resume(
+        &self,
+        _ctx: &crate::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        let Some(data) = data else {
+            return Err(DriverError::BadState);
+        };
+        data.pm_visits += 1;
+        record_typed(TypedEvent::Resume(data.id));
+        Ok(())
+    }
+
+    fn shutdown(&self, _ctx: &crate::PmContext<'_>, data: Option<&mut Self::Data>) {
+        if let Some(data) = data {
+            data.pm_visits += 1;
+            record_typed(TypedEvent::Shutdown(data.id));
+        }
+    }
+}
+
+#[def_test(serial)]
+fn typed_data_is_isolated_across_bindings_and_rebind() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let first = platform_desc(&bus, 40, "typed-data");
+    let second = platform_desc(&bus, 41, "typed-data");
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+
+    let first_device = find_device(first.device_id()).expect("first device is published");
+    let second_device = find_device(second.device_id()).expect("second device is published");
+    assert_eq!(first_device.state(), DeviceState::Active);
+    assert_eq!(second_device.state(), DeviceState::Active);
+
+    remove_device_managed(first_device.id()).unwrap();
+    remove_device_managed(second_device.id()).unwrap();
+    let mut removed: Vec<_> = typed_events()
+        .lock()
+        .iter()
+        .filter_map(|event| match event {
+            TypedEvent::Remove(device, data) => Some((*device, *data)),
+            _ => None,
+        })
+        .collect();
+    removed.sort_unstable();
+    assert_eq!(
+        removed,
+        alloc::vec![
+            (first.device_id().raw(), 1),
+            (second.device_id().raw(), 2)
+        ],
+        "each binding must receive Data belonging to its own DeviceId"
+    );
+    assert!(
+        !DROP_SAW_DATA_LOCK.load(Ordering::SeqCst),
+        "Data Drop must not run while the BindingRuntime data spinlock is held"
+    );
+
+    let outcome = probe_device_desc(first.id()).unwrap();
+    assert_eq!(outcome, ProbeOutcome::Activated);
+    remove_device_managed(first.device_id()).unwrap();
+    let removed: Vec<_> = typed_events()
+        .lock()
+        .iter()
+        .filter_map(|event| match event {
+            TypedEvent::Remove(device, data) => Some((*device, *data)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        removed.contains(&(first.device_id().raw(), 3)),
+        "rebinding creates a fresh Data value"
+    );
+}
+
+#[def_test(serial)]
+fn injected_data_install_failure_stops_and_returns_data() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 42, "typed-data");
+    let expected_id = desc.device_id().raw();
+    crate::device::fail_next_data_install(desc.device_id());
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+
+    let device = find_device(desc.device_id()).expect("stable object survives install failure");
+    assert_eq!(
+        device.state(),
+        DeviceState::Discovered,
+        "install failure must not publish the binding"
+    );
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Remove(expected_id, 1),
+            TypedEvent::Cleanup(expected_id),
+            TypedEvent::Drop(1),
+        ],
+        "remove must run before cleanup and Drop, each exactly once"
+    );
+    assert!(
+        !DROP_SAW_DATA_LOCK.load(Ordering::SeqCst),
+        "install-failure Data Drop must not hold the data spinlock"
+    );
+
+    let outcome = probe_device_desc(desc.id()).unwrap();
+    assert_eq!(outcome, ProbeOutcome::Activated);
+    remove_device_managed(desc.device_id()).unwrap();
+    assert!(typed_events().lock().contains(&TypedEvent::Drop(2)));
+}
+
+#[def_test(serial)]
+fn driver_remove_error_still_cleans_up_and_retires() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 46, "typed-data");
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("published by registration scan");
+    let id = device.id();
+
+    FAIL_NEXT_DRIVER_REMOVE.store(true, Ordering::SeqCst);
+    remove_device_managed(id).unwrap();
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Remove(id.raw(), 1),
+            TypedEvent::Cleanup(id.raw()),
+            TypedEvent::Drop(1),
+        ],
+        "a driver Err must not skip cleanup, Data drop, or retirement"
+    );
+    assert!(!DROP_SAW_DATA_LOCK.load(Ordering::SeqCst));
+    assert_eq!(
+        find_device(id).expect("stable object survives requeue").state(),
+        DeviceState::Discovered
+    );
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn bus_remove_error_still_cleans_up_and_retires() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 47, "typed-data");
+    register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("published by registration scan");
+    let id = device.id();
+
+    crate::test_hooks::fail_next_bus_remove();
+    remove_device_managed(id).unwrap();
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Remove(id.raw(), 1),
+            TypedEvent::Cleanup(id.raw()),
+            TypedEvent::Drop(1),
+        ],
+        "a bus Err must not skip cleanup, Data drop, or retirement"
+    );
+    assert!(!DROP_SAW_DATA_LOCK.load(Ordering::SeqCst));
+    assert_eq!(
+        find_device(id).expect("stable object survives requeue").state(),
+        DeviceState::Discovered
+    );
+    assert_desc_pending!(desc.id());
+}
+
+#[def_test(serial)]
+fn pm_callbacks_forward_data_and_restore_it() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    FAIL_NEXT_PM_SUSPEND.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 43, "typed-data");
+    let driver = register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("adopted by registration scan");
+
+    let observed = crate::test_hooks::with_binding_lock(device.id(), || {
+        crate::PmContext::with_test_context(device.clone(), |ctx| {
+            let mut data = ctx
+                .take_data()
+                .expect("PM take")
+                .expect("probe data exists");
+            let suspend = driver.suspend_erased(ctx, Some(&mut data));
+            let resume = driver.resume_erased(ctx, Some(&mut data));
+            let shutdown = driver.shutdown_erased(ctx, Some(&mut data));
+            let pm_visits = data.downcast_mut::<TypedData>().map(|data| data.pm_visits);
+            let restore = ctx.restore_data(data);
+            (
+                suspend.is_ok(),
+                resume.is_ok(),
+                shutdown.is_ok(),
+                pm_visits,
+                restore.is_ok(),
+            )
+        })
+        .expect("PM context")
+    });
+    let observed = observed.expect("the binding lock was available");
+    assert_eq!(
+        observed,
+        (true, true, true, Some(3), true),
+        "all three PM callbacks received the same Data and restore succeeded"
+    );
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![
+            TypedEvent::Suspend(1),
+            TypedEvent::Resume(1),
+            TypedEvent::Shutdown(1),
+        ]
+    );
+
+    remove_device_managed(device.id()).unwrap();
+    assert!(typed_events().lock().contains(&TypedEvent::Drop(1)));
+}
+
+#[def_test(serial)]
+fn pm_callback_error_still_restores_data() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    FAIL_NEXT_PM_SUSPEND.store(true, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 44, "typed-data");
+    let driver = register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("adopted by registration scan");
+
+    let (suspend_failed, restore_ok, restored) = crate::test_hooks::with_binding_lock(
+        device.id(),
+        || {
+            crate::PmContext::with_test_context(device.clone(), |ctx| {
+                let mut data = ctx
+                    .take_data()
+                    .expect("PM take")
+                    .expect("probe data exists");
+                let suspend = driver.suspend_erased(ctx, Some(&mut data));
+                let restore = ctx.restore_data(data);
+                let restored_data = ctx
+                    .take_data()
+                    .expect("restored data can be taken again");
+                let restored = restored_data.is_some();
+                if let Some(data) = restored_data {
+                    ctx.restore_data(data)
+                        .expect("put the checked data back into the slot");
+                }
+                (suspend.is_err(), restore.is_ok(), restored)
+            })
+            .expect("PM context")
+        },
+    )
+    .expect("the binding lock was available");
+    assert!(suspend_failed);
+    assert!(restore_ok);
+    assert!(restored);
+    assert_eq!(
+        typed_events().lock().clone(),
+        alloc::vec![TypedEvent::Suspend(1)],
+        "the failing callback ran exactly once and Data was not dropped"
+    );
+
+    remove_device_managed(device.id()).unwrap();
+}
+
+#[def_test(serial)]
+fn pm_type_mismatch_does_not_invoke_driver() {
+    typed_events().lock().clear();
+    NEXT_TYPED_DATA.store(0, Ordering::SeqCst);
+    FAIL_NEXT_DRIVER_REMOVE.store(false, Ordering::SeqCst);
+    DROP_SAW_DATA_LOCK.store(false, Ordering::SeqCst);
+    let bus = reset_model();
+    let desc = platform_desc(&bus, 45, "typed-data");
+    let driver = register_driver_object(crate::BoxedDriver::new(TypedDataDriver));
+    let device = find_device(desc.device_id()).expect("adopted by registration scan");
+
+    let is_type_mismatch = crate::test_hooks::with_binding_lock(device.id(), || {
+        crate::PmContext::with_test_context(device.clone(), |ctx| {
+            let mut wrong = crate::driver::DriverData::new(0u8);
+            matches!(
+                driver.suspend_erased(ctx, Some(&mut wrong)),
+                Err(crate::driver::ErasedCallError::TypeMismatch)
+            )
+        })
+        .expect("PM context")
+    })
+    .expect("the binding lock was available");
+    assert!(is_type_mismatch);
+    assert!(
+        typed_events().lock().is_empty(),
+        "TypeMismatch must not invoke the driver callback"
+    );
+
+    remove_device_managed(device.id()).unwrap();
 }

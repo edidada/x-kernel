@@ -23,14 +23,29 @@ make install-tools
 
 ```bash
 make dylint          # scan the kernel selected by .config
+make dylint XKMAKE_ARGS=--fix  # apply machine suggestions in configured local packages
 make dylint_test     # run every lint's UI test
 make dylint XKMAKE_ARGS="-- --message-format=json"
 make dylint FACTS_OUT=<dir>   # also export code facts (see below)
 ```
 
+The fix mode selects local packages from Cargo's application compilation unit
+graph, so Cargo applies suggestions in dependencies of `entry` without
+selecting inactive platform or development packages. It checks that the fix
+build resolves the same package features as the scan. Dry-run reports how
+package selection will be resolved at run time without starting Cargo.
+Re-run fix mode after moving derives, because that can expose a derive list or
+attribute group that still needs sorting.
+
 A scan only sees code that the configuration compiles; CI scans the
 aarch64 and x86_64 `qemu_defconfig` configurations. Add the platform's
 kernel target to the toolchain before scanning another configuration.
+
+No lint checks a vendored crate, one whose manifest sits directly under
+`vendor/` (see `docs/code-guidelines/README.md`, "Vendored code").
+`register_lints` registers only the facts export for it, so the dependency
+facts scan and `--fix`, which both reach these path dependencies, report and
+rewrite nothing there.
 
 `xkmake` builds this library once into `<target>/tools/lints` and passes
 it to `cargo dylint --lib-path`. The build ignores the rustflags of the
@@ -44,6 +59,53 @@ target directory.
 The first local run builds the Dylint driver into `$DYLINT_DRIVER_PATH`
 (default `~/.dylint_drivers`). The CI image sets `DYLINT_DRIVER_PATH` to a
 driver prebuilt for the pinned toolchain.
+
+## Standard Box in kernel tests
+
+`std_box_in_kernel_tests` implements CG-049-no-std-box-in-kernel-tests at
+`deny` level. It is active only with `--cfg unittest`. Within such a build,
+it checks source files with an exact `ut-tests` path component and inline
+items, associated items, expressions, local declarations, fields, or enum
+variants guarded by outer `#[cfg(unittest)]` or `#[cfg(test)]`.
+Positive `all`/`any` combinations are recognized when they require a test
+condition. An inner crate-level `#![cfg(unittest)]` does not make ordinary
+production items test code. Ordinary host unit/integration tests and tools
+built without `--cfg unittest` are outside the rollout.
+
+An early pass records test-gated source spans before expansion; a late pass
+checks resolved types and associated functions. Standard `Box` is identified
+by rustc's Box type identity, including renamed imports, type aliases and
+qualified paths. Calls returning `Box` also report, including method and
+UFCS forms of `into_boxed_slice` and `into_boxed_str`. Imports themselves do
+not report, and unrelated user types named `Box` are allowed. Exceptions for
+existing production interfaces belong on the narrowest containing item,
+using `allow(unknown_lints, std_box_in_kernel_tests, reason =
+"CG-049-no-std-box-in-kernel-tests: test scenario: <specific contract>")`
+and the CG-024 `clippy::allow_attributes` expectation wrapper.
+
+This is not ownership dataflow analysis: associated-type projections,
+inferred moves of existing owners, and helper results wrapping a Box in
+another type can escape detection when no checked Box path or direct
+Box-valued call appears. Exception scope and justification remain review
+requirements; rustc can technically honor broader allowances.
+
+External macro implementation spans are excluded so `vec!`'s internal
+standard `Box` does not trigger the rule. Source-spanned arguments such as
+`vec![Box::new(value)]` and pass-through macro arguments still report.
+Local macro implementations report at their invocation when invoked in UT
+scope, including macros defined in production source. External macros that
+construct a Box, and user tokens whose original spans a procedural macro
+replaces with external expansion spans, are outside this check. Review
+those macro definitions separately. The scope collector does not infer
+test-only reachability, handle `cfg_attr` or negated logical equivalences,
+or follow a test-gated file module outside `ut-tests/` into its source file.
+Test attributes alone (`#[test]` or `#[unittest::def_test]`) do not establish
+scope without a recognized cfg gate or a `ut-tests/` source path.
+Inactive cfg branches are not type checked and cannot report.
+
+The embedded UI tests exercise production neighbors in a unittest-enabled
+crate, inline test helpers, gated locals/fields/variants, aliases, conversions, explicit macro arguments,
+macro internals, per-item allowances, and host tests with the gate disabled.
 
 ## Code facts export
 
@@ -190,7 +252,8 @@ version they do not know. Each line is one JSON object; `t` is its kind.
    the expected compiler output, run through `crate::testing::run_ui` with
    the mock crates the source uses (for example `testing::MOCK_KSPIN`).
 3. In `src/lib.rs`, add `mod <lint>;` and register the lint and its pass in
-   `register_lints`.
+   `register_lints`, after the vendored-crate return so the pass inherits
+   that exclusion.
 4. Add the rule file `docs/code-guidelines/CG-<nnn>-<descriptive>.md`.
 
 `dylint_testing` runs UI tests under one lock. When a test fails, the lock is

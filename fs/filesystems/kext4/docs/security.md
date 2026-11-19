@@ -925,5 +925,20 @@ batch is redirtied and its WRITEBACK ended. NONE admission refusal is capacity
 feedback with skipped-page accounting, not an I/O failure. ALL waits capacity;
 workers require no producer mutex. No new rejection field or coordination lock
 is added. Buffered write_end cannot reacquire the copied folio or wait for
-writeback while it publishes accepted size. Completion remains independent of
+writeback while it publishes accepted size. A batched run settles through the
+separate `BatchedWriteOperations` vtable after its folio locks are released: the
+settlement hook cannot change the published byte count, publishes no size,
+releases only the reservation ranges that run created, and may report only
+settlement bookkeeping failures — never a data veto; published bytes can already
+be writeback-visible when settlement fails. Completion remains independent of
 the inode data lock retained by writer rollback.
+
+Reservation settlement resolves filesystem context only when the accepted
+prefix leaves an unaccepted tail. A complete overwrite keeps all reservations
+without accessing that context. Single-folio size publication delegates the
+growth check to the address space, which reads the inode's current size under
+the still-held inode data lock. The completion request carries the prepared
+range and copied count; the range's exclusive end is validated before admission,
+and copying stays within that range. Short writes and cancellation release only
+their token-owned unaccepted tail. Writeback retains its live EOF sampling
+protocol.

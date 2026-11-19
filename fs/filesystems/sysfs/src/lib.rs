@@ -29,7 +29,7 @@ extern crate alloc;
 
 use alloc::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     format,
     string::{String, ToString},
     sync::Arc,
@@ -39,9 +39,12 @@ use alloc::{
 
 use kalloc_types::KBox;
 use kdevice::{
-    DeviceLocation, DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes,
+    DeviceLocation, DeviceNode, DeviceNodeEvent, DeviceNodeKind, SystemClass, SystemDeviceControl,
+    SystemDeviceDescriptor, SystemDeviceId, SystemDeviceState, install_system_device,
+    subscribe_device_nodes, system_device_snapshot, system_device_state,
 };
 use kdevice_uevent::{self, UeventAction, UeventScope};
+use kerrno::{KErrorKind, KResult};
 use klazy::Once;
 use ksync::{Mutex, RwLock};
 use kvfs::{
@@ -54,6 +57,16 @@ use lazyinit::LazyInit;
 const SYSFS_MAGIC: u32 = 0x6265_6572;
 const READ_ONLY_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o444);
 const UEVENT_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o644);
+const MEMORY_BLOCK_SIZE_BYTES: u64 = 128 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct StaticSystemControl;
+impl SystemDeviceControl for StaticSystemControl {
+    fn set_online(&self, _online: bool) -> KResult<()> {
+        Err(KErrorKind::OperationNotSupported.into())
+    }
+}
+static STATIC_SYSTEM_CONTROL: StaticSystemControl = StaticSystemControl;
 
 static SYSFS: Once<(Arc<SuperBlock>, Arc<Mount>)> = Once::new();
 static DEVICE_PROJECTION_INITIALIZATION: Once<()> = Once::new();
@@ -96,6 +109,26 @@ impl DirectoryEntry {
     }
 }
 
+/// Attribute projected from a system device rather than a `kdevice::DeviceNode`.
+///
+/// System devices have no major/minor number, so their attributes are
+/// synthesized from [`SystemDeviceState`] and written through the hotplug
+/// controller instead of a character device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemAttributeKind {
+    CpuOnline,
+    CpuPresent,
+    CpuPossible,
+    CpuGlobalOnline,
+    CpuGlobalPossible,
+    MemoryPhysIndex,
+    MemoryState,
+    MemoryOnline,
+    MemoryBlockSizeBytes,
+    MemoryGlobalOnline,
+    MemoryGlobalPossible,
+}
+
 #[derive(Clone)]
 enum TreeEntry {
     Directory(Arc<DirectoryEntry>),
@@ -108,6 +141,11 @@ enum TreeEntry {
         subsystem: String,
         properties: Vec<(String, String)>,
         contents: Vec<u8>,
+    },
+    SystemAttribute {
+        device: Option<SystemDeviceId>,
+        kind: SystemAttributeKind,
+        permission: NodePermission,
     },
 }
 
@@ -145,14 +183,31 @@ impl TreeEntry {
                     && left_properties == right_properties
                     && left_contents == right_contents
             }
+            (
+                Self::SystemAttribute {
+                    device: left_device,
+                    kind: left_kind,
+                    permission: left_permission,
+                },
+                Self::SystemAttribute {
+                    device: right_device,
+                    kind: right_kind,
+                    permission: right_permission,
+                },
+            ) => {
+                left_device == right_device
+                    && left_kind == right_kind
+                    && left_permission.bits() == right_permission.bits()
+            }
             _ => false,
         }
     }
 }
 
 struct DeviceProjection {
-    nodes: BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
+    nodes: BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: Vec<kvfs::CharacterDeviceRegistration>,
+    systems: Vec<SystemDeviceState>,
     tree: BTreeMap<String, TreeEntry>,
 }
 
@@ -160,16 +215,18 @@ impl DeviceProjection {
     fn new() -> Self {
         let nodes = BTreeMap::new();
         let characters = Vec::new();
-        let tree = build_tree(&nodes, &characters);
+        let systems = Vec::new();
+        let tree = build_tree_with_systems(&nodes, &characters, &systems);
         Self {
             nodes,
             characters,
+            systems,
             tree,
         }
     }
 
     fn rebuild_tree(&mut self) -> Vec<String> {
-        let mut tree = build_tree(&self.nodes, &self.characters);
+        let mut tree = build_tree_with_systems(&self.nodes, &self.characters, &self.systems);
         for (path, entry) in &mut tree {
             if let TreeEntry::Directory(directory) = entry
                 && let Some(TreeEntry::Directory(previous)) = self.tree.get(path)
@@ -183,6 +240,29 @@ impl DeviceProjection {
     }
 }
 
+/// Strips the one trailing newline or NUL `kobject_action_type` ignores.
+fn strip_action_terminator(data: &[u8]) -> &[u8] {
+    match data {
+        [rest @ .., b'\n' | 0] => rest,
+        _ => data,
+    }
+}
+
+/// Parses a `uevent` write the way `kobject_action_type` does.
+///
+/// One trailing newline or NUL is dropped, then the action is the first token
+/// up to a single space: `udevadm trigger` writes `add <uuid>` and userspace
+/// may append further `KEY=VALUE` words. Any other whitespace stays inside the
+/// token, so `add\t<uuid>`, an embedded newline or a leading tab does not name
+/// an action and the write is refused, matching the reference parser.
+fn parse_uevent_action(data: &[u8]) -> VfsResult<UeventAction> {
+    let text = strip_action_terminator(data);
+    let text = core::str::from_utf8(text).map_err(|_| VfsError::InvalidInput)?;
+    let action = text.split(' ').next().ok_or(VfsError::InvalidInput)?;
+    UeventAction::try_from(action).map_err(|_| VfsError::InvalidInput)
+}
+
+/// The device projection tree shared by every lookup.
 fn device_projection() -> &'static Mutex<DeviceProjection> {
     #[expect(
         clippy::expect_used,
@@ -205,6 +285,106 @@ fn device_projection_events() -> &'static Mutex<()> {
         .expect("sysfs device projection event serialization must initialize before callbacks")
 }
 
+fn format_cpulist(indices: impl IntoIterator<Item = u32>) -> alloc::string::String {
+    let mut indices: Vec<u32> = indices.into_iter().collect();
+    indices.sort_unstable();
+    indices.dedup();
+    let mut output = alloc::string::String::new();
+    let mut position = 0;
+    while position < indices.len() {
+        let start = indices[position];
+        let mut end = start;
+        while position + 1 < indices.len() && indices[position + 1] == end.saturating_add(1) {
+            position += 1;
+            end = indices[position];
+        }
+        if !output.is_empty() {
+            output.push(',');
+        }
+        if start == end {
+            output.push_str(&alloc::format!("{start}"));
+        } else {
+            output.push_str(&alloc::format!("{start}-{end}"));
+        }
+        position += 1;
+    }
+    output.push('\n');
+    output
+}
+
+fn format_block_bitmap(indices: impl IntoIterator<Item = u32>) -> alloc::string::String {
+    let mut indices: Vec<u32> = indices.into_iter().collect();
+    indices.sort_unstable();
+    let Some(highest) = indices.last().copied() else {
+        return alloc::string::String::from("0\n");
+    };
+    let words = (highest as usize / 32) + 1;
+    let mut bitmap = alloc::vec![0u32; words];
+    for index in indices {
+        bitmap[index as usize / 32] |= 1 << (index % 32);
+    }
+    let mut output = alloc::string::String::new();
+    for (position, word) in bitmap.iter().enumerate().rev() {
+        if position == bitmap.len() - 1 {
+            output.push_str(&alloc::format!("{word:x}"));
+        } else {
+            output.push_str(&alloc::format!("{word:08x}"));
+        }
+    }
+    output.push('\n');
+    output
+}
+
+fn install_boot_system_devices() {
+    kcpu_id_map::for_each_present_logical_cpu(|_, logical_cpu_id, _| {
+        let index = logical_cpu_id.as_usize() as u32;
+        let id = SystemDeviceId::new(SystemClass::Cpu, index);
+        if system_device_state(id).is_some() {
+            return;
+        }
+        let _ = install_system_device(SystemDeviceDescriptor::new(
+            id,
+            0,
+            0,
+            kcpu_id_map::is_cpu_online(logical_cpu_id),
+            Arc::new(STATIC_SYSTEM_CONTROL),
+        ));
+    });
+
+    let mut starts = BTreeSet::new();
+    for region in khal::mem::memory_regions() {
+        if !region.flags.contains(khal::mem::MemFlags::FREE) || region.size == 0 {
+            continue;
+        }
+        let start = region.paddr.as_usize() as u64;
+        let Some(end) = start.checked_add(region.size as u64) else {
+            continue;
+        };
+        let mut block = start / MEMORY_BLOCK_SIZE_BYTES * MEMORY_BLOCK_SIZE_BYTES;
+        while block < end {
+            starts.insert(block);
+            block = match block.checked_add(MEMORY_BLOCK_SIZE_BYTES) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+    }
+    for start in starts {
+        let index = (start / MEMORY_BLOCK_SIZE_BYTES) as u32;
+        let id = SystemDeviceId::new(SystemClass::Memory, index);
+        if system_device_state(id).is_some() {
+            continue;
+        }
+        let _ = install_system_device(SystemDeviceDescriptor::new(
+            id,
+            start,
+            MEMORY_BLOCK_SIZE_BYTES,
+            true,
+            Arc::new(STATIC_SYSTEM_CONTROL),
+        ));
+    }
+}
+
 /// Initializes the device-node projection independently of mounting sysfs.
 ///
 /// Boot calls this before driver discovery so every lifecycle add event first
@@ -212,6 +392,7 @@ fn device_projection_events() -> &'static Mutex<()> {
 /// idempotent fallback for nonstandard callers.
 pub fn init_device_projection() {
     DEVICE_PROJECTION_INITIALIZATION.call_once(|| {
+        install_boot_system_devices();
         DEVICE_PROJECTION.init_once(Mutex::new(DeviceProjection::new()));
         DEVICE_PROJECTION_EVENTS.init_once(Mutex::new(()));
 
@@ -224,10 +405,11 @@ pub fn init_device_projection() {
         for node in nodes {
             projection
                 .nodes
-                .entry(node.core_id())
+                .entry(node.key())
                 .or_insert_with(|| Arc::new(ProjectedDevice::new(node)));
         }
         projection.characters = kvfs::subscribe_character_devices(Arc::new(handle_character_event));
+        projection.systems = system_device_snapshot();
         projection.rebuild_tree();
         drop(projection);
     });
@@ -249,12 +431,12 @@ fn handle_device_event(event: DeviceNodeEvent) {
             let mut projection = device_projection().lock();
             let is_same_publication = projection
                 .nodes
-                .get(&node.core_id())
+                .get(&node.key())
                 .is_some_and(|projected| projected.node == node);
             if !is_same_publication {
                 projection
                     .nodes
-                    .insert(node.core_id(), Arc::new(ProjectedDevice::new(node)));
+                    .insert(node.key(), Arc::new(ProjectedDevice::new(node)));
             }
             let changed = projection.rebuild_tree();
             drop(projection);
@@ -264,7 +446,7 @@ fn handle_device_event(event: DeviceNodeEvent) {
             let projected = device_projection()
                 .lock()
                 .nodes
-                .get(&node.core_id())
+                .get(&node.key())
                 .filter(|projected| projected.node == node)
                 .cloned();
             if let Some(projected) = projected {
@@ -281,10 +463,10 @@ fn handle_device_event(event: DeviceNodeEvent) {
             // replacement projection.
             if projection
                 .nodes
-                .get(&node.core_id())
+                .get(&node.key())
                 .is_some_and(|projected| projected.node == node)
             {
-                projection.nodes.remove(&node.core_id());
+                projection.nodes.remove(&node.key());
                 let changed = projection.rebuild_tree();
                 drop(projection);
                 invalidate_changed_paths(&changed);
@@ -758,18 +940,210 @@ fn add_drm_render_entries(
     );
 }
 
+fn add_system_attribute(
+    tree: &mut BTreeMap<String, TreeEntry>,
+    device: Option<SystemDeviceId>,
+    kind: SystemAttributeKind,
+    permission: NodePermission,
+) {
+    let path = match kind {
+        SystemAttributeKind::CpuGlobalOnline => "devices/system/cpu/online".to_string(),
+        SystemAttributeKind::CpuGlobalPossible => "devices/system/cpu/possible".to_string(),
+        SystemAttributeKind::MemoryGlobalOnline => "devices/system/memory/online".to_string(),
+        SystemAttributeKind::MemoryGlobalPossible => "devices/system/memory/possible".to_string(),
+        SystemAttributeKind::MemoryBlockSizeBytes => {
+            "devices/system/memory/block_size_bytes".to_string()
+        }
+        kind => {
+            let Some(device) = device else {
+                return;
+            };
+            let class = device.class();
+            let path = format!(
+                "devices/system/{}/{}{}",
+                class.name(),
+                class.name(),
+                device.index()
+            );
+            let name = match kind {
+                SystemAttributeKind::CpuOnline | SystemAttributeKind::MemoryOnline => "online",
+                SystemAttributeKind::CpuPresent => "present",
+                SystemAttributeKind::CpuPossible => "possible",
+                SystemAttributeKind::MemoryPhysIndex => "phys_index",
+                SystemAttributeKind::MemoryState => "state",
+                SystemAttributeKind::MemoryBlockSizeBytes => "block_size_bytes",
+                SystemAttributeKind::CpuGlobalOnline
+                | SystemAttributeKind::CpuGlobalPossible
+                | SystemAttributeKind::MemoryGlobalOnline
+                | SystemAttributeKind::MemoryGlobalPossible => unreachable!(),
+            };
+            format!("{path}/{name}")
+        }
+    };
+    add_entry(
+        tree,
+        path,
+        TreeEntry::SystemAttribute {
+            device,
+            kind,
+            permission,
+        },
+    );
+}
+
+fn system_attribute_contents(
+    device: Option<SystemDeviceId>,
+    kind: SystemAttributeKind,
+) -> VfsResult<Vec<u8>> {
+    let global_systems = || -> VfsResult<Vec<SystemDeviceState>> { Ok(system_device_snapshot()) };
+    match kind {
+        SystemAttributeKind::CpuGlobalOnline => Ok(format_cpulist(
+            global_systems()?
+                .into_iter()
+                .filter(|state| state.id.class() == SystemClass::Cpu && state.is_online)
+                .map(|state| state.id.index()),
+        )
+        .into_bytes()),
+        SystemAttributeKind::CpuGlobalPossible => Ok(format_cpulist(
+            global_systems()?
+                .into_iter()
+                .filter(|state| state.id.class() == SystemClass::Cpu)
+                .map(|state| state.id.index()),
+        )
+        .into_bytes()),
+        SystemAttributeKind::MemoryGlobalOnline => Ok(format_block_bitmap(
+            global_systems()?
+                .into_iter()
+                .filter(|state| state.id.class() == SystemClass::Memory && state.is_online)
+                .map(|state| state.id.index()),
+        )
+        .into_bytes()),
+        SystemAttributeKind::MemoryGlobalPossible => Ok(format_block_bitmap(
+            global_systems()?
+                .into_iter()
+                .filter(|state| state.id.class() == SystemClass::Memory)
+                .map(|state| state.id.index()),
+        )
+        .into_bytes()),
+        SystemAttributeKind::MemoryBlockSizeBytes if device.is_none() => {
+            Ok(append_line(&alloc::format!("{MEMORY_BLOCK_SIZE_BYTES:x}")))
+        }
+        kind => {
+            let id = device.ok_or(VfsError::NoSuchDevice)?;
+            let state = system_device_state(id).ok_or(VfsError::NoSuchDevice)?;
+            let bytes = match kind {
+                SystemAttributeKind::CpuOnline | SystemAttributeKind::MemoryOnline => {
+                    if state.is_online { b"1\n" } else { b"0\n" }.to_vec()
+                }
+                SystemAttributeKind::CpuPresent | SystemAttributeKind::CpuPossible => {
+                    b"1\n".to_vec()
+                }
+                SystemAttributeKind::MemoryPhysIndex => append_line(&state.id.index().to_string()),
+                SystemAttributeKind::MemoryState => append_line(state.state_name()),
+                SystemAttributeKind::MemoryBlockSizeBytes => {
+                    append_line(&format!("{:x}", MEMORY_BLOCK_SIZE_BYTES))
+                }
+                SystemAttributeKind::CpuGlobalOnline
+                | SystemAttributeKind::CpuGlobalPossible
+                | SystemAttributeKind::MemoryGlobalOnline
+                | SystemAttributeKind::MemoryGlobalPossible => unreachable!(),
+            };
+            Ok(bytes)
+        }
+    }
+}
+
+fn add_system_entries(tree: &mut BTreeMap<String, TreeEntry>, systems: &[SystemDeviceState]) {
+    add_directory(tree, "devices/system/cpu");
+    add_directory(tree, "devices/system/memory");
+    add_system_attribute(
+        tree,
+        None,
+        SystemAttributeKind::CpuGlobalOnline,
+        READ_ONLY_PERMISSION,
+    );
+    add_system_attribute(
+        tree,
+        None,
+        SystemAttributeKind::CpuGlobalPossible,
+        READ_ONLY_PERMISSION,
+    );
+    add_system_attribute(
+        tree,
+        None,
+        SystemAttributeKind::MemoryGlobalOnline,
+        READ_ONLY_PERMISSION,
+    );
+    add_system_attribute(
+        tree,
+        None,
+        SystemAttributeKind::MemoryGlobalPossible,
+        READ_ONLY_PERMISSION,
+    );
+    add_system_attribute(
+        tree,
+        None,
+        SystemAttributeKind::MemoryBlockSizeBytes,
+        READ_ONLY_PERMISSION,
+    );
+
+    for state in systems {
+        let id = state.id;
+        match id.class() {
+            SystemClass::Cpu => {
+                let permission = READ_ONLY_PERMISSION;
+                for kind in [
+                    SystemAttributeKind::CpuOnline,
+                    SystemAttributeKind::CpuPresent,
+                    SystemAttributeKind::CpuPossible,
+                ] {
+                    let kind_permission = if kind == SystemAttributeKind::CpuOnline {
+                        permission
+                    } else {
+                        READ_ONLY_PERMISSION
+                    };
+                    add_system_attribute(tree, Some(id), kind, kind_permission);
+                }
+            }
+            SystemClass::Memory => {
+                for (kind, permission) in [
+                    (SystemAttributeKind::MemoryPhysIndex, READ_ONLY_PERMISSION),
+                    (SystemAttributeKind::MemoryState, READ_ONLY_PERMISSION),
+                    (SystemAttributeKind::MemoryOnline, READ_ONLY_PERMISSION),
+                    (
+                        SystemAttributeKind::MemoryBlockSizeBytes,
+                        READ_ONLY_PERMISSION,
+                    ),
+                ] {
+                    add_system_attribute(tree, Some(id), kind, permission);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unittest)]
+fn build_tree(
+    nodes: &BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
+    characters: &[kvfs::CharacterDeviceRegistration],
+) -> BTreeMap<String, TreeEntry> {
+    build_tree_with_systems(nodes, characters, &[])
+}
+
 #[expect(
     clippy::too_many_lines,
-    reason = "CG-028-focused-functions: the tree projection is one linear pass that builds \
-              directories and leaves together; splitting it would duplicate the path walk"
+    reason = "CG-028-focused-functions: sysfs projection walks devices, buses, classes and system \
+              attributes in one ordered pass so directory ownership stays single-pass"
 )]
-fn build_tree(
-    nodes: &BTreeMap<kdevice::DeviceId, Arc<ProjectedDevice>>,
+fn build_tree_with_systems(
+    nodes: &BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: &[kvfs::CharacterDeviceRegistration],
+    systems: &[SystemDeviceState],
 ) -> BTreeMap<String, TreeEntry> {
     let mut tree = BTreeMap::new();
     for directory in [
         "devices",
+        "devices/system",
         "class/input",
         "class/drm",
         "dev/char",
@@ -802,20 +1176,19 @@ fn build_tree(
                 append_line(&format!("{}:{}", device.major(), device.minor())),
             ),
         );
-        let properties = vec![
-            ("MAJOR".to_string(), device.major().to_string()),
-            ("MINOR".to_string(), device.minor().to_string()),
-            ("DEVNAME".to_string(), registration.name().to_string()),
-        ];
         add_entry(
             &mut tree,
             format!("{leaf}/uevent"),
-            TreeEntry::RawUevent {
-                path: leaf.clone(),
-                subsystem: registration.class().to_string(),
-                contents: render_uevent(&properties),
-                properties,
-            },
+            TreeEntry::CharacterAttribute(
+                registration.clone(),
+                format!(
+                    "MAJOR={}\nMINOR={}\nDEVNAME={}\n",
+                    device.major(),
+                    device.minor(),
+                    registration.name()
+                )
+                .into_bytes(),
+            ),
         );
         for (source, target) in [
             (format!("{class}/{}", registration.name()), leaf.clone()),
@@ -831,7 +1204,20 @@ fn build_tree(
                 TreeEntry::Symlink(relative_symlink(&source, &target)),
             );
         }
+        // logind opens /sys/class/tty/tty0/active to decide whether seat0 has
+        // VTs (seat_has_vts); without it CreateSession rejects VTNr. The fixed
+        // VT console is always VT 1 (ktty's VT_GETSTATE reports VT 1), so
+        // publish that alias as the active console.
+        if registration.class() == "tty" && registration.name() == "tty0" {
+            add_entry(
+                &mut tree,
+                format!("{leaf}/active"),
+                TreeEntry::CharacterAttribute(registration.clone(), append_line("tty1")),
+            );
+        }
     }
+
+    add_system_entries(&mut tree, systems);
 
     for projected in nodes.values() {
         let node = &projected.node;
@@ -908,13 +1294,46 @@ fn build_tree(
                 ));
             }
             properties.push(("DRIVER".to_string(), node.driver_name().to_string()));
+            // `DEVPATH` names the device directory, never the `uevent`
+            // attribute inside it; Linux's `kobject_uevent_env` reports
+            // `/devices/pci0000:00/0000:00:04.0`, and udev derives its database
+            // entry (`data/+pci:0000:00:04.0`) from that path. Publishing the
+            // attribute path makes udev look for a device called "uevent" and
+            // drop the event.
+            let device_path = format!("devices/{physical}");
+            add_entry(
+                &mut tree,
+                format!("{device_path}/uevent"),
+                TreeEntry::RawUevent {
+                    path: device_path,
+                    subsystem: "pci".to_string(),
+                    contents: render_uevent(&properties),
+                    properties,
+                },
+            );
+        } else if bus_name(node.location()) == "platform" {
+            // Linux writes `MODALIAS=platform:<pdev->name>` for every platform
+            // device (`drivers/base/platform.c`), and the device name is the
+            // last component of its sysfs path. The projected MMIO and static
+            // devices are named after that path leaf (`a003e00.mmio`,
+            // `static9001`), so the leaf is the platform device name.
+            //
+            // libdrm's `drmParseOFBusInfo` falls back to this attribute when it
+            // builds a DRM platform bus info and returns `ENOENT` without it, so
+            // `drmGetDevices2` silently drops the node and clients such as
+            // `kmscube` report "no drm device found".
+            let leaf = physical.rsplit('/').next().unwrap_or(physical.as_str());
+            let properties = vec![
+                ("DRIVER".to_string(), node.driver_name().to_string()),
+                ("MODALIAS".to_string(), format!("platform:{leaf}")),
+            ];
             let path = format!("devices/{physical}/uevent");
             add_entry(
                 &mut tree,
                 path.clone(),
                 TreeEntry::RawUevent {
                     path,
-                    subsystem: "pci".to_string(),
+                    subsystem: "platform".to_string(),
                     contents: render_uevent(&properties),
                     properties,
                 },
@@ -982,6 +1401,11 @@ impl SimpleDirOps for SysfsDirectory {
         Ok(KBox::new(names.into_iter())?)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: the sysfs leaf dispatch keeps all attribute kinds in \
+                  one match so permission and read/write policy stay comparable"
+    )]
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let path = self.child_path(name);
         let entry = device_projection()
@@ -1030,18 +1454,18 @@ impl SimpleDirOps for SysfsDirectory {
                                 kdevice_uevent::uevent_file_contents(node, scope)
                             })
                             .map(Some),
-                        SimpleFileOperation::Write { data, .. } => projected
-                            .with_available(|node| -> VfsResult<()> {
-                                let action = core::str::from_utf8(data)
-                                    .map_err(|_| VfsError::InvalidInput)?
-                                    .trim_matches(['\0', '\n', '\r', ' ']);
-                                let action = UeventAction::try_from(action)
-                                    .map_err(|()| VfsError::InvalidInput)?;
-                                kdevice_uevent::publish(action, node, scope);
-                                Ok(())
-                            })
-                            .and_then(|result| result)
-                            .map(|()| None),
+                        SimpleFileOperation::Write { data, .. } => {
+                            projected
+                                .with_available(|node| -> VfsResult<()> {
+                                    // `kobject_uevent_store` parses the whole
+                                    // attribute text before it publishes.
+                                    let action = parse_uevent_action(data)?;
+                                    kdevice_uevent::publish(action, node, scope);
+                                    Ok(())
+                                })
+                                .and_then(|result| result)
+                                .map(|()| None)
+                        }
                     }
                 });
                 lookup.file(
@@ -1063,11 +1487,9 @@ impl SimpleDirOps for SysfsDirectory {
                     match operation {
                         SimpleFileOperation::Read => Ok(Some(contents.clone())),
                         SimpleFileOperation::Write { data, .. } => {
-                            let action = core::str::from_utf8(data)
-                                .map_err(|_| VfsError::InvalidInput)?
-                                .trim_matches(['\0', '\n', '\r', ' ']);
-                            let action = UeventAction::try_from(action)
-                                .map_err(|()| VfsError::InvalidInput)?;
+                            // The device-directory uevent parses its action
+                            // with the same rule as the device one.
+                            let action = parse_uevent_action(data)?;
                             kdevice_uevent::publish_raw(action, &path, &subsystem, &properties);
                             Ok(None)
                         }
@@ -1080,6 +1502,24 @@ impl SimpleDirOps for SysfsDirectory {
                         UEVENT_PERMISSION,
                         file,
                     ),
+                )
+            }
+            TreeEntry::SystemAttribute {
+                device,
+                kind,
+                permission,
+            } => {
+                let file = CommandFile::new(move |operation| -> VfsResult<Option<Vec<u8>>> {
+                    match operation {
+                        SimpleFileOperation::Read => {
+                            system_attribute_contents(device, kind).map(Some)
+                        }
+                        SimpleFileOperation::Write { .. } => Err(VfsError::OperationNotPermitted),
+                    }
+                });
+                lookup.file(
+                    name,
+                    SimpleFile::new_regular_with_permission(self.fs.clone(), permission, file),
                 )
             }
         }

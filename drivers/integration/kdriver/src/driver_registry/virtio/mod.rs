@@ -13,14 +13,14 @@ pub(crate) mod ids;
 #[cfg(feature = "virtio")]
 mod glue;
 
+#[cfg(feature = "virtio-gpu")]
+mod gpu;
+
 #[cfg(feature = "virtio-blk")]
 mod block;
 
 #[cfg(feature = "virtio-input")]
 mod input;
-
-#[cfg(feature = "virtio")]
-use alloc::sync::Arc;
 
 #[cfg(feature = "virtio")]
 use driver_base::{DeviceKind, DriverError, DriverResult};
@@ -75,7 +75,23 @@ struct VirtioDriver {
     matcher: VirtioMatcher,
 }
 
+enum VirtioBindingData {
+    #[cfg(any(
+        feature = "virtio-net",
+        feature = "virtio-socket",
+        feature = "virtio-9p",
+        feature = "virtio-rng",
+        feature = "virtio-gpu",
+        feature = "virtio-input",
+    ))]
+    NoPrivateState,
+    #[cfg(feature = "virtio-blk")]
+    Block(block::BlockActivation),
+}
+
 impl DeviceDriver for VirtioDriver {
+    type Data = VirtioBindingData;
+
     fn name(&self) -> &'static str {
         self.name
     }
@@ -96,16 +112,21 @@ impl DeviceDriver for VirtioDriver {
         &self.matcher
     }
 
-    fn probe_device(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
-        activate_virtio_device(device, self.bus_type, self.kind, self.device_type)
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<Self::Data> {
+        activate_virtio_device(ctx, self.bus_type, self.kind, self.device_type)
     }
 
-    fn remove(&self, device: Arc<DeviceObject>) -> DriverResult<()> {
+    fn remove(
+        &self,
+        _ctx: &kdevice::RemoveContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
         #[cfg(feature = "virtio-blk")]
-        if self.kind == DeviceKind::Block {
-            block::close_device(device.id());
+        if let Some(VirtioBindingData::Block(activation)) = data {
+            activation.close();
         }
-        let _ = device;
+        #[cfg(not(feature = "virtio-blk"))]
+        let _ = data;
         Ok(())
     }
 }
@@ -127,7 +148,7 @@ fn make_virtio_driver(
             acpi_ids: &[],
         })
     };
-    Arc::new(VirtioDriver {
+    BoxedDriver::new(VirtioDriver {
         name,
         kind,
         device_type,
@@ -171,19 +192,19 @@ macro_rules! virtio_driver_pair {
               enabled VirtIO device features"
 )]
 fn activate_virtio_device(
-    device: Arc<DeviceObject>,
+    ctx: &kdevice::ProbeContext<'_>,
     bus_type: BusTypeId,
     device_kind: DeviceKind,
     vtype: u32,
-) -> DriverResult<()> {
+) -> DriverResult<VirtioBindingData> {
     if bus_type == BusTypeId::PCI {
-        activate_virtio_pci(device, device_kind)
+        activate_virtio_pci(ctx, device_kind)
     } else if bus_type == BusTypeId::PLATFORM {
-        activate_virtio_mmio(device, device_kind, vtype)
+        activate_virtio_mmio(ctx, device_kind, vtype)
     } else {
         log::warn!(
             "virtio {device_kind:?} at {:?}: unsupported bus type {}",
-            device.location(),
+            ctx.device().location(),
             bus_type.name()
         );
         Err(DriverError::Unsupported)
@@ -195,9 +216,13 @@ fn activate_virtio_device(
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "virtio")]
-fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> DriverResult<()> {
+fn activate_virtio_pci(
+    ctx: &kdevice::ProbeContext<'_>,
+    device_kind: DeviceKind,
+) -> DriverResult<VirtioBindingData> {
     use pci::{DeviceFunction, PciBus};
 
+    let device = ctx.device();
     let (segment, bus_nr, dev_nr, function) = match device.location() {
         DeviceLocation::Pci {
             segment,
@@ -251,7 +276,7 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         Err(virtio::PciProbeError::NotVirtio) => return Err(DriverError::Unsupported),
         Err(virtio::PciProbeError::Transport) => return Err(DriverError::Io),
         Err(virtio::PciProbeError::NoInterrupt) => {
-            return Err(no_interrupt_error(&device, device_kind));
+            return Err(no_interrupt_error(device.as_ref(), device_kind));
         }
     };
 
@@ -259,12 +284,32 @@ fn activate_virtio_pci(device: Arc<DeviceObject>, device_kind: DeviceKind) -> Dr
         return Err(DriverError::Unsupported);
     }
 
+    #[cfg(feature = "virtio-gpu")]
+    if device_kind == DeviceKind::Display {
+        return gpu::activate(ctx, transport, Some(irq), Some((config, bdf)))
+            .map(|_| VirtioBindingData::NoPrivateState);
+    }
     #[cfg(feature = "virtio-input")]
     if device_kind == DeviceKind::Input {
-        return input::activate_pci(device, transport, irq, config, bdf);
+        return input::activate_pci(ctx, transport, irq, config, bdf)
+            .map(|_| VirtioBindingData::NoPrivateState);
     }
 
-    dispatch_virtio_try_new(device, device_kind, transport, Some(irq))
+    dispatch_virtio_try_new(ctx, device_kind, transport, Some(irq))
+}
+
+/// Arm this function after its handler is live. LIFO cleanup masks just the
+/// function before its shared IRQ action is removed.
+#[cfg(any(feature = "virtio-gpu", feature = "virtio-input"))]
+fn arm_pci_intx(
+    ctx: &kdevice::ProbeContext<'_>,
+    config: &mut pci::PciConfigAccess,
+    bdf: pci::DeviceFunction,
+) -> DriverResult<()> {
+    let mut cleanup_config = *config;
+    ctx.add_cleanup(move || set_pci_intx_disabled(&mut cleanup_config, bdf, true))?;
+    set_pci_intx_disabled(config, bdf, false);
+    Ok(())
 }
 
 /// Converts an explicit `NoInterrupt` probe result into an activation error.
@@ -461,12 +506,13 @@ impl MmioAccess for MappedMmio {
 /// cannot construct a transport whose `Drop` resets the device.
 #[cfg(feature = "virtio")]
 fn activate_mmio_with<A: MmioAccess>(
-    device: Arc<DeviceObject>,
+    ctx: &kdevice::ProbeContext<'_>,
     device_kind: DeviceKind,
     vtype: u32,
     size: usize,
     mut access: A,
-) -> DriverResult<()> {
+) -> DriverResult<VirtioBindingData> {
+    let device = ctx.device();
     let identification = access.identify(size)?;
 
     match classify_mmio_device(identification.device_id, vtype) {
@@ -493,9 +539,9 @@ fn activate_mmio_with<A: MmioAccess>(
     let transport = access.open(size)?;
     #[cfg(unittest)]
     if fixture {
-        return dispatch_fixture_try_new(device, device_kind, transport, irq);
+        return dispatch_fixture_try_new(ctx, device_kind, transport, irq);
     }
-    dispatch_virtio_try_new(device, device_kind, transport, irq)
+    dispatch_virtio_try_new(ctx, device_kind, transport, irq)
 }
 
 /// Dispatches a fixture-opened transport.
@@ -504,19 +550,30 @@ fn activate_mmio_with<A: MmioAccess>(
 /// attribute DMA calls to this scenario; every other device keeps the
 /// production dispatch unchanged.
 #[cfg(all(feature = "virtio", unittest))]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: the fixture dispatch transfers the production \
+              boxed VsockDeviceImpl from the counting-HAL constructor to kclass publication"
+)]
 fn dispatch_fixture_try_new<T: virtio::Transport + Send + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &kdevice::ProbeContext<'_>,
     kind: DeviceKind,
     transport: T,
     irq: Option<IrqResource>,
-) -> DriverResult<()> {
+) -> DriverResult<VirtioBindingData> {
     match kind {
         #[cfg(feature = "virtio-socket")]
         DeviceKind::Vsock => {
             use glue::VirtIoSocket;
-            kclass::publish_vsock(parent, VirtIoSocket::try_new_counting(transport, irq)?).map(drop)
+            kclass::publish_vsock(ctx, VirtIoSocket::try_new_counting(transport, irq)?)?;
+            Ok(VirtioBindingData::NoPrivateState)
         }
-        _ => dispatch_virtio_try_new(parent, kind, transport, irq),
+        _ => dispatch_virtio_try_new(ctx, kind, transport, irq),
     }
 }
 
@@ -528,10 +585,11 @@ fn dispatch_fixture_try_new<T: virtio::Transport + Send + 'static>(
 /// resets the device) is constructed only for the driver that owns the device.
 #[cfg(feature = "virtio")]
 fn activate_virtio_mmio(
-    device: Arc<DeviceObject>,
+    ctx: &kdevice::ProbeContext<'_>,
     device_kind: DeviceKind,
     vtype: u32,
-) -> DriverResult<()> {
+) -> DriverResult<VirtioBindingData> {
+    let device = ctx.device();
     let Some(mmio) = device.first_mmio() else {
         log::warn!(
             "virtio {device_kind:?} at {:?}: platform device has no MMIO resource",
@@ -558,13 +616,7 @@ fn activate_virtio_mmio(
     // production claim, so the claim-before-access order stays under test.
     #[cfg(unittest)]
     if let Some(access) = virtio_mmio_support::fixture_for(mmio.base) {
-        return activate_mmio_with(
-            device,
-            device_kind,
-            vtype,
-            mmio.size,
-            access.with_claim(claim),
-        );
+        return activate_mmio_with(ctx, device_kind, vtype, mmio.size, access.with_claim(claim));
     }
 
     let regs = crate::iomap_mmio(mmio.base, mmio.size, "virtio-mmio-probe")?;
@@ -572,54 +624,52 @@ fn activate_virtio_mmio(
         regs,
         mapping: MmioMapping::new(memaddr::VirtAddr::from_mut_ptr(regs.as_ptr()), claim),
     };
-    activate_mmio_with(device, device_kind, vtype, mmio.size, access)
+    activate_mmio_with(ctx, device_kind, vtype, mmio.size, access)
 }
 
 #[cfg(feature = "virtio")]
 fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
-    parent: Arc<DeviceObject>,
+    ctx: &kdevice::ProbeContext<'_>,
     kind: DeviceKind,
     transport: T,
     irq: Option<IrqResource>,
-) -> DriverResult<()> {
+) -> DriverResult<VirtioBindingData> {
     match kind {
         #[cfg(feature = "virtio-net")]
         DeviceKind::Net => {
             use glue::VirtIoNet;
-            kclass::publish_net(parent, VirtIoNet::try_new(transport, irq)?).map(drop)
+            kclass::publish_net(ctx, VirtIoNet::try_new(transport, irq)?)?;
+            Ok(VirtioBindingData::NoPrivateState)
         }
         #[cfg(feature = "virtio-blk")]
-        DeviceKind::Block => block::activate(parent, transport, irq),
+        DeviceKind::Block => block::activate(ctx, transport, irq).map(VirtioBindingData::Block),
         #[cfg(feature = "virtio-gpu")]
         DeviceKind::Display => {
-            use glue::VirtIoGpu;
-            let display = kclass::publish_display(parent.clone(), VirtIoGpu::try_new(transport)?)?;
-            if let Some(irq) = irq {
-                glue::install_irq(&parent, &display, irq)?;
-            }
-            Ok(())
+            gpu::activate(ctx, transport, irq, None)?;
+            Ok(VirtioBindingData::NoPrivateState)
         }
         #[cfg(feature = "virtio-input")]
-        DeviceKind::Input => input::activate_mmio(parent, transport, irq),
+        DeviceKind::Input => {
+            input::activate_mmio(ctx, transport, irq)?;
+            Ok(VirtioBindingData::NoPrivateState)
+        }
         #[cfg(feature = "virtio-socket")]
         DeviceKind::Vsock => {
             use glue::VirtIoSocket;
-            kclass::publish_vsock(parent, VirtIoSocket::try_new(transport, irq)?).map(drop)
+            kclass::publish_vsock(ctx, VirtIoSocket::try_new(transport, irq)?)?;
+            Ok(VirtioBindingData::NoPrivateState)
         }
         #[cfg(feature = "virtio-9p")]
         DeviceKind::Fs9p => {
             use glue::VirtIo9p;
-            kclass::publish_virtio_9p(parent, VirtIo9p::try_new(transport, irq)?).map(drop)
+            kclass::publish_virtio_9p(ctx, VirtIo9p::try_new(transport, irq)?)?;
+            Ok(VirtioBindingData::NoPrivateState)
         }
         #[cfg(feature = "virtio-rng")]
         DeviceKind::Hwrng => {
             use glue::VirtIoRng;
 
-            // A platform (firmware) device must carry its resolved DMA view;
-            // silently falling back to the static HAL would create a second
-            // production DMA path for the same discovery route. PCI firmware
-            // DMA is outside this migration's scope and keeps the static HAL.
-            let device = match (parent.location(), parent.dma()) {
+            let device = match (ctx.device().location(), ctx.device().dma()) {
                 (DeviceLocation::Mmio { .. }, Some(info)) => {
                     VirtIoRng::try_new_with_dma(transport, irq, info)?
                 }
@@ -630,7 +680,8 @@ fn dispatch_virtio_try_new<T: virtio::Transport + Send + 'static>(
                 (DeviceLocation::Pci { .. }, _) => VirtIoRng::try_new(transport, irq)?,
                 _ => return Err(DriverError::Unsupported),
             };
-            kclass::publish_hwrng(parent, device).map(drop)
+            kclass::publish_hwrng(ctx, device)?;
+            Ok(VirtioBindingData::NoPrivateState)
         }
         _ => Err(DriverError::Unsupported),
     }
@@ -745,6 +796,54 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
 #[cfg(feature = "virtio")]
 pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
     crate::driver_registry::register_factories(registrar, DRIVER_FACTORIES);
+}
+
+/// Masks or unmasks legacy INTx delivery for one PCI function.
+///
+/// A transport that has reached `DRIVER_OK` may assert its level-triggered
+/// line at any time. Activation that installs the interrupt owner later masks
+/// INTx first and unmasks it only once the action is registered, so a shared
+/// line never sees an unrouted assertion.
+///
+/// Every caller belongs to a device kind that installs its interrupt owner
+/// late, so a configuration that enables `virtio` but none of those kinds —
+/// virtcca enables virtio without display or input — has no user of this.
+///
+/// Only the device kinds that mask INTx at probe and unmask it after
+/// registering their handler call this. A configuration with `virtio` but
+/// neither kind (virtcca enables virtio without display or input) has no
+/// caller, so the definition is expected to be dead there. `unittest` alone is
+/// not a caller either: the input test module that names it is gated on
+/// `virtio-input` as well.
+#[cfg(feature = "virtio")]
+#[cfg_attr(
+    not(any(feature = "virtio-gpu", feature = "virtio-input")),
+    expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: probe-time INTx masking is shared by every \
+                  device kind that installs its interrupt owner late; a virtio configuration may \
+                  enable neither virtio-gpu nor virtio-input (virtcca does), leaving the helper \
+                  unused. It is used as soon as either kind is enabled, which is every \
+                  configuration that has a display or input device"
+    )
+)]
+pub(super) fn set_pci_intx_disabled(
+    config: &mut pci::PciConfigAccess,
+    bdf: pci::DeviceFunction,
+    is_disabled: bool,
+) {
+    const INTERRUPT_DISABLE: u16 = 1 << 10;
+    const STATUS_COMMAND_OFFSET: u16 = 0x04;
+
+    let status_command = config.read_word(bdf, STATUS_COMMAND_OFFSET);
+    let command = if is_disabled {
+        status_command as u16 | INTERRUPT_DISABLE
+    } else {
+        status_command as u16 & !INTERRUPT_DISABLE
+    };
+    // Status has write-one-to-clear bits in the same 32-bit word. Only write
+    // the Command halfword so a pending Status bit is not cleared here.
+    config.write_halfword(bdf, STATUS_COMMAND_OFFSET, command);
 }
 
 #[cfg(all(feature = "virtio", unittest))]

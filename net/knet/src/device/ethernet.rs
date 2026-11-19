@@ -1136,8 +1136,13 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
+    #[cfg(unittest)]
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         Some(self.inner.id())
+    }
+
+    fn publication_id(&self) -> Option<kdevice::PublicationId> {
+        Some(self.inner.publication_id())
     }
 
     fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<RxPoll> {
@@ -1156,7 +1161,9 @@ impl NetDeviceOps for EthernetDevice {
         trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
         let packet = self.handle_rx_frame(ifindex, rx_buf.data(), timestamp);
         self.inner.recycle_rx(rx_buf).map_err(map_dev_err)?;
-        Ok(RxPoll::Consumed(packet))
+        Ok(RxPoll::Consumed(
+            packet.map(super::net_rx::RxPacket::Network),
+        ))
     }
 
     fn has_rx_work(&self) -> bool {

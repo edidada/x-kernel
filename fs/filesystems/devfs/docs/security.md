@@ -116,6 +116,7 @@ actual synchronization report arrives. A peer open's queue is never cleared.
 
 The crate contains two unsafe memory operations, one unsafe timer start, and
 two exported C ABI entry points:
+The crate contains one unsafe memory operation and two exported C ABI entry
 
 - `src/nodes/fb.rs::FrameBuffer::as_mut_slice` uses
   `slice::from_raw_parts_mut`. The constructor obtains `base` and `size` from
@@ -188,6 +189,7 @@ and wakes client-owned poll registrations.
 | T-06 | An input event arrives between readiness check and waiter registration | Medium — a reader could sleep despite queued input | The queue changes while a task is preparing to sleep | Registration precedes the caller's second readiness check; either the client `PollSet` wake or the recheck observes the event. |
 | T-07 | One slow reader exhausts input buffers | Medium — another reader loses events or the VirtIO queue stalls | A process leaves its event file open without reading | Each file has a 256-event cap; overflow emits `SYN_DROPPED`; inputdev continues draining the hardware queue. |
 | T-08 | Short driver capability reply exposes stale kernel memory | High — kernel stack/heap disclosure | A driver reports fewer bitmap bytes than the ioctl buffer | The ioctl zero-fills its scratch bitmap and abs value before querying; the driver can only overwrite initialized bytes, and the user copy is clipped to the requested length. |
+| T-09 | `LOOP_GET_STATUS` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies the implicit padding in `linux_raw_sys::loop_info` | `LoopInfo` models each gap as an explicit zeroed field, asserts the Linux ABI layout, and copies through `UserPtr::write_vm` with `UserWrite`. |
 
 Queued input records retain the clock selected when they were enqueued.
 The timekeeper supplies a correlated pair at event receipt, preventing delayed
@@ -209,6 +211,20 @@ limitation must not be presented as a complete suspend-aware clock.
 | F-05 | Client poll registration is rejected | The current poll operation fails | The task does not sleep without a wake source | 3 | Propagate `PollRegisterError`. |
 | F-06 | Driver fails an abs or property query | Both ioctls return `EIO` | Userspace cannot mistake a backend failure for an absent axis or property | 4 | Log the driver error; do not mask it as a zero-filled success. |
 | F-07 | Userspace supplies a shorter abs/property buffer | Copy is clipped; `EVIOCGPROP` reports the clipped length, `EVIOCGABS` returns 0 | Caller can detect truncation for the bitmap but not the fixed-size abs record | 4 | Bound the copy by the requested length; match Linux's per-ioctl return convention. |
+
+## Content files in writable directories
+
+Writable devtmpfs directories accept plain file creation and hard links from
+userspace, mirroring Linux ramfs-backed devtmpfs. Creation is gated by the
+generic VFS namespace policy: the parent directory needs `MAY_WRITE |
+MAY_EXEC` (`/dev` and `/dev/shm` are mode 0755/01777 root-owned), so only
+root or a `CAP_DAC_OVERRIDE` holder can create content — the same population
+that can already create device nodes there. Content files allocate memory
+only through the caller-driven page cache and the per-inode metadata lock;
+they expose no cross-task state, no hardware identity and no kernel-memory
+backed reads (holes read as zeroes). `link` aliases an existing inode within
+one directory and cannot cross superblocks (the VFS rejects cross-mount
+links before the callback runs).
 
 ## Known limitations
 

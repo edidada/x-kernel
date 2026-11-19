@@ -10,7 +10,7 @@ use core::{ffi::CStr, iter};
 use filemap::{PrivateFileViewSpec, new_file_private_vma};
 use kcred::Cred;
 use kernel_elf_parser::{
-    AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, app_stack_region_with_auxv,
+    AuxEntry, AuxType, ElfError, ElfHeaders, ElfHeadersBuilder, app_stack_region_with_auxv,
 };
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
@@ -315,7 +315,27 @@ pub struct PartialInstallProbe {
     /// Observes borrowed mappings and schedules without reacquiring this MM.
     /// The peer must never require this MM mutex or an inverse lock.
     /// Captured request-local state owns the peer handshake and migration target.
-    pub observe: alloc::boxed::Box<dyn Fn(&MmSpace) + Send + Sync>,
+    observe: kalloc_types::KBox<dyn Fn(&MmSpace) + Send + Sync>,
+}
+
+#[cfg(unittest)]
+impl PartialInstallProbe {
+    /// Prepares a request-local observer before irreversible exec operations.
+    ///
+    /// Requires sleepable, reclaim-safe task context without locks needed by
+    /// reclaim. Returns `NoMemory` if owner allocation fails, dropping the
+    /// captures without invoking the observer. Invocation and destruction must
+    /// satisfy the captures' context requirements; invocation holds the target
+    /// MM lock and must not reacquire it or introduce an inverse lock order.
+    pub fn new(
+        hits: Arc<core::sync::atomic::AtomicUsize>,
+        observe: impl Fn(&MmSpace) + Send + Sync + 'static,
+    ) -> KResult<Self> {
+        Ok(Self {
+            hits,
+            observe: kalloc_types::KBox::new(observe)?,
+        })
+    }
 }
 
 #[cfg(unittest)]
@@ -339,6 +359,19 @@ impl PreparedExecImage {
     /// Returns the auxiliary vector in `/proc/<pid>/auxv` wire form.
     pub fn auxv_bytes(&self) -> &[u8] {
         &self.auxv
+    }
+
+    /// Returns the exec-time auxv as the flat `(type, value)` word sequence
+    /// reported by `/proc/<pid>/auxv` and `PR_GET_AUXV`.
+    pub fn saved_aux_words(&self) -> Vec<u64> {
+        self.auxv
+            .chunks_exact(core::mem::size_of::<u64>())
+            .map(|chunk| {
+                u64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                ])
+            })
+            .collect()
     }
 }
 
@@ -410,7 +443,7 @@ fn map_elf(
     Ok(())
 }
 
-fn map_elf_error(err: &'static str) -> KError {
+fn map_elf_error(err: ElfError) -> KError {
     debug!("Failed to parse ELF file: {err}");
     KError::InvalidExecutable
 }
@@ -671,7 +704,18 @@ fn initial_aux_vector(
         AuxEntry::new(AuxType::PHENT, image.program_header_entry_size()),
         AuxEntry::new(AuxType::PHNUM, image.program_header_count()),
         AuxEntry::new(AuxType::PAGESZ, PAGE_SIZE_4K),
+        AuxEntry::new(AuxType::CLKTCK, posix_types::USER_HZ as usize),
         AuxEntry::new(AuxType::ENTRY, image.entry(executable_bias)?),
+        // Linux publishes the CPU capability word here, and user runtimes read
+        // it instead of probing control registers: glibc's IFUNC resolvers and
+        // LLVM's `getHostCPUFeatures` (behind llvmpipe's JIT) pick instruction
+        // paths from it. Omitting it makes every reader see "no optional
+        // features", and a JIT that still emits a feature-gated path faults.
+        AuxEntry::new(AuxType::HWCAP, khal::cpu_hwcap()),
+        // Linux `create_elf_tables()` also publishes the secondary mask and
+        // the `times(2)` clock tick rate. Advertise a baseline HWCAP2 until
+        // the architecture HAL exposes a separate bitmap.
+        AuxEntry::new(AuxType::HWCAP2, 0),
     ];
     if let Some(interpreter_bias) = layout.interpreter_bias() {
         auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));

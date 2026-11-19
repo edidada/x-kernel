@@ -26,6 +26,26 @@ use crate::elf_image::tests::{
 
 static TEST_FS: FileSystemType = FileSystemType::internal("kexec-test");
 
+#[def_test]
+fn partial_install_probe_releases_unused_capture_without_invocation() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = calls.clone();
+    let probe = super::PartialInstallProbe::new(
+        Arc::new(AtomicUsize::new(0)),
+        move |_| {
+            captured.fetch_add(1, Ordering::Relaxed);
+        },
+    )
+    .unwrap();
+    assert_eq!(Arc::strong_count(&calls), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    drop(probe);
+    assert_eq!(Arc::strong_count(&calls), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
 fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
     let cached_data = data.clone();
     let size = data.len() as u64;
@@ -153,6 +173,11 @@ fn prepared_image_survives_cache_clear_and_rejections_preserve_installed_mm() {
         vec!["app".into(), "owned-argument".into()],
     );
     let prepared = super::prepare_user_app_request(request).expect("prepare fixture");
+    let has_clock_ticks = prepared.auxv_bytes().chunks_exact(16).any(|entry| {
+        usize::from_ne_bytes(entry[..8].try_into().unwrap()) == AuxType::CLKTCK as usize
+            && usize::from_ne_bytes(entry[8..].try_into().unwrap()) == posix_types::USER_HZ as usize
+    });
+    assert!(has_clock_ticks, "exec must expose the times(2) USER_HZ ABI rate");
     assert!(!prepared.stack_data.is_empty());
     assert!(prepared.stack_data.len() <= kaddr_layout::USER_STACK_SIZE);
     assert_eq!(

@@ -21,7 +21,11 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 Named KVFS cdev registrations use the same device-projection tree as hardware
 nodes, at `devices/virtual/<class>/<name>` with class/dev links and read-only
 identity attributes. Name, class, dev_t and availability come from the cdev
-registration handle; there is no ConsoleAttribute or hardcoded tty0/tty1 path.
+registration handle. The one class-specific attribute is `/sys/class/tty/tty0/active`, which
+is projected for the `tty0` registration and reports the fixed VT console (`tty1`, the value
+ktty's `VT_GETSTATE` reports); logind's `seat_has_vts()` reads it to decide whether seat0 has
+virtual terminals, and without it `CreateSession` rejects a `VTNr`. No other class needs a
+per-name attribute, and the projection for every other cdev registration stays generic.
 Sysfs subscribes atomically with a registry snapshot, and named add/remove
 callbacks rebuild/invalidate the projection after registry locks are released.
 Read closures recheck registration availability. These virtual identity uevent
@@ -40,7 +44,10 @@ device-management clients.
   bus, driver, and character-number paths.
 - Render read-only attributes and relative symlinks from owned snapshots.
 - Validate `uevent` action writes and pass them to the shared kobject event
-  publisher.
+  publisher. The action is parsed as `kobject_action_type` does: one trailing
+  newline or NUL is dropped, the action is the token before the first single
+  space (`udevadm trigger` writes `add <uuid>`), and any other whitespace is
+  part of the token, so a tab or an embedded newline is refused with `EINVAL`.
 - Apply Linux-compatible permissions: ordinary attributes are `0444` and
   writable `uevent` attributes are `0644`.
 
@@ -109,7 +116,22 @@ For an input device the canonical object is:
 DRM uses `/sys/devices/<physical>/drm/cardN` with `dev`, `device`, `subsystem`,
 and `uevent`. Class and character-number entries are relative links to these
 canonical objects. `relative_symlink` computes links from source and target
-components, so link depth follows the actual paths.
+components, so link depth follows the actual paths. Each connector also gets a
+`class/drm/cardN-<connector>` link to its own directory, which carries `status`,
+`dpms`, `modes`, `enabled`, and raw `edid`; linking the connector to the card
+would hide those attributes. The class tree therefore contains `class/drm/cardN`
+for the card, `class/drm/cardN-<connector>` for each connector, and
+`class/drm/renderD<minor>` for the render minor; `dev/char/<major>:<minor>` links
+point back to the canonical device directories.
+
+Every device directory also carries its own `uevent`. PCI devices report the
+`PCI_*` identity Linux publishes; platform devices (MMIO, firmware node, static)
+report `DRIVER` and a `MODALIAS=platform:<leaf>` line. The platform attribute is
+not decoration: libdrm's `drmParseOFBusInfo`/`drmParseOFDeviceInfo` read
+`OF_FULLNAME`/`OF_COMPATIBLE_N` first and fall back to `MODALIAS`, returning
+`ENOENT` when neither is present. A missing `uevent` makes `drmGetDevices2` drop
+the node silently, so DRM clients fail with "no drm device found" even though
+`/dev/dri/cardN` exists.
 
 The root also supplies `/sys/fs/cgroup` and `/sys/fs/bpf` mountpoints required
 by boot filesystem setup.
@@ -128,7 +150,7 @@ unavailable. The `Removing` callback takes the projected device's access gate
 exclusively, which waits for in-flight attribute reads or uevent writes. The
 coordinator then publishes remove while the path still exists, and `Removed`
 finally deletes the projection. A removing node remains reserved in `kdevice`,
-so a replacement with the same core ID cannot interleave with this sequence.
+so a replacement with the same `DeviceNodeKey` cannot interleave with this sequence; distinct publications of one DeviceId are separate projections.
 
 Each add or remove rebuilds the generated path tree once. A structural diff
 identifies the highest changed paths and invalidates only those cached dentries.
@@ -195,3 +217,16 @@ reaches into the display driver itself: a device that stops reporting a
 connector stops has its entry removed with the node, and a card that has no
 connector metadata gets no connector entry.
 
+## System device projection
+
+`/sys/devices/system/{cpu,memory}` is synthesized from `kdevice`'s system
+device registry. Directories exist only for present devices. All attributes are
+read-only: `cpuN/{online,present,possible}`, `memoryN/{phys_index,state,online}`,
+global `cpu/{online,possible}`, `memory/{online,possible}`, and
+`memory/block_size_bytes`. CPU sets use cpulist formatting and memory sets use
+Linux's hex block bitmap. This layer is a snapshot projection; state-changing
+hotplug is deliberately outside it.
+
+System devices have no major/minor number and no `/dev` node. Attributes are a
+separate `TreeEntry::SystemAttribute` variant carrying the device ID, kind and
+permission, because ordinary attributes are hard-wired read-only.

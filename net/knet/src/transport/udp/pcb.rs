@@ -33,7 +33,7 @@ pub(super) struct UdpDatagram {
 }
 
 /// A validated IPv4 UDP view over a reference-counted [`PacketBuf`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PreparedUdpPacket {
     packet: PacketBuf,
 }
@@ -78,16 +78,9 @@ impl PreparedUdpPacket {
         self.metadata().remote_addr()
     }
 
+    #[cfg(unittest)]
     pub(crate) fn into_packet(self) -> PacketBuf {
         self.packet
-    }
-
-    /// Rebuilds a validated view from a packet stamped by [`super::input::prepare_ipv4_packet`].
-    pub(crate) fn from_stamped(packet: PacketBuf) -> Result<Self, PacketBuf> {
-        if packet.udp_metadata().is_none() {
-            return Err(packet);
-        }
-        Ok(Self { packet })
     }
 
     fn metadata(&self) -> UdpPacketMetadata {
@@ -151,6 +144,18 @@ impl UdpPcb {
 
     pub(super) fn has_recv_data(&self) -> bool {
         !self.rx_queue.lock().is_empty()
+    }
+
+    /// Length of the datagram at the head of the receive queue.
+    ///
+    /// `udp_ioctl(SIOCINQ)` copies out `first_packet_length`, the payload
+    /// length of the first queued datagram (0 for an empty queue). The payload
+    /// range excludes the IPv4 and UDP headers, which is what the receive path
+    /// hands to `recv` as well.
+    pub(super) fn head_datagram_len(&self) -> Option<usize> {
+        let queue = self.rx_queue.lock();
+        let range = queue.front()?.metadata().payload_range();
+        Some(range.end - range.start)
     }
 
     pub(super) fn recv_datagram(&self, mode: RecvMode) -> Option<UdpDatagram> {

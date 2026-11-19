@@ -4,8 +4,9 @@
 
 //! Real guards and watching with an isolated GP, not the boot callback carrier.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use kalloc_types::KBox;
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use krcu_core::{CallbackNode, CallbackState, CpuWatching, RcuContextIf, ReaderNode};
@@ -34,11 +35,11 @@ impl Drop for Value {
 
 /// # Safety
 /// `node` is the zero-offset field projection of a uniquely submitted Value
-/// Box. The sole executor invokes it once, after the reader has ended its borrow.
+/// KBox. The sole executor invokes it once, after the reader has ended its borrow.
 unsafe fn reclaim_value(node: *mut CallbackNode) {
-    // SAFETY: checked zero offset preserves the original Box pointer and its
+    // SAFETY: checked zero offset preserves the original KBox pointer and its
     // provenance; invocation consumes the transferred owner after all accesses.
-    drop(unsafe { Box::from_raw(node.cast::<Value>()) });
+    drop(unsafe { KBox::from_raw(node.cast::<Value>()) });
 }
 
 #[derive(Default)]
@@ -66,18 +67,21 @@ fn verify_implicit_region<G>(
         return unittest::TestResult::Ignored;
     }
     let drops = Arc::new(AtomicUsize::new(0));
-    let published = Arc::new(AtomicPtr::new(Box::into_raw(Box::new(Value {
-        node: CallbackNode::new(reclaim_value),
-        number: 17,
-        drops: drops.clone(),
-    }))));
+    let published = Arc::new(AtomicPtr::new(KBox::into_raw(
+        KBox::new_nowait(Value {
+            node: CallbackNode::new(reclaim_value),
+            number: 17,
+            drops: drops.clone(),
+        })
+        .unwrap(),
+    )));
     let handshake = Arc::new(Handshake::default());
     let result = Arc::new(kspin::SpinNoPreempt::new(None));
     let updater_published = published.clone();
     let updater_handshake = handshake.clone();
     let updater_result = result.clone();
-    let updater = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let updater = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             let nodes = [const { ReaderNode::new() }; kbuild_config::NR_CPUS];
             // SAFETY: sole controller of these isolated nodes. Only READER_CPU reads
             // this fixture's publication; no production reader uses the nodes.
@@ -131,7 +135,7 @@ fn verify_implicit_region<G>(
             let invoked = unsafe { state.invoke_ready(READER_CPU, 1) };
             if !accepted {
                 // SAFETY: rejection retained ownership; reader exit is confirmed.
-                drop(unsafe { Box::from_raw(retired) });
+                drop(unsafe { KBox::from_raw(retired) });
             }
             updater_handshake.can_resume.store(true, Ordering::Release);
             *updater_result.lock() = Some((
@@ -141,7 +145,7 @@ fn verify_implicit_region<G>(
                 observed,
                 invoked,
             ));
-        },
+        }).unwrap(),
         "rcu-implicit-updater".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -151,8 +155,8 @@ fn verify_implicit_region<G>(
 
     let reader_handshake = handshake.clone();
     let reader_published = published.clone();
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             // Single-CPU affinity keeps this permanent observation tied to the
             // reader CPU even after the tested guard ends. Publish before entry
             // so no fixture lock changes the implicit region being exercised.
@@ -168,9 +172,9 @@ fn verify_implicit_region<G>(
             reader_handshake.has_entered.store(true, Ordering::Release);
             // An IRQ-off reader cannot depend on a timer callback to escape a
             // broken fixture. The hardware clock still advances with IRQs masked.
-            let deadline = khal::time::monotonic_time_nanos().saturating_add(5_000_000_000);
+            let deadline_ns = khal::time::monotonic_time_nanos().saturating_add(5_000_000_000);
             while !reader_handshake.can_exit.load(Ordering::Acquire) {
-                if khal::time::monotonic_time_nanos() >= deadline {
+                if khal::time::monotonic_time_nanos() >= deadline_ns {
                     reader_handshake
                         .has_timed_out
                         .store(true, Ordering::Release);
@@ -198,7 +202,7 @@ fn verify_implicit_region<G>(
             // SAFETY: matching same-CPU exit before any task work or guard release.
             unsafe { krcu::exit_user_quiescent() };
             drop(boundary);
-        },
+        }).unwrap(),
         "rcu-implicit-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

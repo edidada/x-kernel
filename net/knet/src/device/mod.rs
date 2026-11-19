@@ -13,7 +13,7 @@ use ktime_types::MonotonicInstant;
 mod ethernet;
 mod id;
 mod loopback;
-mod net_rx;
+pub(crate) mod net_rx;
 mod registry;
 
 pub(crate) use ethernet::*;
@@ -170,7 +170,7 @@ pub(crate) enum RxPoll {
     Empty,
     /// One frame or deferred packet was consumed by the budgeted receive step.
     /// Ethernet ARP handling and dropped frames yield `None`.
-    Consumed(Option<PacketBuf>),
+    Consumed(Option<net_rx::RxPacket>),
 }
 
 /// Trait implemented by network device backends.
@@ -193,7 +193,13 @@ pub(crate) trait NetDevice: Send + Sync {
     fn link_send_snapshot(&self) -> LinkSendSnapshot;
 
     /// Device-model ID for driver-backed devices.
+    #[cfg(unittest)]
     fn device_id(&self) -> Option<kdevice::DeviceId> {
+        None
+    }
+
+    /// Exact class publication identity for driver-backed devices.
+    fn publication_id(&self) -> Option<kdevice::PublicationId> {
         None
     }
 

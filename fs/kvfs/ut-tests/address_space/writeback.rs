@@ -4,12 +4,13 @@
 
 //! Partial writeback completion and retry tests.
 
-use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{
     ops::Range,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+use kalloc_types::KBox;
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
 use pagecache::FolioRead;
@@ -64,14 +65,16 @@ impl AddressSpaceOperations for PrefixRetryWritebackOps {
 
 #[def_test]
 fn failed_prefix_writeback_redirties_and_retry_converges() {
-    let operations: &'static PrefixRetryWritebackOps =
-        Box::leak(Box::new(PrefixRetryWritebackOps {
+    let operations: &'static PrefixRetryWritebackOps = KBox::leak(
+        KBox::new(PrefixRetryWritebackOps {
             state: Mutex::new(PrefixRetryState {
                 fail_once: true,
                 calls: 0,
                 durable: Vec::new(),
             }),
-        }));
+        })
+        .unwrap(),
+    );
     let input = vec![0x6d; PAGE_SIZE_4K * 2];
     let inode = VfsInode::new_file_with_address_space_and_flags(
         Arc::new(TruncateOps),
@@ -104,6 +107,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
             .unwrap();
         assert_eq!(state, (expected_dirty, false));
     }
+    address_space.i_pages.verify_index_consistency();
     {
         let state = operations.state.lock();
         assert_eq!(state.calls, 1);
@@ -126,6 +130,7 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
             .unwrap();
         assert_eq!(state, (false, false));
     }
+    address_space.i_pages.verify_index_consistency();
     let state = operations.state.lock();
     assert_eq!(state.calls, 2);
     assert_eq!(state.durable, input);
@@ -158,6 +163,7 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
     assert_eq!(result, Err(VfsError::InvalidInput));
     assert_eq!(control.nr_to_write(), 0);
     assert_eq!(control.pages_skipped(), 0);
+    mapping.i_pages.verify_index_consistency();
     let mut control = WritebackControl::all().with_nr_to_write(1);
     let mut retried = Vec::new();
     mapping
@@ -168,6 +174,7 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
         .unwrap();
     assert_eq!(retried, vec![1]);
     assert_eq!(control.nr_to_write(), 0);
+    mapping.i_pages.verify_index_consistency();
     for index in 0..3 {
         mapping
             .i_pages
@@ -256,15 +263,15 @@ impl AddressSpaceOperations for DeferredWritebackOps {
 fn deferred_mapping(
     fail_on_call: Option<usize>,
     append_on_call: Option<usize>,
-) -> (Arc<VfsInode>, &'static DeferredWritebackOps) {
-    let operations: &'static DeferredWritebackOps = Box::leak(Box::new(DeferredWritebackOps {
+) -> VfsResult<(Arc<VfsInode>, &'static DeferredWritebackOps)> {
+    let operations: &'static DeferredWritebackOps = KBox::leak(KBox::new(DeferredWritebackOps {
         calls: Mutex::new(Vec::new()),
         pending: Mutex::new(Vec::new()),
         fail_on_call,
         append_on_call,
         ready: ktask::WaitQueue::new(),
         submitted: AtomicUsize::new(0),
-    }));
+    })?);
     let inode = VfsInode::new_file_with_address_space_and_flags(
         Arc::new(TruncateOps),
         NodeFlags::ALWAYS_CACHE,
@@ -275,7 +282,7 @@ fn deferred_mapping(
             Umode::new(NodeType::RegularFile, NodePermission::default()),
         ),
     );
-    (inode, operations)
+    Ok((inode, operations))
 }
 
 // Observe the actual parking transition, never a fixed number of yields.
@@ -288,7 +295,7 @@ fn assert_waiting(task: &ktask::KtaskRef, finished: &AtomicBool) {
 
 #[def_test]
 fn raw_zero_budget_and_empty_range_bypass_filesystem_dispatch() {
-    let (inode, operations) = deferred_mapping(None, None);
+    let (inode, operations) = deferred_mapping(None, None).unwrap();
     let mapping = inode.address_space();
     mapping.write_cached_bytes(0, b"dirty").unwrap();
     let mut zero = WritebackControl::all().with_nr_to_write(0);
@@ -314,7 +321,7 @@ fn data_write_and_wait_covers_clean_old_writeback_and_new_errors_after_submissio
         (false, WritebackSyncMode::None),
         (true, WritebackSyncMode::All),
     ] {
-        let (inode, operations) = deferred_mapping(fail_submission.then_some(2), None);
+        let (inode, operations) = deferred_mapping(fail_submission.then_some(2), None).unwrap();
         let mapping = inode.address_space();
         mapping.write_cached_bytes(0, b"old").unwrap();
         let mut raw = WritebackControl::all().with_sync_mode(mode);
@@ -363,7 +370,7 @@ fn live_invalidation_waits_for_owned_writeback_and_retains_failed_data() {
         (false, Some(VfsError::Io)),
         (true, Some(VfsError::Io)),
     ] {
-        let (inode, operations) = deferred_mapping(fail_submission.then_some(1), None);
+        let (inode, operations) = deferred_mapping(fail_submission.then_some(1), None).unwrap();
         let mapping = inode.address_space();
         mapping.write_cached_bytes(0, b"retained").unwrap();
         let finished = Arc::new(AtomicBool::new(false));
@@ -407,7 +414,7 @@ fn live_invalidation_waits_for_owned_writeback_and_retains_failed_data() {
 
 #[def_test]
 fn finite_data_target_submits_and_waits_the_same_bound_during_append() {
-    let (inode, operations) = deferred_mapping(None, Some(1));
+    let (inode, operations) = deferred_mapping(None, Some(1)).unwrap();
     let mapping = inode.address_space();
     mapping.write_cached_bytes(0, b"captured").unwrap();
     let finished = Arc::new(AtomicBool::new(false));
@@ -437,14 +444,16 @@ fn finite_data_target_submits_and_waits_the_same_bound_during_append() {
 
 #[def_test]
 fn data_range_sync_rounds_to_intersecting_folios() {
-    let operations: &'static PrefixRetryWritebackOps =
-        Box::leak(Box::new(PrefixRetryWritebackOps {
+    let operations: &'static PrefixRetryWritebackOps = KBox::leak(
+        KBox::new(PrefixRetryWritebackOps {
             state: Mutex::new(PrefixRetryState {
                 fail_once: false,
                 calls: 0,
                 durable: Vec::new(),
             }),
-        }));
+        })
+        .unwrap(),
+    );
     let inode = VfsInode::new_file_with_address_space_and_flags(
         Arc::new(TruncateOps),
         NodeFlags::ALWAYS_CACHE,
@@ -496,14 +505,15 @@ impl AddressSpaceOperations for AcceptedWriteOps {
         &self,
         _mapping: &AddressSpace,
         _request: crate::WriteBeginRequest,
-    ) -> VfsResult<()> {
-        Ok(())
+    ) -> VfsResult<crate::WriteReservation> {
+        Ok(crate::WriteReservation::new())
     }
 
     fn write_end(
         &self,
         mapping: &AddressSpace,
         request: crate::WriteEndRequest,
+        _reservation: &crate::WriteReservation,
     ) -> VfsResult<usize> {
         assert!(self.accepted <= request.copied());
         self.entered.store(true, Ordering::Release);
@@ -527,13 +537,16 @@ impl AddressSpaceOperations for AcceptedWriteOps {
 #[def_test]
 fn writeback_waits_for_buffered_acceptance_and_samples_the_published_eof() {
     for accepted in [7, 2] {
-        let operations: &'static AcceptedWriteOps = Box::leak(Box::new(AcceptedWriteOps {
-            accepted,
-            entered: AtomicBool::new(false),
-            released: AtomicBool::new(false),
-            events: ktask::WaitQueue::new(),
-            synced: AtomicUsize::new(0),
-        }));
+        let operations: &'static AcceptedWriteOps = KBox::leak(
+            KBox::new(AcceptedWriteOps {
+                accepted,
+                entered: AtomicBool::new(false),
+                released: AtomicBool::new(false),
+                events: ktask::WaitQueue::new(),
+                synced: AtomicUsize::new(0),
+            })
+            .unwrap(),
+        );
         let inode = VfsInode::new_file_with_address_space_and_flags(
             Arc::new(TruncateOps),
             NodeFlags::ALWAYS_CACHE,

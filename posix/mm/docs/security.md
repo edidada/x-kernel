@@ -1,5 +1,15 @@
 # posix-mm — Security and Reliability Analysis
 
+## Independent resource limits
+
+Finite `RLIMIT_AS` and default system commitment admission are separate checks.
+Unlimited `RLIMIT_AS` no longer permits a single private writable commitment
+larger than managed RAM. The check uses total capacity, not volatile free pages,
+and is performed before destructive fixed-address replacement. `MAP_NORESERVE`
+bypasses default private commitment admission as on Linux, so physical OOM is
+still possible and handled by the process runtime. A passed heuristic admission
+is not a guarantee of future physical backing or complete OOM recovery.
+
 ## Trust Model
 
 `posix-mm` trusts that:
@@ -147,3 +157,29 @@ callback rather than new-map admission. Fixed replacement removes the target,
 trims a shrinking source, then resolves the remaining source and prepares its
 move. These removals remain effective if a later preparation fails. The syscall
 has no mapping-admission retry around this destructive sequence.
+
+## RLIMIT_AS
+
+Address-space growth is admitted using a process-resource limit snapshot and the
+VMA footprint while holding the MM lock. Concurrent mapping operations cannot
+spend the same remaining budget. Fixed mmap accounts for holes and existing
+destination mappings before removing them. Growing mremap checks its delta
+before fixed replacement; fixed `MREMAP_DONTUNMAP` removes the destination
+before checking the retained source's charge, so rejection can leave that
+destination unmapped. A denied brk leaves the break unchanged. Unlimited limits
+retain the normal fast path; finite-limit arithmetic is checked.
+This limit governs virtual address-space admission, not physical memory
+availability, and is not checked again when a page fault allocates backing.
+
+## Locked-memory requests
+
+`mlockall(2)` is accepted as a no-op because the kernel has no swap, so every
+page is already resident and cannot be evicted. Being a no-op must not make the
+entry point a permissive one: the `flags` word is validated against
+`MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT` before the call reports success. An
+empty word, an unknown bit, and the bare `MCL_ONFAULT` return `InvalidInput`,
+exactly as `SYSCALL_DEFINE1(mlockall)` does. Accepting them would tell a caller
+that it had locked memory it never asked the kernel to lock, and a hardening
+path that treats success as proof of residency would draw the wrong conclusion.
+`munlockall()` likewise reports success after doing nothing, which is the
+correct answer for memory that was never pinned.

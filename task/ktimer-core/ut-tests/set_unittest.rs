@@ -8,9 +8,9 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::cpu::CancelResult;
 
-fn setting(deadline: u64) -> Deadline {
+fn setting(deadline_ns: u64) -> Deadline {
     Deadline::new(MonotonicInstant::from_span_since_origin(
-        TimeSpan::from_nanos(deadline),
+        TimeSpan::from_nanos(deadline_ns),
     ))
     .unwrap()
 }
@@ -74,9 +74,9 @@ fn reprogram_reads_each_current_deadline_under_the_cpu_lock() {
 fn reprogram_preserves_zero_horizon_and_other_deadline_sources() {
     let node = TimerNode::new(setting(0));
     let timer_set = TimerSet::<1>::new();
-    for deadline in [0, 10, u64::MAX] {
+    for deadline_ns in [0, 10, u64::MAX] {
         // SAFETY: fixed external node and one set, with no concurrent service.
-        unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline)) }.unwrap();
+        unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline_ns)) }.unwrap();
         let mut prepared = None;
         let mut programmed = None;
         // SAFETY: deterministic CPU0 programming stub with an independent
@@ -90,8 +90,8 @@ fn reprogram_preserves_zero_horizon_and_other_deadline_sources() {
         .unwrap();
         // SAFETY: no running delivery; drain before assertions may return.
         unsafe { timer_set.cancel_sync(&node) };
-        assert_eq!(prepared, Some(deadline));
-        assert_eq!(programmed, Some(deadline.min(20)));
+        assert_eq!(prepared, Some(deadline_ns));
+        assert_eq!(programmed, Some(deadline_ns.min(20)));
     }
     for other in [Some(20), None] {
         let mut programmed = Some(99);
@@ -132,7 +132,7 @@ fn dispatch_due_orders_local_timers_and_keeps_future_and_remote_pending() {
     // SAFETY: one stable external handler outlives the fixed node array;
     // all pending memberships are removed before any storage is released.
     let nodes = [30, 10, 20, 40, 5]
-        .map(|deadline| unsafe { TimerNode::with_handler(setting(deadline), &handler) });
+        .map(|deadline_ns| unsafe { TimerNode::with_handler(setting(deadline_ns), &handler) });
     for (index, node) in nodes.iter().enumerate() {
         let cpu = usize::from(index == 4);
         // SAFETY: each fixed node uses this same stable set, with no delivery
@@ -271,12 +271,12 @@ fn expired_wait_start_preserves_idle_route_and_pending_deadline() {
     for selected in [0, 1] {
         let node = TimerNode::new(setting(100));
         let timer_set = TimerSet::<2>::new();
-        for deadline in [9, 10] {
+        for deadline_ns in [9, 10] {
             let mut clock_calls = 0;
             // SAFETY: stable idle node and CPU collection. Clock only records
             // local observations; no timer mutations or locks inside it.
             let result = unsafe {
-                timer_set.arm_on_if_future(&node, selected.into(), setting(deadline), || {
+                timer_set.arm_on_if_future(&node, selected.into(), setting(deadline_ns), || {
                     clock_calls += 1;
                     10
                 })
@@ -394,10 +394,10 @@ fn wait_start_invalid_cpu_skips_clock_but_ordinary_arm_accepts_past() {
     };
     assert_eq!(result, Err(KError::InvalidInput));
     assert_eq!(clock_calls, 0);
-    for deadline in [9, 10] {
+    for deadline_ns in [9, 10] {
         // SAFETY: fixed node, initialized CPU and serialized access. Ordinary
         // arm must not acquire the wait-specific rejection behavior.
-        let result = unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline)) };
+        let result = unsafe { timer_set.arm_on(&node, 0.into(), setting(deadline_ns)) };
         // SAFETY: serve the matching test CPU with live callback-free storage.
         let delivered = unsafe {
             crate::dispatch::dispatch_round(&timer_set.cpus[0], 10, timer_set.cpus[0].lock())
@@ -602,10 +602,10 @@ fn running_and_cleanup_prevent_owner_migration() {
 /// helper does not catch them.
 #[cfg(feature = "smp")]
 pub fn concurrent_owner_routes(
-    run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
+    runner: impl crate::test_support::WorkerRunner,
     yield_now: fn(),
 ) -> unittest::TestResult {
-    use alloc::{boxed::Box, sync::Arc};
+    use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let node = Arc::new(TimerNode::new(setting(10)));
@@ -613,13 +613,13 @@ pub fn concurrent_owner_routes(
     let ready = Arc::new(AtomicUsize::new(0));
     let finished = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicBool::new(false));
-    let workers: [Box<dyn FnOnce() + Send>; 2] = core::array::from_fn(|cpu| {
+    let workers = core::array::from_fn(|cpu| {
         let node = node.clone();
         let timer_set = timer_set.clone();
         let ready = ready.clone();
         let finished = finished.clone();
         let failed = failed.clone();
-        Box::new(move || {
+        move || {
             ready.fetch_add(1, Ordering::AcqRel);
             while ready.load(Ordering::Acquire) != 2 {
                 yield_now();
@@ -645,9 +645,9 @@ pub fn concurrent_owner_routes(
                 yield_now();
             }
             finished.fetch_add(1, Ordering::AcqRel);
-        }) as Box<dyn FnOnce() + Send>
+        }
     });
-    assert!(run_workers(workers));
+    assert!(runner.run(workers));
     assert_eq!(finished.load(Ordering::Acquire), 2);
     assert!(!failed.load(Ordering::Acquire));
     assert!(!node.is_linked());
@@ -678,10 +678,10 @@ pub fn concurrent_owner_routes(
 /// supplied worker driver or yield function are not caught.
 #[cfg(feature = "smp")]
 pub fn concurrent_cancel_waits_for_cleanup(
-    run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
+    runner: impl crate::test_support::WorkerRunner,
     yield_now: fn(),
 ) -> unittest::TestResult {
-    use alloc::{boxed::Box, sync::Arc};
+    use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::{
@@ -750,10 +750,10 @@ pub fn concurrent_cancel_waits_for_cleanup(
     // SAFETY: both allocations remain live through dispatch/cancel; all
     // operations use this same stable CPU collection and routed owner.
     unsafe { scenario.timer_set.arm_on(&node, 0.into(), setting(10)) }.unwrap();
-    let workers: [Box<dyn FnOnce() + Send>; 2] = core::array::from_fn(|cpu| {
+    let workers = core::array::from_fn(|cpu| {
         let scenario = scenario.clone();
         let node = node.clone();
-        Box::new(move || {
+        move || {
             scenario.ready.fetch_add(1, Ordering::AcqRel);
             while scenario.ready.load(Ordering::Acquire) != 2 {
                 yield_now();
@@ -782,14 +782,13 @@ pub fn concurrent_cancel_waits_for_cleanup(
                 }
                 let observe_wait = || {
                     let stage = scenario.stage.load(Ordering::Acquire);
-                    let has_invalid_cleanup_state = if stage == 2
-                        && scenario.wait_seen.load(Ordering::Relaxed) < 2
-                    {
-                        let (_, timers) = scenario.timer_set.lock_owner(&node);
-                        !timers.is_running(&node) || timers.earliest_deadline_ns() != Some(20)
-                    } else {
-                        false
-                    };
+                    let has_invalid_cleanup_state =
+                        if stage == 2 && scenario.wait_seen.load(Ordering::Relaxed) < 2 {
+                            let (_, timers) = scenario.timer_set.lock_owner(&node);
+                            !timers.is_running(&node) || timers.earliest_deadline_ns() != Some(20)
+                        } else {
+                            false
+                        };
                     if has_invalid_cleanup_state {
                         scenario.failed.store(true, Ordering::Relaxed);
                     }
@@ -805,9 +804,9 @@ pub fn concurrent_cancel_waits_for_cleanup(
                 }
                 scenario.cancel_returned.store(true, Ordering::Release);
             }
-        }) as Box<dyn FnOnce() + Send>
+        }
     });
-    let workers_succeeded = run_workers(workers);
+    let workers_succeeded = runner.run(workers);
     let was_quiescent = !node.is_linked()
         && scenario.timer_set.cpus.iter().all(|cpu| {
             let timers = cpu.lock();

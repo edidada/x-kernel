@@ -1,5 +1,16 @@
 # ktask — Security and reliability
 
+## Fair PELT ownership
+
+Remote wake placement removes retained Fair history under the source RQ and
+entity guards before taking the destination RQ lock. The owner helper retries
+if cpu_id changes; destination publication still checks affinity before moving
+ownership. No source/destination scheduler locks overlap, and affinity retry
+cannot subtract a contribution twice because the entity becomes Detached.
+This adds no raw pointer, allocation, retained task reference or timer callback.
+The old-owner query applies only to cross-CPU Wake publication; it does not
+require a prepared new task to have a registered source queue.
+
 ## Priority inheritance
 
 `TaskPiHost` uses counted task references and pointer identity. Graph-held
@@ -8,6 +19,15 @@ retry migration. Policy updates release these locks before PI-chain refresh.
 The adapter adds no unsafe operations, user-word protocol or owner-death recovery.
 
 ## Scheduler Entry Ownership
+
+new_kthread_with_entry allocates the root PID before constructing an unpublished
+task. PID failure drops the prepared entry in the caller; success transfers the
+same owner without reboxing. The prepared-entry test checks address identity,
+root PID presence and exactly-once capture destruction for both constructors,
+on invocation and cancellation. PID exhaustion is not injected. Existing entry
+allocation-failure tests cover rejection before invocation. Fixture assertions
+are not a production OOM recovery guarantee; legacy spawn wrappers and nested
+stack/name/bookkeeping allocations retain their previous contracts.
 
 The unittest-only sleep probe registration is scoped to one retained task
 identity and captured by its prepared timers. Probe methods execute without
@@ -249,13 +269,22 @@ nonrecursive, non-unwinding callback contract; tests use owning `Timer` handles.
 guard. Its programmer only merges deadlines and writes hardware, never callbacks
 or scheduler locks. These are the new unsafe production call sites.
 
+The periodic deadline is CPU-local and changes only with local IRQs and
+preemption excluded. A busy-to-busy switch retains it; an idle switch clears
+it. A delayed IRQ advances the phase once, without a loop of callbacks. It
+shares the existing arbitration and suspend gate; it does not own a timer
+node. Only a due periodic tick requests deferred CPU-timer work for the
+current user task. That request must not block or allocate in hard IRQ
+context. User and kernel execution time are settled at mode boundaries,
+context switches and on demand by thread accounting.
+
 | Threat | Asset / trigger / impact | Response |
 | --- | --- | --- |
 | Stale hardware write | Deadline integrity; concurrent remote advance overwritten by an old snapshot delays delivery | Mitigate: hold the prepared CPU lock through hardware write; notify actual destination after every accepted start. Platform must preserve publish-before-IPI ordering. |
 | Lock inversion | Availability; notification or callback re-enters a held timer lock and deadlocks | Mitigate: callback outside locks, sender releases registration locks before notification; the programmer runs under the prepared CPU lock and takes no runqueue lock. |
 | Wrong-context delivery | Memory safety and scheduling; an IPI or recursive service invokes a timer callback | Mitigate: IPI endpoint only reprograms; timer IRQ owns dispatch, with IRQs disabled. Real-IRQ and notification-only tests check this separation. |
 | Premature boot service | Per-CPU state; notification drain touches an uninitialized scheduler or timer service | Mitigate: retain existing runtime enablement after scheduler and local timer state initialization; static set construction alone is not readiness. |
-| Lost independent deadline | Availability; empty/deferred prepared queue suppresses scheduler deadlines | Mitigate: merge both sources under the local IRQ guard; prepared backoff does not defer other sources. |
+| Lost independent deadline | Availability; empty/deferred prepared queue suppresses scheduler or periodic deadlines | Mitigate: merge all sources under the local IRQ guard; prepared backoff does not defer other sources. |
 
 `tests_timer_irq.rs` adds bounded real-IRQ/IPI validation infrastructure. Its
 owning handles drain callbacks before destruction. These tests do not establish
@@ -740,7 +769,7 @@ Known limits:
    `next_event_ns` does not rewrite it.
 3. SMP must enable `ipi`: a remote wake's `kick` sets `need_resched`
    through IPI. `interrupt()` of a running task (signal delivery) uses the
-   same IPI; otherwise a NOHZ lone runner never leaves user mode.
+   same IPI; signal progress must not depend on a later periodic tick.
    `smp && !ipi` is a compile-time reject. IPI callbacks must not lock or
    reprogram dest's scheduler.
 4. `on_timer_fire` defers hardware rearm across a wake batch and then
@@ -894,7 +923,10 @@ drop registrations at capacity. System preparation instead owns an unbounded
 intrusive list with a preallocated node per non-idle task. Registration carries
 a weak owner while admitted; permanent exit and destructor fallback unlink it
 under the same registry lock. Its sole unsafe list removal checks the Active
-phase under that lock, establishing that the node belongs to this exact list.
+phase under that lock, establishing that the node belongs to this exact list;
+`cursor_mut_from_ptr` is undefined for a node outside it. Admission links only
+Prepared registrations, which are unlinked, so the list's duplicate-insertion
+panic is unreachable.
 Only this module mutates its links, and removal releases the list reference
 outside the registry guard. There are no new unsafe Send/Sync implementations.
 

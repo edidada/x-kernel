@@ -72,6 +72,48 @@ exists, it may resume service while the request remains pending. This decision
 uses current suppression and confirmed route availability, not
 `effective == None` as an activation-history proxy.
 
+### Initial Policy And Action History
+
+The first successfully published action establishes an otherwise-absent
+`requested` policy. Ordinary `IrqAffinity::Any` uses
+`kcpu_id_map::present_mask()`; fixed `IrqAffinity::Cpu(n)` uses `{n}`. Source-
+managed PerCpu/NMI/MSI/no-flow sources do not receive an ordinary default.
+The value is computed before publication and committed only after action
+publication succeeds; a rejected/configured-failing registration leaves no
+policy or history. Explicitly established requested values are retained.
+
+The four boot entries call `init_boot_cpu_id_map` before primary kernel/IRQ
+initialization. If the map is unexpectedly unavailable, ordinary Any
+registration fails with `IrqDescError::NotReady` before action/history/policy
+publication. No procfs read or user setter initializes it.
+
+`IrqAffinity::Cpu(n)` is range-checked against the compile-time logical CPU
+bound before constructing a mask; an impossible descriptor returns
+`InvalidCpu` without action/history/policy mutation. "Representable" is not the
+same claim as "present".
+
+NMI publication uses the same prepare/commit path as regular/shared actions.
+A source-managed NMI without explicit owner policy remains unknown; an explicit
+fixed owner policy is committed only after the NMI action publishes.
+
+`has_action_history` is set only by successful regular/shared/NMI publication.
+It is not cleared by action removal; it is a lifecycle fact, not a VFS
+visibility flag.
+
+### Line Retirement Subscription
+
+`IrqLineHandle::subscribe_retirement` allocates an independent intrusive slot
+outside the Line lock, then verifies the exact Line is still the current
+directory entry under `IRQ_STATE -> Line`. The slot links without allocation.
+Retirement marks the Line retired, moves the entire list under the Line lock,
+releases KIRQ locks, and then invokes observers. An unlinked subscription stops
+future notification but never waits for an already captured callback. A
+subscription whose Line already retired does not touch intrusive links.
+
+Only a real Line retirement notifies; ordinary `free_irq` action removal does
+not. Current production retirement is x86_64 `free_msix`; callback runs in its
+sleepable task context without KIRQ locks and may enter the procfs namespace.
+
 ## Sparse Line Access And Retained Identity
 
 `runtime/handle.rs` owns the opaque `IrqLineHandle` and the public
@@ -84,10 +126,21 @@ active RCU readers before taking the array lock, and creates no mapping or
 action.
 
 The handle retains the exact Line Arc observed in `DIRECTORY`; the virq is a
-label, not identity or permission. Query validates the directory Arc and the
-Line's retired bit under `IRQ_STATE -> Line`, then copies affinity from the
-already-locked state through `snapshot_locked`; it never calls a second
-Line-locking helper. It is a historical observation, not a mapping lease.
+label, not identity or permission. `is_same_line` compares the underlying Line,
+not the wrapper allocation; `is_current` checks the directory Arc and retired
+bit. `affinity_snapshot` copies the stored policy without a source-capability
+check, while the existing `irq_affinity` remains capability-gated. Neither
+query reads hardware or creates a mapping lease.
+
+`has_action_history` records successful publication and survives action
+removal. It does not imply that an action is currently installed.
+
+`is_user_affinity_source_supported` is a static source/descriptor
+classification, checked under `IRQ_STATE -> Line`: ordinary immediate/deferred
+Any sources are user-routable; fixed, PerCpu/NMI/MSI, no-flow and controllerless
+sources are not. It does not inspect action presence, per-action restrictions or
+temporary routing state. Procfs uses it only when constructing stable inode
+permissions; writes independently re-run the checked setter.
 
 Set uses `with_retained_line`: acquire the expected Line's management mutex,
 take `IRQ_STATE`, verify `descs[virq]` is still the same Arc, take the Line,
@@ -98,6 +151,46 @@ false across the gap between short locks; the mutex alone is not the exclusion
 proof. A stale handle returns `UnknownIrq` before hardware and never redirects
 to a replacement Line. This access is trusted kernel control, not user
 authorization or source-owner policy.
+
+## User Routing Protection
+
+`IrqRegisterOptions::restrict_user_affinity` declares a source owner's
+user-routing restriction for a regular action. The flag lives in the existing
+`IrqAction` (`USER_AFFINITY_RESTRICTED`) and is published atomically with that
+action by `publish_regular_action`; there is no Line cache, global table or
+separate policy count. `ActionSet` scans installed action flags under Line
+exclusion on the control path. Removing the action removes the restriction.
+Protected shared registration is not supported in this PR; existing
+regular/shared conflict rules reject the combination.
+
+This is deliberately **user-only**, not Linux `IRQF_NOBALANCING` / `IRQD_NO_BALANCING`.
+The trusted kernel `set_irq_affinity` remains policy-independent (but still
+subject to source, context, fixed, PerCpu, NMI, MSI and failure rules), and
+automatic initial routing is unchanged. A source owner that needs a specific
+initial route must establish it through the trusted path before requiring
+protection. PMU SPI-to-CPU association and real-delivery validation remain
+Ticket07 owner integration.
+
+Observation and write eligibility are distinct:
+
+- `IrqLineHandle::irq_affinity` remains the identity-bound observation and is
+  available for a protected Line; policy does not hide requested/effective/
+  pending/failure state.
+- `IrqLineHandle::check_user_affinity_change` samples change eligibility
+  (`source -> teardown -> action presence -> policy`) without hardware access.
+  It is not an authorization token and does not promise a target mask is
+  programmable.
+- `IrqLineHandle::set_user_affinity` repeats the checks under
+  `with_retained_line` and the Line lock, then runs the existing
+  `apply_user_locked` transaction. Policy denial is before the chip callback.
+  No-action and teardown reject the user change entrance; they do not suppress
+  observation.
+
+The PMU adapter's ordinary SPI path uses
+`IrqRegisterOptions::disabled()` or `auto_enable()` with
+`restrict_user_affinity()`; the PPI and real-NMI paths retain their existing
+lifecycle. `enable_irq` remains non-sleeping and does not call a task affinity
+setter.
 
 ## Shared Descriptor Values
 
@@ -2691,3 +2784,11 @@ locks for request/free serialization, releasing the short locks before
 `__synchronize_irq` while retaining `request_mutex`. The RAII guard expresses
 that ownership directly in Rust. XArray capacity is also prepared before short
 locks; commits revalidate identity and publish without allocating nodes.
+
+The IRQ-work kernel unit tests use NOWAIT `KBox` allocation, including fixtures
+prepared while local IRQs and preemption are disabled. Nodes retain their heap
+addresses through publication and drain. Self-freeing callbacks reconstruct
+only pointers transferred by `KBox::into_raw`; chained callbacks cast the
+first-field IRQ-work pointer back to its original `repr(C)` owner before
+reconstruction. The local queue fixture outlives both parent and child callbacks.
+The separate host IRQ-work test keeps its standard allocator ownership model.

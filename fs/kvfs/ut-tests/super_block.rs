@@ -452,6 +452,15 @@ fn spawn_successful_waiting_mount(block_device: Arc<block::BlockDevice>) -> ktas
     })
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn add_test_disk(name: &str, major: u32) -> (block::GendiskRef, Arc<block::BlockDevice>) {
     let disk = block::Gendisk::alloc(String::from(name), major, 0, 1, Box::new(TestBlockDevice))
         .expect("valid superblock test disk");
@@ -826,6 +835,15 @@ impl block::BioOperations for OpenLifecycleDevice {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn mount_opens_once_and_closes_at_failure_or_logical_shutdown() {
     let backend = Arc::new(OpenLifecycleDevice {
         modes: crate::Mutex::new(alloc::vec::Vec::new()),
@@ -933,6 +951,15 @@ fn mount_opens_once_and_closes_at_failure_or_logical_shutdown() {
 }
 
 #[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc still requires a standard Box driver owner; keep this fixture on the production ownership contract"
+)]
 fn registry_lookup_defers_final_superblock_drop_until_after_unlock() {
     let backend = Arc::new(OpenLifecycleDevice {
         modes: crate::Mutex::new(alloc::vec::Vec::new()),
@@ -1071,6 +1098,19 @@ fn fifo_timestamp_mutation_waits_for_readonly_policy_publication() {
     )
     .unwrap();
     assert!(!file.mode().contains(crate::FMode::WRITER));
+    let past = ktime_types::SystemTime::from_unix_seconds(1);
+    inode.set_accessed_at(past);
+    inode.set_modified_at(past);
+    inode.set_changed_at(past);
+    assert_eq!(file.write(b"a"), Ok(1));
+    let after_write = inode.times();
+    assert!(after_write.modified_at.unix_seconds() > 1);
+    assert!(after_write.changed_at.unix_seconds() > 1);
+    let mut byte = [0];
+    assert_eq!(file.read(&mut byte), Ok(1));
+    assert_eq!(byte, *b"a");
+    assert!(inode.times().accessed_at.unix_seconds() > 1);
+
     let before = inode.times();
     let gate = sb.umount_lock.write();
     let result = Arc::new(crate::Mutex::new(None));

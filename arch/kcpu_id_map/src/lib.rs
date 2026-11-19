@@ -4,8 +4,12 @@
 
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(unittest)]
+extern crate alloc;
+
 mod arch;
 mod cpu_id;
+pub mod text;
 
 pub use arch::init_boot_cpu_id_map;
 pub use cpu_id::{KCpuMask, KCpuMaskExt, LogicalCpuId, LogicalCpuIdIter, RawCpuId};
@@ -37,6 +41,82 @@ pub fn for_each_present_logical_cpu(mut f: impl FnMut(usize, LogicalCpuId, usize
     });
 }
 
+/// Invokes `f` for each online logical CPU.
+///
+/// Unlike [`for_each_present_logical_cpu`], this skips CPUs that a hotplug
+/// request took offline. Callbacks for work that must reach every usable CPU
+/// (IPIs, TLB shootdowns) should use this traversal; firmware enumeration and
+/// `/sys/devices/system/cpu/possible` must keep using the present traversal.
+///
+/// The callback receives the zero-based online CPU index, the logical CPU id,
+/// and the total number of online logical CPUs for this traversal.
+pub fn for_each_online_logical_cpu(mut f: impl FnMut(usize, LogicalCpuId, usize)) {
+    imp::ensure_runtime_cpu_id_map();
+
+    cpu_id::for_each_online_logical_cpu(|online_index, logical_cpu_id, online_count| {
+        f(online_index, logical_cpu_id, online_count);
+    });
+}
+
+/// Reports whether `logical_cpu_id` is present *and* online.
+///
+/// Returns `false` for a CPU that firmware never described, so callers do not
+/// need a separate presence check before asking about online state.
+pub fn is_cpu_online(logical_cpu_id: LogicalCpuId) -> bool {
+    imp::ensure_runtime_cpu_id_map();
+
+    cpu_id::is_online(logical_cpu_id)
+}
+
+/// Returns the number of online logical CPUs.
+///
+/// The boot CPU is always online, so this is never zero once the CPU id map
+/// is initialized.
+pub fn online_cpu_count() -> usize {
+    imp::ensure_runtime_cpu_id_map();
+
+    cpu_id::online_count()
+}
+
+/// Sets the online bit of a present logical CPU and returns its previous state.
+///
+/// Returns `None` when firmware never described the CPU; the caller decides
+/// which errno that maps to. No policy is applied here: rejecting the boot CPU
+/// or the last online CPU belongs to the hotplug state machine, which also owns
+/// the hardware transition.
+pub fn set_cpu_online(logical_cpu_id: LogicalCpuId, is_online: bool) -> Option<bool> {
+    imp::ensure_runtime_cpu_id_map();
+
+    cpu_id::set_online(logical_cpu_id, is_online)
+}
+
+/// Reports whether the runtime CPU id map has been populated.
+///
+/// This does not force lazy initialization and is suitable for KIRQ policy
+/// initialization: an absent map means a default present-CPU policy is not yet
+/// available.
+pub fn is_initialized() -> bool {
+    cpu_id::cpu_map_initialized()
+}
+
+/// Returns the current present CPU mask, or `None` before the runtime CPU map
+/// is initialized or when firmware described no CPUs.
+///
+/// This is a policy input, not an interrupt-readiness set. It never synthesizes
+/// boot/CPU 0 or changes the CPU map.
+pub fn present_mask() -> Option<KCpuMask> {
+    if !is_initialized() {
+        return None;
+    }
+    let mut mask = KCpuMask::new();
+    let mut count = 0usize;
+    for_each_present_logical_cpu(|_, logical, _| {
+        mask.set_logical(logical, true);
+        count += 1;
+    });
+    (count != 0).then_some(mask)
+}
+
 /// Returns the number of present CPUs discovered at runtime from the device
 /// tree (AArch64/RISC-V/LoongArch) or ACPI MADT (x86_64), clamped to the
 /// compile-time `NR_CPUS` cap.
@@ -50,3 +130,18 @@ pub fn nr_cpus() -> usize {
 
     cpu_id::present_count().max(1)
 }
+
+/// Returns the runtime CPU numbering width: the highest present logical CPU ID
+/// plus one, with a minimum of 1 before the map is initialized.
+///
+/// This is the Linux-style `nr_cpu_ids` width used for bitmap high-chunk digit
+/// width and list parsing. It is deliberately distinct from the compile-time
+/// `NR_CPUS` capacity and from [`nr_cpus`] present-CPU count.
+pub fn nr_cpu_ids() -> usize {
+    imp::ensure_runtime_cpu_id_map();
+
+    cpu_id::nr_cpu_ids()
+}
+
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/text.rs");

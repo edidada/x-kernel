@@ -4,7 +4,7 @@
 
 //! Router state and packet dispatch.
 
-use alloc::{collections::VecDeque, vec, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 
 use kalloc_types::KBox;
 use kerrno::{KError, KResult, LinuxError};
@@ -18,9 +18,10 @@ use crate::{
     device::{
         DeviceRegistry, IF_OPER_DOWN, Ipv4AddrChange, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING,
         LINK_FLAG_UP, LinkKind, NeighborEvent, NeighborSnapshot, NeighborState, NeighborUpdate,
-        NetDevice, NetDeviceId, RxPoll,
+        NetDevice, NetDeviceId, RxPoll, net_rx::RxPacket,
     },
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
+    netfilter::FilterConfig,
     network::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
@@ -484,18 +485,14 @@ impl Router {
         self.data_tx_queue.capacity_poll()
     }
 
-    pub(crate) fn can_enqueue_tx_packets(&self, packet_count: usize) -> bool {
-        self.data_tx_queue.can_push(packet_count)
-    }
-
     pub(crate) fn queue_ipv4_packet(&mut self, packet: Vec<u8>, oif: i32) -> KResult {
-        let packets = self.fragment_ipv4_packet_for_output(packet)?;
+        self.check_ipv4_output_size(&packet)?;
         self.data_tx_queue
-            .try_extend(
-                packets.into_iter().map(|packet| {
-                    PacketBuf::from_ip_packet_vec(oif, packet, PacketOwner::Ipv4Stack)
-                }),
-            )
+            .try_extend(core::iter::once(PacketBuf::from_ip_packet_vec(
+                oif,
+                packet,
+                PacketOwner::Ipv4Stack,
+            )))
             .map_err(|_| KError::WouldBlock)
     }
 
@@ -521,14 +518,8 @@ impl Router {
         packet: Vec<u8>,
         timestamp: MonotonicInstant,
     ) -> KResult {
-        let packets = self.fragment_ipv4_packet_for_output(packet)?;
-        for packet in packets {
-            let buf = PacketBuf::from_ip_packet_vec(0, packet, PacketOwner::Ipv4Stack);
-            // RX-ready hint for the poller, not send success. This path is
-            // not the poller; a dropped loopback packet is still a successful
-            // xmit, as documented above.
-            let _poll_next = self.dispatch_ipv4_packet(buf, timestamp);
-        }
+        self.check_ipv4_output_size(&packet)?;
+        self.dispatch_ipv4_output(tx_packet_buf(packet), timestamp, crate::netfilter::global());
         Ok(())
     }
 
@@ -539,17 +530,31 @@ impl Router {
         self.devices.register(device)
     }
 
-    /// Removes a device and returns the notifications describing the state it
-    /// owned.  Address, route, and neighbor removals precede the link removal
-    /// so a subscriber can still resolve the interface while processing them.
+    /// Test-only compatibility lookup for legacy DeviceId-based fixtures.
+    #[cfg(unittest)]
     pub(crate) fn remove_device_by_model_id(
         &mut self,
         id: kdevice::DeviceId,
     ) -> Option<Vec<NetworkEvent>> {
+        let publication = self
+            .devices
+            .iter()
+            .find(|device| device.device_id() == Some(id))
+            .and_then(|device| device.publication_id())?;
+        self.remove_device_by_publication(publication)
+    }
+
+    /// Removes a device and returns the notifications describing the state it
+    /// owned.  Address, route, and neighbor removals precede the link removal
+    /// so a subscriber can still resolve the interface while processing them.
+    pub(crate) fn remove_device_by_publication(
+        &mut self,
+        publication: kdevice::PublicationId,
+    ) -> Option<Vec<NetworkEvent>> {
         let pos = self
             .devices
             .iter()
-            .position(|device| device.device_id() == Some(id))?;
+            .position(|device| device.publication_id() == Some(publication))?;
         let dev = self.devices.id_at(pos);
         let mut link = self.devices.get_by_id(dev)?.link_snapshot(dev.ifindex());
         let neighbors = self.devices.get_by_id(dev)?.neighbor_snapshots(dev);
@@ -606,18 +611,16 @@ impl Router {
         for addr in addresses {
             let entry = addr.entry;
             events.push(NetworkEvent::AddrRemoved { addr });
-            let mut index = 0;
-            while index < remaining_routes.len() {
-                if Self::route_derived_from_address(remaining_routes[index], dev, entry) {
-                    let route = remaining_routes.remove(index);
-                    events.push(NetworkEvent::RouteRemoved {
+            events.extend(
+                remaining_routes
+                    .extract_if(.., |route| {
+                        Self::route_derived_from_address(*route, dev, entry)
+                    })
+                    .map(|route| NetworkEvent::RouteRemoved {
                         route,
                         provenance: RouteProvenance::Kernel,
-                    });
-                } else {
-                    index += 1;
-                }
-            }
+                    }),
+            );
         }
         // Routes configured directly on the departing device (including routes
         // whose preferred source belongs to another interface) are flushed only
@@ -950,6 +953,7 @@ impl Router {
         }
     }
 
+    #[cfg(unittest)]
     pub(crate) fn apply_neighbor_update(
         &mut self,
         update: NeighborUpdate,
@@ -1037,7 +1041,7 @@ impl Router {
         &mut self,
         timestamp: MonotonicInstant,
         budget: usize,
-        packets: &mut Vec<PacketBuf>,
+        packets: &mut Vec<RxPacket>,
     ) -> RxDrain {
         packets.clear();
         if budget == 0 || self.devices.is_empty() {
@@ -1149,6 +1153,15 @@ impl Router {
         timestamp: MonotonicInstant,
         budget: usize,
     ) -> (usize, bool) {
+        self.dispatch_output_budgeted(timestamp, budget, crate::netfilter::global())
+    }
+
+    pub(crate) fn dispatch_output_budgeted(
+        &mut self,
+        timestamp: MonotonicInstant,
+        budget: usize,
+        filter: &FilterConfig,
+    ) -> (usize, bool) {
         if budget == 0 {
             return (0, self.has_queued_tx_packets());
         }
@@ -1166,7 +1179,7 @@ impl Router {
             };
             match ipv4::ip_version(ip_packet) {
                 Some(4) => {
-                    poll_next |= self.dispatch_ipv4_packet(packet, timestamp);
+                    poll_next |= self.dispatch_ipv4_output(packet, timestamp, filter);
                 }
                 Some(6) => {
                     let (src_addr, dst_addr, is_multicast) = {
@@ -1221,7 +1234,12 @@ impl Router {
     /// Returns whether the send made RX ready, which [`Self::dispatch_budgeted`]
     /// uses as its `poll_next` hint. Ethernet TX and dropped packets return
     /// `false`.
-    fn dispatch_ipv4_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
+    pub(crate) fn dispatch_ipv4_output(
+        &mut self,
+        mut packet: PacketBuf,
+        timestamp: MonotonicInstant,
+        filter: &FilterConfig,
+    ) -> bool {
         if crate::ipv4::prepare_output_packet(&mut packet).is_err() {
             return false;
         }
@@ -1250,13 +1268,27 @@ impl Router {
                 if bound_if != 0 && bound_if != ifindex {
                     continue;
                 }
-                poll_next |=
-                    dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
+                poll_next |= send_ipv4_output(
+                    dev,
+                    ifindex,
+                    dst_addr,
+                    packet.clone(),
+                    timestamp,
+                    &mut self.next_ipv4_identification,
+                    filter,
+                );
             }
             let last_ifindex = last_id.ifindex();
             if bound_if == 0 || bound_if == last_ifindex {
-                poll_next |=
-                    last_device.send_ip_packet(last_ifindex, dst_addr, src_addr, packet, timestamp);
+                poll_next |= send_ipv4_output(
+                    last_device,
+                    last_ifindex,
+                    dst_addr,
+                    packet,
+                    timestamp,
+                    &mut self.next_ipv4_identification,
+                    filter,
+                );
             }
             return poll_next;
         }
@@ -1286,30 +1318,29 @@ impl Router {
             .devices
             .get_mut_by_id(rule.dev)
             .expect("route device must be registered");
-        dev.send_ip_packet(rule.dev.ifindex(), next_hop, src_addr, packet, timestamp)
+        send_ipv4_output(
+            dev,
+            rule.dev.ifindex(),
+            next_hop,
+            packet,
+            timestamp,
+            &mut self.next_ipv4_identification,
+            filter,
+        )
     }
 
-    fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
+    fn check_ipv4_output_size(&self, packet: &[u8]) -> KResult {
         if packet.len() > usize::from(u16::MAX) {
             return Err(KError::InvalidInput);
         }
-        let header = Ipv4Header::parse_header_only(&packet).map_err(|_| KError::InvalidInput)?;
-        let dst_addr = IpAddress::Ipv4(header.dst_addr());
-        let Some(mtu) = self.route_mtu(&dst_addr) else {
-            return Ok(vec![packet]);
-        };
-        if packet.len() <= mtu {
-            return Ok(vec![packet]);
+        let header = Ipv4Header::parse_header_only(packet).map_err(|_| KError::InvalidInput)?;
+        if let Some(mtu) = self.route_mtu(&IpAddress::Ipv4(header.dst_addr()))
+            && packet.len() > mtu
+            && (header.dont_fragment() || mtu < header.header_len() + 8)
+        {
+            return Err(LinuxError::EMSGSIZE.into());
         }
-
-        let identification = self.next_ipv4_identification;
-        self.next_ipv4_identification = self.next_ipv4_identification.wrapping_add(1).max(1);
-        ipv4::fragment_output_packet(&packet, mtu, identification).map_err(|err| match err {
-            ipv4::Ipv4FragmentError::Malformed => KError::InvalidInput,
-            ipv4::Ipv4FragmentError::DontFragment | ipv4::Ipv4FragmentError::MtuTooSmall => {
-                LinuxError::EMSGSIZE.into()
-            }
-        })
+        Ok(())
     }
 
     fn is_local_ipv4_source(&self, src_addr: crate::ip::Ipv4Address) -> bool {
@@ -1365,6 +1396,38 @@ impl Router {
 fn next_device_index(dev_index: usize, device_count: usize) -> usize {
     debug_assert!(device_count > 0);
     (dev_index + 1) % device_count
+}
+
+/// Applies OUTPUT to the complete datagram for this device before fragmentation.
+fn send_ipv4_output(
+    dev: &mut dyn NetDevice,
+    ifindex: i32,
+    next_hop: IpAddress,
+    packet: PacketBuf,
+    timestamp: MonotonicInstant,
+    identification: &mut u16,
+    filter: &FilterConfig,
+) -> bool {
+    if !filter.accept_output(&packet, dev.name()) {
+        return false;
+    }
+    let bytes = packet.network_packet().expect("finalized IPv4 packet");
+    let header = Ipv4Header::parse_header_only(bytes).expect("finalized IPv4 header");
+    let source = IpAddress::Ipv4(header.src_addr());
+    if bytes.len() <= dev.mtu() {
+        return dev.send_ip_packet(ifindex, next_hop, source, packet, timestamp);
+    }
+    let id = *identification;
+    *identification = identification.wrapping_add(1).max(1);
+    let Ok(fragments) = ipv4::fragment_output_packet(bytes, dev.mtu(), id) else {
+        return false;
+    };
+    let mut poll_next = false;
+    for bytes in fragments {
+        let fragment = PacketBuf::from_ip_packet_vec(ifindex, bytes, PacketOwner::DeviceTx);
+        poll_next |= dev.send_ip_packet(ifindex, next_hop, source, fragment, timestamp);
+    }
+    poll_next
 }
 
 fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {

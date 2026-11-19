@@ -33,6 +33,18 @@ only stores inode identity/metadata and does not duplicate hierarchy or membersh
   `state::CgroupFsState::cgroup_of(inode)` (per-mount registry lookup) ->
   `Arc<Cgroup>`. Descriptors outside this filesystem return `None` (mapped to
   `EBADF` by the caller).
+- `cgroup_clone_target(&VfsFile) -> VfsResult<Arc<Cgroup>>` (`src/lib.rs`):
+  resolves and authorizes a `clone3(CLONE_INTO_CGROUP)` target directory.
+  Provider: cgroup2fs; consumer: `ksyscall` (clone3); call direction
+  `clone3(2)` -> `clone_cgroup_target` -> `cgroup_clone_target` ->
+  (mount view-root visibility check + target and common-ancestor
+  `cgroup.procs` `MAY_WRITE` against the caller's **current** credentials) ->
+  `Arc<Cgroup>`. Fallible result set: `EBADF` (not a cgroup2 directory),
+  `ENODEV` (removed target), `ENOENT` (endpoint outside the mount view),
+  `EXDEV` (cross-hierarchy), `EACCES` (delegation write denied). Unlike
+  `cgroup_from_file`, this performs authorization and returns a typed error
+  rather than `Option`; the fork path only ever sees the resolved
+  `Arc<Cgroup>`, never the user descriptor.
 
 ## Scope
 
@@ -128,3 +140,20 @@ negative lookup does not hide newly visible files; each lookup still reuses the 
 ## Drop / Resource Release
 
 The registry holds the stable inode and cgroup node of each live cgroup; `rmdir` drops the entry via `remove_node`, and remaining entries are released with the superblock. Old fds keep their inode alive through their own `Arc`. Membership, controller charge and hierarchy lifetime remain managed by `kcgroup`.
+
+
+## Memory and CPU controllers
+
+`memory` renders `memory.current`, `peak`, `max`, `high`, `low`, `swap.*`,
+`events`, and `stat` from the `memacct` tree. `cpu` renders weight and
+bandwidth controls, while `cpuset` renders requested and effective CPU/memory
+masks. Controller state is owned by `kcgroup`; this filesystem only parses
+values and projects the accounting/control state.
+
+`memory.max` and `cpu.max` are enforced by their owning subsystems, not by the
+filesystem adapter. A write validates the Linux domain before mutating state;
+a rejected write leaves the previous value in place. `cpu.weight` is applied
+to existing members and sampled by new or migrated tasks. `cpuset.cpus`/`mems`
+writes roll back both controller masks and task affinity when member application
+fails; cgroups without their own cpuset controller apply the nearest ancestor's
+effective masks.
