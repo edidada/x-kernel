@@ -25,6 +25,14 @@ pub struct ClkHandle {
     /// This consumer's notifier registration id, if it registered one via
     /// [`register_notifier`](Self::register_notifier). `0` = none. Replaced by
     /// a new registration and removed on drop.
+    ///
+    /// All other accesses to the core's notifier list run under `CLK_LOCK`
+    /// (`register_notifier` wraps its body in it); these atomics exist only
+    /// so a `&self` method can replace the id and so the handle is `Sync`.
+    /// Publication ordering: `register_notifier` stores the new id with
+    /// `Release` after adding the callback to the core's list, so a drop
+    /// that observes the id also observes the registration; `Acquire` on
+    /// read pairs with it.
     notifier_id: AtomicU64,
 }
 
@@ -169,7 +177,9 @@ impl ClkHandle {
         });
     }
 
-    /// Whether the hardware reports the clock as enabled.
+    /// Whether the clock has at least one enable reference — the
+    /// prepare/enable contract's answer. The register-backed view is
+    /// [`is_enabled_in_hw`](Self::is_enabled_in_hw).
     pub fn is_enabled(&self) -> ClkResult<bool> {
         self.core.is_enabled()
     }
@@ -250,11 +260,17 @@ impl ClkHandle {
     /// handle — each clone owns its own registration).
     pub fn register_notifier(&self, cb: ClkNotifier) -> ClkNotifierId {
         crate::core::with_clk_lock(|| {
+            // AcqRel swap: publish that the old registration is being torn
+            // down before removing it from the core list, and acquire any
+            // prior registration's publication.
             let prev = self.notifier_id.swap(0, Ordering::AcqRel);
             if prev != 0 {
                 self.core.remove_notifier(prev);
             }
             let id = self.core.add_notifier(cb);
+            // Release: the callback is already in the core's list; publishing
+            // the id lets a concurrent drop observe the registration and
+            // unregister it exactly once.
             self.notifier_id.store(id, Ordering::Release);
             id
         })
@@ -267,6 +283,8 @@ impl ClkHandle {
         self.core.remove_notifier(id);
         // CAS result is intentionally discarded: on success drop will not
         // unregister twice; on failure this was not the tracked id.
+        // AcqRel/Acquire: publish the id invalidation (the core list entry
+        // was removed above) and acquire any prior registration publication.
         let _ = self
             .notifier_id
             .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);

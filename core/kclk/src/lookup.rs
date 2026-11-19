@@ -75,6 +75,20 @@ impl ClkTable {
     /// Remove all entries. Only available under `--cfg unittest` so each test
     /// starts from a known-empty registry.
     #[cfg(unittest)]
+    /// Returns the clock registered under DT binding `index`, if any.
+    pub fn get_by_index(&self, index: ClkIndex) -> Option<Arc<ClkCore>> {
+        self.by_index
+            .lock()
+            .get(index as usize)
+            .and_then(|slot| slot.clone())
+    }
+
+    /// Returns the clock registered under SoC output `name`, if any.
+    pub fn get_by_name(&self, name: &str) -> Option<Arc<ClkCore>> {
+        self.by_name.lock().get(name).cloned()
+    }
+
+    /// Remove every registered clock from the table.
     pub fn clear(&self) {
         self.by_index.lock().clear();
         self.by_name.lock().clear();

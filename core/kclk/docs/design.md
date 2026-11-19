@@ -209,8 +209,10 @@ A driver registers a [`ClkNotifier`] on a clock to learn when its rate
 changes. `set_rate` delivers [`ClkEvent::PreRateChange`] before the change
 (a subscriber may veto by returning `NotifierResult::Stop`, which aborts with
 `ClkError::Aborted`) and [`ClkEvent::PostRateChange`] after. Notifiers fire on
-the node on which `set_rate` was called; intermediate parents changed during
-upward propagation do not receive separate notifications.
+**every** clock whose rate is actually reprogrammed — the node `set_rate` was
+called on and each parent reprogrammed on its behalf during upward
+`SET_RATE_PARENT` propagation. A `Pre` veto on any node in the chain aborts
+the whole change.
 
 Registration returns an id (`ClkNotifierId`) that can be passed to
 `unregister_notifier` to remove the subscriber.
@@ -325,11 +327,12 @@ calling the hardware op once when the count reaches zero.
   `ksync::Mutex`), so a rate change — including parent recursion and
   re-rounding — is atomic w.r.t. other changes. `get_rate` reads the per-node
   cache without this lock.
-- The atomic gate (`enable`/`disable`) takes a separate IRQ-saving
+- The atomic gate (`enable`/`disable`) takes a separate `SpinNoIrq`
   `CLK_ENABLE_LOCK` (Linux's two-lock model), so it neither races a concurrent
   `set_parent` migration nor loses interrupt-context usability. Lock order is
   `CLK_LOCK` → `CLK_ENABLE_LOCK`; the reparent migration nests them in exactly
-  that order.
+  that order. The concurrency regressions exercise the migration against
+  task-context `prepare_enable`/`disable_unprepare` (which take both locks).
 - Parent recursion clones the parent `Arc` and releases the child state lock
   first, so propagation acquires locks strictly parent-before-child — no
   lock-ordering deadlock across the tree.
@@ -565,9 +568,10 @@ Arc::new(MyPll { reg })).parent(..).build()`.
   interrupt-context usable). The otherwise lock-free callbacks (`recalc_rate`,
   `is_enabled`, `init`, ...) must also stay non-sleeping. Only the `CLK_LOCK`-
   only provider callbacks (`prepare`/`unprepare`/`set_rate`) may sleep.
-- **Notifiers fire only on the entry node.** A `set_rate` that propagates up
-  the tree delivers events only to the node on which it was called; intermediate
-  parents reprogrammed during propagation do not receive separate notifications.
+- **Notifiers fire on every reprogrammed clock.** A `set_rate` that propagates
+  up the tree delivers Pre/Post on the entry node and on each parent
+  reprogrammed during propagation (matching Linux `clk_change_rate`); a `Pre`
+  veto anywhere aborts the whole change.
 - **Firmware clock specifiers currently carry zero or one provider cell.** DT
   parsing supports `#clock-cells = <0>` and `<1>`. Providers with two or more
   cells require an extensible/raw specifier representation before they can be

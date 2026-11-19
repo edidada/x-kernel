@@ -114,8 +114,9 @@ sealed to the crate, so every such object was created from `Arc<ClkCore>`.
 
 - No authenticity/integrity check on firmware-described clocks; a misconfigured
   tree produces wrong but representable rates.
-- Notifiers fire only on the node where `set_rate` was called; intermediate
-  parents changed during upward propagation receive no separate notification.
+- Notifiers fire on every reprogrammed clock (the entry node and each parent
+  reprogrammed during `SET_RATE_PARENT` propagation); a `Pre` veto anywhere
+  aborts the whole change.
 - The slow-operation lock is a sleepable mutex, so `prepare`/`unprepare` and
   `set_rate` provider callbacks may block. `enable`/`disable`, `set_parent`,
   reparent-time recalculation, and otherwise lock-free callbacks must not sleep.

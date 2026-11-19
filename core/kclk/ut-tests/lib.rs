@@ -672,7 +672,10 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
     let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty());
     let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::empty());
 
-    let comp = ClkBuilder::new("comp", Composite::new(Some(mux), Some(div), Some(gate)))
+    let comp = ClkBuilder::new(
+        "comp",
+        Composite::new(Some(mux), Some(div), Some(gate)).into_ops(),
+    )
         .parent(parent)
         .build()
         .unwrap();
@@ -685,9 +688,12 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
 
     // Gate bit lives at offset 8 in the same word.
     assert_eq!(comp.is_enabled().unwrap(), false);
+    comp.prepare().unwrap();
     comp.enable().unwrap();
     assert!(comp.is_enabled().unwrap());
     assert_eq!(reg.word(0) & (1 << 8), 1 << 8);
+    comp.disable();
+    comp.unprepare().unwrap();
 }
 
 // ---------------------------------------------------------------------------

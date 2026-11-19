@@ -227,16 +227,18 @@ impl Divider {
             return best.max(1);
         }
         if self.flags.contains(DividerFlags::POWER_OF_TWO) {
+            // Scan exponents instead of doubling a u32 divider: with width 31
+            // the doubled value would shift the only set bit out and wrap to
+            // zero, spinning forever (`0 <= max_div` always holds).
             let mut best = 1u32;
             let mut best_diff = u64::MAX;
-            let mut d = 1u32;
-            while d <= self.max_div() {
+            for exp in 0..=self.width.min(31) {
+                let d = 1u32 << exp;
                 let df = diff(rate_for(parent_rate, d), target);
                 if df < best_diff {
                     best_diff = df;
                     best = d;
                 }
-                d <<= 1;
             }
             return best;
         }

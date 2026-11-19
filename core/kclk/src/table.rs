@@ -615,7 +615,7 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
             let g = gate
                 .as_ref()
                 .map(|d| Gate::into_ops(reg.clone(), d.offset, d.bit, d.flags));
-            Composite::new(m, dv, g)
+            Composite::new(m, dv, g).into_ops()
         }
         ClkNodeDesc::Custom { ops } => ops.clone(),
     })
@@ -652,6 +652,6 @@ fn refresh_subtree(
     }
     visiting.remove(name);
     visited.insert(name);
-    nodes[name].refresh_rate();
+    nodes[name].refresh_rate()?;
     Ok(())
 }
