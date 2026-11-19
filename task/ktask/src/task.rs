@@ -537,6 +537,8 @@ impl TaskInner {
     /// parking, and restore them before release. Recovery must not need any
     /// lock the task could retain while parked. Never use this for user tasks
     /// or ordinary business work; it bypasses cooperative task acknowledgment.
+    /// The task cannot check when the platform restores resources or which
+    /// locks recovery will acquire. The caller must establish both conditions.
     pub unsafe fn with_pm_infrastructure(mut self) -> Self {
         self.is_pm_infrastructure = true;
         self

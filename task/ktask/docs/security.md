@@ -1,21 +1,5 @@
 # ktask — Security and reliability
 
-## CPU parking and PM infrastructure tasks
-
-The unsafe `TaskInner::with_pm_infrastructure` in `src/task.rs` bypasses
-cooperative freeze acknowledgement. Callers may mark only unpublished kernel
-infrastructure whose execution is governed by CPU parking. User tasks and
-ordinary kernel work must participate in cooperative freezing. PM must keep
-resources used by the marked task available until its CPU acknowledges parking
-and restore them before releasing the CPU. Recovery must not require a lock
-the task could hold while parked.
-
-In `src/softirqd.rs`, IRQ and device resources stay available until the CPU
-Stop callback excludes softirq execution. PM restores them before CPU release
-without acquiring locks retained by the daemon. In `src/stop_machine.rs`,
-the pinned Stop thread owns the CPU rendezvous and runs its callbacks with
-interrupts disabled. Recovery must not acquire resources held by that thread.
-
 ## Fair PELT ownership
 
 Remote wake placement removes retained Fair history under the source RQ and
@@ -1000,5 +984,19 @@ preparation timeout. A CPU that stops servicing Stop work can therefore prevent
 rollback: timeout is not proof of safe storage reclamation. CPU topology must
 remain stable. Hardware-reset context preservation remains a separate platform obligation;
 this spin-only rendezvous cannot authorize firmware sleep. Local scheduling is enabled only with fixed owner affinity.
-Infrastructure tags are assigned before task publication by audited constructors;
-freezer-aware futures must not retain a device/lock needed by PM while Pending.
+Freezer-aware futures must not retain a device or lock needed by PM while Pending.
+
+## CPU parking and PM infrastructure tasks
+
+The unsafe `TaskInner::with_pm_infrastructure` in `src/task.rs` bypasses
+cooperative freeze acknowledgement. Callers may mark only unpublished kernel
+infrastructure whose execution is governed by CPU parking. User tasks and
+ordinary kernel work must participate in cooperative freezing. PM must keep this task's resources available until its CPU acknowledges
+parking, and restore them before release. Recovery must not require a lock
+the task could hold while parked.
+
+In `src/softirqd.rs`, IRQ and device resources stay available until the CPU
+Stop callback excludes softirq execution. PM restores them before CPU release
+without acquiring locks retained by the daemon. In `src/stop_machine.rs`,
+the pinned Stop thread owns the CPU rendezvous and runs its callbacks with
+interrupts disabled. Recovery must not acquire resources held by that thread.
