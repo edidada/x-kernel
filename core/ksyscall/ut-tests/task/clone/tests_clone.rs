@@ -265,3 +265,13 @@ fn test_validate_accepts_plain_fork_and_plain_thread() {
     req.set_flags(CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND);
     assert!(req.validate_clear_sighand_flag().is_ok());
 }
+
+#[def_test]
+fn test_clone_rejects_newuser_with_shared_fs() {
+    let mut req = CloneRequest::new();
+    req.set_flags(CloneFlags::NEWUSER | CloneFlags::FS);
+    assert_eq!(
+        LinuxError::from(req.validate_namespace_flags().unwrap_err()),
+        LinuxError::EINVAL
+    );
+}

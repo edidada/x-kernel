@@ -131,6 +131,7 @@ fn authorize_setns(
     target_cred: &Cred,
     caller_cred: &Cred,
     nsfd: &NsFd,
+    copy_fs: bool,
 ) -> KResult<()> {
     let require_target = |user_ns: &UserNamespace, capability: u32| {
         if target_cred.has_cap_in(user_ns, capability) {
@@ -168,7 +169,10 @@ fn authorize_setns(
             require_target(ns.user_ns(), CAP_SYS_ADMIN)?;
             require_caller(CAP_SYS_CHROOT)?;
             require_caller(CAP_SYS_ADMIN)?;
-            if process.fs_is_shared() {
+            // Linux `prepare_nsset()` copies the fs_struct when NEWNS is
+            // combined with another namespace flag; only a lone CLONE_NEWNS
+            // request evaluates `fs->users != 1` on the caller's fs.
+            if process.fs_is_shared() && !copy_fs {
                 return Err(KError::InvalidInput);
             }
             Ok(())
@@ -280,7 +284,7 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
         return Err(KError::InvalidInput);
     }
     let cred = kprocess::current_cred();
-    authorize_setns(process, &cred, &cred, &nsfd)?;
+    authorize_setns(process, &cred, &cred, &nsfd, false)?;
 
     let target_mnt = match &*nsfd {
         NsFd::Mnt(ns) => Some(ns.clone()),
@@ -380,7 +384,7 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
         (*current_cred).clone()
     };
     for nsfd in &swaps {
-        authorize_setns(process, &current_cred, &caller_cred, nsfd)?;
+        authorize_setns(process, &current_cred, &caller_cred, nsfd, swaps.len() > 1)?;
     }
     for nsfd in &swaps {
         if let NsFd::Net(ns) = nsfd {

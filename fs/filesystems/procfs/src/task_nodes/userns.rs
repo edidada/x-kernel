@@ -8,6 +8,7 @@ use alloc::{borrow::Cow, format, string::String, sync::Arc, vec::Vec};
 
 use kcred::{CAP_SYS_ADMIN, IdMapExtent, UserNamespace};
 use kprocess::AsThread;
+use ksync::Mutex;
 use ktask::WeakKtaskRef;
 use kvfs::{SimpleFileOps, VfsError, VfsFile, VfsResult};
 use memaddr::PAGE_SIZE_4K;
@@ -54,11 +55,24 @@ impl IdMapKind {
 pub(super) struct IdMapFile {
     task: WeakKtaskRef,
     kind: IdMapKind,
+    pinned_ns: Mutex<Option<Arc<UserNamespace>>>,
 }
 
 impl IdMapFile {
     pub(super) fn new(task: WeakKtaskRef, kind: IdMapKind) -> Self {
-        Self { task, kind }
+        Self {
+            task,
+            kind,
+            pinned_ns: Mutex::new(None),
+        }
+    }
+
+    fn target_ns(&self) -> VfsResult<Arc<UserNamespace>> {
+        if let Some(ns) = self.pinned_ns.lock().clone() {
+            return Ok(ns);
+        }
+        let task = upgrade_task(&self.task)?;
+        Ok(task.as_thread().real_cred().user_ns_arc().clone())
     }
 }
 
@@ -76,10 +90,15 @@ fn render_id_map(
 ) -> String {
     let mut text = String::new();
     if ns.parent().is_none() {
-        // The initial namespace has an implicit identity map. Rendering the
-        // full range keeps `/proc/1/uid_map` equal to Linux even though no
-        // extents are stored.
-        text.push_str(&format!("{:10} {:10} {:10}\n", 0, 0, u32::MAX));
+        // The initial namespace has an implicit identity map. The inside
+        // coordinate is 0 in the initial namespace; render the outside value
+        // in the reader's namespace, matching `uid_m_show`'s projection.
+        let outside = match kind {
+            IdMapKind::Uid => reader_ns.map_uid_from_initial(0),
+            IdMapKind::Gid => reader_ns.map_gid_from_initial(0),
+        }
+        .unwrap_or(u32::MAX);
+        text.push_str(&format!("{:10} {:10} {:10}\n", 0, outside, u32::MAX));
         return text;
     }
     let Some(parent) = ns.parent() else {
@@ -112,9 +131,16 @@ fn render_id_map(
 }
 
 impl SimpleFileOps for IdMapFile {
+    fn validate_open(&self) -> VfsResult<()> {
+        // Linux pins the target user namespace in the open file description;
+        // later task namespace switches must not retarget the write.
+        let ns = self.target_ns()?;
+        *self.pinned_ns.lock() = Some(ns);
+        Ok(())
+    }
+
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
-        let task = upgrade_task(&self.task)?;
-        let ns = task.as_thread().real_cred().user_ns_arc().clone();
+        let ns = self.target_ns()?;
         let reader_ns = kprocess::current_cred().user_ns_arc().clone();
         Ok(Cow::Owned(
             render_id_map(self.kind, &ns, &reader_ns).into_bytes(),
@@ -122,8 +148,7 @@ impl SimpleFileOps for IdMapFile {
     }
 
     fn write(&self, file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
-        let task = upgrade_task(&self.task)?;
-        let target = task.as_thread().real_cred().user_ns_arc().clone();
+        let target = self.target_ns()?;
         let writer = file.cred().clone();
         let current = kprocess::current_cred();
 
@@ -153,21 +178,39 @@ impl SimpleFileOps for IdMapFile {
 /// `/proc/<pid>/setgroups`.
 pub(super) struct SetgroupsFile {
     task: WeakKtaskRef,
+    pinned_ns: Mutex<Option<Arc<UserNamespace>>>,
 }
 
 impl SetgroupsFile {
     pub(super) fn new(task: WeakKtaskRef) -> Self {
-        Self { task }
+        Self {
+            task,
+            pinned_ns: Mutex::new(None),
+        }
+    }
+
+    fn target_ns(&self) -> VfsResult<Arc<UserNamespace>> {
+        if let Some(ns) = self.pinned_ns.lock().clone() {
+            return Ok(ns);
+        }
+        let task = upgrade_task(&self.task)?;
+        Ok(task.as_thread().real_cred().user_ns_arc().clone())
     }
 }
 
 impl SimpleFileOps for SetgroupsFile {
+    fn validate_open(&self) -> VfsResult<()> {
+        let ns = self.target_ns()?;
+        *self.pinned_ns.lock() = Some(ns);
+        Ok(())
+    }
+
     fn validate_open_for_write(&self) -> VfsResult<()> {
         // Linux `proc_setgroups_open()` requires CAP_SYS_ADMIN in the target
         // namespace at open-for-write; the write callback performs no
         // capability check. CAP_SETGID is not sufficient.
-        let task = upgrade_task(&self.task)?;
-        let ns = task.as_thread().real_cred().user_ns_arc().clone();
+        let ns = self.target_ns()?;
+        *self.pinned_ns.lock() = Some(ns.clone());
         if kprocess::current_cred().has_cap_in(&ns, CAP_SYS_ADMIN) {
             Ok(())
         } else {
@@ -176,8 +219,7 @@ impl SimpleFileOps for SetgroupsFile {
     }
 
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
-        let task = upgrade_task(&self.task)?;
-        let ns = task.as_thread().real_cred().user_ns_arc().clone();
+        let ns = self.target_ns()?;
         let text = if ns.setgroups_allowed() {
             "allow\n"
         } else {
@@ -192,9 +234,7 @@ impl SimpleFileOps for SetgroupsFile {
         // The pid file resolves its task before the write callback in Linux; a
         // task that vanished after open therefore reports ESRCH even for
         // malformed input. Authority was checked at open.
-        let task = upgrade_task(&self.task)?;
-        let target_cred = task.as_thread().real_cred();
-        let ns = target_cred.user_ns_arc().clone();
+        let ns = self.target_ns()?;
         if offset != 0 || data.len() >= MAX_SETGROUPS_WRITE {
             return Err(VfsError::InvalidInput);
         }

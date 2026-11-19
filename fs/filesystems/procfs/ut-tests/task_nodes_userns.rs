@@ -48,6 +48,18 @@ fn id_map_renders_overflow_for_unmapped_reader() {
 }
 
 #[def_test]
+fn initial_map_is_projected_into_a_child_reader() {
+    let initial = initial_user_namespace();
+    let reader = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
+    let rendered = render_id_map(IdMapKind::Uid, &initial, &reader);
+    assert_eq!(
+        rendered.split_whitespace().nth(1),
+        Some("4294967295"),
+        "reader does not map global UID 0"
+    );
+}
+
+#[def_test]
 fn id_map_renders_through_a_non_initial_parent() {
     let initial = initial_user_namespace();
     let writer = Cred::root();

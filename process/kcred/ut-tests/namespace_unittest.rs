@@ -367,6 +367,26 @@ fn nested_owner_can_write_its_own_single_extent_map() {
 }
 
 #[def_test]
+fn map_write_requires_the_writing_task_parent_capability() {
+    let namespace = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false)
+        .unwrap();
+    let opener = Cred::root();
+    let current = Cred::new(1000, 1000);
+    assert_eq!(
+        LinuxError::from(
+            namespace
+                .write_uid_map(
+                    &opener,
+                    &current,
+                    alloc::vec![IdMapExtent::new(0, 0, 1).unwrap()],
+                )
+                .unwrap_err()
+        ),
+        LinuxError::EPERM
+    );
+}
+
+#[def_test]
 fn capabilities_never_flow_toward_ancestors() {
     let initial = initial_user_namespace();
     let child = UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
