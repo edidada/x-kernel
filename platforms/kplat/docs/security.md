@@ -24,3 +24,24 @@ MMIO/DMA preparation errors must be handled by
 their callers; moving or renaming contracts does not certify rollback on
 partial platform sharing failure. The existing AArch64 partial-sharing error
 policy is tracked separately in kiface's capability audit.
+
+## x86 system sleep
+
+The unsafe caller/provider boundary is `sys::SystemSleepIf` in
+`src/sys.rs`. The x86 implementation lives in `kplat-x86_64/src/suspend.rs`.
+The PM coordinator owns exclusion and lifetime across these calls.
+
+- `prepare` runs on the boot CPU. Serialize PM and exclude CPU hotplug until
+  `finish` releases the wake resources.
+- `park_cpu` runs on the target CPU with local IRQs and migration disabled.
+  Devices must remain usable during capture. Keep the C callback and its raw
+  argument valid through the callback's resumed return, including on abort.
+- `enter` requires other CPUs, devices, NMI sources, IRQs and clocks to be
+  quiesced before firmware entry on the boot CPU.
+- `restore_cpus` requires boot CPU IRQs to remain disabled and shared resources
+  to remain excluded while saved remote contexts restart.
+- `finish` requires all remote CPU callbacks to have joined before releasing
+  ownership. A timeout alone does not establish that join.
+
+`persistent_time` is a safe optional clock read. The forwarding import
+`khal::power::SystemSleepIf` exposes the same contract to existing callers.
