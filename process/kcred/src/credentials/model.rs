@@ -615,7 +615,7 @@ impl Cred {
         }
 
         let old = self.prepare();
-        if self.has_cap(CAP_SETUID) {
+        if self.has_cap_in(self.user_ns(), CAP_SETUID) {
             self.set_resuid_unchecked(Some(uid), Some(uid), Some(uid));
             self.apply_setid_caps(&old);
             return Ok(());
@@ -648,7 +648,7 @@ impl Cred {
             return Err(KError::InvalidInput);
         }
 
-        if self.has_cap(CAP_SETGID) {
+        if self.has_cap_in(self.user_ns(), CAP_SETGID) {
             self.set_resgid_unchecked(Some(gid), Some(gid), Some(gid));
             return Ok(());
         }
@@ -681,7 +681,7 @@ impl Cred {
         let old_ruid = self.ruid;
         let old_euid = self.euid;
 
-        if !self.has_cap(CAP_SETUID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETUID) {
             if let Some(ruid) = ruid
                 && ruid != old_ruid
                 && ruid != old_euid
@@ -730,7 +730,7 @@ impl Cred {
         let old_rgid = self.rgid;
         let old_egid = self.egid;
 
-        if !self.has_cap(CAP_SETGID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETGID) {
             if let Some(rgid) = rgid
                 && rgid != old_rgid
                 && rgid != old_egid
@@ -779,7 +779,7 @@ impl Cred {
         euid: Option<Uid>,
         suid: Option<Uid>,
     ) -> KResult<()> {
-        if !self.has_cap(CAP_SETUID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETUID) {
             self.check_uid_change(ruid)?;
             self.check_uid_change(euid)?;
             self.check_uid_change(suid)?;
@@ -814,7 +814,7 @@ impl Cred {
         egid: Option<Gid>,
         sgid: Option<Gid>,
     ) -> KResult<()> {
-        if !self.has_cap(CAP_SETGID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETGID) {
             self.check_gid_change(rgid)?;
             self.check_gid_change(egid)?;
             self.check_gid_change(sgid)?;
@@ -842,7 +842,7 @@ impl Cred {
     /// affected by a filesystem-ID change.
     pub fn set_fsuid(&mut self, fsuid: Uid) -> Uid {
         let old_fsuid = self.fsuid;
-        let permitted = self.has_cap(CAP_SETUID)
+        let permitted = self.has_cap_in(self.user_ns(), CAP_SETUID)
             || fsuid == self.ruid
             || fsuid == self.euid
             || fsuid == self.suid
@@ -864,7 +864,7 @@ impl Cred {
     /// The returned old value does not indicate whether the change succeeded.
     pub fn set_fsgid(&mut self, fsgid: Gid) -> Gid {
         let old_fsgid = self.fsgid;
-        if self.has_cap(CAP_SETGID)
+        if self.has_cap_in(self.user_ns(), CAP_SETGID)
             || fsgid == self.rgid
             || fsgid == self.egid
             || fsgid == self.sgid
