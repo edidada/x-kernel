@@ -51,7 +51,7 @@ fn park_remote(argument: *mut ()) {
         state.acknowledged.store(2, Ordering::Release);
         return;
     };
-    acknowledge_and_wait(argument);
+    acknowledge_and_wait(state);
     // A stale token or failed restore here would release execution with an
     // inhibited timer. That is an internal credential violation, not a usable
     // partial recovery state; never silently release ordinary execution.
@@ -59,10 +59,7 @@ fn park_remote(argument: *mut ()) {
     assert!(events.resume().is_ok());
 }
 
-extern "C" fn acknowledge_and_wait(argument: *mut ()) {
-    // SAFETY: the participant's boxed state outlives callback/CPU restoration;
-    // its owner reclaims it only after the stopper's completion publication.
-    let state = unsafe { &*argument.cast::<ParkState>() };
+fn acknowledge_and_wait(state: &ParkState) {
     state.acknowledged.store(1, Ordering::Release);
     while !state.release.load(Ordering::Acquire) {
         core::hint::spin_loop();
