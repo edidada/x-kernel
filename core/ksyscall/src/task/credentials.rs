@@ -188,7 +188,7 @@ pub(crate) fn sys_getgroups(size: i32, list: UserPtr<Gid>) -> KResult<isize> {
 pub(crate) fn sys_setgroups(size: i32, list: UserConstPtr<Gid>) -> KResult<isize> {
     debug!("sys_setgroups <= size: {size}");
     let cred = kprocess::current_cred();
-    if !cred.has_cap_in(cred.user_ns(), kcred::CAP_SETGID) {
+    if !cred.user_ns().setgroups_allowed() || !cred.has_cap_in(cred.user_ns(), kcred::CAP_SETGID) {
         return Err(KError::OperationNotPermitted);
     }
 
