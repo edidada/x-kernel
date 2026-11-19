@@ -178,8 +178,10 @@ accounting verifies that both exact and compound backing survives until
 `finish()` returns.
 `inactive_table_destruction_releases_its_live_data_hold` leaves a live managed
 leaf in a never-activated tree and checks that destruction returns its real
-PageRef to allocator inventory. The time fixtures contain no handwritten unsafe
-code. The page-storage transfer test
+PageRef to allocator inventory. Page-table fixtures keep IRQs enabled during
+synchronous retirement and only disable preemption to retain CPU affinity. The
+handler-only allocation-transfer case may mask IRQs because it never edits or
+flushes a table. The time fixtures contain no handwritten unsafe code. The page-storage transfer test
 uses `unsafe { PageRef::from_raw(pa, 1) }` for its exact outstanding transfer; the
 adjacent SAFETY comment documents ownership and the absence of hardware use.
 These tests do not establish IRQ/NMI concurrency or real platform suspend

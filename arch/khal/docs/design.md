@@ -206,8 +206,12 @@ or user gates. The huge-leaf lifetime case runs serially and compares allocation
 usage before unmap and after synchronous retirement, with no independent owner
 masking early release. `inactive_table_destruction_releases_its_live_data_hold`
 additionally leaves a real managed data leaf installed in a never-activated
-tree and checks that Drop restores the allocator usage baseline. All four
-supported platform unittest builds select them.
+tree and checks that Drop restores the allocator usage baseline. Page-table
+fixtures pin their CPU with `NoPreempt` while leaving IRQs enabled across
+`finish()` and edit-guard Drop so software shootdown can receive IPIs. Only the
+handler-only raw-reference round trip masks IRQs for its exact PCP reuse check;
+it never edits or flushes a table. All four supported platform unittest builds
+select them.
 CPU identity tests require initialized CPU state. Independent epoch fixtures do
 not freeze the active kernel's global clock. Explicit cfg gates outside the
 mounts prevent non-UT builds from resolving the runtime test macro; they do not
