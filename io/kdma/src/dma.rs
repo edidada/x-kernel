@@ -185,28 +185,14 @@ impl DmaAllocator {
         let size = num_pages * PAGE_SIZE_4K;
         let vaddr = va!(virt_raw);
 
-        // Deallocation cannot fail; the helper already logs platform release errors.
-        let _ = self.release_platform_dma(v2p(vaddr), size);
-        // The pages may return to the general allocator only after every CPU
-        // has dropped its uncached translation: otherwise a CPU that still
-        // holds the coherent mapping could observe a cached alias of the
-        // reused page. The provider detaches that invalidation from the
-        // allocator lock, so release the pages inside the completion, which
-        // the public wrapper runs after unlocking.
-        match self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal) {
-            Ok(Some(flush)) => {
-                self.pending_completions
-                    .push(DmaMappingCompletion::new(move || {
-                        let is_invalidated = flush.complete();
-                        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
-                        is_invalidated
-                    }));
-            }
-            // The provider completed the invalidation in place, or the mode
-            // restore failed after logging; no flush is pending.
-            Ok(None) | Err(_) => {
-                global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
-            }
+        if self.release_platform_dma(v2p(vaddr), size).is_err() {
+            return;
+        }
+        let restore = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
+        if let Some(completion) = release_after_restore(restore, move || {
+            global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        }) {
+            self.pending_completions.push(completion);
         }
     }
 
@@ -515,3 +501,27 @@ fn layout_for_pages(num_pages: usize) -> Layout {
     )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }
+
+/// Return pages to the allocator only after every required invalidation succeeds.
+/// The caller drains deferred work outside the DMA allocator lock.
+fn release_after_restore(
+    restore: AllocResult<Option<DmaMappingCompletion>>,
+    release: impl FnOnce() + Send + 'static,
+) -> Option<DmaMappingCompletion> {
+    match restore {
+        Ok(Some(flush)) => Some(DmaMappingCompletion::new(move || {
+            if !flush.complete() {
+                return false;
+            }
+            release();
+            true
+        })),
+        Ok(None) => {
+            release();
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+unittest::path_mod_test!(tests, "../ut-tests/coherent_release.rs");

@@ -101,7 +101,8 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   flush, so a CPU that still holds the page's uncached translation cannot
   observe a cached alias of the reused page. The public wrapper runs the
   completion after unlocking, so CPUs spinning on the allocator lock with
-  interrupts disabled can still answer the shootdown.
+  interrupts disabled can still answer the shootdown. A failed platform release,
+  mapping restore, or final shootdown leaves these pages allocated.
 - Coherent allocation participates in the global page allocator and page
   table updates, so it must run after `kalloc` and the address-space
   subsystem are initialized; first use of the bounce path lazily
