@@ -4,7 +4,55 @@
 
 use unittest::def_test;
 
-use super::PollState;
+use super::{CpuPolicy, NetworkPoller, NormalQueue, PollState, QueueConfig};
+
+/// Foreground demand remains pending until queue startup can replay it.
+///
+/// # Panics
+/// Panics if unprepared polling consumes demand or claims execution.
+#[def_test]
+fn foreground_notification_before_start_preserves_demand() {
+    let poller = NetworkPoller::new();
+
+    assert!(!poller.try_claim(true));
+    let state = poller.state.lock();
+    assert!(state.queue.is_none());
+    assert!(state.has_pending);
+    assert!(!state.is_running);
+}
+
+/// A foreground notification cannot displace the active executor or lose demand.
+///
+/// # Panics
+/// Panics if queue preparation fails or pending demand does not survive ownership.
+#[def_test]
+fn foreground_notification_preserves_running_owner() {
+    let config =
+        QueueConfig::new(&[khal::percpu::this_cpu_id()], CpuPolicy::CurrentCpu, 1).unwrap();
+    let queue = NormalQueue::new("knet-poller-test", config).unwrap();
+    let poller = NetworkPoller::new();
+    {
+        let mut state = poller.state.lock();
+        state.queue = Some(queue.clone());
+        state.is_running = true;
+    }
+
+    assert!(!poller.try_claim(true));
+    {
+        let mut state = poller.state.lock();
+        assert!(state.is_running);
+        assert!(state.has_pending);
+        assert!(state.finish(false));
+    }
+    assert!(poller.try_claim(false));
+    {
+        let mut state = poller.state.lock();
+        assert!(!state.has_pending);
+        assert!(!state.finish(false));
+    }
+    drop(poller);
+    queue.close_and_drain().unwrap();
+}
 
 /// IRQ-side requests reach the boot-bound reusable network Work.
 ///
