@@ -200,7 +200,8 @@ impl Cred {
     /// participate. It is not a general privilege predicate; capability-gated
     /// operations must use [`Cred::has_cap`] instead.
     pub fn has_root_euid(&self) -> bool {
-        self.is_root_id(self.euid)
+        core::ptr::eq(&*self.user_ns, &*crate::initial_user_namespace())
+            && self.is_root_id(self.euid)
     }
 
     /// Returns the saved set-user-ID.
@@ -270,7 +271,7 @@ impl Cred {
         if changes_locked != 0 || unlocks != 0 {
             return Err(KError::OperationNotPermitted);
         }
-        if !self.has_cap(CAP_SETPCAP) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETPCAP) {
             let unprivileged = SecureBits::UNPRIVILEGED.bits();
             if old == new || (old.bits() ^ new.bits()) & !unprivileged != 0 {
                 return Err(KError::OperationNotPermitted);
@@ -503,7 +504,7 @@ impl Cred {
     /// Returns [`KError::OperationNotPermitted`] without `CAP_SETPCAP`, or
     /// [`KError::InvalidInput`] when `cap` exceeds [`CAP_LAST_CAP`].
     pub fn drop_bounding_cap(&mut self, cap: usize) -> KResult<()> {
-        if !self.has_cap(CAP_SETPCAP) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETPCAP) {
             return Err(KError::OperationNotPermitted);
         }
         if cap > CAP_LAST_CAP as usize {

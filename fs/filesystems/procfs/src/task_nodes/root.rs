@@ -1773,7 +1773,7 @@ impl SimpleDirOps for ThreadDir {
                 };
                 SimpleFile::new_regular_with_owner(
                     fs.clone(),
-                    NodePermission::from_bits_truncate(0o666),
+                    NodePermission::from_bits_truncate(0o644),
                     uid,
                     gid,
                     super::userns::SetgroupsFile::new(task_weak.clone()),
@@ -1782,15 +1782,31 @@ impl SimpleDirOps for ThreadDir {
             "auxv" => {
                 let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
                 let owner = task.as_thread().real_cred();
-                let owner_uid = kvfs::Kuid::from_inside(owner.euid(), owner.user_ns_arc());
-                let owner_gid = kvfs::Kgid::from_inside(owner.egid(), owner.user_ns_arc());
+                let ns = owner.user_ns_arc();
+                let uid = kvfs::Kuid::from_inside(owner.euid(), ns);
+                let gid = kvfs::Kgid::from_inside(owner.egid(), ns);
+                let parent = ns.parent();
+                let owner_uid = if uid.is_invalid() {
+                    parent
+                        .and_then(|parent| parent.map_uid_to_initial(owner.euid()))
+                        .unwrap_or(0)
+                } else {
+                    uid.as_raw()
+                };
+                let owner_gid = if gid.is_invalid() {
+                    parent
+                        .and_then(|parent| parent.map_gid_to_initial(owner.egid()))
+                        .unwrap_or(0)
+                } else {
+                    gid.as_raw()
+                };
                 lookup.file(
                     name,
                     SimpleFile::new_snapshot_with_owner(
                         fs.clone(),
                         NodePermission::OWNER_READ,
-                        owner_uid.as_raw(),
-                        owner_gid.as_raw(),
+                        owner_uid,
+                        owner_gid,
                         {
                             let task_weak = task_weak.clone();
                             move || {
