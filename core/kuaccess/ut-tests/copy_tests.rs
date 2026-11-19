@@ -176,6 +176,33 @@ impl VmRuntimeOps for SleepableBacking {
     }
 }
 
+/// A first-touch atomic read resolves its backing after returning from the trap.
+#[def_test(user)]
+fn user_atomic_read_resolves_sleepable_backing_in_task_context() {
+    let curr = current();
+    let space = curr.as_thread().process().address_space().unwrap();
+    let start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE + 0x1000_0000);
+    let backing = Arc::new(SleepableBacking {
+        pages: PrivateBackend::new(start, PageSize::Size4K),
+        faults: AtomicUsize::new(0),
+        behavior: FaultBehavior::Normal,
+    });
+    backing.install(
+        &mut space.lock(),
+        start,
+        PAGE_SIZE_4K,
+        MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE,
+    );
+    assert_eq!(
+        atomic_load_u32_nofault(start.as_usize()),
+        Err(MemError::NoAccess)
+    );
+    assert_eq!(backing.faults.load(Ordering::Relaxed), 0);
+    assert_eq!(atomic_load_u32(start.as_usize()), Ok(0));
+    assert_eq!(backing.faults.load(Ordering::Relaxed), 1);
+    space.lock().unmap(start, PAGE_SIZE_4K).unwrap();
+}
+
 #[def_test(user)]
 fn user_copies_resolve_sleepable_backing_and_preserve_permissions() {
     let curr = current();

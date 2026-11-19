@@ -38,7 +38,8 @@ syscall / runtime
 - `access_user_memory()` requires the current task to resolve to a thread.
 - User-string loads access user addresses, so they may sleep and resolve page faults.
 - Ordinary `osvm` copy entry points require a sleepable thread context and do not disable IRQs themselves. A page fault returns through the exception-table fixup, then the calling task fills the page back in. Filling a file page may wait for block I/O.
-- The trap handler for atomic user access depends on the current thread's `accessing_user_memory` flag and takes over page faults only inside that window.
+- The access-window trap handler rejects non-sleepable context. Faultable atomic
+  reads and writes resolve missing pages in the calling task after fixup.
 
 ## Algorithms
 
@@ -54,8 +55,11 @@ syscall / runtime
 ### User atomic access
 
 1. Check 4-byte alignment and the user address range.
-2. Faultable loads use the `access_user_memory()` window. Compare-exchange uses the nofault primitive and, after a fault, resolves the write in task context before retrying.
-3. Load uses a naturally aligned read-only 32-bit load. The nofault compare-exchange exclusive/atomic sequence runs under `IrqSave`.
+2. Faultable loads and compare-exchange first use their nofault primitive. A
+   fault returns through the exception table; the calling task resolves it with
+   READ or WRITE access before retrying, with IRQs enabled for MM completion.
+3. Nofault load and compare-exchange temporarily close any outer access window
+   under `IrqSave`, preserving it afterwards without attempting in-trap MM work.
 4. Success returns the observed value or `(exchanged, observed)`. A fault maps to `MemError::NoAccess`.
 
 These primitives give futex and robust-list paths a TOCTOU-free read or update of a user futex word. A read-only load does not require a writable mapping and does not trigger COW.

@@ -28,8 +28,9 @@ use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use memspace::PageFaultOutcome;
 use osvm::{MemError, MemResult, VirtMemIo};
 
-/// Enables scoped access into user memory, allowing page faults to occur inside
-/// kernel.
+/// Marks a scoped user-memory access window.
+/// Faults that cannot be resolved in sleepable context must return through an
+/// exception-table fixup and retry from the calling task.
 pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     let curr = current();
     #[expect(
@@ -50,6 +51,11 @@ pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
 
 #[register_trap_handler(PAGE_FAULT)]
 fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
+    // Exception entry can mask IRQs. Let the assembly fixup return to the task
+    // rather than entering MM, blocking I/O or synchronous shootdown here.
+    if !ktask::is_sleepable_context() {
+        return false;
+    }
     let Some(curr) = current_may_uninit() else {
         return false;
     };
@@ -168,9 +174,14 @@ pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String
     String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
 }
 
-/// Atomically loads a 32-bit word from user memory.
+/// Atomically loads a 32-bit user word, resolving faults in sleepable task context.
 pub fn atomic_load_u32(addr: usize) -> MemResult<u32> {
-    atomic_load_u32_inner(addr, true)
+    loop {
+        match atomic_load_u32_nofault(addr) {
+            Err(MemError::NoAccess) => fault_in_user_word(addr, MappingFlags::READ)?,
+            result => return result,
+        }
+    }
 }
 
 /// Atomically loads a 32-bit user word without resolving page faults.
@@ -179,7 +190,7 @@ pub fn atomic_load_u32(addr: usize) -> MemResult<u32> {
 /// reported as [`MemError::NoAccess`]; the caller must drop its lock, fault the
 /// address in through [`atomic_load_u32`], and retry the whole operation.
 pub fn atomic_load_u32_nofault(addr: usize) -> MemResult<u32> {
-    atomic_load_u32_inner(addr, false)
+    atomic_load_u32_inner(addr)
 }
 
 /// Atomically tests whether `*addr == expected` without changing the word.
@@ -194,25 +205,30 @@ pub fn atomic_u32_eq_nofault(addr: usize, expected: u32) -> MemResult<bool> {
     Ok(atomic_load_u32_nofault(addr)? == expected)
 }
 
-fn atomic_load_u32_inner(addr: usize, resolve_faults: bool) -> MemResult<u32> {
+fn atomic_load_u32_inner(addr: usize) -> MemResult<u32> {
     if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
         return Err(MemError::InvalidAddr);
     }
     check_access(addr, core::mem::size_of::<u32>())?;
 
     let mut observed = 0u32;
-    let mut operation = || {
-        // SAFETY: `check_access` validated the 4-byte user range, `addr` is
-        // naturally aligned, and `observed` is a live writable kernel stack
-        // slot. The assembly exception table converts a user-memory fault into
-        // a nonzero return.
-        unsafe { user_atomic_load_u32(addr as *const u32, core::ptr::addr_of_mut!(observed)) }
-    };
-    let failed = if resolve_faults {
-        access_user_memory(operation)
-    } else {
-        operation()
-    };
+    let _irq = IrqSave::new();
+    let curr = current_may_uninit();
+    let outer_access = curr
+        .as_ref()
+        .and_then(|task| task.try_as_thread())
+        .filter(|thread| thread.is_accessing_user_memory());
+    if let Some(thread) = outer_access {
+        thread.set_accessing_user_memory(false);
+    }
+    // SAFETY: `check_access` validated the aligned user word and `observed`
+    // is live writable storage. The exception table returns a fault without
+    // resolving it while IRQs are masked or an outer access window is open.
+    let failed =
+        unsafe { user_atomic_load_u32(addr as *const u32, core::ptr::addr_of_mut!(observed)) };
+    if let Some(thread) = outer_access {
+        thread.set_accessing_user_memory(true);
+    }
     if unlikely(failed != 0) {
         Err(MemError::NoAccess)
     } else {
@@ -265,6 +281,13 @@ pub fn atomic_cmpxchg_u32_nofault(addr: usize, old: u32, new: u32) -> MemResult<
 /// [`MemError::NoAccess`] when the address is outside user space or the VMA
 /// rejects the write.
 pub fn fault_in_user_writeable(addr: usize) -> MemResult<()> {
+    fault_in_user_word(addr, MappingFlags::WRITE)
+}
+
+fn fault_in_user_word(addr: usize, access_flags: MappingFlags) -> MemResult<()> {
+    if !ktask::is_sleepable_context() {
+        return Err(MemError::NoAccess);
+    }
     if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
         return Err(MemError::InvalidAddr);
     }
@@ -278,7 +301,7 @@ pub fn fault_in_user_writeable(addr: usize) -> MemResult<()> {
         .process()
         .address_space()
         .map_err(|_| MemError::NoAccess)?;
-    let outcome = address_space.resolve_page_fault(VirtAddr::from_usize(addr), MappingFlags::WRITE);
+    let outcome = address_space.resolve_page_fault(VirtAddr::from_usize(addr), access_flags);
     if outcome.is_resolved() || outcome.is_retryable() {
         Ok(())
     } else if outcome == PageFaultOutcome::OutOfMemory {
