@@ -1360,9 +1360,7 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
         let inode_ns = self.dentry.user_namespace();
-        let fsuid = crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc());
-        if fsuid.as_raw() != inode.metadata().uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER)
-        {
+        if cred.fsuid() != inode.metadata().uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
             return Err(VfsError::OperationNotPermitted);
         }
         let _namespace_guard = inode.lock_namespace_exclusive();
@@ -1734,7 +1732,7 @@ impl Path {
         // Stored IDs are global values; compare the caller's filesystem ID
         // through the same projection so identity checks stay valid for
         // callers inside a child namespace.
-        let fsuid_global = crate::kid::Kuid::from_inside(cred.fsuid(), &caller_ns);
+        let fsuid_global = crate::kid::Kuid::from_raw(cred.fsuid());
         let is_owner = fsuid_global.as_raw() == metadata.uid;
         let can_chown = cred.has_cap_in(&inode_ns, kcred::CAP_CHOWN);
 
@@ -1784,8 +1782,7 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
         let inode_ns = self.dentry.user_namespace();
-        let fsuid = crate::kid::Kuid::from_inside(cred.fsuid(), cred.user_ns_arc());
-        if fsuid.as_raw() != metadata.uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
+        if cred.fsuid() != metadata.uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
             return Err(VfsError::OperationNotPermitted);
         }
         if mode.contains(NodePermission::SET_GID)
