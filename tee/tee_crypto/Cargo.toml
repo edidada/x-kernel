@@ -51,7 +51,7 @@ cmac = { version = "0.8", default-features = false }
 pbkdf2 = { version = "0.13", default-features = false }
 
 # Asymmetric — RSA
-rsa = { version = "0.10.0-rc.18", default-features = false, features = ["hazmat", "encoding"] }
+rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["hazmat", "encoding"] }
 signature = { version = "3.0.0", default-features = false }
 pkcs1 = { version = "0.8.0-rc.1", default-features = false }
 pkcs8 = { version = "0.11", default-features = false, features = ["alloc"] }
