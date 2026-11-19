@@ -387,6 +387,8 @@ impl MmSpace {
                     }
                 }
             }
+            // An emptied protection range also needs confirmed revocation
+            // before its runtime can release externally owned backing.
             modify.finish();
         }
 
@@ -613,6 +615,7 @@ impl MmSpace {
             let pte_flags = {
                 let mut modify = self.pgtbl.modify();
                 let result = runtime.on_protect(protect_range, flags, &mut modify);
+                // Runtime hooks may revoke or replace entries themselves.
                 modify.finish();
                 result?
             };
@@ -622,6 +625,8 @@ impl MmSpace {
                 let mut modify = self.pgtbl.modify();
                 let result =
                     modify.protect_region(protect_range.start, protect_range.size(), pte_flags);
+                // Protection is a synchronous boundary, including DMA cache
+                // mode transitions on raw pages owned outside the page table.
                 modify.finish();
                 result.map_err(crate::backend::map_paging_err)?;
             }
@@ -889,7 +894,8 @@ impl MmSpace {
     fn copy_kernel_mappings(&mut self) -> KResult {
         #[cfg(not(any(target_arch = "aarch64", target_arch = "loongarch64")))]
         {
-            self.copy_mappings_from(&crate::kernel_layout().lock())?;
+            let kernel = crate::kernel_layout().lock();
+            self.copy_mappings_from(&kernel)?;
         }
         Ok(())
     }
@@ -1130,27 +1136,27 @@ impl MmSpace {
         self.map_runtime_vma(vma, false, runtime)
     }
 
-    /// Maps a linear range and detaches its kernel TLB invalidation.
-    ///
-    /// The caller holds this address space's lock and must release it before
-    /// completing the returned flush, so CPUs contending for that lock can
-    /// answer the shootdown IPI. Only the raw linear mapping used by device
-    /// windows is supported; other backends use [`map_linear`](Self::map_linear).
-    #[must_use = "the caller must complete the invalidation after unlocking"]
-    pub fn map_linear_deferred(
+    /// Installs raw kernel PTEs before returning their synchronous completion.
+    pub(crate) fn map_kernel_linear(
         &mut self,
         start_vaddr: VirtAddr,
         start_paddr: PhysAddr,
         size: usize,
         flags: MappingFlags,
-    ) -> KResult<Option<page_table::DeferredKernelTlbFlush>> {
-        self.drain_pending_invalidations();
+    ) -> KResult {
         self.validate_region(start_vaddr, size)?;
-        if !start_paddr.is_aligned_4k() {
-            k_bail!(InvalidInput, "address is not aligned");
+        if size == 0
+            || !start_paddr.is_aligned_4k()
+            || start_paddr.checked_add(size).is_none()
+            || flags.is_empty()
+        {
+            return Err(KError::InvalidInput);
         }
-
-        let offset = start_vaddr.as_usize() as isize - start_paddr.as_usize() as isize;
+        let range = VirtAddrRange::from_start_size(start_vaddr, size);
+        if self.vmas.overlaps(range) {
+            return Err(KError::AlreadyExists);
+        }
+        let offset = start_vaddr.as_usize().wrapping_sub(start_paddr.as_usize()) as isize;
         let runtime = VmRuntimeRef::new_linear(offset);
         let mut vma = VmArea::new(
             start_vaddr,
@@ -1161,67 +1167,43 @@ impl MmSpace {
             0,
             None,
         );
-        if self.vmas.overlaps(vma.range()) {
-            return Err(KError::AlreadyExists);
-        }
-        let deferred = {
-            let mut modify = self.pgtbl.modify();
-            runtime.map(vma.range(), vma.flags(), &mut modify)?;
-            let deferred = modify.defer_kernel_invalidation();
-            drop(modify);
-            deferred
-        };
-        vma.set_runtime(runtime.register_object_views(
-            self.mm_id,
-            self.deferred_invalidate_handle(),
-            &vma,
-        ));
+        vma.set_runtime(runtime);
+        // Reserve VA even on partial PTE installation failure. A later device
+        // probe must not mistake an installed prefix for a reusable hole.
         self.vmas.insert(vma);
-        Ok(deferred)
+        let mut edit = self.pgtbl.modify();
+        let result = edit
+            .map_region_raw(
+                start_vaddr,
+                |address| PhysAddr::from(address.as_usize().wrapping_sub(offset as usize)),
+                size,
+                flags,
+                false,
+            )
+            .map_err(map_paging_err);
+        edit.try_finish().map_err(|_| KError::Io)?;
+        result
     }
 
-    /// Unmaps a raw linear range and detaches its kernel TLB invalidation.
-    ///
-    /// The caller holds this address space's lock and must release it before
-    /// completing the returned flush. Falls back to [`unmap`](Self::unmap)
-    /// when the range contains a managed runtime, whose invalidation
-    /// completion must run in place.
-    #[must_use = "the caller must complete the invalidation after unlocking"]
-    pub fn unmap_linear_deferred(
-        &mut self,
-        start: VirtAddr,
-        size: usize,
-    ) -> KResult<Option<page_table::DeferredKernelTlbFlush>> {
-        self.drain_pending_invalidations();
+    pub(crate) fn unmap_kernel_linear(&mut self, start: VirtAddr, size: usize) -> KResult {
         self.validate_region(start, size)?;
         let range = VirtAddrRange::from_start_size(start, size);
-        let operations = self
-            .vmas
-            .collect_overlapping(range)
-            .iter()
-            .map(|vma| {
-                let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
-                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
-                let is_linear = matches!(&runtime, VmRuntimeRef::Linear(_));
-                Ok((overlap, runtime, is_linear))
-            })
-            .collect::<KResult<Vec<_>>>()?;
-        if operations.iter().any(|(_, _, is_linear)| !is_linear) {
-            self.unmap(start, size)?;
-            return Ok(None);
+        let vmas = self.covering_vmas_in_range(range)?;
+        if size == 0
+            || vmas
+                .iter()
+                .any(|vma| vma.backing().kind() != VmBackingKind::Linear)
+        {
+            return Err(KError::InvalidInput);
         }
-        let deferred = {
-            let mut modify = self.pgtbl.modify();
-            for (overlap, runtime, _) in &operations {
-                runtime.unmap(*overlap, &mut modify)?;
-            }
-            let deferred = modify.defer_kernel_invalidation();
-            drop(modify);
-            deferred
-        };
-        // Raw linear backing has no object-side invalidation completion.
+        let mut edit = self.pgtbl.modify();
+        let result = edit
+            .unmap_sparse_region(start, size, PageSize::Size4K)
+            .map_err(map_paging_err);
+        edit.try_finish().map_err(|_| KError::Io)?;
+        result?;
         self.vmas.unmap(start, size);
-        Ok(deferred)
+        Ok(())
     }
 
     /// Map a region using the provided runtime execution reference and flags.
@@ -1565,6 +1547,9 @@ impl MmSpace {
     /// Returns an error for unmapped, out-of-bounds or unaligned ranges,
     /// disallowed permissions, runtime errors, or a new commitment exceeding
     /// managed RAM (`KError::NoMemory`).
+    /// An error may follow partial PTE changes: the caller must retain raw
+    /// backing and must not claim the new protection is complete. Required TLB
+    /// invalidation completes synchronously before this method returns.
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> KResult {
         self.drain_pending_invalidations();
         self.validate_region(start, size)?;
@@ -1578,44 +1563,33 @@ impl MmSpace {
         self.protect_mapping_range(start, size, flags)
     }
 
-    /// Changes kernel mapping attributes and detaches the remote invalidation.
-    ///
-    /// The caller holds this address space's lock while calling this method and
-    /// must release it before completing the returned flush. That keeps CPUs
-    /// that are waiting for the same lock able to answer the shootdown IPI.
-    ///
-    /// Only raw kernel mappings such as the linear map or device windows are
-    /// supported. Managed file mappings must use [`protect`](Self::protect),
-    /// whose retirements complete in place; `defer_kernel_invalidation` returns
-    /// `None` for a user page table or when a retirement is still pending, in
-    /// which case the guard's drop completes the flush as before.
-    ///
-    /// This is a kernel-internal fast path for callers that already own a
-    /// validated range: unlike [`protect`](Self::protect), it does not require
-    /// full VMA coverage, alignment, or a per-VMA `allows_protection` check, and
-    /// unmapped pages inside `[start, start + size)` are skipped. The caller
-    /// must pass a page-aligned range fully covered by kernel VMAs whose mapping
-    /// mode it exclusively owns.
-    pub fn protect_kernel_deferred(
+    /// Changes raw kernel mappings while their PageRef or MMIO owner retains
+    /// backing through synchronous invalidation under the caller's task mutex.
+    pub(crate) fn protect_kernel_linear(
         &mut self,
         start: VirtAddr,
         size: usize,
         flags: MappingFlags,
-    ) -> KResult<Option<page_table::DeferredKernelTlbFlush>> {
-        if !self.pgtbl.is_kernel() {
-            // User address spaces use residency-scoped flushes and backend
-            // protection hooks, so keep the ordinary protection path.
-            self.protect(start, size, flags)?;
-            return Ok(None);
+    ) -> KResult {
+        self.validate_region(start, size)?;
+        if size == 0 || flags.is_empty() {
+            return Err(KError::InvalidInput);
         }
-        let mut modify = self.pgtbl.modify();
-        modify
+        let range = VirtAddrRange::from_start_size(start, size);
+        let vmas = self.covering_vmas_in_range(range)?;
+        if vmas.iter().any(|vma| {
+            vma.backing().kind() != VmBackingKind::Linear || !vma.allows_protection(flags)
+        }) {
+            return Err(KError::PermissionDenied);
+        }
+        let mut edit = self.pgtbl.modify();
+        let result = edit
             .protect_region(start, size, flags)
-            .map_err(crate::backend::map_paging_err)?;
-        let deferred = modify.defer_kernel_invalidation();
-        drop(modify);
+            .map_err(map_paging_err);
+        edit.try_finish().map_err(|_| KError::Io)?;
+        result?;
         self.vmas.protect(start, size, flags);
-        Ok(deferred)
+        Ok(())
     }
 
     /// Requires every byte of `[start, start + size)` to be backed by a
@@ -1989,7 +1963,9 @@ impl MmSpace {
     /// Handles a typed page-fault request.
     ///
     /// The dispatch consults explicit VMA metadata first and lets the VMA
-    /// choose the fault policy before a runtime materializes pages.
+    /// choose the fault policy before a runtime materializes pages. IRQs must
+    /// be enabled: pending invalidations and permission changes can require
+    /// synchronous shootdown even when the fault itself needs no I/O wait.
     pub fn handle_fault_input(&mut self, input: FaultInput) -> PageFaultOutcome {
         self.drain_pending_invalidations();
         let vaddr = input.address();

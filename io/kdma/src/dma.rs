@@ -126,17 +126,10 @@ fn alloc_coherent_pages(layout: Layout) -> AllocResult<DmaInfo> {
 
 fn update_mapping_mode(vaddr: VirtAddr, num_pages: usize, mode: DmaMappingMode) -> AllocResult<()> {
     let expand_size = num_pages * PAGE_SIZE_4K;
-    let completion = DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
+    DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
         error!("change table flag fail");
         AllocError::NoMemory
-    })?;
-    if let Some(completion) = completion
-        && !completion.complete()
-    {
-        error!("DMA mapping invalidation did not complete");
-        return Err(AllocError::NoMemory);
-    }
-    Ok(())
+    })
 }
 
 fn prepare_platform_dma(paddr: PhysAddr, size_bytes: usize) -> AllocResult<()> {

@@ -54,3 +54,11 @@ The default simple-file permissions remain unchanged. Process descriptor
 limits constrain open handles, not aggregate snapshot bytes; permission and
 memory-budget policy are separate from observation consistency. Sharing a
 cloned snapshot Arc retains one generation without allocating another buffer.
+
+## Kernel text protection
+
+Static-key text patching requires sleepable task context after runtime kernel
+mapping admission. The current control path is the procfs event-enable write;
+scheduler/IRQ capture does not patch text. One kernel address-space mutex covers
+PTE edits and synchronous TLB completion. Early boot and IRQ/NMI callers must
+not invoke this control operation; IRQ root reads use the cached root.

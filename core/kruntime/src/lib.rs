@@ -322,6 +322,7 @@ fn is_init_ok() -> bool {
 /// returning. Because the late-init thread holds an `Internal` identity and
 /// allocates no root PID itself, init receives the system's first root PID.
 fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
+    memspace::seal_boot_mapping();
     #[cfg(feature = "smp")]
     {
         // Returns only after every present secondary CPU has registered its
@@ -346,6 +347,7 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     init_cpu_services();
 
+    memspace::enable_runtime_mapping();
     if let Err(error) = kdma::init_streaming_pool() {
         warn!("DMA streaming pool preparation failed ({error:?}); streaming mappings unavailable");
     }

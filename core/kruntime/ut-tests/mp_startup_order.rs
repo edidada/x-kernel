@@ -12,6 +12,7 @@ use unittest::{assert, assert_eq, def_test};
 static COMPLETE: [AtomicBool; kbuild_config::NR_CPUS] =
     [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS];
 static RAN_EARLY: AtomicBool = AtomicBool::new(false);
+static BOOT_MAPPING_IS_FROZEN: AtomicBool = AtomicBool::new(false);
 static QUEUED: AtomicUsize = AtomicUsize::new(0);
 static REMAINING: AtomicUsize = AtomicUsize::new(0);
 static SERVICES_READY_BEFORE_RCU: AtomicBool = AtomicBool::new(false);
@@ -41,6 +42,18 @@ pub(crate) fn record_service_barrier(primary: LogicalCpuId) {
 }
 
 pub(crate) fn queue_early_tasks(primary: LogicalCpuId) {
+    // APs cannot acknowledge IPIs yet. Shared PTEs must stay unchanged until
+    // the service rendezvous enables remote shootdown and runtime updates.
+    let is_frozen = matches!(
+        memspace::kernel_layout().protect(
+            memaddr::VirtAddr::from(0),
+            4096,
+            khal::paging::MappingFlags::READ,
+        ),
+        Err(kerrno::KError::WouldBlock)
+    );
+    BOOT_MAPPING_IS_FROZEN.store(is_frozen, Ordering::Release);
+
     // All AP run queues exist, but APs still wait for the primary's
     // INITED_CPUS publication. No task can pass the startup checkpoint yet.
     for_each_present_logical_cpu(|_, cpu_id, _| {
@@ -67,6 +80,7 @@ pub(crate) fn queue_early_tasks(primary: LogicalCpuId) {
 
 #[def_test]
 fn cpu_services_are_ready_before_rcu_initialization() {
+    assert!(BOOT_MAPPING_IS_FROZEN.load(Ordering::Acquire));
     assert!(SERVICES_READY_BEFORE_RCU.load(Ordering::Acquire));
     if kcpu_id_map::nr_cpus() > 1 {
         assert!(PRIMARY_WAITING_FOR_SERVICES.load(Ordering::Acquire));

@@ -115,36 +115,27 @@ fn new_test_aspace() -> AddrSpace {
 }
 
 #[def_test]
-fn linear_mapping_defers_its_kernel_invalidation() {
+fn kernel_linear_mapping_completes_before_releasing_its_va() {
     let mut aspace = new_test_aspace();
     let start = VirtAddr::from(0x1000usize);
     let paddr = PhysAddr::from(0x20_0000usize);
 
-    // Architectures whose page-table metadata needs no invalidation for an
-    // invalid-to-valid mapping (aarch64's fresh-map fence) publish the PTE
-    // without a deferred flush; the others must defer it.
-    let map_deferred = aspace
-        .map_linear_deferred(
+    aspace
+        .map_kernel_linear(
             start,
             paddr,
             PAGE_SIZE_4K,
             MappingFlags::READ | MappingFlags::WRITE,
         )
-        .expect("linear mapping should succeed");
-    // The PTE is published before the remote shootdown completes.
+        .expect("linear mapping should complete");
     assert!(aspace.page_table().query(start).is_ok());
-    if let Some(deferred) = map_deferred {
-        assert_eq!(deferred.complete(), Ok(()));
-    }
+    assert!(aspace.find_vma(start).is_some());
 
-    // Removing a valid translation always needs an invalidation, so every
-    // architecture must defer the unmap.
-    let deferred = aspace
-        .unmap_linear_deferred(start, PAGE_SIZE_4K)
-        .expect("linear unmap should succeed")
-        .expect("a kernel unmap should defer its invalidation");
+    aspace
+        .unmap_kernel_linear(start, PAGE_SIZE_4K)
+        .expect("linear unmap should complete");
     assert!(aspace.page_table().query(start).is_err());
-    assert_eq!(deferred.complete(), Ok(()));
+    assert!(aspace.find_vma(start).is_none());
 }
 
 fn map_shared(
@@ -870,7 +861,7 @@ fn move_pages_keeps_managed_storage_after_source_retirement() {
     let mut edit = aspace.pgtbl.modify();
     // The source PTE is the sole physical owner, as after cache/token detachment.
     edit.map(src, page, MappingFlags::READ).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     drop(edit);
 
     aspace.move_pages(src, dst, PAGE_SIZE_4K * 3, PageSize::Size4K).unwrap();
@@ -885,7 +876,7 @@ fn move_pages_keeps_managed_storage_after_source_retirement() {
     let mut edit = aspace.pgtbl.modify();
     edit.unmap(dst).unwrap();
     assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before + PAGE_SIZE_4K);
-    edit.try_finish().unwrap();
+    edit.finish();
     assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
 }
 
@@ -902,7 +893,7 @@ fn move_pages_conflict_retires_managed_destinations_without_consuming_sources() 
     for address in [src, src + offset, dst + offset] {
         edit.map(address, alloc_page_ref(UsageKind::PageCache).unwrap(), MappingFlags::READ).unwrap();
     }
-    edit.try_finish().unwrap();
+    edit.finish();
     drop(edit);
     let first = aspace.pgtbl.query_entry(src).unwrap();
     let last = aspace.pgtbl.query_entry(src + offset).unwrap();
@@ -923,7 +914,7 @@ fn move_pages_conflict_retires_managed_destinations_without_consuming_sources() 
     for address in [src, src + offset, dst + offset] {
         edit.unmap(address).unwrap();
     }
-    edit.try_finish().unwrap();
+    edit.finish();
     assert_eq!(global_allocator().usages().get(UsageKind::PageCache), before);
 }
 
