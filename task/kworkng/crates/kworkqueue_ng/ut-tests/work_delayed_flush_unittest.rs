@@ -353,7 +353,9 @@ fn prepare_on(cpu: usize, run: impl FnOnce() + Send + 'static) -> ktask::KtaskRe
 ///
 /// # Panics
 /// Panics on early capture, incorrect CPU placement, lost readiness or failed drain.
-#[def_test]
+// The remote IRQ tail waits for CPU0's controller. Keep unrelated shootdown
+// initiators from pinning CPU0 before the controller releases that tail.
+#[def_test(serial)]
 fn delayed_flush_retries_actual_remote_timer_tail() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;

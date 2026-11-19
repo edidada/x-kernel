@@ -175,7 +175,7 @@ fixtures. Together with seven page-reference cases, there are 24 cases including
 ut-tests/time_epoch.rs and ut-tests/paging_page_refs.rs. The huge-leaf case is
 serial and retains no test-owned backing reference across unmap; allocation
 accounting verifies that both exact and compound backing survives until
-`try_finish()` succeeds.
+`finish()` returns.
 `inactive_table_destruction_releases_its_live_data_hold` leaves a live managed
 leaf in a never-activated tree and checks that destruction returns its real
 PageRef to allocator inventory. The time fixtures contain no handwritten unsafe
@@ -238,9 +238,8 @@ do not own their source table pages and do not restore or release those holds.
 
 The table owner must end hardware use and complete required translation
 retirement before destroying owned storage. The existing AArch64 user-ASID
-invalidation path in `PageTable64::drop` remains the final reclamation gate:
-failed completion preserves table frames and all unrecovered managed data
-transfers. Reference counting retains storage; it does not replace address-space
+invalidation path in `PageTable64::drop` synchronously completes before any
+table frame or remaining managed data transfer is released. Reference counting retains storage; it does not replace address-space
 exit, remote-CPU coordination or TLB shootdown. Managed data leaves use the
 separate provider below.
 
@@ -325,24 +324,22 @@ category, while clearing permissions retires the old transfer.
 The page-table guard retains recovered holds until confirmed TLB completion,
 including full invalidation for huge leaves removed through interior addresses.
 Retirement remains bounded at 16 inline holds and at most 256 with fallible
-spill. Full capacity or spill OOM attempts an intermediate drain with the
-recovered hold still live. Unconfirmed completion retains holds and a full
-retry; an unstorable hold or unresolved guard Drop stays pinned. Repeated
-failure can exhaust RAM, and no asynchronous reaper is supplied.
+spill. Full capacity or spill OOM synchronously drains while the recovered
+hold remains live. Only completion permits releasing the batch. A stalled
+software shootdown keeps retrying and waiting with stall diagnostics; it cannot
+return an incomplete state to the release path.
 
-Automatic `finish()` / Drop needs no object-owner completion check to retain
-managed mapping holds. `TlbFlushReceipt::had_pending()` describes batching,
-without proving completion. Synchronous revocation still requires successful
-`try_finish()` and handling of `NotReady`, `Deferred`, `TimedOut` or
-`UnsupportedScope`; a live reference cannot substitute for permission
-revocation or remote translation retirement.
+`finish()` / Drop complete invalidation before releasing managed mapping
+holds. The receipt's `had_pending()` field describes batching; completion is
+guaranteed by return, including permission revocation and raw backing release.
+A caller still keeps raw backing live until it reaches that boundary.
 
 Table destruction is separate from active-leaf retirement: the owner must stop
 hardware use and future reactivation, complete required retirement and end
 borrower access. The inactive-tree walk recovers each owned base/huge transfer
 once before freeing its descriptor frame. Borrowed roots are skipped, and the
-existing final AArch64 user-ASID completion gate preserves all frames and
-unrecovered transfers on failure. `copy_from` borrows source transfers without
+final AArch64 user-ASID invalidation completes before descriptor frames and
+unrecovered transfers are released. `copy_from` borrows source transfers without
 cloning; it checks the entire destination root range for managed leaves in
 owned subtrees before any destructive overwrite. Destination managed leaves
 must first be unmapped and retired. Source lifetime, shared-translation
@@ -351,8 +348,8 @@ invalidation and alias synchronization remain caller obligations.
 | ID | Threat or failure | Trigger | Control and residual risk |
 |----|-------------------|---------|---------------------------|
 | MP-01 | Invalid or double recovery corrupts lifetime counts. | Wrong byte/page conversion, copied PTE treated as another owner, or recovery of a raw leaf. | Exact-range provider inverse and private category authorize one recovery after old-leaf capture; raw/borrowed entries never supply another transfer. Provider and architecture encoding correctness remain trusted. |
-| MP-02 | Old data is reused under stale translations. | A cleared/replaced mapping loses its last hold before completion. | The recovered hold survives bounded spill/drain failure and unconfirmed completion; unresolved holds stay pinned. This prevents managed reuse but can leak RAM and does not revoke permissions. |
-| MP-03 | Raw backing is released after an unconfirmed shootdown. | An existing PA-only release path uses `finish()`. | Raw names expose the unchanged external lifetime contract. Migration must transfer a mapping hold or retain backing on `try_finish()` failure; that production migration is deferred. |
+| MP-02 | Old data is reused under stale translations. | A cleared/replaced mapping loses its last hold before completion. | The recovered hold survives synchronous invalidation, including intermediate drains on spill OOM. Returning from finish also completes permission revocation. |
+| MP-03 | Raw backing is released before synchronous invalidation. | An external owner releases backing before `finish()` returns. | Raw owners must retain backing until synchronous completion. Managed PTE transfers enforce that hold inside the page-table guard. |
 | MP-04 | Alias cloning refers to freed storage or consumes the source hold. | A forged/stale raw pair is borrowed, or the temporary reconstructed PageRef is dropped. | `map_existing` retains exclusive access to an actual managed source of the exact allocation incarnation; the HAL uses ManuallyDrop only as a borrowed view and returns a separate checked clone. Clone failure leaves the source transfer unchanged. |
 
 PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and

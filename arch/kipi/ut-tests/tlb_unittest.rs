@@ -44,7 +44,7 @@ fn test_handle_shootdown_no_pending() {
 #[def_test(serial)]
 fn remote_shootdown_is_enabled_before_the_tests_run() {
     assert!(ALL_CPUS_STARTED.load(Ordering::Acquire));
-    assert_eq!(TlbFlushIf::flush_all_cpus(None), Ok(()));
+    TlbFlushIf::flush_all_cpus(None);
 }
 
 #[def_test(serial)]
@@ -190,18 +190,33 @@ fn test_dual_initiator_requests_are_isolated() {
 }
 
 #[def_test(serial)]
-fn nested_shootdown_reports_incomplete_until_the_outer_retry_runs() {
-    let slot = ActiveShootdownSlot::try_acquire_current().expect("exclusive per-CPU request slot");
-    // A nested request must not publish over the outer slot or authorize page
-    // reuse. No targets are contacted: slot ownership alone drives this case.
-    assert_eq!(
-        flush_remote(None, KCpuMask::new()),
-        Err(TlbFlushError::Deferred)
-    );
-    assert!(slot.take_retry_full_flush());
+fn active_shootdown_keeps_irqs_enabled_until_the_slot_is_released() {
+    assert!(karch::local_irq_enabled());
+    let cpu = this_cpu_id().as_usize();
+    {
+        let slot = ActiveShootdownSlot::acquire_current();
+        assert!(karch::local_irq_enabled());
+        assert_eq!(slot.initiator(), cpu);
+        assert!(REQUEST_SLOTS[cpu].is_active.load(Ordering::Acquire));
+        // Receiving an invalidation does not reuse the outgoing request slot.
+        handle_shootdown();
+    }
+    assert!(!REQUEST_SLOTS[cpu].is_active.load(Ordering::Acquire));
+    assert!(karch::local_irq_enabled());
 }
 
 #[def_test(serial)]
-fn shootdown_without_remote_targets_reports_completion() {
-    assert_eq!(flush_remote(None, KCpuMask::new()), Ok(()));
+fn shootdown_without_remote_targets_completes_synchronously() {
+    flush_remote(None, KCpuMask::new());
+}
+
+#[def_test(serial)]
+fn bh_disabled_task_can_complete_a_shootdown() {
+    let was_bh_disabled = kirq::context::is_bh_disabled();
+    {
+        let _bh_guard = kirq::context::local_bh_disable();
+        assert!(kirq::context::is_bh_disabled());
+        flush_remote(None, KCpuMask::new());
+    }
+    assert_eq!(kirq::context::is_bh_disabled(), was_bh_disabled);
 }

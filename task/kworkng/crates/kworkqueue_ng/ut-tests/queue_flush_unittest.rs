@@ -251,7 +251,9 @@ fn flush_visits_all_partitions_after_common_cutoff() {
 /// # Panics
 /// Panics on incorrect CPU placement, premature flush return, inclusion of later
 /// work, failed drain or leaked Queue ownership.
-#[def_test]
+// The IRQ-off pause depends on CPU0's flusher being scheduled. Parallel MM
+// tests can pin CPU0 in shootdown while waiting for this CPU's acknowledgement.
+#[def_test(serial)]
 fn remote_sample_before_cutoff_commits_after_publication() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;

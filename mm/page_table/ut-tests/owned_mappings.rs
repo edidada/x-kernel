@@ -16,7 +16,6 @@ use unittest::def_test;
 use super::tests::TestEntry;
 use crate::{
     PageSize, PageTable64, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData, PtError,
-    TlbFlushError, TlbFlushResult,
 };
 
 struct Lifetime {
@@ -35,8 +34,6 @@ struct Trace {
     fences: AtomicUsize,
     fail_next_allocation: AtomicBool,
     fail_next_clone: AtomicBool,
-    fail_next_flush: AtomicBool,
-    prevent_flush_completion: AtomicBool,
     forbidden_table: AtomicUsize,
 }
 
@@ -48,6 +45,18 @@ impl Trace {
     }
 
     fn invalidate(&self, address: Option<VirtAddr>) {
+        for page in &self.pages {
+            if page.withdrawn_at.load(Ordering::Relaxed) != usize::MAX
+                && page.invalidated_at.load(Ordering::Relaxed)
+                    <= page.withdrawn_at.load(Ordering::Relaxed)
+            {
+                assert_eq!(
+                    page.drops.load(Ordering::Relaxed),
+                    0,
+                    "hold released before backend completion"
+                );
+            }
+        }
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
         if address.is_some() {
             self.singles.fetch_add(1, Ordering::Relaxed);
@@ -98,8 +107,6 @@ impl Fixture {
             fences: AtomicUsize::new(0),
             fail_next_allocation: AtomicBool::new(false),
             fail_next_clone: AtomicBool::new(false),
-            fail_next_flush: AtomicBool::new(false),
-            prevent_flush_completion: AtomicBool::new(false),
             forbidden_table: AtomicUsize::new(0),
         });
         assert!(
@@ -263,34 +270,17 @@ impl PagingMetaData for GatherMeta {
         with_active_trace(|trace| trace.invalidate(address));
     }
 
-    fn flush_tlb_process(address: Option<VirtAddr>) -> TlbFlushResult {
+    fn flush_tlb_process(address: Option<VirtAddr>) {
         Self::flush_tlb(address);
-        Ok(())
     }
 
     #[cfg(feature = "smp")]
-    fn flush_tlb_process_mask(
-        address: Option<VirtAddr>,
-        _mask: kcpu_id_map::KCpuMask,
-    ) -> TlbFlushResult {
+    fn flush_tlb_process_mask(address: Option<VirtAddr>, _mask: kcpu_id_map::KCpuMask) {
         Self::flush_tlb_process(address)
     }
 
-    fn flush_tlb_all_cpus(address: Option<VirtAddr>) -> TlbFlushResult {
-        let mut completed = false;
-        with_active_trace(|trace| {
-            if !trace.prevent_flush_completion.load(Ordering::Relaxed)
-                && !trace.fail_next_flush.swap(false, Ordering::Relaxed)
-            {
-                trace.invalidate(address);
-                completed = true;
-            }
-        });
-        if completed {
-            Ok(())
-        } else {
-            Err(TlbFlushError::TimedOut)
-        }
+    fn flush_tlb_all_cpus(address: Option<VirtAddr>) {
+        with_active_trace(|trace| trace.invalidate(address));
     }
 
     fn fence_fresh_map() {
@@ -822,22 +812,20 @@ fn borrowed_subtrees_keep_source_holds_and_refuse_borrower_mutation() {
 }
 
 #[def_test(serial)]
-fn unconfirmed_shootdown_retains_data_until_a_successful_full_retry() {
+fn finish_completes_invalidation_before_releasing_the_withdrawn_mapping() {
     let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
     let mut table = Table::try_new_kernel().unwrap();
     let mut edit = table.modify();
     edit.map(VirtAddr::from(0), fixture.reference(0), PagingFlags::READ)
         .unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     fixture.0.withdraw(0);
     edit.unmap(VirtAddr::from(0)).unwrap();
-    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
-    assert_eq!(edit.try_finish(), Err(TlbFlushError::TimedOut));
     fixture.0.assert_drops(0, 0);
-    assert!(matches!(edit.flush, super::ToFlush::Full));
-    edit.try_finish().unwrap();
+    assert!(edit.finish().had_pending());
     fixture.0.assert_drops(0, 1);
-    fixture.0.assert_counts(0, 1);
+    fixture.0.assert_counts(1, 0);
+    assert!(!edit.finish().had_pending());
 }
 
 #[def_test(serial)]
@@ -862,78 +850,7 @@ fn empty_permissions_and_invalid_capabilities_install_no_owned_leaf() {
 }
 
 #[def_test(serial)]
-fn guard_drop_does_not_release_a_hold_after_unconfirmed_invalidation() {
-    // This synthetic capability contains no heap allocation or actual backing;
-    // forgetting it can test destructor suppression without leaking test RAM.
-    static RELEASES: AtomicUsize = AtomicUsize::new(0);
-    struct Hold;
-    impl Drop for Hold {
-        fn drop(&mut self) {
-            RELEASES.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    struct Handler;
-    impl PagingHandler for Handler {
-        type MappingReference = Hold;
-
-        fn mapping_reference_paddr(_reference: &Hold) -> PhysAddr {
-            PhysAddr::from(0x4000_0000)
-        }
-
-        fn mapping_reference_bytes(_reference: &Hold) -> usize {
-            PAGE_SIZE_4K
-        }
-
-        fn mapping_reference_into_raw(reference: Hold) -> (PhysAddr, usize) {
-            core::mem::forget(reference);
-            (PhysAddr::from(0x4000_0000), PAGE_SIZE_4K)
-        }
-
-        unsafe fn mapping_reference_from_raw(paddr: PhysAddr, bytes: usize) -> Hold {
-            assert_eq!(paddr, PhysAddr::from(0x4000_0000));
-            assert_eq!(bytes, PAGE_SIZE_4K);
-            Hold
-        }
-
-        fn alloc_frame() -> Option<PhysAddr> {
-            GatherHandler::alloc_frame()
-        }
-
-        fn dealloc_frame(address: PhysAddr) {
-            GatherHandler::dealloc_frame(address);
-        }
-
-        fn p2v(address: PhysAddr) -> VirtAddr {
-            GatherHandler::p2v(address)
-        }
-    }
-    RELEASES.store(0, Ordering::Relaxed);
-    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
-    let mut table = PageTable64::<GatherMeta, TestEntry, Handler>::try_new_kernel().unwrap();
-    let mut edit = table.modify();
-    edit.map(VirtAddr::from(0), Hold, PagingFlags::READ)
-        .unwrap();
-    edit.try_finish().unwrap();
-    // This provider deliberately keeps the default unsupported clone hook.
-    assert_eq!(
-        edit.map_existing(VirtAddr::from(0), VirtAddr::from(PAGE_SIZE_4K)),
-        Err(PtError::InvalidAddress)
-    );
-    assert!(edit.query(VirtAddr::from(0)).is_ok());
-    assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
-    edit.unmap(VirtAddr::from(0)).unwrap();
-    fixture
-        .0
-        .prevent_flush_completion
-        .store(true, Ordering::Relaxed);
-    drop(edit);
-    assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
-    drop(table);
-    assert_eq!(RELEASES.load(Ordering::Relaxed), 0);
-}
-
-#[def_test(serial)]
-fn automatic_finish_keeps_ownership_without_a_caller_completion_check() {
+fn guard_drop_completes_invalidation_before_releasing_a_hold() {
     let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
     let mut table = Table::try_new_kernel().unwrap();
     let mut edit = table.modify();
@@ -942,19 +859,13 @@ fn automatic_finish_keeps_ownership_without_a_caller_completion_check() {
     edit.finish();
     fixture.0.withdraw(0);
     edit.unmap(VirtAddr::from(0)).unwrap();
-    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
-    // Automatic callers can ignore the diagnostic receipt. The guard, rather
-    // than the caller, must retain ownership and the full retry after failure.
-    edit.finish();
     fixture.0.assert_drops(0, 0);
-    assert!(matches!(edit.flush, super::ToFlush::Full));
-    edit.finish();
+    drop(edit);
     fixture.0.assert_drops(0, 1);
-    assert!(!edit.finish().had_pending());
 }
 
 #[def_test(serial)]
-fn synchronous_permission_revocation_reports_failure_without_a_retired_hold() {
+fn finish_completes_permission_revocation_without_retiring_a_hold() {
     let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
     let mut table = Table::try_new_kernel().unwrap();
     let mut edit = table.modify();
@@ -964,19 +875,18 @@ fn synchronous_permission_revocation_reports_failure_without_a_retired_hold() {
         PagingFlags::READ | PagingFlags::WRITE,
     )
     .unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     edit.protect(VirtAddr::from(0), PagingFlags::READ).unwrap();
-    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
-    assert_eq!(edit.try_finish(), Err(TlbFlushError::TimedOut));
+    assert!(edit.finish().had_pending());
+    fixture.0.assert_counts(1, 0);
     fixture.0.assert_drops(0, 0);
-    assert!(edit.try_finish().unwrap().had_pending());
     assert_eq!(
         edit.query_entry(VirtAddr::from(0)).unwrap().flags(),
         PagingFlags::READ
     );
     fixture.0.withdraw(0);
     edit.unmap(VirtAddr::from(0)).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     fixture.0.assert_drops(0, 1);
 }
 
@@ -995,7 +905,7 @@ fn owned_leaf_transfers_without_acquiring_an_extra_reference() {
     edit.unmap(VirtAddr::from(0)).unwrap();
     assert_eq!(Arc::strong_count(&fixture.0), 2);
     fixture.0.assert_drops(0, 0);
-    edit.try_finish().unwrap();
+    edit.finish();
     assert_eq!(Arc::strong_count(&fixture.0), 1);
     fixture.0.assert_drops(0, 1);
 }
@@ -1020,12 +930,12 @@ fn owned_aliases_retire_their_own_transfers_independently() {
     fixture.0.withdraw(0);
     edit.unmap(VirtAddr::from(0)).unwrap();
     fixture.0.assert_drops(0, 0);
-    edit.try_finish().unwrap();
+    edit.finish();
     fixture.0.assert_drops(0, 1);
     assert_eq!(Arc::strong_count(&fixture.0), 2);
     assert!(edit.query(VirtAddr::from(size as usize)).is_ok());
     edit.unmap(VirtAddr::from(size as usize)).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     fixture.0.assert_drops(0, 2);
 }
 
@@ -1053,12 +963,12 @@ fn raw_alias_does_not_acquire_or_release_a_managed_transfer() {
             .is_managed()
     );
     edit.unmap(VirtAddr::from(PAGE_SIZE_4K)).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     fixture.0.assert_drops(0, 0);
     assert_eq!(Arc::strong_count(&fixture.0), 2);
     fixture.0.withdraw(0);
     edit.unmap(VirtAddr::from(0)).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     fixture.0.assert_drops(0, 1);
 }
 
@@ -1091,7 +1001,7 @@ fn inactive_tree_destruction_recovers_live_base_and_huge_leaf_transfers() {
 }
 
 #[def_test(serial)]
-fn empty_replacement_releases_unpublished_input_but_retains_the_old_mapping_on_failure() {
+fn empty_replacement_releases_unpublished_input_and_retires_the_old_mapping_after_flush() {
     let fixture = Fixture::new([(0, PAGE_SIZE_4K), (0, PAGE_SIZE_4K)]);
     let mut table = Table::try_new_kernel().unwrap();
     let mut edit = table.modify();
@@ -1110,10 +1020,7 @@ fn empty_replacement_releases_unpublished_input_but_retains_the_old_mapping_on_f
     .unwrap();
     fixture.0.assert_drops(1, 1);
     fixture.0.assert_drops(0, 0);
-    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
-    assert_eq!(edit.try_finish(), Err(TlbFlushError::TimedOut));
-    fixture.0.assert_drops(0, 0);
-    edit.try_finish().unwrap();
+    edit.finish();
     fixture.0.assert_drops(0, 1);
 }
 
@@ -1132,7 +1039,7 @@ fn three_level_tree_destruction_recovers_a_root_huge_leaf() {
             GatherMeta::flush_tlb(address);
         }
 
-        fn flush_tlb_all_cpus(address: Option<VirtAddr>) -> TlbFlushResult {
+        fn flush_tlb_all_cpus(address: Option<VirtAddr>) {
             GatherMeta::flush_tlb_all_cpus(address)
         }
     }
@@ -1281,11 +1188,8 @@ fn external_replacement_commits_raw_target_and_retires_only_source() {
     assert_eq!(result, Ok(expected));
     assert_eq!(edit.query(address).unwrap().0, target);
     fixture.0.assert_drops(0, 0);
-    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
     assert!(edit.finish().had_pending());
-    fixture.0.assert_drops(0, 0);
     assert_eq!(edit.query(address).unwrap().0, target);
-    edit.try_finish().unwrap();
     fixture.0.assert_drops(0, 1);
     // An address change is allowed now: the replacement is raw, not managed.
     edit.remap_raw(address, PhysAddr::from(0xc000_0000), PagingFlags::READ)
@@ -1396,4 +1300,38 @@ fn map_existing_huge_leaf_requires_exact_bases_and_preserves_geometry() {
     edit.unmap(alias).unwrap();
     edit.finish();
     fixture.0.assert_drops(0, 2);
+}
+
+#[def_test(serial)]
+fn kernel_managed_retirement_waits_for_finish() {
+    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    edit.map(VirtAddr::from(0), fixture.reference(0), PagingFlags::READ)
+        .unwrap();
+    edit.finish();
+    fixture.0.withdraw(0);
+    edit.unmap(VirtAddr::from(0)).unwrap();
+    fixture.0.assert_drops(0, 0);
+    edit.finish();
+    fixture.0.assert_counts(1, 0);
+    fixture.0.assert_drops(0, 1);
+}
+
+#[def_test(serial)]
+fn fresh_kernel_map_drop_orders_publication_without_remote_completion() {
+    let fixture = Fixture::new([]);
+    let mut table = Table::try_new_kernel().unwrap();
+    let mut edit = table.modify();
+    edit.map_raw(
+        VirtAddr::from(0),
+        PhysAddr::from(0x4000_0000),
+        PageSize::Size4K,
+        PagingFlags::READ,
+    )
+    .unwrap();
+    let fences_before = fixture.0.fences.load(Ordering::Relaxed);
+    drop(edit);
+    assert_eq!(fixture.0.fences.load(Ordering::Relaxed), fences_before + 1);
+    fixture.0.assert_counts(0, 0);
 }

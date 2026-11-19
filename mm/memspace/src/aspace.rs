@@ -1181,7 +1181,7 @@ impl MmSpace {
                 false,
             )
             .map_err(map_paging_err);
-        edit.try_finish().map_err(|_| KError::Io)?;
+        edit.finish();
         result
     }
 
@@ -1200,7 +1200,7 @@ impl MmSpace {
         let result = edit
             .unmap_sparse_region(start, size, PageSize::Size4K)
             .map_err(map_paging_err);
-        edit.try_finish().map_err(|_| KError::Io)?;
+        edit.finish();
         result?;
         self.vmas.unmap(start, size);
         Ok(())
@@ -1586,7 +1586,7 @@ impl MmSpace {
         let result = edit
             .protect_region(start, size, flags)
             .map_err(map_paging_err);
-        edit.try_finish().map_err(|_| KError::Io)?;
+        edit.finish();
         result?;
         self.vmas.protect(start, size, flags);
         Ok(())

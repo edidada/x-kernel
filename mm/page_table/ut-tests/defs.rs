@@ -17,6 +17,9 @@ impl PagingMetaData for DummyMeta {
     const VA_MAX_BITS: usize = 39;
 
     fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
+
+    #[cfg(feature = "smp")]
+    fn flush_tlb_all_cpus(_vaddr: Option<Self::VirtAddr>) {}
 }
 
 #[def_test]
@@ -43,19 +46,28 @@ fn test_paging_metadata_bounds() {
 
 #[cfg(feature = "smp")]
 #[def_test]
-fn local_only_metadata_does_not_confirm_a_remote_scope() {
+fn default_smp_hooks_use_the_required_full_scope_provider() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static FULL_SCOPE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    struct FullScopeMeta;
+    impl PagingMetaData for FullScopeMeta {
+        type VirtAddr = VirtAddr;
+
+        const LEVELS: usize = 4;
+        const PA_MAX_BITS: usize = 36;
+        const VA_MAX_BITS: usize = 39;
+
+        fn flush_tlb(_address: Option<VirtAddr>) {}
+
+        fn flush_tlb_all_cpus(_address: Option<VirtAddr>) {
+            FULL_SCOPE_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    FULL_SCOPE_CALLS.store(0, Ordering::Relaxed);
     let mut targets = kcpu_id_map::KCpuMask::new();
     targets.set(0, true);
-    assert_eq!(
-        DummyMeta::flush_tlb_process_mask(None, targets),
-        Err(super::TlbFlushError::UnsupportedScope)
-    );
-    assert_eq!(
-        DummyMeta::flush_tlb_process_mask(None, kcpu_id_map::KCpuMask::new()),
-        Ok(())
-    );
-    assert_eq!(
-        DummyMeta::flush_tlb_all_cpus(None),
-        Err(super::TlbFlushError::UnsupportedScope)
-    );
+    FullScopeMeta::flush_tlb_process_mask(None, targets);
+    FullScopeMeta::flush_tlb_process(None);
+    FullScopeMeta::flush_tlb_all_cpus(None);
+    assert_eq!(FULL_SCOPE_CALLS.load(Ordering::Relaxed), 3);
 }
