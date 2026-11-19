@@ -1698,13 +1698,12 @@ impl Path {
         result
     }
 
-    fn fsgid_in_group(cred: &Cred, ns: &Arc<kcred::UserNamespace>, global_gid: u32) -> bool {
-        let fsgid = crate::kid::Kgid::from_inside(cred.fsgid(), ns);
-        fsgid.as_raw() == global_gid
+    fn fsgid_in_group(cred: &Cred, _ns: &Arc<kcred::UserNamespace>, global_gid: u32) -> bool {
+        cred.fsgid() == global_gid
             || cred
                 .supplementary_groups()
-                .iter()
-                .any(|gid| crate::kid::Kgid::from_inside(*gid, ns).as_raw() == global_gid)
+                .binary_search(&global_gid)
+                .is_ok()
     }
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.

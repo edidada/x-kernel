@@ -23,6 +23,7 @@ fn task_directory_path(process: alloc::sync::Weak<kprocess::Process>) -> kvfs::P
         let ops = alloc::sync::Arc::new(super::ProcessTaskDir {
             fs: fs.clone(),
             process,
+            observer_ns: None,
         });
         kvfs::SimpleDir::new_maker(fs, ops)
     })

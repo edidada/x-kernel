@@ -409,7 +409,8 @@ impl Cred {
     /// capability. Real, saved and filesystem IDs do not grant authority, and
     /// capability numbers above [`CAP_LAST_CAP`] are never reported as held.
     pub fn has_cap(&self, cap: u32) -> bool {
-        self.capabilities.has_effective(cap)
+        core::ptr::eq(&*self.user_ns, &*crate::initial_user_namespace())
+            && self.capabilities.has_effective(cap)
     }
 
     /// Returns the user namespace this credential is interpreted in.

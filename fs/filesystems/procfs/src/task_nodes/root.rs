@@ -50,6 +50,7 @@ pub(super) fn upgrade_task(task_weak: &WeakKtaskRef) -> VfsResult<KtaskRef> {
 struct ProcessTaskDir {
     fs: Arc<SimpleFs>,
     process: Weak<Process>,
+    observer_ns: Option<Arc<PidNamespace>>,
 }
 
 impl SimpleDirOps for ProcessTaskDir {
@@ -85,7 +86,13 @@ impl SimpleDirOps for ProcessTaskDir {
             return Err(VfsError::NotFound);
         }
 
-        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task, None))
+        Ok(make_thread_dir(
+            lookup,
+            name,
+            self.fs.clone(),
+            &task,
+            self.observer_ns.clone(),
+        ))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -146,11 +153,15 @@ impl TaskStatus {
         let thread = task.as_thread();
         let process = thread.process();
         let (mut stat, masks) = TaskStat::sample_thread(task);
-        let pid = observer_ns
-            .and_then(|ns| process.number_in_namespace(ns))
-            .unwrap_or_else(|| process.pid());
-        stat.pid = pid;
-        let tgid = pid;
+        let tgid = if let Some(ns) = observer_ns {
+            let pid = process
+                .number_in_namespace(ns)
+                .unwrap_or_else(|| process.pid());
+            stat.pid = pid;
+            pid
+        } else {
+            process.pid()
+        };
         let cred = thread.real_cred();
         let shared_pending = masks.shared_pending().bits();
         let cpumask = task.cpumask();
@@ -1573,6 +1584,7 @@ impl SimpleDirOps for ThreadDir {
                         Arc::new(ProcessTaskDir {
                             fs: fs.clone(),
                             process: Arc::downgrade(task.as_thread().process()),
+                            observer_ns: observer_ns.clone(),
                         }),
                     ),
                 ))
@@ -1947,7 +1959,13 @@ impl SimpleDirOps for ProcFsHandler {
         let pid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
         let task = procfs::process_task_in_namespace(pid, self.observer_ns.as_ref())
             .map_err(|_| VfsError::NotFound)?;
-        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task, None))
+        Ok(make_thread_dir(
+            lookup,
+            name,
+            self.fs.clone(),
+            &task,
+            self.observer_ns.clone(),
+        ))
     }
 
     fn supports_dentry_cache(&self) -> bool {
