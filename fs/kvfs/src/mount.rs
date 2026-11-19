@@ -292,6 +292,12 @@ impl MntNamespace {
     ) -> VfsResult<Arc<Mount>> {
         loop {
             let super_block = context.get_tree(lookup_root, lookup_pwd)?;
+            if !super_block.has_active_mounts() {
+                // First mount of a newly created superblock fixes `s_user_ns`.
+                // A pre-existing singleton (sysfs/cgroup2) keeps the owner
+                // installed by its first mounter.
+                super_block.init_user_ns(context.cred().user_ns_arc().clone());
+            }
             let result = self.attach_with_requested_superblock_flags(
                 mountpoint,
                 &super_block,
@@ -1360,7 +1366,15 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
         let inode_ns = self.dentry.user_namespace();
-        if cred.fsuid() != inode.metadata().uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
+        let metadata = inode.metadata();
+        if cred.fsuid() != metadata.uid
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
+        {
             return Err(VfsError::OperationNotPermitted);
         }
         let _namespace_guard = inode.lock_namespace_exclusive();
@@ -1724,7 +1738,12 @@ impl Path {
         // callers inside a child namespace.
         let fsuid_global = crate::kid::Kuid::from_raw(cred.fsuid());
         let is_owner = fsuid_global.as_raw() == metadata.uid;
-        let can_chown = cred.has_cap_in(&inode_ns, kcred::CAP_CHOWN);
+        let can_chown = crate::permission::capable_wrt_inode_uidgid(
+            cred,
+            &inode_ns,
+            &metadata,
+            kcred::CAP_CHOWN,
+        );
 
         if uid.is_some_and(|_| {
             !can_chown && (!is_owner || uid_kuid != Some(crate::kid::Kuid::from_raw(metadata.uid)))
@@ -1751,7 +1770,12 @@ impl Path {
         // clear a set-ID bit.
         if mode.bits() != metadata.mode.permission().bits()
             && fsuid_global.as_raw() != metadata.uid
-            && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER)
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
         {
             return Err(VfsError::OperationNotPermitted);
         }
@@ -1771,12 +1795,24 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let metadata = self.metadata();
         let inode_ns = self.dentry.user_namespace();
-        if cred.fsuid() != metadata.uid && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
+        if cred.fsuid() != metadata.uid
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
+        {
             return Err(VfsError::OperationNotPermitted);
         }
         if mode.contains(NodePermission::SET_GID)
             && !cred.in_group(metadata.gid)
-            && !cred.has_cap_in(&inode_ns, kcred::CAP_FSETID)
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FSETID,
+            )
         {
             mode.remove(NodePermission::SET_GID);
         }
@@ -1816,10 +1852,24 @@ impl Path {
             (Some(SetattrTime::Current), Some(SetattrTime::Current))
         );
         if !is_touch {
-            if !is_owner && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
+            if !is_owner
+                && !crate::permission::capable_wrt_inode_uidgid(
+                    cred,
+                    &inode_ns,
+                    &metadata,
+                    kcred::CAP_FOWNER,
+                )
+            {
                 return Err(VfsError::OperationNotPermitted);
             }
-        } else if !is_owner && !cred.has_cap_in(&inode_ns, kcred::CAP_FOWNER) {
+        } else if !is_owner
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
+        {
             self.permission(Permission::MAY_WRITE, cred)?;
         }
 
@@ -2004,7 +2054,7 @@ impl Path {
         // owner, and `CAP_FOWNER` held in the directory inode's user namespace
         // (`capable_wrt_inode_uidgid`), not in the initial namespace.
         let dir_ns = self.dentry.user_namespace();
-        if cred.has_cap_in(&dir_ns, kcred::CAP_FOWNER)
+        if crate::permission::capable_wrt_inode_uidgid(cred, &dir_ns, &dir, kcred::CAP_FOWNER)
             || cred.fsuid() == dir.uid
             || cred.fsuid() == victim.metadata().uid
         {

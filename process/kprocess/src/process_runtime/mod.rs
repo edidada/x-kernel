@@ -696,18 +696,6 @@ fn prepare_fork_fs_and_namespaces(
     };
 
     let parent_nsproxy = parent.nsproxy().ok_or(KError::NoSuchProcess)?;
-    if config
-        .namespace_flags
-        .contains(kns::NamespaceFlags::NEWUSER)
-        && !fs_context
-            .lock()
-            .root()
-            .ptr_eq(&parent_nsproxy.mnt_ns().root_path())
-    {
-        // Linux `current_chrooted()`: a chrooted creator cannot obtain a new
-        // user namespace (and the capability reset that comes with it).
-        return Err(KError::OperationNotPermitted);
-    }
     // `CLONE_NEWCGROUP` roots the child's view at the cgroup the parent is
     // leaving, not at `config.target_cgroup` (the `CLONE_INTO_CGROUP`
     // destination the child is migrated to during publication).
@@ -721,6 +709,20 @@ fn prepare_fork_fs_and_namespaces(
         None
     };
     let nsproxy_result = if matches!(config.fs, ForkFs::Shared) {
+        let fs = fs_context.lock();
+        // Linux `current_chrooted()`: a chrooted creator cannot obtain a new
+        // user namespace (and the capability reset that comes with it). Keep
+        // the fs guard across namespace construction so a concurrent chroot
+        // cannot invalidate the check.
+        if config
+            .namespace_flags
+            .contains(kns::NamespaceFlags::NEWUSER)
+            && !fs
+                .root()
+                .ptr_eq(&parent_nsproxy.mnt_ns().visible_root_path())
+        {
+            return Err(KError::OperationNotPermitted);
+        }
         parent_nsproxy.clone_for_child(
             config.namespace_flags,
             NamespaceFsContext::Shared,
@@ -729,6 +731,15 @@ fn prepare_fork_fs_and_namespaces(
         )
     } else {
         let mut fs = fs_context.lock();
+        if config
+            .namespace_flags
+            .contains(kns::NamespaceFlags::NEWUSER)
+            && !fs
+                .root()
+                .ptr_eq(&parent_nsproxy.mnt_ns().visible_root_path())
+        {
+            return Err(KError::OperationNotPermitted);
+        }
         parent_nsproxy.clone_for_child(
             config.namespace_flags,
             NamespaceFsContext::Private(&mut fs),

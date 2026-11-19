@@ -282,11 +282,13 @@ pub fn sys_fsconfig(
                 &cred,
             )?;
             let super_block = context.get_tree(&root, &pwd)?;
-            // Linux derives `s_user_ns` from the fs_context that created the
-            // superblock; legacy mount(2) installs it in `do_new_mount`, the
-            // fsopen/fsconfig path must do the same or all inode capability
-            // checks fall back to the initial namespace.
-            super_block.init_user_ns(cred.user_ns_arc().clone());
+            // Install `s_user_ns` only for a newly created superblock. A
+            // pre-existing singleton (sysfs/cgroup2) must keep the owner from
+            // its first mounter; otherwise an unprivileged child namespace
+            // could take over the host-shared superblock.
+            if !super_block.has_active_mounts() {
+                super_block.init_user_ns(cred.user_ns_arc().clone());
+            }
             state.super_block = Some(super_block);
         }
         FSCONFIG_CMD_RECONFIGURE => {

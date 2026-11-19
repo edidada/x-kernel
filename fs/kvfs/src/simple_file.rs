@@ -33,6 +33,14 @@ pub trait SimpleFileOps: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Validates one open that requests write access.
+    ///
+    /// The default preserves existing helper users; `SetgroupsFile` uses it
+    /// for Linux's open-for-write capability check without denying read opens.
+    fn validate_open_for_write(&self) -> VfsResult<()> {
+        Ok(())
+    }
+
     /// Handles one scalar write; read-only files reject it by default.
     ///
     /// `CommandFile` invokes this callback after complete command copying and
@@ -336,6 +344,9 @@ impl crate::InodeSymlinkOperations for SimpleFile {
 impl FileOperations for SimpleFile {
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut crate::VfsFileBuilder) -> VfsResult<()> {
         self.ops.validate_open()?;
+        if file.mode().contains(crate::FMode::WRITE) {
+            self.ops.validate_open_for_write()?;
+        }
         self.file_operations.clone().open(inode, file)
     }
 

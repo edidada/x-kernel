@@ -30,6 +30,28 @@ bitflags::bitflags! {
     }
 }
 
+/// Linux `capable_wrt_inode_uidgid()`.
+///
+/// If the inode's global uid/gid are mapped into the caller's user namespace,
+/// the capability is checked there. Otherwise Linux falls back to the inode's
+/// `s_user_ns`, which lets the initial namespace administer inodes whose IDs
+/// are not visible to a child namespace.
+pub(crate) fn capable_wrt_inode_uidgid(
+    cred: &Cred,
+    inode_ns: &kcred::UserNamespace,
+    metadata: &Metadata,
+    cap: u32,
+) -> bool {
+    let caller_ns = cred.user_ns();
+    if caller_ns.map_uid_from_initial(metadata.uid).is_some()
+        && caller_ns.map_gid_from_initial(metadata.gid).is_some()
+    {
+        cred.has_cap_in(caller_ns, cap)
+    } else {
+        cred.has_cap_in(inode_ns, cap)
+    }
+}
+
 /// Applies the generic DAC permission policy to an inode.
 ///
 /// Filesystems that do not override [`crate::InodeOperations::permission`]
@@ -39,7 +61,11 @@ pub fn generic_permission(inode: &VfsInode, permission: Permission, cred: &Cred)
     // user namespace and additionally requires the inode's uid/gid to be
     // mapped there. Using the superblock's `s_user_ns` here would deny a
     // namespaced root that owns a mapped ID on a host-mounted filesystem.
-    check_dac_permission_in(&inode.metadata(), permission, cred, cred.user_ns())
+    let inode_ns = inode
+        .super_block()
+        .map(|super_block| super_block.user_ns())
+        .unwrap_or_else(|_| kcred::initial_user_namespace());
+    check_dac_permission_in(&inode.metadata(), permission, cred, &inode_ns)
 }
 
 #[cfg(unittest)]
@@ -70,16 +96,11 @@ fn check_dac_permission_in(
         return Err(KError::PermissionDenied);
     }
 
-    // `capable_wrt_inode_uidgid()` also fails when the inode's IDs are not
-    // mapped into the caller's namespace.
-    let inode_ids_mapped = user_ns.map_uid_from_initial(metadata.uid).is_some()
-        && user_ns.map_gid_from_initial(metadata.gid).is_some();
-
-    if inode_ids_mapped && cred.has_cap_in(user_ns, CAP_DAC_OVERRIDE) {
+    if capable_wrt_inode_uidgid(cred, user_ns, metadata, CAP_DAC_OVERRIDE) {
         return Ok(());
     }
 
-    if inode_ids_mapped && cred.has_cap_in(user_ns, CAP_DAC_READ_SEARCH) {
+    if capable_wrt_inode_uidgid(cred, user_ns, metadata, CAP_DAC_READ_SEARCH) {
         let readable = Permission::MAY_READ
             | if metadata.mode.node_type() == NodeType::Directory {
                 Permission::MAY_EXEC

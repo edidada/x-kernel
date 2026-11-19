@@ -89,7 +89,9 @@ impl NamespacePlan {
         // a fresh full capability set through `CLONE_NEWUSER`.
         if flags.contains(NamespaceFlags::NEWUSER)
             && let Some(fs_context) = fs_context
-            && !fs_context.root().ptr_eq(&parent.mnt_ns().root_path())
+            && !fs_context
+                .root()
+                .ptr_eq(&parent.mnt_ns().visible_root_path())
         {
             return Err(UnshareError::NotPermitted);
         }

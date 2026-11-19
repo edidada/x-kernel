@@ -646,6 +646,14 @@ impl SuperBlock {
         self.user_ns.call_once(|| user_ns);
     }
 
+    /// Returns whether any mount currently holds this superblock.
+    pub fn has_active_mounts(&self) -> bool {
+        matches!(
+            *self.lifecycle.lock(),
+            SuperBlockLifecycle::Available { active_mounts } if active_mounts > 0
+        )
+    }
+
     /// Returns the filesystem type name.
     pub const fn name(&self) -> &'static str {
         self.file_system_type.name()

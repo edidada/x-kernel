@@ -160,7 +160,7 @@ impl SetgroupsFile {
 }
 
 impl SimpleFileOps for SetgroupsFile {
-    fn validate_open(&self) -> VfsResult<()> {
+    fn validate_open_for_write(&self) -> VfsResult<()> {
         // Linux `proc_setgroups_open()` requires CAP_SYS_ADMIN in the target
         // namespace at open-for-write; the write callback performs no
         // capability check. CAP_SETGID is not sufficient.

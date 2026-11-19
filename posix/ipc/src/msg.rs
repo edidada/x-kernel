@@ -28,6 +28,13 @@ use super::{
 /// Linux `ipcperms()` evaluates capabilities in `ipc_namespace->user_ns`, not
 /// in the creating task's credential namespace. A kernel/fixture task without
 /// an IPC namespace uses the initial namespace.
+///
+/// # Execution context
+///
+/// Requires a current user task or a kernel task with no IPC namespace; it is
+/// called from SysV IPC syscall entry in task context. It may take the process
+/// runtime lock but does not sleep, so it must not run in IRQ/softirq context
+/// or while holding a lock that the runtime/namespace owner can acquire.
 fn current_ipc_namespace_owner() -> Arc<UserNamespace> {
     kprocess::try_current_user_process()
         .and_then(|process| process.ipc_ns().ok())
