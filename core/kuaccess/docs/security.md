@@ -26,7 +26,11 @@
 - `check_access()` allows only the valid user-space interval.
 - `atomic_cmpxchg_u32()`, `atomic_load_u32()`, `atomic_u32_eq()`, and `fault_in_user_writeable()` also require the address to be 4-byte aligned.
 - `fault_in_user_writeable()` uses the live MM's task-context resolver and does not modify the user word. Admission waits run outside the MM mutex and repeat mapping checks. The caller must be allowed to sleep and must not hold a non-sleepable lock. `Resolved` and retry-class outcomes return success; the caller repeats its store after a retry-class outcome. `OutOfMemory` returns `ENOMEM`. Permission denial, an unmapped address, and every other failure return `NoAccess` immediately. This path must not bypass a read-only mapping.
-- `handle_page_fault()` handles a fault only while the current thread has explicitly entered the user-memory access window.
+- `handle_page_fault()` requires both the explicit user-memory access window and
+  sleepable context; masked exception entry returns through the assembly fixup.
+- Faultable atomic reads, like writes, resolve missing pages only after fixup in
+  task context. Nofault operations close any outer access window while executing;
+  no IRQ-off user atomic can initiate MM invalidation through the trap handler.
 - An ordinary copy must not wait for block-device completion on the exception path with IRQs disabled. The caller must be allowed to sleep and must not hold a non-sleepable lock. The requirement is not met by relaxing block-driver context checks.
 - `kuaccess` must preserve the typed outcome classification of `MmSpace::handle_page_fault()`. Only `Resolved` and retry-class outcomes may become a handled trap. Unmapped, permission denied, bus error, OOM, no-progress, and generic failure must become a user-copy or atomic-user failure, not another retry.
 - An ordinary copy may fault the same page again after `Resolved`, so staged mapping and write-permission preparation can finish. Completed/COW attempts for one page share a budget of 16. Admission retries wait on the backing provider's existing locks outside the MM mutex and do not consume this budget. An explicit `NoProgress` fails immediately. If the budget is exhausted and the copy still cannot finish, the result is `NoAccess`. A partially initialized buffer must not be reported as a complete success. Reads and writes use `READ` and `WRITE` fault permissions respectively and must not bypass a read-only mapping.

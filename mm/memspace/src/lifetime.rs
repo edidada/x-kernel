@@ -122,7 +122,8 @@ impl MmUserHandle {
     ///
     /// Requires sleepable task context with IRQs/preemption enabled, without an
     /// MM mutex, a non-sleepable lock or locks needed by the backing provider.
-    /// Exception handlers must use the non-waiting raw MM fault entry instead.
+    /// IRQ-off exception handlers must return through fixup before invoking MM;
+    /// raw locked fault handling can also require synchronous TLB invalidation.
     pub fn resolve_page_fault(&self, address: VirtAddr, flags: MappingFlags) -> PageFaultOutcome {
         loop {
             let (outcome, retry) = {
