@@ -189,6 +189,10 @@ impl Cred {
         self.euid
     }
 
+    fn is_root_id(&self, id: Uid) -> bool {
+        self.user_ns.map_uid_to_initial(0) == Some(id)
+    }
+
     /// Returns whether the effective user ID is root.
     ///
     /// Linux uses this identity check for `/proc/sys` access
@@ -196,7 +200,7 @@ impl Cred {
     /// participate. It is not a general privilege predicate; capability-gated
     /// operations must use [`Cred::has_cap`] instead.
     pub fn has_root_euid(&self) -> bool {
-        self.euid == 0
+        self.is_root_id(self.euid)
     }
 
     /// Returns the saved set-user-ID.
@@ -968,8 +972,8 @@ impl Cred {
     pub fn apply_exec(&mut self, no_new_privs: bool, fs_shared_with_other_process: bool) {
         let old_permitted = self.capabilities.permitted();
         let old_effective_setuid = self.capabilities.has_effective(CAP_SETUID);
-        let privileged_root =
-            !self.securebits.contains(SecureBits::NOROOT) && (self.ruid == 0 || self.euid == 0);
+        let privileged_root = !self.securebits.contains(SecureBits::NOROOT)
+            && (self.is_root_id(self.ruid) || self.is_root_id(self.euid));
         let inheritable = self.capabilities.inheritable();
         let mut permitted = if privileged_root {
             self.cap_bounding
@@ -978,7 +982,7 @@ impl Cred {
         } else {
             CapSet::EMPTY
         };
-        let grant_effective = privileged_root && self.euid == 0;
+        let grant_effective = privileged_root && self.is_root_id(self.euid);
 
         // Linux's id_changed has an euid half and an egid-group half. This
         // kernel's exec changes no IDs, so the euid half cannot fire; a
@@ -1031,10 +1035,10 @@ impl Cred {
             return;
         }
 
-        if (old.ruid == 0 || old.euid == 0 || old.suid == 0)
-            && self.ruid != 0
-            && self.euid != 0
-            && self.suid != 0
+        if (old.is_root_id(old.ruid) || old.is_root_id(old.euid) || old.is_root_id(old.suid))
+            && !self.is_root_id(self.ruid)
+            && !self.is_root_id(self.euid)
+            && !self.is_root_id(self.suid)
         {
             if !self.keep_caps() {
                 self.capabilities = CapSets::new(
@@ -1048,11 +1052,11 @@ impl Cred {
             self.cap_ambient = CapSet::EMPTY;
         }
 
-        if old.euid == 0 && self.euid != 0 {
+        if old.is_root_id(old.euid) && !self.is_root_id(self.euid) {
             let permitted = self.capabilities.permitted();
             self.capabilities =
                 CapSets::new(CapSet::EMPTY, permitted, self.capabilities.inheritable());
-        } else if old.euid != 0 && self.euid == 0 {
+        } else if !old.is_root_id(old.euid) && self.is_root_id(self.euid) {
             let permitted = self.capabilities.permitted();
             self.capabilities = CapSets::new(permitted, permitted, self.capabilities.inheritable());
         }
@@ -1069,10 +1073,10 @@ impl Cred {
         }
 
         let inheritable = self.capabilities.inheritable();
-        if old_fsuid == 0 && self.fsuid != 0 {
+        if self.is_root_id(old_fsuid) && !self.is_root_id(self.fsuid) {
             let effective = self.capabilities.effective().difference(CAP_FS_MASK);
             self.capabilities = CapSets::new(effective, self.capabilities.permitted(), inheritable);
-        } else if old_fsuid != 0 && self.fsuid == 0 {
+        } else if !self.is_root_id(old_fsuid) && self.is_root_id(self.fsuid) {
             let effective = self
                 .capabilities
                 .effective()
