@@ -84,6 +84,10 @@ impl NamespacePlan {
             return Err(UnshareError::NotPermitted);
         }
 
+        if flags.contains(NamespaceFlags::NEWUSER) && cred.user_ns().level() > 32 {
+            return Err(UnshareError::NoSpace);
+        }
+
         // Linux `create_user_ns()` rejects a chrooted creator: a task whose
         // fs root has moved away from the mount-namespace root must not gain
         // a fresh full capability set through `CLONE_NEWUSER`.

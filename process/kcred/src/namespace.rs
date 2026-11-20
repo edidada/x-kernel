@@ -496,7 +496,9 @@ impl UserNamespace {
                 // A GID map is authorized by the writer's own EGID, not by
                 // the namespace creator's UID; comparing UID to GID would
                 // require uid == gid.
-                MapKind::Gid => mapped.is_some() && mapped == writer_id,
+                MapKind::Gid => {
+                    mapped.is_some() && mapped == writer_id && self.owner_euid == writer.euid()
+                }
             };
             if kind == MapKind::Uid && is_owner_self_map {
                 return true;

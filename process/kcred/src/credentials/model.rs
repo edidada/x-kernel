@@ -583,7 +583,7 @@ impl Cred {
     /// set. This is the capability half of scheduler authorization; Linux's
     /// ownership check (`check_same_owner()`) remains the caller's responsibility.
     pub fn has_scheduler_capability_over(&self, target: &Self) -> bool {
-        self.has_cap(CAP_SYS_NICE)
+        self.has_cap_in(target.user_ns(), CAP_SYS_NICE)
             || target
                 .capabilities
                 .permitted()

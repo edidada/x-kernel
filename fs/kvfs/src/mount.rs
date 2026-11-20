@@ -1366,11 +1366,11 @@ impl Path {
 
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
-        let inode_ns = self.dentry.user_namespace();
-        let metadata = inode.metadata();
         // Immutability is an exec-security input; serialize the flag change
         // with sampling and with privilege revocation.
         let _privilege_guard = inode.lock_privileges();
+        let inode_ns = self.dentry.user_namespace();
+        let metadata = inode.metadata();
         if cred.fsuid() != metadata.uid
             && !crate::permission::capable_wrt_inode_uidgid(
                 cred,
@@ -1738,7 +1738,6 @@ impl Path {
         // concurrent chown from losing the other's fields or authorizing
         // against an owner/mode that is already stale.
         let _privilege_guard = inode.lock_privileges();
-        inode.check_mutable()?;
         let metadata = self.metadata();
         let inode_ns = self.dentry.user_namespace();
         let caller_ns = cred.user_ns_arc().clone();
@@ -1750,6 +1749,7 @@ impl Path {
         {
             return Err(VfsError::from(kerrno::LinuxError::EINVAL));
         }
+        inode.check_mutable()?;
 
         // Stored IDs are global values; compare the caller's filesystem ID
         // through the same projection so identity checks stay valid for

@@ -193,10 +193,11 @@ fn authorize_setns(
             // then requires the pending credential to be administrative. The
             // no-op must not demand a capability the caller does not need.
             require_target(target.owner(), CAP_SYS_ADMIN)?;
+            require_caller(CAP_SYS_ADMIN)?;
             if Arc::ptr_eq(target, &process.cgroup_ns()?) {
                 return Ok(());
             }
-            require_caller(CAP_SYS_ADMIN)
+            Ok(())
         }
         NsFd::Uts(_) | NsFd::Ipc(_) | NsFd::Net(_) => require_both_admin(nsfd.owner()),
     }
