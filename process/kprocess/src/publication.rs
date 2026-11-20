@@ -7,6 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+#[cfg(unittest)]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
