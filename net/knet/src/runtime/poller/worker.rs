@@ -96,7 +96,7 @@ impl NetworkPoller {
 
     /// Competes for one scheduled round without waiting for another executor.
     pub(crate) fn assist_once(&'static self) {
-        self.run(ASSIST_BUDGET, 1);
+        self.run(ASSIST_BUDGET, 1, false);
     }
 
     /// Records task-context demand and assists before submitting background work.
@@ -104,9 +104,7 @@ impl NetworkPoller {
     /// An existing executor schedules follow-up work when it finishes. Otherwise,
     /// this round submits unfinished work and concurrent notifications to the queue.
     pub(crate) fn notify_and_assist(&'static self, _: PollReason) {
-        if self.try_claim(true) {
-            self.run_claimed(ASSIST_BUDGET, 1);
-        }
+        self.run(ASSIST_BUDGET, 1, true);
     }
 
     fn kick(&'static self) {
@@ -124,20 +122,10 @@ impl NetworkPoller {
         }
     }
 
-    fn run(&'static self, budget: PollBudget, rounds: usize) {
-        if self.try_claim(false) {
-            self.run_claimed(budget, rounds);
+    fn run(&'static self, budget: PollBudget, rounds: usize, has_new_demand: bool) {
+        if !self.try_claim(has_new_demand) {
+            return;
         }
-    }
-
-    fn try_claim(&self, has_new_demand: bool) -> bool {
-        let mut state = self.state.lock();
-        state.has_pending |= has_new_demand;
-        state.queue.is_some() && state.claim()
-    }
-
-    /// Runs only after this executor has claimed the poller under the state lock.
-    fn run_claimed(&'static self, budget: PollBudget, rounds: usize) {
         let mut has_more = false;
         for _ in 0..rounds {
             #[cfg(unittest)]
@@ -154,10 +142,16 @@ impl NetworkPoller {
             self.kick();
         }
     }
+
+    fn try_claim(&self, has_new_demand: bool) -> bool {
+        let mut state = self.state.lock();
+        state.has_pending |= has_new_demand;
+        state.queue.is_some() && state.claim()
+    }
 }
 
 fn run_background() {
-    super::network_poller().run(BACKGROUND_BUDGET, BACKGROUND_MAX_ROUNDS);
+    super::network_poller().run(BACKGROUND_BUDGET, BACKGROUND_MAX_ROUNDS, false);
     #[cfg(unittest)]
     BACKGROUND_RUNS.fetch_add(1, core::sync::atomic::Ordering::Release);
 }
