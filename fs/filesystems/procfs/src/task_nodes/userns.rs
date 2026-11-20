@@ -56,6 +56,7 @@ pub(super) struct IdMapFile {
     task: WeakKtaskRef,
     kind: IdMapKind,
     pinned_ns: Mutex<Option<Arc<UserNamespace>>>,
+    pinned_reader_ns: Mutex<Option<Arc<UserNamespace>>>,
 }
 
 impl IdMapFile {
@@ -64,6 +65,7 @@ impl IdMapFile {
             task,
             kind,
             pinned_ns: Mutex::new(None),
+            pinned_reader_ns: Mutex::new(None),
         }
     }
 
@@ -136,12 +138,18 @@ impl SimpleFileOps for IdMapFile {
         // later task namespace switches must not retarget the write.
         let ns = self.target_ns()?;
         *self.pinned_ns.lock() = Some(ns);
+        let reader = kprocess::current_cred().user_ns_arc().clone();
+        *self.pinned_reader_ns.lock() = Some(reader);
         Ok(())
     }
 
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
         let ns = self.target_ns()?;
-        let reader_ns = kprocess::current_cred().user_ns_arc().clone();
+        let reader_ns = self
+            .pinned_reader_ns
+            .lock()
+            .clone()
+            .unwrap_or_else(|| kprocess::current_cred().user_ns_arc().clone());
         Ok(Cow::Owned(
             render_id_map(self.kind, &ns, &reader_ns).into_bytes(),
         ))
