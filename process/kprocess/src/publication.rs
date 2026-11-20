@@ -7,6 +7,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
@@ -17,6 +18,9 @@ use crate::{
     AsThread, Pid, PidNamespace, Process, ProcessGroup, ProcessGroupMemberSlot, Session, Tid,
     current_user_process, process_domain,
 };
+
+#[cfg(unittest)]
+pub(crate) static NS_INDEX_HITS: AtomicUsize = AtomicUsize::new(0);
 
 /// A prepared user task that is not yet visible to process/task registry lookups.
 pub(crate) struct PreparedUserTask {
@@ -908,6 +912,8 @@ impl ProcessPublication {
         {
             let _domain = process_domain::read_lock();
             if process.number_in_namespace(observer_ns) == Some(pid) {
+                #[cfg(unittest)]
+                NS_INDEX_HITS.fetch_add(1, Ordering::Relaxed);
                 return Ok(process);
             }
         }

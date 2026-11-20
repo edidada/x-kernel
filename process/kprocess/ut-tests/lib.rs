@@ -2914,8 +2914,13 @@ fn test_namespaced_process_lookup_uses_namespace_index() {
 
     // The child has local number 1 in `child_ns`; the lookup must hit the
     // publication index and return the same process identity.
+    crate::publication::NS_INDEX_HITS.store(0, core::sync::atomic::Ordering::Relaxed);
     let resolved = crate::procfs::process_task_in_namespace(1, Some(&child_ns)).unwrap();
     assert!(Arc::ptr_eq(resolved.as_thread().process(), &process));
+    assert!(
+        crate::publication::NS_INDEX_HITS.load(core::sync::atomic::Ordering::Relaxed) > 0,
+        "namespaced lookup must use the publication index, not the scan fallback"
+    );
 
     // `/proc/<pid>/stat` projection: the leader is 1 in the child namespace,
     // while the parent, process group and session leaders live outside it and
