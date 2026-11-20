@@ -270,8 +270,6 @@ CI 用户态 glibc 基线使用 `yeanwang/x-kernel-builder:v3.2`。新版本增�
 Setup 检出 `HARNESS_ROOTFS_DIR`，单测、TEE 和 runtime 使用固定的
 `rootfs-v20261120`，并共用 harness 的 release 下载器和校验元数据。
 校验元数据按 release 标签保存，CI 不跟随 `latest` 指针。
-默认版本由 Jenkinsfile 的 `parameters` 声明管理，流水线运行时会将声明同步回任务配置。
-变更基线时同步更新参数默认值、运行时回退值和 `prepare_rootfs_cache.sh` 的默认值。
 缓存按架构、libc、release 和
 归档校验值识别，不再使用 x-kernel-image 的 `20260302` 镜像。
 `prepare_rootfs_cache.sh` 在返回镜像路径前检查用户态工具与 bridge 的 libc，
