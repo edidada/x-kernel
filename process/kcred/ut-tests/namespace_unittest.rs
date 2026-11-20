@@ -463,3 +463,32 @@ fn namespace_nesting_is_capped_at_linux_depth() {
         LinuxError::ENOSPC
     );
 }
+
+#[def_test]
+fn gid_self_map_requires_the_namespace_owner() {
+    let namespace =
+        UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false).unwrap();
+    let root = Cred::root();
+    namespace.set_setgroups_allowed(false).unwrap();
+    let mut attacker = Cred::root();
+    let sys_admin = CapSet::from_bits(1 << CAP_SYS_ADMIN);
+    attacker
+        .set_capabilities(CapSets::new(sys_admin, CapSet::FULL, CapSet::EMPTY))
+        .unwrap();
+    assert_eq!(
+        LinuxError::from(
+            namespace
+                .write_gid_map(
+                    &attacker,
+                    &attacker,
+                    alloc::vec![IdMapExtent::new(0, 1001, 1).unwrap()],
+                )
+                .unwrap_err()
+        ),
+        LinuxError::EPERM
+    );
+    // The owner still installs its own single extent.
+    namespace
+        .write_gid_map(&root, &root, alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()])
+        .unwrap();
+}

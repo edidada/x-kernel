@@ -309,11 +309,9 @@ impl UserNamespace {
         }
         let mut namespace = Some(self);
         while let Some(current) = namespace {
-            let owner_in_initial = match current.parent() {
-                Some(parent) => parent.map_uid_to_initial(current.owner_euid),
-                None => Some(0),
-            };
-            if owner_in_initial == Some(root_id) {
+            // `owner_euid` is already an initial-namespace ID; do not project
+            // it through the parent map again.
+            if current.owner_euid == root_id {
                 return true;
             }
             namespace = current.parent().map(|parent| &**parent);

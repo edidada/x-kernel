@@ -430,11 +430,19 @@ list. An expired captured source must not fall back to the default path.
 - `SuperBlock::init_user_ns`/`user_ns` and `Dentry::user_namespace`
   (`src/super_block.rs`, `src/node/dentry.rs`): install and expose Linux
   `s_user_ns` ownership. `posix/fs` installs the mounting task's user namespace
-  in `do_new_mount`; kvfs capability checks (`chown`, `chmod`, sticky delete,
-  xattr/fileattr) evaluate `has_cap_in` against this namespace.
-- `SimpleFile::new_regular_with_owner` (`src/simple_file.rs`): creates a simple
-  file whose inode owner is a projected `Kuid`/`Kgid`; procfs uses it for
-  `/proc/<pid>/uid_map`, `gid_map`, `setgroups`, and `auxv` visibility.
+  in `do_new_mount`/`fsconfig`; inode capability checks (`chown`, `chmod`,
+  sticky delete, xattr/fileattr, DAC) use `capable_wrt_inode_uidgid`: the
+  capability is checked in the caller's user namespace and requires the inode
+  IDs to be mapped there.
+- `SimpleFile::new_regular_with_owner`/`new_snapshot_with_owner` and
+  `SimpleFileOps::validate_open_for_write` (`src/simple_file.rs`): create a
+  simple file whose inode owner is a global `Kuid`/`Kgid`, and run an
+  open-for-write capability hook; procfs uses them for `/proc/<pid>/uid_map`,
+  `gid_map`, `setgroups`, and `auxv` visibility/authorization.
+- `FileSystemType::nodev_userns`/`is_userns_mountable`
+  (`src/file_system_type.rs`): declare that a superblock type may be mounted
+  from a non-initial user namespace (Linux `FS_USERNS_MOUNT`); `posix/fs`
+  enforces it in the mount/fsopen paths.
 - `Path::dentry_is_mount_root(&self) -> bool` (`src/mount.rs`): reports whether
   the path's dentry is its mount's root dentry (Linux `path_mounted`,
   `dentry == mnt_root`), independent of overmount visibility. Provider: kvfs;
