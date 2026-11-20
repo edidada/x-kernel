@@ -201,7 +201,10 @@ impl WakePage {
             old_x_vector: 0,
             old_flags: 0,
         };
-        // SAFETY: the transaction exclusively owns this reserved 4 KiB page.
+        // SAFETY: boot reserves the entire trampoline page in direct-mapped RAM.
+        // The caller excludes AP startup and other writers while we read it.
+        // The writable backup array has PAGE_SIZE_4K bytes in separate Rust
+        // storage, so the two byte ranges cannot overlap.
         unsafe { ptr::copy_nonoverlapping(page, saved.original.as_mut_ptr(), PAGE_SIZE_4K) };
         // SAFETY: validated FACS extent includes its aligned waking vector.
         saved.old_vector = unsafe {
@@ -221,7 +224,10 @@ impl WakePage {
                 .cast::<u32>()
                 .read_volatile()
         };
-        // SAFETY: the linker-delimited image fits the exclusively owned page.
+        // SAFETY: the linker labels bound readable bytes in kernel text. The
+        // length check above bounds the write to the reserved trampoline page.
+        // That writable low-memory mapping is disjoint from the kernel image,
+        // and the caller excludes AP execution and writes until installation ends.
         unsafe { ptr::copy_nonoverlapping(start as *const u8, page, length) };
         for (patch, target) in [
             (ptr::addr_of!(s3_wake_pm_patch), ptr::addr_of!(s3_wake_pm)),
@@ -300,7 +306,9 @@ impl Drop for WakePage {
                 .cast::<u32>()
                 .write_volatile(self.old_flags)
         };
-        // SAFETY: all AP callbacks have joined; the original page is disjoint.
+        // SAFETY: the backup holds PAGE_SIZE_4K readable bytes in Rust storage,
+        // disjoint from the writable reserved page retained since install.
+        // All AP callbacks have joined before the saved bytes are restored.
         unsafe { ptr::copy_nonoverlapping(self.original.as_ptr(), self.page, PAGE_SIZE_4K) };
     }
 }
