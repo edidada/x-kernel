@@ -26,6 +26,9 @@ validated:
   it is open and by the VMA's owning linear runtime while a mapping exists, so
   closing the last descriptor before `munmap` frees nothing that user PTEs
   still reference; closing it stops workers and drains staged completions.
+  The raw zero-fill in `RingPages::new` is bounded by that allocation: the byte
+  length is rounded to pages and `num_pages * PAGE_SIZE_4K >= len_bytes` is
+  checked before the write, matching the SAFETY comment.
 - **`io_uring_enter` arguments**: unknown enter flags are rejected; a non-NULL
   signal mask is rejected only when `IORING_ENTER_GETEVENTS` requests the wait
   this subset cannot service (Linux never reads the mask otherwise).

@@ -67,7 +67,7 @@ const CQ_HEADER_SIZE: usize = 0x40;
 pub(crate) struct RingPages {
     base: *mut u8,
     base_paddr: PhysAddr,
-    len: usize,
+    len_bytes: usize,
     num_pages: usize,
 }
 
@@ -79,15 +79,15 @@ unsafe impl Send for RingPages {}
 unsafe impl Sync for RingPages {}
 
 impl RingPages {
-    fn new(len: usize) -> KResult<Self> {
+    fn new(len_bytes: usize) -> KResult<Self> {
         // Round the block up to a page multiple so the raw zero-fill below is
         // covered by exactly the pages the allocator returns.
-        let len = align_up_4k(len);
-        if len == 0 {
+        let len_bytes = align_up_4k(len_bytes);
+        if len_bytes == 0 {
             return Err(KError::InvalidInput);
         }
-        let num_pages = len / PAGE_SIZE_4K;
-        if num_pages * PAGE_SIZE_4K < len {
+        let num_pages = len_bytes / PAGE_SIZE_4K;
+        if num_pages * PAGE_SIZE_4K < len_bytes {
             return Err(KError::InvalidInput);
         }
         let va = global_allocator()
@@ -96,19 +96,19 @@ impl RingPages {
         let base_paddr = v2p(VirtAddr::from(va));
         // Charge the ring to the caller's memory cgroup, like every PageRef
         // allocation; a raw page allocation would otherwise bypass memcg.
-        if memacct::charge_frame(base_paddr, len, UsageKind::VirtMem).is_err() {
+        if memacct::charge_frame(base_paddr, len_bytes, UsageKind::VirtMem).is_err() {
             global_allocator().dealloc_pages(va, num_pages, UsageKind::VirtMem);
             return Err(KError::NoMemory);
         }
         let base = va as *mut u8;
         // SAFETY: `va` is a fresh allocation of `num_pages * PAGE_SIZE_4K`,
-        // which the check above proves is at least `len`; the zero-fill stays
-        // inside the allocation.
-        unsafe { ptr::write_bytes(base, 0, len) };
+        // which the check above proves is at least `len_bytes`; the zero-fill
+        // stays inside the allocation.
+        unsafe { ptr::write_bytes(base, 0, len_bytes) };
         Ok(Self {
             base,
             base_paddr,
-            len,
+            len_bytes,
             num_pages,
         })
     }
@@ -124,7 +124,7 @@ impl RingPages {
 
 impl Drop for RingPages {
     fn drop(&mut self) {
-        memacct::uncharge_frame(self.base_paddr, self.len);
+        memacct::uncharge_frame(self.base_paddr, self.len_bytes);
         global_allocator().dealloc_pages(self.base as usize, self.num_pages, UsageKind::VirtMem);
     }
 }
