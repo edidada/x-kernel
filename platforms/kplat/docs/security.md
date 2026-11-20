@@ -34,8 +34,11 @@ The PM coordinator owns exclusion and lifetime across these calls.
 - `prepare` runs on the boot CPU. Serialize PM and exclude CPU hotplug until
   `finish` releases the wake resources.
 - `park_cpu` runs on the target CPU with local IRQs and migration disabled.
-  Devices must remain usable during capture. Keep the C callback and its raw
-  argument valid through the callback's resumed return, including on abort.
+  These exclusions and usable devices are required through the resumed
+  return of `SystemSleepIf::park_cpu`, including the abort path. Keep both
+  the `extern "C"` callback and the storage addressed by its raw argument
+  valid for that entire call. The callback returning or acknowledging alone
+  does not release the caller's lifetime obligation.
 - `enter` requires other CPUs, devices, NMI sources, IRQs and clocks to be
   quiesced before firmware entry on the boot CPU.
 - `restore_cpus` requires boot CPU IRQs to remain disabled and shared resources
