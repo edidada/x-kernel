@@ -364,11 +364,12 @@ fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCr
         return Err(KError::InvalidInput);
     }
     let cred = &sender.cred;
-    let pid_ok = claim.pid == sender.pid || cred.has_sys_admin();
+    let pid_ns = sender.process.active_pid_namespace();
+    let pid_ok = claim.pid == sender.pid || cred.has_cap_in(pid_ns.owner(), kcred::CAP_SYS_ADMIN);
     let uid_ok = [cred.ruid(), cred.euid(), cred.suid()].contains(&claim.uid)
-        || cred.has_cap(kcred::CAP_SETUID);
+        || cred.has_cap_in(cred.user_ns(), kcred::CAP_SETUID);
     let gid_ok = [cred.rgid(), cred.egid(), cred.sgid()].contains(&claim.gid)
-        || cred.has_cap(kcred::CAP_SETGID);
+        || cred.has_cap_in(cred.user_ns(), kcred::CAP_SETGID);
     if !(pid_ok && uid_ok && gid_ok) {
         return Err(KError::from(LinuxError::EPERM));
     }
