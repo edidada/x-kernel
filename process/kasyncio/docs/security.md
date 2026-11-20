@@ -26,8 +26,9 @@ validated:
 - **`io_uring_enter` arguments**: unknown enter flags are rejected; a non-NULL
   signal mask is rejected only when `IORING_ENTER_GETEVENTS` requests the wait
   this subset cannot service (Linux never reads the mask otherwise).
-  `to_submit` beyond the user-published tail or the ring depth is rejected;
-  `min_complete` is clamped to the CQ depth as Linux does. A non-io_uring fd
+  `to_submit` is clamped to the published entries and `min_complete` to the
+  CQ depth, as Linux does. Rejection staging is bounded by the completion-ring
+  depth, so an invalid-SQE flood cannot grow the kernel queue without bound. A non-io_uring fd
   returns `EOPNOTSUPP`, matching Linux. The setup descriptor is installed
   close-on-exec unconditionally.
 

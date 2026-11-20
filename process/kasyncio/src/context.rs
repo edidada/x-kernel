@@ -171,6 +171,12 @@ impl AsyncContext {
         !self.inner.lock().completed.is_empty()
     }
 
+    /// Returns the number of staged completions not yet published to the
+    /// shared ring; the submit path uses it to bound the staging backlog.
+    pub(crate) fn completion_len(&self) -> usize {
+        self.inner.lock().completed.len()
+    }
+
     /// Accounts a dispatched operation.
     pub(crate) fn account_inflight(&self) {
         self.inner.lock().inflight += 1;

@@ -108,13 +108,15 @@ outcomes, and its user cookie is observable in exactly one completion:
 
 A submission rejected at enqueue produces no completion — the submitter
 observes the error directly (`WouldBlock` on a full queue,
-`BadFileDescriptor` on a shut-down context). An SQE rejected by validation
-(nonzero flags, unsupported opcode, out-of-range index) is different: it is
-consumed, the SQ head advances, and it completes with `-EINVAL`, so later
-SQEs still run.
+`BadFileDescriptor` on a shut-down context). An SQE with nonzero fields or an
+unsupported opcode is different: it is consumed, the SQ head advances, and it
+completes with `-EINVAL`, so later SQEs still run. An out-of-range SQ-array
+index follows Linux `io_get_sqe` instead: the entry is consumed, `SQ_DROPPED`
+advances, the batch ends, and no CQE is produced (the SQE was never read, so
+no `user_data` exists to report).
 
-`io_uring_enter` clamps `min_complete` to the CQ depth and counts CQEs already
-visible in the shared ring; it returns the accepted SQE count even when a
+`io_uring_enter` clamps `to_submit` to the published tail and `min_complete`
+to the CQ depth, and counts CQEs already visible in the shared ring; it returns the accepted SQE count even when a
 later worker-spawn or wait step fails, and the wait returns as soon as the
 shared ring holds enough unconsumed CQEs.
 

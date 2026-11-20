@@ -81,13 +81,23 @@ unsafe impl Sync for RingPages {}
 
 impl RingPages {
     fn new(len: usize) -> KResult<Self> {
+        // Round the block up to a page multiple so the raw zero-fill below is
+        // covered by exactly the pages the allocator returns.
+        let len = align_up_4k(len);
+        if len == 0 {
+            return Err(KError::InvalidInput);
+        }
         let num_pages = len / PAGE_SIZE_4K;
+        if num_pages * PAGE_SIZE_4K < len {
+            return Err(KError::InvalidInput);
+        }
         let va = global_allocator()
             .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::VirtMem)
             .map_err(|_| KError::NoMemory)?;
         let base = va as *mut u8;
-        // SAFETY: `va` is a fresh allocation of `len` bytes and `len` is a
-        // multiple of the page size.
+        // SAFETY: `va` is a fresh allocation of `num_pages * PAGE_SIZE_4K`,
+        // which the check above proves is at least `len`; the zero-fill stays
+        // inside the allocation.
         unsafe { ptr::write_bytes(base, 0, len) };
         Ok(Self {
             base,
@@ -268,59 +278,65 @@ impl Ring {
     /// unsupported SQE cannot wedge the ring: it is completed with `-EINVAL`
     /// and the following entries still run, as in Linux.
     pub(crate) fn submit(&mut self, ctx: &AsyncContext, to_submit: u32) -> KResult<u32> {
-        if to_submit > self.sq_entries {
-            return Err(KError::InvalidInput);
-        }
         let tail = self.read_u32(SQ_TAIL);
-        let available = tail.wrapping_sub(self.sq_head);
-        if to_submit > available {
-            return Err(KError::InvalidInput);
-        }
+        // Linux clamps a short submission to the published entries instead of
+        // failing it.
+        let available = tail.wrapping_sub(self.sq_head).min(self.sq_entries);
+        let to_submit = to_submit.min(available);
         // Pairs with the user's Release publication of SQ_TAIL: observing the
         // tail makes every SQE field written before it visible here.
         fence(Ordering::Acquire);
 
         let mask = self.sq_entries - 1;
+        // `submitted` is the return count; `consumed` advances the shared head.
         let mut submitted = 0;
+        let mut consumed = 0;
         for index in 0..to_submit {
             let sq_index = (self.sq_head.wrapping_add(index) & mask) as usize;
             let array_off = self.sq_array_off + sq_index * 4;
             let sqe_index = self.read_u32(array_off);
             if sqe_index >= self.sq_entries {
-                // The index array is user-shared; consume the entry and report
-                // the error instead of leaving it at the head.
-                ctx.push_completion(CompletedOp {
-                    user_data: 0,
-                    res: -kerrno::LinuxError::EINVAL.into_raw(),
-                });
-                submitted += 1;
-                continue;
+                // Linux's `io_get_sqe` drops an invalid array entry: consume
+                // it, bump SQ_DROPPED, and stop the batch without a CQE.
+                let dropped = self.read_u32(SQ_DROPPED);
+                self.write_u32(SQ_DROPPED, dropped.wrapping_add(1));
+                consumed += 1;
+                break;
             }
             let sqe = self.read_sqe(sqe_index);
             if sqe.flags != 0 || !sqe.is_supported_opcode() {
                 // Unsupported flags/opcodes complete with -EINVAL and are
-                // consumed so later SQEs are not blocked.
+                // consumed so later SQEs are not blocked. Bound the staged
+                // backlog: if the completion queue is already at its limit,
+                // leave this entry at the head for the next enter.
+                if ctx.completion_len() >= self.cq_entries as usize {
+                    break;
+                }
                 ctx.push_completion(CompletedOp {
                     user_data: sqe.user_data,
                     res: -kerrno::LinuxError::EINVAL.into_raw(),
                 });
                 submitted += 1;
+                consumed += 1;
                 continue;
             }
             match ctx.push_ready(PreparedOp {
                 user_data: sqe.user_data,
             }) {
-                Ok(()) => submitted += 1,
+                Ok(()) => {
+                    submitted += 1;
+                    consumed += 1;
+                }
                 Err(KError::WouldBlock) => break,
                 Err(error) => {
-                    if submitted == 0 {
+                    if consumed == 0 {
                         return Err(error);
                     }
                     break;
                 }
             }
         }
-        self.sq_head = self.sq_head.wrapping_add(submitted);
+        self.sq_head = self.sq_head.wrapping_add(consumed);
         self.write_u32(SQ_HEAD, self.sq_head);
         Ok(submitted)
     }
@@ -363,8 +379,14 @@ impl Ring {
 
     fn read_u32(&self, offset: usize) -> u32 {
         let ptr = self.base.wrapping_add(offset).cast::<u32>();
-        // SAFETY: `offset` is inside the allocated ring block and the header field
-        // is aligned and initialized before publication.
+        // SAFETY: every caller passes an offset produced by `Ring::create`'s
+        // layout arithmetic: the fixed SQ_HEAD..SQ_DROPPED words,
+        // `cq_head_off + {0,4,8,12,16,20}`, or a masked array slot
+        // (`sq_index < sq_entries`). `Ring::create` rejects a layout whose
+        // `used` end exceeds the allocated `ring_len`, so these offsets lie
+        // inside the block, are 4-byte aligned on the directly mapped block,
+        // and `Ring::create` zero-initializes every header word before the
+        // block becomes user-visible.
         unsafe { ptr::read_volatile(ptr) }
     }
 
