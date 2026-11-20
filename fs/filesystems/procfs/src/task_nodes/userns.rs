@@ -52,11 +52,16 @@ impl IdMapKind {
 }
 
 /// `/proc/<pid>/{uid_map,gid_map}`.
+#[derive(Default)]
+struct PinnedIdMap {
+    target: Option<Arc<UserNamespace>>,
+    reader: Option<Arc<UserNamespace>>,
+}
+
 pub(super) struct IdMapFile {
     task: WeakKtaskRef,
     kind: IdMapKind,
-    pinned_ns: Mutex<Option<Arc<UserNamespace>>>,
-    pinned_reader_ns: Mutex<Option<Arc<UserNamespace>>>,
+    pinned: Mutex<PinnedIdMap>,
 }
 
 impl IdMapFile {
@@ -64,17 +69,24 @@ impl IdMapFile {
         Self {
             task,
             kind,
-            pinned_ns: Mutex::new(None),
-            pinned_reader_ns: Mutex::new(None),
+            pinned: Mutex::new(PinnedIdMap::default()),
         }
     }
 
-    fn target_ns(&self) -> VfsResult<Arc<UserNamespace>> {
-        if let Some(ns) = self.pinned_ns.lock().clone() {
-            return Ok(ns);
-        }
+    fn resolve_target(&self) -> VfsResult<Arc<UserNamespace>> {
         let task = upgrade_task(&self.task)?;
         Ok(task.as_thread().real_cred().user_ns_arc().clone())
+    }
+
+    fn pinned_target(&self) -> Option<Arc<UserNamespace>> {
+        self.pinned.lock().target.clone()
+    }
+
+    fn target_ns(&self) -> VfsResult<Arc<UserNamespace>> {
+        match self.pinned_target() {
+            Some(ns) => Ok(ns),
+            None => self.resolve_target(),
+        }
     }
 }
 
@@ -134,24 +146,28 @@ fn render_id_map(
 
 impl SimpleFileOps for IdMapFile {
     fn validate_open(&self) -> VfsResult<()> {
-        // Linux pins the target user namespace in the open file description;
-        // later task namespace switches must not retarget the write.
-        let ns = self.target_ns()?;
-        *self.pinned_ns.lock() = Some(ns);
+        // Linux pins the target and reader user namespaces in the open file
+        // description; later switches must not retarget either side.
+        let target = self.resolve_target()?;
         let reader = kprocess::current_cred().user_ns_arc().clone();
-        *self.pinned_reader_ns.lock() = Some(reader);
+        let mut pinned = self.pinned.lock();
+        pinned.target = Some(target);
+        pinned.reader = Some(reader);
         Ok(())
     }
 
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
-        let ns = self.target_ns()?;
-        let reader_ns = self
-            .pinned_reader_ns
-            .lock()
-            .clone()
-            .unwrap_or_else(|| kprocess::current_cred().user_ns_arc().clone());
+        let (target, reader) = {
+            let pinned = self.pinned.lock();
+            (pinned.target.clone(), pinned.reader.clone())
+        };
+        let target = match target {
+            Some(target) => target,
+            None => self.resolve_target()?,
+        };
+        let reader = reader.unwrap_or_else(|| kprocess::current_cred().user_ns_arc().clone());
         Ok(Cow::Owned(
-            render_id_map(self.kind, &ns, &reader_ns).into_bytes(),
+            render_id_map(self.kind, &target, &reader).into_bytes(),
         ))
     }
 
@@ -197,18 +213,22 @@ impl SetgroupsFile {
         }
     }
 
+    fn resolve_target(&self) -> VfsResult<Arc<UserNamespace>> {
+        let task = upgrade_task(&self.task)?;
+        Ok(task.as_thread().real_cred().user_ns_arc().clone())
+    }
+
     fn target_ns(&self) -> VfsResult<Arc<UserNamespace>> {
         if let Some(ns) = self.pinned_ns.lock().clone() {
             return Ok(ns);
         }
-        let task = upgrade_task(&self.task)?;
-        Ok(task.as_thread().real_cred().user_ns_arc().clone())
+        self.resolve_target()
     }
 }
 
 impl SimpleFileOps for SetgroupsFile {
     fn validate_open(&self) -> VfsResult<()> {
-        let ns = self.target_ns()?;
+        let ns = self.resolve_target()?;
         *self.pinned_ns.lock() = Some(ns);
         Ok(())
     }
@@ -217,7 +237,7 @@ impl SimpleFileOps for SetgroupsFile {
         // Linux `proc_setgroups_open()` requires CAP_SYS_ADMIN in the target
         // namespace at open-for-write; the write callback performs no
         // capability check. CAP_SETGID is not sufficient.
-        let ns = self.target_ns()?;
+        let ns = self.resolve_target()?;
         *self.pinned_ns.lock() = Some(ns.clone());
         if kprocess::current_cred().has_cap_in(&ns, CAP_SYS_ADMIN) {
             Ok(())
