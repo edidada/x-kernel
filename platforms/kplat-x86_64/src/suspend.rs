@@ -6,18 +6,93 @@
 
 use core::arch::global_asm;
 
-global_asm!(include_str!("suspend.S"));
+#[repr(C, align(16))]
+struct FxSaveArea([u8; 512]);
 
-/// Assembly layout: callee registers, control/MSR state, descriptor tables,
-/// and a 16-byte aligned 512-byte FXSAVE image at byte offset 208.
+/// Storage shared with the reset trampoline. Assembly offsets follow this layout.
 #[repr(C, align(16))]
 pub(crate) struct SavedCpu {
-    words: [u64; 90],
+    rsp: u64,
+    rbx: u64,
+    rbp: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    cr3: u64,
+    cr0: u64,
+    cr4: u64,
+    efer: u64,
+    gs_base: u64,
+    kernel_gs_base: u64,
+    fs_base: u64,
+    star: u64,
+    lstar: u64,
+    fmask: u64,
+    apic_base: u64,
+    gdtr: [u64; 2],
+    idtr: [u64; 2],
+    tr: u64,
+    cr2: u64,
+    cr8: u64,
+    fxsave: FxSaveArea,
 }
+global_asm!(
+    include_str!("suspend.S"),
+    ctx_rsp = const core::mem::offset_of!(SavedCpu, rsp),
+    ctx_rbx = const core::mem::offset_of!(SavedCpu, rbx),
+    ctx_rbp = const core::mem::offset_of!(SavedCpu, rbp),
+    ctx_r12 = const core::mem::offset_of!(SavedCpu, r12),
+    ctx_r13 = const core::mem::offset_of!(SavedCpu, r13),
+    ctx_r14 = const core::mem::offset_of!(SavedCpu, r14),
+    ctx_r15 = const core::mem::offset_of!(SavedCpu, r15),
+    ctx_cr3 = const core::mem::offset_of!(SavedCpu, cr3),
+    ctx_cr0 = const core::mem::offset_of!(SavedCpu, cr0),
+    ctx_cr4 = const core::mem::offset_of!(SavedCpu, cr4),
+    ctx_efer = const core::mem::offset_of!(SavedCpu, efer),
+    ctx_gs_base = const core::mem::offset_of!(SavedCpu, gs_base),
+    ctx_kernel_gs_base = const core::mem::offset_of!(SavedCpu, kernel_gs_base),
+    ctx_fs_base = const core::mem::offset_of!(SavedCpu, fs_base),
+    ctx_star = const core::mem::offset_of!(SavedCpu, star),
+    ctx_lstar = const core::mem::offset_of!(SavedCpu, lstar),
+    ctx_fmask = const core::mem::offset_of!(SavedCpu, fmask),
+    ctx_apic_base = const core::mem::offset_of!(SavedCpu, apic_base),
+    ctx_gdtr = const core::mem::offset_of!(SavedCpu, gdtr),
+    ctx_idtr = const core::mem::offset_of!(SavedCpu, idtr),
+    ctx_tr = const core::mem::offset_of!(SavedCpu, tr),
+    ctx_cr2 = const core::mem::offset_of!(SavedCpu, cr2),
+    ctx_cr8 = const core::mem::offset_of!(SavedCpu, cr8),
+    ctx_fxsave = const core::mem::offset_of!(SavedCpu, fxsave),
+);
 
 impl SavedCpu {
     pub(crate) const fn new() -> Self {
-        Self { words: [0; 90] }
+        Self {
+            rsp: 0,
+            rbx: 0,
+            rbp: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            cr3: 0,
+            cr0: 0,
+            cr4: 0,
+            efer: 0,
+            gs_base: 0,
+            kernel_gs_base: 0,
+            fs_base: 0,
+            star: 0,
+            lstar: 0,
+            fmask: 0,
+            apic_base: 0,
+            gdtr: [0; 2],
+            idtr: [0; 2],
+            tr: 0,
+            cr2: 0,
+            cr8: 0,
+            fxsave: FxSaveArea([0; 512]),
+        }
     }
 
     /// Saves this CPU and invokes `enter`, returning after abort or restoration.
@@ -53,14 +128,20 @@ unittest::path_mod_test!(tests, "../ut-tests/suspend.rs");
 use core::ptr;
 
 use kerrno::{KError, KResult};
-use khal::mem::{p2v, pa, v2p};
+use khal::mem::{PAGE_SIZE_4K, p2v, pa, v2p};
+
+// ACPI Firmware ACPI Control Structure (FACS), byte offsets from its signature.
+const FACS_FIRMWARE_WAKING_VECTOR: usize = 12;
+const FACS_X_FIRMWARE_WAKING_VECTOR: usize = 24;
+const FACS_OSPM_FLAGS: usize = 36;
+const FACS_64BIT_WAKE_F: u32 = 1;
 
 /// Exclusive temporary ownership of the reserved AP page and firmware vector.
 /// Caller serialization must exclude boot/hotplug and every other PM attempt.
 pub(crate) struct WakePage {
     page: *mut u8,
     facs: *mut u8,
-    original: [u8; 4096],
+    original: [u8; PAGE_SIZE_4K],
     old_vector: u32,
     old_x_vector: u64,
     old_flags: u32,
@@ -109,25 +190,37 @@ impl WakePage {
         }
         let start = ptr::addr_of!(s3_wake_start) as usize;
         let length = ptr::addr_of!(s3_wake_end) as usize - start;
-        if length > 4096 {
+        if length > PAGE_SIZE_4K {
             return Err(KError::InvalidInput);
         }
         let mut saved = Self {
             page,
             facs,
-            original: [0; 4096],
+            original: [0; PAGE_SIZE_4K],
             old_vector: 0,
             old_x_vector: 0,
             old_flags: 0,
         };
         // SAFETY: the transaction exclusively owns this reserved 4 KiB page.
-        unsafe { ptr::copy_nonoverlapping(page, saved.original.as_mut_ptr(), 4096) };
+        unsafe { ptr::copy_nonoverlapping(page, saved.original.as_mut_ptr(), PAGE_SIZE_4K) };
         // SAFETY: validated FACS extent includes its aligned waking vector.
-        saved.old_vector = unsafe { facs.wrapping_add(12).cast::<u32>().read_volatile() };
+        saved.old_vector = unsafe {
+            facs.wrapping_add(FACS_FIRMWARE_WAKING_VECTOR)
+                .cast::<u32>()
+                .read_volatile()
+        };
         // SAFETY: validated FACS extent includes its aligned extended vector.
-        saved.old_x_vector = unsafe { facs.wrapping_add(24).cast::<u64>().read_volatile() };
+        saved.old_x_vector = unsafe {
+            facs.wrapping_add(FACS_X_FIRMWARE_WAKING_VECTOR)
+                .cast::<u64>()
+                .read_volatile()
+        };
         // SAFETY: validated FACS extent includes the aligned OS flags.
-        saved.old_flags = unsafe { facs.wrapping_add(36).cast::<u32>().read_volatile() };
+        saved.old_flags = unsafe {
+            facs.wrapping_add(FACS_OSPM_FLAGS)
+                .cast::<u32>()
+                .read_volatile()
+        };
         // SAFETY: the linker-delimited image fits the exclusively owned page.
         unsafe { ptr::copy_nonoverlapping(start as *const u8, page, length) };
         for (patch, target) in [
@@ -153,16 +246,20 @@ impl WakePage {
             s3_restore_context as *const () as u64,
         );
         // SAFETY: the validated aligned FACS field is owned by this transaction.
-        unsafe { facs.wrapping_add(24).cast::<u64>().write_volatile(0) };
+        unsafe {
+            facs.wrapping_add(FACS_X_FIRMWARE_WAKING_VECTOR)
+                .cast::<u64>()
+                .write_volatile(0)
+        };
         // SAFETY: the same ownership excludes other firmware-vector writers.
         unsafe {
-            facs.wrapping_add(36)
+            facs.wrapping_add(FACS_OSPM_FLAGS)
                 .cast::<u32>()
-                .write_volatile(saved.old_flags & !1)
+                .write_volatile(saved.old_flags & !FACS_64BIT_WAKE_F)
         };
         // SAFETY: publish the real-mode vector after the complete wake image.
         unsafe {
-            facs.wrapping_add(12)
+            facs.wrapping_add(FACS_FIRMWARE_WAKING_VECTOR)
                 .cast::<u32>()
                 .write_volatile(page_address as u32)
         };
@@ -172,7 +269,7 @@ impl WakePage {
 
 impl WakePage {
     fn patch<T: Copy>(&mut self, offset: usize, value: T) {
-        assert!(offset <= 4096 - core::mem::size_of::<T>());
+        assert!(offset <= PAGE_SIZE_4K - core::mem::size_of::<T>());
         let address = self.page.wrapping_add(offset).cast::<T>();
         // SAFETY: the checked patch fits the exclusively owned reserved page;
         // unaligned writes support linker-defined instruction operands.
@@ -185,26 +282,26 @@ impl Drop for WakePage {
         // SAFETY: transaction ownership retains this validated FACS vector.
         unsafe {
             self.facs
-                .wrapping_add(12)
+                .wrapping_add(FACS_FIRMWARE_WAKING_VECTOR)
                 .cast::<u32>()
                 .write_volatile(self.old_vector)
         };
         // SAFETY: ownership likewise retains the aligned extended field.
         unsafe {
             self.facs
-                .wrapping_add(24)
+                .wrapping_add(FACS_X_FIRMWARE_WAKING_VECTOR)
                 .cast::<u64>()
                 .write_volatile(self.old_x_vector)
         };
         // SAFETY: ownership likewise retains the aligned OS flags.
         unsafe {
             self.facs
-                .wrapping_add(36)
+                .wrapping_add(FACS_OSPM_FLAGS)
                 .cast::<u32>()
                 .write_volatile(self.old_flags)
         };
         // SAFETY: all AP callbacks have joined; the original page is disjoint.
-        unsafe { ptr::copy_nonoverlapping(self.original.as_ptr(), self.page, 4096) };
+        unsafe { ptr::copy_nonoverlapping(self.original.as_ptr(), self.page, PAGE_SIZE_4K) };
     }
 }
 
@@ -223,6 +320,10 @@ static CPU_CONTEXTS: CpuStorage =
     CpuStorage(UnsafeCell::new([const { SavedCpu::new() }; CPU_COUNT]));
 static CPU_RESTORED: [AtomicBool; CPU_COUNT] = [const { AtomicBool::new(false) }; CPU_COUNT];
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+const PM1_SCI_EN: u32 = 1;
+const PM1_SLP_TYP_SHIFT: u32 = 10;
+const PM1_SLP_EN: u32 = 1 << 13;
+
 static S3_REQUEST: AtomicU32 = AtomicU32::new(0);
 struct WakeStorage(UnsafeCell<Option<WakePage>>);
 // SAFETY: only the boot CPU owning ACTIVE accesses the installed wake page,
@@ -264,7 +365,7 @@ fn restore_local_apic() {
 
 extern "C" fn request_s3(argument: *mut ()) {
     let port = argument as usize as u16;
-    let control = ((argument as usize) >> 16) as u16;
+    let control = ((argument as usize) >> u16::BITS) as u16;
     // SAFETY: prepare selected QEMU's FADT-declared PM1a control block. The
     // system coordinator retained the installed vector and every saved stack.
     unsafe {
@@ -339,8 +440,11 @@ impl kplat::sys::SystemSleepIf {
         ACTIVE
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .map_err(|_| KError::ResourceBusy)?;
-        let control = 1u32 | (u32::from(sleep_types[0]) << 10) | (1 << 13);
-        S3_REQUEST.store(u32::from(pm1.port) | (control << 16), Ordering::Relaxed);
+        let control = PM1_SCI_EN | (u32::from(sleep_types[0]) << PM1_SLP_TYP_SHIFT) | PM1_SLP_EN;
+        S3_REQUEST.store(
+            u32::from(pm1.port) | (control << u16::BITS),
+            Ordering::Relaxed,
+        );
         // SAFETY: the transaction owns fixed context/wake storage and excludes
         // AP startup until finish. No saved CPU context exists yet.
         let irq_state = match x86_apic::SavedIoApics::prepare() {
@@ -477,7 +581,8 @@ impl kplat::sys::SystemSleepIf {
                 unsafe { lapic.send_init_ipi(id) };
             });
             raw_delay(10_000);
-            let vector = (crate::peripherals::bootmem::ap_trampoline_page_paddr() / 4096) as u8;
+            let vector =
+                (crate::peripherals::bootmem::ap_trampoline_page_paddr() / PAGE_SIZE_4K) as u8;
             for _ in 0..2 {
                 x86_apic::with_local_apic(|lapic| {
                     // SAFETY: the complete wake page was installed before INIT.
