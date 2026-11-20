@@ -7,9 +7,12 @@ validated:
 
 - **SQE contents**: opcode, flags, fds, lengths, offsets, and user pointers
   arrive from userspace. The submit path validates the index array, SQE flags,
-  and opcode before queueing; a rejected entry is consumed and completed with
-  `-EINVAL` (preserving its `user_data` where it is readable), so it cannot
-  block later entries and the client still learns which request failed.
+  and opcode before queueing. An entry with nonzero flags or an unsupported
+  opcode is consumed and completed with `-EINVAL` (preserving its `user_data`),
+  so it cannot block later entries and the client still learns which request
+  failed. An out-of-range array index is dropped like Linux `io_get_sqe`:
+  `SQ_DROPPED` advances, the batch ends, and no CQE is fabricated for an SQE
+  that was never read.
 - **User buffers**: operations carrying user VAs execute on a worker that
   is a thread of the owning process, so every access goes through the
   standard guarded user-memory path (`osvm`/`kuaccess`) with fault
@@ -52,8 +55,13 @@ unchanged from any other thread.
 - `WORKER_CAP` (4) bounds kernel stacks per context; the reservation is
   charged in the same critical section as the eligibility check, so
   concurrent submitters cannot oversubscribe it.
-- `READY_LIMIT` (1024) bounds the per-context queue; a full queue reports
-  `WouldBlock` to the submitter instead of growing.
+- `READY_LIMIT` (1024) bounds the per-context queue. A full queue stops the
+  submission batch at the queued SQE and returns a short count; the SQE stays
+  at the shared SQ head for the next `io_uring_enter`. It is not reported to
+  userspace as `EAGAIN`, matching Linux.
+- Ring blocks are charged to the caller's memory cgroup with
+  `memacct::charge_frame`, and their size follows the requested layout (at most
+  4 MiB); tiny rings no longer reserve a fixed multi-MiB block.
 - Idle-park registration failures back off exponentially (10 ms doubled to
   a 320 ms ceiling) so a persistently failing wake source cannot spin the
   CPU.
@@ -63,6 +71,8 @@ unchanged from any other thread.
 
 ## Failure posture
 
-No kasyncio path panics on user-controlled input: invalid input becomes
-an error completion (the cookie is preserved), resource exhaustion becomes
-`WouldBlock`/backoff, and teardown paths never block their callers.
+No kasyncio path panics on user-controlled input: an invalid opcode or flags
+become an error completion (the cookie is preserved), an invalid SQ-array index
+is dropped with `SQ_DROPPED`, a full ready queue returns a short submission
+count, idle-park registration failures back off, and teardown paths never block
+their callers.

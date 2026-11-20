@@ -18,6 +18,7 @@ ignored = ["kns"]
 anon_inodefs.workspace = true
 kcred.workspace = true
 kalloc.workspace = true
+memacct.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true

@@ -2219,6 +2219,7 @@ dependencies = [
  "ktask",
  "ktime_types",
  "kvfs",
+ "memacct",
  "memaddr",
  "posix-process",
  "posix-types",

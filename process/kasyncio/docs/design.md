@@ -35,9 +35,10 @@ process/kasyncio/src/
 
 `ops.rs` (operation decode/dispatch) remains the next step: only NOP is
 accepted onto the ready queue, and `execute()` completes it with result `0`.
-Any other opcode, nonzero SQE flags, or out-of-range SQE index is consumed and
-completed with `-EINVAL`, so an invalid entry cannot wedge the submission
-ring.
+An entry with nonzero SQE flags or an unsupported opcode is consumed and
+completed with `-EINVAL`. An out-of-range array index is dropped like Linux
+`io_get_sqe`: `SQ_DROPPED` advances and the batch ends with no CQE, so an
+invalid entry cannot wedge the submission ring.
 
 ## Execution model
 
@@ -81,10 +82,13 @@ here explicitly to avoid rework under an ABI-compatibility pretext.
 - Two `PollSet` wake sources follow the detach-then-wake rule and are never
   woken under a lock: `worker_wake` (queued work or shutdown) and
   `cq_wake` (published completions).
-- The ready queue is bounded by `READY_LIMIT` (1024); a full queue reports
-  `WouldBlock` to the submitter.
-- The ring lives in one physically contiguous block: 2 MiB for up to 16384
-  entries, 4 MiB up to Linux `IORING_MAX_ENTRIES` (32768). The kernel accesses
+- The ready queue is bounded by `READY_LIMIT` (1024). A full queue stops the
+  submission batch at that SQE and returns a short count; the SQE remains at
+  the shared SQ head for the next enter (Linux has no user-visible `EAGAIN`
+  here).
+- The ring lives in one physically contiguous block sized to the layout
+  (power-of-two pages, at most 4 MiB; 32768 entries needs 4 MiB), and its pages
+  are charged to the caller's memory cgroup. The block is The kernel accesses
   it through the direct map; userspace obtains the same pages through
   `mmap(fd, IORING_OFF_SQ_RING)` and `mmap(fd, IORING_OFF_SQES)`. The VMA
   holds an owning linear runtime over the block, so `close(fd)` before
@@ -106,10 +110,12 @@ outcomes, and its user cookie is observable in exactly one completion:
   natural completion even after shutdown; the context stays alive until
   the last worker retires.
 
-A submission rejected at enqueue produces no completion — the submitter
-observes the error directly (`WouldBlock` on a full queue,
-`BadFileDescriptor` on a shut-down context). An SQE with nonzero fields or an
-unsupported opcode is different: it is consumed, the SQ head advances, and it
+A submission stopped by a full ready queue produces no completion for the
+remaining SQEs: the batch returns a short count and the SQE stays at the
+shared SQ head for retry. A shut-down context surfaces `BadFileDescriptor`
+when no SQE was accepted. Neither case reports `EAGAIN` to userspace.
+
+An SQE with nonzero fields or an unsupported opcode is different: it is consumed, the SQ head advances, and it
 completes with `-EINVAL`, so later SQEs still run. An out-of-range SQ-array
 index follows Linux `io_get_sqe` instead: the entry is consumed, `SQ_DROPPED`
 advances, the batch ends, and no CQE is produced (the SQE was never read, so
@@ -122,9 +128,10 @@ shared ring holds enough unconsumed CQEs.
 
 ## Worker exit contract
 
-Workers retire — run the loop exit, then `posix_process::do_exit(0, false)`
+Workers retire — run the loop exit, then `posix_process::do_exit_worker()`
 so membership, cgroup charge, and (when last) the process tail are handled
-by the ordinary exit path — when any of the following holds:
+by the ordinary exit path without replacing the status published by the
+ordinary threads — when any of the following holds:
 
 1. **Context shutdown** (fd `release` or test): never blocks; the shutdown
    also cancels undispatched queue entries per the completion contract and
@@ -137,7 +144,7 @@ by the ordinary exit path — when any of the following holds:
    epoch, so a concurrent attach/detach rejects the snapshot instead of
    letting a worker retire while an ordinary thread is still live. Workers
    re-evaluate at least once per `IDLE_PARK_BOUND` (200 ms); the last
-   `do_exit` then completes the process tail.
+   `do_exit_worker` then completes the process tail.
 4. **Pending `SIGKILL`**: a worker never re-enters userspace, where
    fatal-signal delivery normally happens, so the idle path probes the
    thread's pending-signal set after every task-interrupt wake. `kill -9`

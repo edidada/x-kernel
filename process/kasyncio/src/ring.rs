@@ -43,8 +43,6 @@ use crate::{
     context::{AsyncContext, CompletedOp, PreparedOp},
 };
 
-/// Smallest backing block: enough for 16384 SQEs plus the CQ ring.
-pub(crate) const RING_MIN_MEM: usize = 2 * 1024 * 1024;
 /// Largest backing block: enough for 32768 SQEs plus the CQ ring, matching
 /// Linux `IORING_MAX_ENTRIES`.
 pub(crate) const RING_MAX_MEM: usize = 4 * 1024 * 1024;
@@ -69,6 +67,7 @@ const CQ_HEADER_SIZE: usize = 0x40;
 pub(crate) struct RingPages {
     base: *mut u8,
     base_paddr: PhysAddr,
+    len: usize,
     num_pages: usize,
 }
 
@@ -94,6 +93,13 @@ impl RingPages {
         let va = global_allocator()
             .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::VirtMem)
             .map_err(|_| KError::NoMemory)?;
+        let base_paddr = v2p(VirtAddr::from(va));
+        // Charge the ring to the caller's memory cgroup, like every PageRef
+        // allocation; a raw page allocation would otherwise bypass memcg.
+        if memacct::charge_frame(base_paddr, len, UsageKind::VirtMem).is_err() {
+            global_allocator().dealloc_pages(va, num_pages, UsageKind::VirtMem);
+            return Err(KError::NoMemory);
+        }
         let base = va as *mut u8;
         // SAFETY: `va` is a fresh allocation of `num_pages * PAGE_SIZE_4K`,
         // which the check above proves is at least `len`; the zero-fill stays
@@ -101,7 +107,8 @@ impl RingPages {
         unsafe { ptr::write_bytes(base, 0, len) };
         Ok(Self {
             base,
-            base_paddr: v2p(VirtAddr::from(va)),
+            base_paddr,
+            len,
             num_pages,
         })
     }
@@ -117,6 +124,7 @@ impl RingPages {
 
 impl Drop for RingPages {
     fn drop(&mut self) {
+        memacct::uncharge_frame(self.base_paddr, self.len);
         global_allocator().dealloc_pages(self.base as usize, self.num_pages, UsageKind::VirtMem);
     }
 }
@@ -162,12 +170,10 @@ impl Ring {
         let cqes_off = align_up_4k(cq_head_off + CQ_HEADER_SIZE);
         let sqes_off = align_up_4k(cqes_off + cq_entries as usize * IO_URING_CQE_SIZE);
         let used = sqes_off + entries as usize * IO_URING_SQE_SIZE;
-        let ring_len = if used <= RING_MIN_MEM {
-            RING_MIN_MEM
-        } else {
-            RING_MAX_MEM
-        };
-        if used > ring_len {
+        // Size the block to the layout (rounded to a buddy-order size) instead
+        // of reserving a fixed multi-MiB region for tiny rings.
+        let ring_len = align_up_4k(used).next_power_of_two();
+        if ring_len > RING_MAX_MEM || used > ring_len {
             return Err(KError::InvalidInput);
         }
 
