@@ -1300,10 +1300,11 @@ mirroring the Linux `netlink_autobind` path: the sending process pid becomes the
 local portid and the delivery group is left empty. User-space stacks such as
 `netlink-proto` send `RTM_GETLINK`, `RTM_GETADDR`, and `RTM_GETROUTE` requests
 without an explicit `bind`, so a hard `NotConnected` rejection would break every
-such client. X-Kernel keeps no portid registry, so the kernel cannot detect a
-pid collision; the one-socket-per-process pattern of these clients makes the
-pid a stable and unique portid in practice. A subsequent explicit `bind` keeps
-working because `autobind` leaves an already-bound socket untouched.
+such client. Autobind consults the per-protocol port registry: if the pid is
+already owned it scans the reserved `0x8000_0000..=0xffff_efff` range for a free
+portid, and an explicit bind to a live socket's portid fails with
+`EADDRINUSE`. A subsequent explicit `bind` keeps working because autobind
+leaves an already-bound socket untouched.
 
 `NetlinkSocket::poll` always registers the receive waker when `IoEvents::IN`
 is requested, even when the receive queue already holds a response. Callers

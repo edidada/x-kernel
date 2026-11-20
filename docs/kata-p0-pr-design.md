@@ -130,11 +130,10 @@ init user namespace 的 owner 是 root，初始凭据在其中拥有全部 capab
 
 exec 安全元数据必须区分“文件没有 capability”与“文件带有一个 permitted 为空的
 capability 属性”，后者仍会清除 ambient 并抑制 setuid-root 的权限恢复。因此使用
-`Option` 保留属性是否存在，并单独携带 inode owner：
+`Option` 保留属性是否存在：
 
 ```rust
 pub struct FileSecurity {
-    pub owner: Uid,
     pub setuid: Option<Uid>,
     pub setgid: Option<Gid>,
     pub file_caps: Option<FileCapabilities>,
