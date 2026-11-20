@@ -14,6 +14,8 @@ use super::{ASSIST_BUDGET, BACKGROUND_BUDGET, BACKGROUND_MAX_ROUNDS, PollBudget,
 pub(crate) struct NetworkPoller {
     work: Work<fn()>,
     state: SpinNoIrq<PollState>,
+    #[cfg(unittest)]
+    poll_once: fn(PollBudget) -> super::PollProgress,
 }
 
 struct PollState {
@@ -48,6 +50,8 @@ impl NetworkPoller {
                 is_running: false,
                 has_pending: false,
             }),
+            #[cfg(unittest)]
+            poll_once: super::poll_network_once,
         }
     }
 
@@ -136,7 +140,11 @@ impl NetworkPoller {
     fn run_claimed(&'static self, budget: PollBudget, rounds: usize) {
         let mut has_more = false;
         for _ in 0..rounds {
-            has_more = super::poll_network_once(budget).has_more;
+            #[cfg(unittest)]
+            let progress = (self.poll_once)(budget);
+            #[cfg(not(unittest))]
+            let progress = super::poll_network_once(budget);
+            has_more = progress.has_more;
             if !has_more {
                 break;
             }

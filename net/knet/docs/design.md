@@ -1505,7 +1505,7 @@ wildcard bind addresses retain their listening meaning.
 | 12 | &emsp;**else**: |
 | 13 | &emsp;&emsp;enqueue the complete datagram with the bound interface, or return `WouldBlock` |
 | 14 | &emsp;release Router |
-| 15 | &emsp;network_poller().notify(Tx); network_poller().assist_once() |
+| 15 | &emsp;network_poller().notify_and_assist(Tx), retaining unfinished work for background processing |
 | 16 | **Procedure** `dispatch_budgeted(tx_budget)` |
 | 17 | &emsp;**repeat** up to $B_{\mathrm{tx}}$ times: |
 | 18 | &emsp;&emsp;packet = pop control queue first, otherwise data queue |

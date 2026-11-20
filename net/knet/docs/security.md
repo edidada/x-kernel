@@ -806,7 +806,10 @@ IPv4 reassembly queues publish their earliest deadline through a separate atomic
 
 ### 21. TX and Receive-Window Handoff Conditions
 
-Sockets and Router must publish newly generated TX work through `notify(PollReason::Tx)`.
+Sockets and Router must record newly generated TX demand. UDP uses
+`notify_and_assist(PollReason::Tx)` to attempt a bounded foreground round and
+retain unfinished work for background processing. Other TX producers use
+`notify(PollReason::Tx)`.
 After TCP consumes receive data, it must publish window-update work through `notify(PollReason::RxWindow)` after releasing the socket-set mutex, including when the advertised window remains positive. Peeks and reads that consume no data do not create window-update work.
 
 TCP readiness waiters use socket-local read/write sources and listener accept sources, so unrelated traffic cannot repeatedly drive an empty epoll wait. smoltcp retains only the aggregated source wakers, not the `TcpSocket` owner. Registration precedes the caller's readiness recheck; callbacks only wake poll sources and must not reenter the socket-set mutex. Global RX and timer notifications remain responsible for scheduling protocol progress.
