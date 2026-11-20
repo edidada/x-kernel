@@ -29,6 +29,8 @@ fn builder_with(
         SimpleFile::new(fs.clone(), NodeType::Symlink, || Ok("self/mounts")),
     );
     trace_nodes::root::add_root_entries(&mut root, fs.clone());
+    #[cfg(feature = "net")]
+    crate::net_nodes::root::add_root_entries(&mut root, fs.clone());
     #[cfg(feature = "lock_stat")]
     root.add(
         "lock_stat",
@@ -47,6 +49,13 @@ fn builder_with(
     #[cfg(feature = "sysrq")]
     crate::sysrq_nodes::root::add_root_entries(&mut root, fs.clone());
 
+    root.add("sys", {
+        let mut sys = DirMapping::new();
+        basic_nodes::root::add_sys_entries(&mut sys, fs.clone());
+        #[cfg(feature = "net")]
+        crate::net_nodes::root::add_sys_entries(&mut sys, fs.clone());
+        SimpleDir::new_maker(fs.clone(), Arc::new(sys))
+    });
     root.add(
         "config.gz",
         SimpleFile::new_regular(fs.clone(), || Ok(kbuild_config::CONFIG_GZIP.to_vec())),
