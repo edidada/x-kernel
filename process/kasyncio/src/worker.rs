@@ -18,9 +18,9 @@
 //! Workers participate in process thread membership, so the process's
 //! address space and fd table stay alive for as long as any worker runs.
 //! Retirement happens when any of the following holds; the loop then calls
-//! [`posix_process::do_exit`] so membership, cgroup charge, and — when the
-//! worker is the last member — the process tail are handled by the ordinary
-//! exit path:
+//! [`posix_process::do_exit_worker`] so membership, cgroup charge, and — when
+//! the worker is the last member — the process tail are handled by the ordinary
+//! exit path without publishing a worker status:
 //!
 //! - The context shut down. Operations already dispatched run to their
 //!   natural completion; operations still queued (never dispatched) were
@@ -237,10 +237,12 @@ fn worker_loop(ctx: Arc<AsyncContext>) {
     // `has_only_in_process_workers` conservative for sibling workers.
     let process = kprocess::current_user_thread().process().clone();
     process.detach_in_process_worker();
-    // Exit as a normal thread of the process. `group_exit = false`: the
-    // leader's exit already broadcast SIGKILL to surviving siblings, which is
-    // what unwinds any in-flight operation.
-    posix_process::do_exit(0, false);
+    // Exit as a normal thread of the process without publishing a status: when
+    // the worker is the last member its teardown still runs the process tail,
+    // but the exit status belongs to the ordinary threads. `group_exit =
+    // false`: the leader's exit already broadcast SIGKILL to surviving
+    // siblings, which is what unwinds any in-flight operation.
+    posix_process::do_exit_worker();
 }
 
 /// Spike stand-in for the operation table: every queued operation completes

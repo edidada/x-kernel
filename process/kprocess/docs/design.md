@@ -264,8 +264,10 @@ retains init identity; orphan reparenting reserves an init relation slot.
   when no ordinary thread remains. The attach must follow the worker's thread
   publication and the detach must precede its thread exit, so the transient
   race directions are conservative (an over-counted membership or under-counted
-  worker only delays retirement, never fakes it); `detach` panics on an
-  un-attached detach. The count itself is crate-internal.
+  worker only delays retirement, never fakes it). `has_only_in_process_workers`
+  rejects a snapshot taken across an attach/detach with a worker epoch, and
+  `detach` saturates at zero on an un-attached detach instead of panicking. The
+  count itself is crate-internal.
 - `timer_delivery` registers `ktimer` expiry and attaches typed dequeue receipts;
   a periodic tick coalesces CPU-timer work on the current thread while its
   process has armed timers. User return consumes that request and polls the

@@ -168,9 +168,10 @@ fn last_ordinary_thread_exit_retires_the_worker() {
             .expect("op below queue limit");
         ensure_worker(&child_ctx).expect("worker spawn must succeed");
         wait_for_op_completion(&child_ctx, 1);
-        // Plain thread exit: no group_exit broadcast, is_last_thread
-        // is false while the worker is alive.
-        posix_process::do_exit(0, false);
+        // Plain thread exit with a non-zero status: no group_exit
+        // broadcast, is_last_thread is false while the worker is alive.
+        // The worker's later retirement must not replace this status.
+        posix_process::do_exit(42, false);
     })
     .expect("child entry preparation");
     let mut child = ktask::TaskInner::new_user(
@@ -194,6 +195,11 @@ fn last_ordinary_thread_exit_retires_the_worker() {
     assert!(
         child_process.is_waitable_zombie(),
         "the child must end as a waitable zombie for its parent"
+    );
+    assert_eq!(
+        child_process.exit_code(),
+        42,
+        "the retiring worker must preserve the ordinary thread's exit status"
     );
     assert_eq!(ctx.total_workers(), 0);
 
