@@ -98,7 +98,7 @@ No user pointers, MMIO, DMA, FFI, or device input reach this crate; the
 
 ## Unsafe inventory
 
-This crate has no unsafe blocks, FFI, or inline assembly. The syscall boundary
+The alarm worker has one unsafe freezer integration call, described below. The syscall boundary
 reads the complete user-copied `sigval` as opaque pointer-sized bits;
 `TimerSigValue` and `TimerSignal` carry those bits without accessing the union.
 Architecture time reads come through `khal`/`ktime`.
@@ -188,3 +188,7 @@ interprets RTC differences as confirmed sleep.
 Dequeuing consumes the alarm ticket before calling the owner. Even zero-expiration
 rechecks restore a consumed alarm; queued tickets avoid duplicate rearm on scans.
 The regression uses an explicit rollback sample and does not alter global time.
+
+## Guest suspend safety contracts
+
+The alarm worker uses block_on_freezable. Before Pending it drops ALARM_LIST and holds only listeners and a timer wait. Recovery must not depend on the worker running. After thaw it checks deadlines in their original clock domains.

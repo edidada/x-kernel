@@ -1,7 +1,7 @@
 # kpm — System power management
 
 See the [SMP freeze audit and staged proposal](smp-freeze-proposal.md) for
-multicore preparation work. The platform-suspend entry remains UP-only.
+multicore preparation work. The guest coordinator in `runtime.rs` parks secondary CPUs across platform sleep and device recovery. The independent `suspend_uniprocessor` entry remains UP-only.
 
 ## Ownership
 
@@ -11,7 +11,7 @@ Runtime startup remains in `kruntime`; task checkpoints remain in `ktask`;
 timekeeping and clock-event mechanisms remain in their existing crates.
 Future device PM and wakeup coordination can extend this subsystem without
 making runtime bring-up their owner. Guest and physical-platform backends must
-satisfy the same contract; neither backend is implemented by this extraction.
+satisfy the same contract; the guest coordinator uses the x86 system-sleep backend.
 
 ## Single-CPU PM time transaction
 

@@ -292,3 +292,7 @@ bounded driver readiness contract and IRQ-safe poll operations; it never takes
 the sleepable input mutex or touches user pointers. A false hint suppresses task wakeups, not checks, and false positives
 are allowed. Cancellation or detach may leave one harmless late retry. Timer
 drop must remain outside the callback and the locks it acquires.
+
+## Guest suspend safety contracts
+
+The log receiver uses block_on_freezable with a nonblocking receive future. At Pending, socket and queue guards have been released. Only its buffer and readiness registrations survive the checkpoint. Device recovery must remain independent of this receiver.

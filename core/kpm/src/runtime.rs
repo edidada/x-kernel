@@ -145,7 +145,7 @@ pub fn suspend_guest() -> KResult<()> {
 fn sleep_interval(
     accounting: &mut RtcSleepAccounting<Persistent>,
 ) -> KResult<(ParkedCpus, KResult<()>)> {
-    let mut session = accounting.begin().map_err(|_| KError::Io)?;
+    let session = accounting.begin().map_err(|_| KError::Io)?;
     // SAFETY: prepared platform owns reset-aware per-CPU storage; all task and
     // device producers are excluded until this function joins every callback.
     let mut cpus = unsafe { ParkedCpus::acquire_for_system_sleep(TimeSpan::from_secs(5)) }
@@ -154,6 +154,16 @@ fn sleep_interval(
         "guest suspend: {} remote CPUs acknowledged",
         cpus.remote_cpu_count()
     );
+    let result = sleep_with_parked_cpus(&mut cpus, session);
+    Ok((cpus, result))
+}
+
+// Borrow the guard so every recoverable exit returns it to the coordinator,
+// which resumes devices before releasing the remote CPUs.
+fn sleep_with_parked_cpus(
+    cpus: &mut ParkedCpus,
+    mut session: ktime::RtcSleepSession<'_, Persistent>,
+) -> KResult<()> {
     let critical = NoPreemptIrqSave::new();
     khal::quiesce_nmi();
     let mut events = ktask::timer_suspend::suspend_local_timer().map_err(|_| KError::BadState)?;
@@ -190,6 +200,5 @@ fn sleep_interval(
     // Remote callbacks stay held until time is continuous and accounted for.
     // Device IRQs stay externally masked; device producers are still frozen.
     log::info!("guest resume: platform returned, sleep accounting {settled:?}");
-    let result = entered.and_then(|_| settled.map(|_| ()).map_err(|_| KError::Io));
-    Ok((cpus, result))
+    entered.and_then(|_| settled.map(|_| ()).map_err(|_| KError::Io))
 }

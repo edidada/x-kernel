@@ -161,3 +161,7 @@ guard as evidence that shared clocks or hardware may be stopped violates its
 contract. Serial integration fixtures use a test-only authoritative task snapshot
 for explicit infrastructure exemptions; no production exemption discovery API
 or name-based rule is introduced.
+
+## Guest suspend safety contracts
+
+The guest coordinator pins the caller to the boot CPU and holds exclusive freezer admission across SystemSleepIf::prepare, enter, restore_cpus and finish. The normal queue freezes only after ordinary producers stop. ParkedCpus::acquire_for_system_sleep uses the prepared platform storage. Once acquired, the guard stays owned across timer and clock errors and device recovery. allow_local_scheduling requires restored local clock and controller access with external IRQ delivery still masked. Dropping the guard joins remote callbacks before finish releases platform storage and before producers thaw.

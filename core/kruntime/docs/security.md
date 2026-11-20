@@ -456,3 +456,7 @@ quiescence or memory reclamation safety for dynamic device mappings.
 System PM admission, platform trust and rollback are owned by `kpm`, not the
 runtime startup layer. See `../../kpm/docs/security.md`. Runtime initialization
 still establishes the scheduler, time and IRQ prerequisites required by PM.
+
+## Guest suspend safety contracts
+
+The boot task uses block_on_freezable only after releasing initialization resources. Its permanently pending future owns no locks or device state. The RCU coordinator uses with_pm_infrastructure to remain runnable during preparation. CPU parking excludes it during hardware loss. Recovery must never wait for a grace period or a private RCU lock.
