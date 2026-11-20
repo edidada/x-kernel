@@ -243,7 +243,7 @@ impl KernelLayout {
     ///
     /// # Errors
     /// Returns context, range or permission errors. An error may follow partial
-    /// PTE changes; retain backing. Incomplete TLB invalidation returns `Io`.
+    /// PTE changes; retain backing. TLB completion itself cannot fail.
     pub fn protect(&self, start: memaddr::VirtAddr, size: usize, flags: MappingFlags) -> KResult {
         self.lock_for_update()?
             .protect_kernel_linear(start, size, flags)

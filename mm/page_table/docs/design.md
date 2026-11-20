@@ -49,8 +49,8 @@ Guest tests are mounted from their original source modules with
 `unittest::path_mod_test!` under `cfg(unittest)`: `ut-tests/defs.rs` retains
 `defs::tests_page_table_defs`, and `ut-tests/table64.rs` retains `table64::tests`,
 including its nested `aarch64_drop` module. `ut-tests/owned_mappings.rs` is mounted
-as `table64::tests_owned` and checks automatic failure retention, fallible
-synchronous permission revocation, exact transfer conservation, aliases and
+as `table64::tests_owned` and checks synchronous retirement ordering,
+permission revocation, exact transfer conservation, aliases and
 live-leaf destruction. The five cases in `ut-tests/pte_ownership.rs` mount as
 crate-root `tests_pte_ownership` and exercise the selected architecture's private
 category encoding. Architecture and `smp` gates and serial execution flags
@@ -104,7 +104,7 @@ The following responsibilities belong to other layers:
 
 | Component | Responsibility |
 |-----------|----------------|
-| `defs.rs` | Core traits and types: `PagingFlags`, `PageTableEntry`, `PagingMetaData`, `PagingHandler`, `PageSize`, `PtError`, `PteSnapshot`, `PteReplaceError`, `TlbFlushReceipt`, `TlbFlushError`, and `TlbFlushResult`. |
+| `defs.rs` | Core traits and types: `PagingFlags`, `PageTableEntry`, `PagingMetaData`, `PagingHandler`, `PageSize`, `PtError`, `PteSnapshot`, `PteReplaceError`, `TlbFlushReceipt`. |
 | `table64.rs` | Generic 64-bit multi-level page tables: `PageTable64` for read-only queries and `PageTableMut` for mutations, conditional replacement, and batched TLB invalidation. |
 | `macros.rs` | Traversal macros `walk_page_table!` / `walk_page_table_create!` and PTE helpers `impl_pte_debug!` / `impl_pte_common_ops!`. |
 | `arch/x86_64.rs` | x86_64 PTEs with four levels and SEV C-bit encryption; `X64PagingMetaData`. |
@@ -119,8 +119,7 @@ The following responsibilities belong to other layers:
 ```text
   None ──flush(vaddr)──> Addresses ──flush(beyond threshold)──> Full
 
-  Addresses / Full ──confirmed invalidation────> None
-  Addresses / Full ──unconfirmed invalidation──> Full
+  Addresses / Full ──synchronous invalidation──> None
 ```
 
 `PageTableMut` carries an independent `fresh_map` flag for architectures whose
@@ -144,20 +143,11 @@ under [AArch64 Fresh-Map Recovery Evidence](#aarch64-fresh-map-recovery-evidence
 | `Addresses` | `Full` | Another address would exceed the threshold. |
 | `Addresses` | `None` | Confirmed `finish()` or `Drop` completion. |
 | `Full` | `None` | Confirmed `finish()` or `Drop` completion. |
-| `Addresses` / `Full` | `None` | Detached by `defer_kernel_invalidation` into `DeferredKernelTlbFlush`. |
-| `Addresses` / `Full` | `Full` | Unconfirmed shootdown; retain data holds for retry. |
 
-`PageTableMut::defer_kernel_invalidation` moves `Addresses`/`Full` into a
-`DeferredKernelTlbFlush` for a kernel table so the caller can release the lock
-that protects the table before the remote shootdown. This matters when the
-shootdown waits for acknowledgements: a CPU that needs the same lock must not
-spin with interrupts disabled, or it can never answer the IPI. The method
-refuses user tables (their flushes are residency-scoped), fresh-map fencing,
-and pending managed retirements, which must complete in place. `complete()`
-returns the backend result and retries a failed scoped or partial shootdown once
-as a full-TLB invalidation; callers must not treat the mapping change as
-complete on error. Dropping the handle without completing it still invalidates,
-but at the drop site and without a result.
+`finish` and `Drop` complete the edit guard in place. The owning address space
+must use task-context serialization when completion can require remote IPIs;
+IRQ-safe locks must not span that wait. No detached kernel completion API is
+needed: memspace retains its task mutex through the same completion boundary.
 
 ### PTE Lifecycle
 
@@ -260,15 +250,11 @@ verify subtree skipping without timing thresholds.
    `M::fence_fresh_map()` instead, so the entry writes reach other translation
    table walkers without the cost of an invalidation broadcast. It then
    returns a `TlbFlushReceipt`.
-5. Software shootdown hooks return a typed completion result internally. Only
-   confirmed invalidation clears the summary and releases gathered data holds.
-   An error keeps the holds and a full-invalidation retry pending. `Drop` retries
-   once; if completion remains unconfirmed, it leaves the holds pinned. Local
-   hardware flush hooks remain synchronous `()` operations.
-6. `finish()` advances this automatic retirement and returns diagnostic batching
-   information; managed object owners need no completion check. `try_finish()`
-   returns `Result<TlbFlushReceipt, TlbFlushError>` when a caller needs synchronous
-   revocation. Its success establishes completion; its error must be handled.
+5. Every hardware/software flush hook returns `()` only after its entire
+   scope completes. `finish()` clears the summary and releases gathered data
+   holds after that boundary. Guard `Drop` uses the same synchronous path.
+6. `finish()` returns a `TlbFlushReceipt` for batching diagnostics. Permission
+   revocation and raw backing release use the same completion boundary.
 
 AArch64 invalidation helpers in `karch` issue `dsb ishst` **before** TLBI to
 publish the PTE changes, followed by a completion DSB and local ISB. A DSB after
@@ -285,28 +271,19 @@ when no invalidation is pending. This does not cancel an earlier unmap in the
 same batch: its queued invalidation is still completed, including the
 pre-TLBI publication barrier.
 
-`TlbFlushReceipt::had_pending()` describes work pending at that call, not proof
-of completion. A fresh-map fence-only boundary has no invalidation pending.
-Automatic callers may drop their own object references: the guard independently
-keeps mapping references until confirmed retirement. Raw release and permission
-revocation that must take effect before return use `try_finish()` and may proceed
-only on success. `NotReady`, `Deferred`, `TimedOut` and `UnsupportedScope` explain
-why that synchronous boundary was not reached. Unsupported SMP metadata defaults
-must not turn local-only invalidation into a successful remote completion.
-A failed hook may not issue a publication barrier, so fresh entries receive their
-own fence on that path before the guard retains the full retry.
+`TlbFlushReceipt::had_pending()` describes whether invalidation was pending
+at this call; a fresh-map fence-only boundary reports false. Every return from
+`finish()` confirms the required scope, including earlier bounded drains.
+SMP metadata providers must implement full-CPU invalidation; the narrower
+scope defaults conservatively delegate to it rather than pretending local work
+covers remote CPUs.
 
-Automatic retention applies only to holds transferred through `map`,
-`map_sized` or `replace_if_same`. A caller retaining a `PageRef` while
-installing its physical address through `map_raw` has not transferred a mapping
-hold. Existing PA-only callers are mechanically renamed to `map_raw`,
-`map_region_raw`, `remap_raw` and `replace_if_same_raw`; this changes no
-backing ownership. Production backing allocation, fields and destructors in
-anon/pagecache/filemap/memspace are explicitly deferred. Existing raw release
-paths that use `finish()` can still release backing after an unconfirmed
-software shootdown. They require a separate migration to transferred mapping
-holds, or to `try_finish()` with backing retained on error. Propagating an error
-while dropping local owners does not establish a safe release boundary.
+Managed retention applies to holds transferred through `map`, `map_sized` or
+`replace_if_same`. Raw installs transfer no mapping hold: their owners keep
+backing alive until `finish()` returns, and serialize subsequent reuse.
+Production allocation/field/destructor migration to managed holds remains
+separate work. The synchronous completion contract also protects existing raw
+paths that explicitly order release after `finish()`.
 
 ### PTE-owned data mappings and retirement
 
@@ -393,24 +370,15 @@ mapping hold
   -> capture old leaf, clear/replace PTE, record invalidation
   -> from_raw(old PA, leaf bytes), move recovered hold into retirement storage
   -> finish requested local/broadcast invalidation
-       complete   -> drop old mapping hold
-       incomplete -> retain hold, retry a full invalidation
+  -> drop old mapping hold only after synchronous completion
 ```
 
 The invalidation summary and retirement capacity remain independent. Retirement
 keeps 16 holds inline, then fallibly reserves spill storage up to a total of
-256. Full storage or spill OOM attempts an intermediate batch completion while
-retaining the just-recovered hold through that attempt. Small retirements need
-no spill allocation; large unmaps do not invalidate once per retired hold. An
-explicit `finish()` receipt excludes already completed intermediate batches.
-
-Only confirmed invalidation releases retired holds. An unconfirmed attempt
-retains holds and a `Full` retry. If spill failure prevents storing a hold and
-completion fails, that hold stays pinned; guard Drop also pins any holds whose
-completion remains unconfirmed. This prevents reuse under stale translations at
-the cost of unreclaimed pages. There is no asynchronous quarantine reaper.
-Retained lifetime does not prove permission revocation; synchronous operations
-still require successful `try_finish()`.
+256. Full storage or spill OOM synchronously completes the current batch while
+retaining the incoming hold on the stack. Only after invalidation returns are
+those holds released; there is no error-based pinning or asynchronous reaper.
+Permission revocation and raw release use the same `finish()` boundary.
 
 `copy_from()` borrows source table storage and its PTE-owned transfers without
 duplicating holds. Borrowers cannot mutate shared subtrees; the source must
@@ -422,11 +390,11 @@ completed. A conflict in a later root entry cannot leave an earlier subtree
 already destroyed. Existing borrowed roots do not own another transfer.
 
 Table destruction requires an inactive address space, no future hardware use,
-completed required retirement and no remaining borrowers. After the existing
-AArch64 final user-ASID completion gate succeeds, destruction walks every owned
+completed required retirement and no remaining borrowers. After the final
+AArch64 user-ASID invalidation completes, destruction walks every owned
 base/huge managed leaf once, recovers its exact transfer, and drops it before
-freeing its containing table frame. Borrowed root entries are skipped. A failed
-final ASID completion preserves table frames and all unrecovered transfers.
+freeing its containing table frame. Borrowed root entries are skipped. Final
+ASID invalidation returns only after the required architectural completion.
 
 Execution contexts inherit existing table allocation and synchronous shootdown
 constraints and require the provider's reference protocol to be initialized.
@@ -448,7 +416,7 @@ PTE-owned transfer protocol directly:
 | `owned_aliases_retire_their_own_transfers_independently` | Two huge-leaf aliases carry independent exact transfers; retiring one leaves the other live. |
 | `raw_alias_does_not_acquire_or_release_a_managed_transfer` | A raw alias remains unmanaged and cannot consume the neighboring managed leaf's hold. |
 | `inactive_tree_destruction_recovers_live_base_and_huge_leaf_transfers` | Inactive-tree Drop recovers each live 4 KiB, 2 MiB and 1 GiB transfer once. |
-| `empty_replacement_releases_unpublished_input_but_retains_the_old_mapping_on_failure` | Empty replacement releases only the never-published input before completion; a failed flush keeps the old mapping hold. |
+| `empty_replacement_releases_unpublished_input_and_retires_the_old_mapping_after_flush` | Empty replacement releases only the unpublished input before completion; finish retires the old mapping hold. |
 | `three_level_tree_destruction_recovers_a_root_huge_leaf` | A three-level root can itself contain a live 1 GiB owned leaf; teardown recovers its exact range. |
 
 The five `tests_pte_ownership` cases are
@@ -546,10 +514,10 @@ address ranges and nonempty READ/WRITE/EXECUTE access. Every ordinary failure is
 prepublication. A stale comparison changes neither the source nor the caller's
 target. On success a fresh raw descriptor replaces the managed leaf, then its old
 hold enters normal retirement; the caller commits and retains its raw target's
-object ownership. Automatic drain failure can retain the old hold but cannot
-turn successful publication into an error that would authorize freeing the raw
-target as an unused candidate. Existing `replace_if_same_raw` keeps its original
-restriction. Completion remains the existing `finish`/`try_finish` contract.
+object ownership. Automatic drains complete invalidation before releasing the
+old hold; no error follows successful publication that could authorize freeing
+the committed raw target as an unused candidate. Existing `replace_if_same_raw`
+keeps its original restriction. `finish` is the synchronous completion boundary.
 
 The page table layer defines conditional PTE commit and mapping-hold retirement.
 Higher layers retain object-state commit/abort and retry policy for COW,
@@ -601,9 +569,8 @@ or `Drop`:
 
 Automatic managed retirement owns the mapping holds through pending invalidation;
 upper layers release only their own references. Paths requiring synchronous
-permission revocation or releasing raw backing use `try_finish()` and handle an
-error. `Drop` remains an automatic retirement fallback, not a success report for
-synchronous revocation.
+permission revocation or releasing raw backing explicitly call `finish()`.
+Guard Drop uses the same synchronous completion path.
 
 ### Conditional Replacement Instead of Reusing remap_raw
 
@@ -671,9 +638,8 @@ traversal adapt to either layout.
     reads the associated ASID before freeing the first table frame, executes
     `karch::dsb_ishst()`, and synchronously completes invalidation of the entire ASID,
     including non-leaf translation caches. Per-VA leaf invalidation cannot
-    replace this reclamation boundary. If the final ASID hook reports failure,
-    table-frame transfers and all unrecovered PTE-owned transfers remain pinned
-    instead of being returned to inventory.
+    replace this reclamation boundary. The final hook returns only after ASID
+    invalidation completes, before frame or data transfers are released.
   - The provider context must remain alive until page table destruction
     completes. `MmSpace` declares `pgtbl` before `user_asid_context` to preserve
     this lifetime through field destruction order.
@@ -685,12 +651,10 @@ traversal adapt to either layout.
     Raw leaves never invoke reference recovery. Child tables are freed
     recursively before their parent. Both read-only and mutable descent require
     `is_table()`, so non-present data entries are never treated as child tables.
-- **`PageTableMut::finish`** advances automatic retirement and reports only
-  whether work was pending; failed completion retains mapping holds internally.
-- **`PageTableMut::try_finish`** provides a synchronous success/error boundary
-  for revocation and raw release, without changing managed ownership on failure.
-- **`PageTableMut::drop`** advances retirement through the same private boundary;
-  if it still cannot confirm completion, the remaining data holds stay pinned.
+- **`PageTableMut::finish`** completes pending invalidation and releases retired
+  mapping holds. Its receipt reports pending batching work, not an error status.
+- **`PageTableMut::drop`** performs the same synchronous finalization if omitted.
+
 
 
 ## Storage ownership supplied by the handler
@@ -714,7 +678,7 @@ data-mapping transfers; reference counts do not perform TLB invalidation.
 
 `table64::tests_owned` checks managed alias ownership, clone/occupied/alignment
 rejection, table-allocation failure after a prepared prefix, raw-leaf duplication,
-managed-to-raw match/mismatch validation, and old-hold retention on unconfirmed
+managed-to-raw match/mismatch validation, and old-hold retention until synchronous
 completion. HAL `paging_page_refs` exercises independent aliases and external
 replacement with real PageRef inventory accounting. These roots are never active;
 the tests establish transfer/release contracts, not successful hardware shootdown.

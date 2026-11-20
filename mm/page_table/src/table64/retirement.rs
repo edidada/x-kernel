@@ -64,17 +64,6 @@ impl<T> RetiredReferences<T> {
         Ok(())
     }
 
-    pub(super) fn forget_holds(&mut self) {
-        // An unconfirmed shootdown cannot authorize reuse. Keep lifetime counts
-        // pinned rather than running their destructors after the guard ends.
-        for reference in self.local.drain(..) {
-            core::mem::forget(reference);
-        }
-        for reference in self.overflow.drain(..) {
-            core::mem::forget(reference);
-        }
-    }
-
     pub(super) fn clear(&mut self) {
         self.local.clear();
         self.overflow.clear();

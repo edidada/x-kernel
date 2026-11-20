@@ -206,8 +206,12 @@ or user gates. The huge-leaf lifetime case runs serially and compares allocation
 usage before unmap and after synchronous retirement, with no independent owner
 masking early release. `inactive_table_destruction_releases_its_live_data_hold`
 additionally leaves a real managed data leaf installed in a never-activated
-tree and checks that Drop restores the allocator usage baseline. All four
-supported platform unittest builds select them.
+tree and checks that Drop restores the allocator usage baseline. Page-table
+fixtures pin their CPU with `NoPreempt` while leaving IRQs enabled across
+`finish()` and edit-guard Drop so software shootdown can receive IPIs. Only the
+handler-only raw-reference round trip masks IRQs for its exact PCP reuse check;
+it never edits or flushes a table. All four supported platform unittest builds
+select them.
 CPU identity tests require initialized CPU state. Independent epoch fixtures do
 not freeze the active kernel's global clock. Explicit cfg gates outside the
 mounts prevent non-UT builds from resolving the runtime test macro; they do not
@@ -293,9 +297,8 @@ do not own their source table pages and do not restore or release those holds.
 
 The table owner must end hardware use and complete required translation
 retirement before destroying owned storage. The existing AArch64 user-ASID
-invalidation path in `PageTable64::drop` remains the final reclamation gate:
-failed completion preserves table frames and all unrecovered managed data
-transfers. Reference counting retains storage; it does not replace address-space
+invalidation path in `PageTable64::drop` synchronously completes before any
+table frame or remaining managed data transfer is released. Reference counting retains storage; it does not replace address-space
 exit, remote-CPU coordination or TLB shootdown. Managed data leaves use the
 separate provider below.
 
@@ -351,11 +354,11 @@ it first captures the old leaf, then records invalidation and restores the old
 managed hold into bounded retirement storage. Recovery acquires no new hold.
 Only confirmed completion releases it, with full invalidation for huge leaves.
 Retirement still keeps 16 holds inline and may fallibly spill to at most 256;
-spill OOM or a full batch attempts an intermediate drain while retaining the
-recovered hold. Unconfirmed completion keeps holds and a full retry; unresolved
-guard destruction or an unstorable hold stays pinned. There is no asynchronous
-reaper. Synchronous revocation still uses `try_finish()` and handles its typed
-completion error; retained lifetime does not establish revoked permissions.
+spill OOM or a full batch synchronously drains while retaining the recovered
+hold. `finish()` and guard Drop complete the requested invalidation before
+releasing holds; no incomplete shootdown can return to authorize reuse.
+Software transport retries internally and keeps waiting if a target remains stalled.
+Permission revocation uses the same synchronous boundary.
 
 Inactive-tree destruction recovers every owned base/huge managed leaf exactly
 once before descriptor-frame release, skipping borrowed roots and honoring the
@@ -371,10 +374,10 @@ holds with map_existing. Anonymous COW targets retain their existing external
 raw ownership; anonymous, VMM and device migration remain separate work. A raw
 install still transfers no mapping hold. Raw replacement cannot change a managed leaf's normalized PA;
 same-PA updates preserve category, and permission clearing retires its old hold.
-Existing raw release paths using `finish()` can still release backing after an
-unconfirmed shootdown. The adapter does not make those paths safe: they need a
-separate ownership transfer or retained backing on `try_finish()` error. The
-provider grants no content-access or device-completion authority.
+Raw release paths keep backing alive until synchronous `finish()` returns.
+This completion guarantee is independent of whether the backing uses managed
+PTE transfers. The provider grants no content-access or device-completion
+authority.
 
 The PageRef regression cases retain real allocator inventory/reuse and
 exact/compound lifetime checks, using `map`, `map_sized` and

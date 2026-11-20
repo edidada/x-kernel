@@ -233,9 +233,12 @@ There are two core state planes here:
 
 ### TLB Shootdown Constraints
 
-- TLB shootdown depends on all APs having started; IPIs are only actually sent after `mark_all_cpus_started()`.
-- `flush_remote()` disables preemption for the lifetime of the published request slot, preventing
-  another task on the same CPU from reusing the same slot.
+- Remote TLB shootdown starts after all CPU interrupt services are ready.
+  Shared kernel mappings stay frozen throughout AP startup; user processes
+  start only after remote completion is available.
+- Runtime `flush_remote()` requires IRQs enabled and preserves that state
+  while disabling preemption through completion. Hardirq, active softirq and
+  NMI handlers cannot initiate shootdown.
 - The target set for user page-table shootdown is provided by the mm-owned residency maintained by the scheduling path;
   `flush_remote()` only consumes a snapshot and does not rebuild or reset the residency after the flush finishes.
 
@@ -260,17 +263,18 @@ Each initiating CPU owns one request slot, with the following lifecycle:
 
 ```text
 inactive
-   -> try_activate()
+   -> activate()
    -> clear_targets / mark_target
    -> publish(request_seq, vaddr/flush_all)
    -> bump the target CPU pending epoch
    -> send IPI
-   -> wait for per-target ack (poll `handle_shootdown` while waiting, so it can ack the peer even with IRQs disabled)
+   -> wait for per-target ack with IRQs enabled for incoming IPI delivery
    -> deactivate()
 ```
 
-If the same CPU enters `flush_remote()` again while the slot is active, the slot is not immediately reentered or reused;
-instead `needs_retry_full_flush` is set, and the outer caller issues one global retry after the current request finishes.
+An outgoing request slot is not reentrant. Preemption exclusion prevents task
+reuse; runtime assertions reject IRQ-off entry, interrupt callbacks and recursive
+initiation. Inbound acknowledgement does not acquire an outgoing slot.
 
 ## Algorithm Flow
 
@@ -291,23 +295,27 @@ instead `needs_retry_full_flush` is set, and the outer caller issues one global 
 
 ### `ipi_handler`
 
-1. With the `smp` feature, call `stop::handle_stop_request()` and then `tlb::handle_shootdown()`; then call `notification::handle_pending()` for fixed notifications.
-2. Then loop to consume the ordinary IPI callbacks in this CPU's queue.
+1. Process stop requests, TLB invalidations and enabled fixed notifications.
+2. Dispatch generic callbacks from the initialized local IPI queue.
 
 This order is deliberate: TLB shootdown is a page-table consistency protocol and has higher priority than ordinary cross-CPU callbacks.
 
 ### `tlb::flush_remote`
 
-1. Obtain the current CPU's active request slot and disable preemption.
-2. Generate, from the target `KCpuMask`, a target array that excludes the current CPU.
+1. Before the CPU-service rendezvous, complete locally: shared mappings are
+   frozen and user processes have not started.
+2. Require task context with IRQs enabled, disable preemption, acquire the
+   exclusive request slot and complete local invalidation. Exclude the
+   initiator from the requested remote targets.
 3. Allocate a new `request_seq`.
-4. Mark the target CPUs and publish `(request_seq, vaddr | flush_all)`.
-5. Bump the `pending epoch` for each target CPU.
-6. Send the IPI.
-7. Wait for each target CPU to advance `acked_seq_by_cpu[target]` to that `request_seq`.
-   The wait loop polls `handle_shootdown()`: the page-table path often reaches
-   `flush_remote` with IRQs disabled, and if it only waited for the IPI handler, two CPUs waiting on each other could never ack.
-8. Release the active slot; if a nested request from the same CPU was detected in the meantime, issue a full retry flush.
+4. Publish the selected CPUs and `(request_seq, vaddr | flush_all)`.
+5. Increment each selected CPU's pending epoch, then notify every target.
+6. Wait for each target's exact request acknowledgement with IRQs enabled,
+   so the normal IPI handler can acknowledge simultaneous requests.
+7. Resend notifications every second, warn after one second and report sustained
+   stalls every ten seconds. Continue waiting without a timeout-to-success or
+   fixed panic deadline; only an acknowledgement authorizes return.
+8. Release the active slot and restore the caller's preemption state.
 
 ### `tlb::handle_shootdown`
 
@@ -517,27 +525,25 @@ services must not be dismantled using their own callback transport.
   per-CPU queues and atomic state.
 
 
-## Shootdown completion status for managed data retirement
+## Shootdown completion boundary
 
-The `TlbFlushIf` provider returns `TlbFlushResult` at the internal shootdown /
-retirement boundary. `Ok(())` confirms every requested remote target's exact
-published request, including any required full retry. Local hardware invalidation
-remains synchronous and returns `()`; the architecture metadata hook performs it
-before requesting remote completion.
+`TlbFlushIf` returns only after local invalidation and every selected remote ACK.
+Runtime callers require task context with IRQs enabled; IRQ-off entry,
+hardirq/softirq/NMI and same-CPU reentry are rejected. The initiator disables
+preemption to retain its outgoing slot but leaves IRQs enabled throughout the
+wait. Incoming requests are acknowledged by the normal IPI handler. Other tasks
+on the initiating CPU cannot run until completion: an IRQ-off target must not
+wait for those tasks or locks retained by the initiator. Artificial test pauses
+that require a remote task to release them run serially, isolated from parallel
+mapping tests; production critical sections must finish independently.
 
-Before `mark_all_cpus_started`, APs may already cache kernel translations but
-cannot all acknowledge notifications. A request with a remote target therefore
-returns `NotReady`, not successful completion. A scope with no remote target
-needs no IPI and succeeds after the architecture's local invalidation.
+Remote requests are enabled by `mark_all_cpus_started` after the CPU-service
+rendezvous, before runtime mapping admission and user-process startup. Before
+AP startup only the boot CPU uses the kernel root. Shared kernel mappings stay
+frozen during AP startup, and each AP flushes locally when installing that root.
+Consequently bootstrap completion is local and boot waits need no TLB polling.
+CPU hot-unplug needs a separate protocol.
 
-Same-CPU nesting marks the outer request for a full retry and returns `Deferred`;
-a future outer retry is not present completion proof. The bounded give-up path
-logs and returns `TimedOut`. Request publication, resend and acknowledgement
-ordering are unchanged. The page-table layer owns failed batches and retains or
-pins managed holds; managed object owners do not consume per-flush booleans.
-Synchronous revocation uses `PageTableMut::try_finish` and handles an error rather
-than claiming that stale access was revoked. Raw release still needs such a
-confirmed boundary until its owners are migrated.
-
-Tests cover the closed boot gate with local-only and remote scopes, nested slot
-ownership and empty remote masks without timing assertions or online-CPU mutation.
+Notifications are resent every second with periodic stall diagnostics. A missing
+required ACK keeps the initiator waiting; no timeout success or fixed panic
+policy releases backing. Every target has its IPI queue and interrupt services ready.

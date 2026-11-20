@@ -30,7 +30,7 @@ use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr};
 
 use crate::defs::{
     PageSize, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData, PtError, PtResult,
-    PteReplaceError, PteSnapshot, TlbFlushReceipt, TlbFlushResult,
+    PteReplaceError, PteSnapshot, TlbFlushReceipt,
 };
 
 const ENTRY_COUNT: usize = 512;
@@ -286,8 +286,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
     ///
     /// The returned [`PageTableMut`] borrows `&mut self`, ensuring exclusive
     /// access. All mutating operations on the page table must go through this
-    /// type. Automatic retirement advances at finish, Drop and bounded drains;
-    /// try_finish provides an explicit synchronous completion boundary.
+    /// type. Retirement completes synchronously at `finish` and `Drop`.
     pub fn modify(&mut self) -> PageTableMut<'_, M, PTE, H> {
         PageTableMut::new(self)
     }
@@ -404,12 +403,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
             // Leaf invalidations cannot retire cached intermediate table
             // descriptors before their physical frames are reused.
             karch::dsb_ishst();
-            if M::flush_tlb_process_asid(None, asid).is_err() {
-                // A failed final invalidation cannot authorize reuse of table
-                // frames or mapped data. Preserve all raw frame transfers too.
-                // The unrecovered leaf transfers remain pinned with the tree.
-                return;
-            }
+            M::flush_tlb_process_asid(None, asid);
         }
         let root = self.table_of(self.root_paddr);
         #[expect(
@@ -444,74 +438,6 @@ enum ToFlush<M: PagingMetaData> {
 impl<M: PagingMetaData> ToFlush<M> {
     const fn has_pending(&self) -> bool {
         !matches!(self, Self::None)
-    }
-}
-
-/// Kernel-mapping invalidation detached from a [`PageTableMut`] guard.
-///
-/// The page-table writes are already published when this value is produced, so
-/// the caller may release the lock that protects the table and then call
-/// [`complete`](Self::complete). That ordering matters when the invalidation
-/// waits for remote CPUs: a CPU that needs the same lock must not be spinning
-/// with interrupts disabled, or it can never acknowledge the shootdown.
-///
-/// Dropping the value without completing still performs the invalidation, but
-/// it then runs at the drop site, which may still hold the lock, and its result
-/// is not reported. Callers that must observe completion use
-/// [`complete`](Self::complete).
-pub struct DeferredKernelTlbFlush {
-    scope: Option<DeferredKernelTlbFlushScope>,
-    flush_all_cpus: fn(Option<usize>) -> TlbFlushResult,
-}
-
-enum DeferredKernelTlbFlushScope {
-    Full,
-    Addresses(alloc::vec::Vec<usize>),
-}
-
-impl DeferredKernelTlbFlush {
-    /// Performs the detached invalidation and reports whether every relevant
-    /// CPU confirmed it.
-    ///
-    /// A failed scoped or partial shootdown is retried once as a full-TLB
-    /// invalidation, mirroring the guard's `ToFlush::Full` retry. The caller
-    /// must not treat the mapping change as complete when this returns an
-    /// error.
-    pub fn complete(mut self) -> TlbFlushResult {
-        self.invalidate()
-    }
-
-    fn invalidate(&mut self) -> TlbFlushResult {
-        let Some(scope) = self.scope.take() else {
-            return Ok(());
-        };
-        let result = match scope {
-            DeferredKernelTlbFlushScope::Full => (self.flush_all_cpus)(None),
-            DeferredKernelTlbFlushScope::Addresses(addresses) => {
-                let mut result = Ok(());
-                for address in addresses {
-                    let current = (self.flush_all_cpus)(Some(address));
-                    if current.is_err() {
-                        result = current;
-                    }
-                }
-                result
-            }
-        };
-        if result.is_ok() {
-            return Ok(());
-        }
-        // A partial or scoped failure cannot authorize reuse; retry the whole
-        // TLB once, as the guard would retain a full-scope retry.
-        (self.flush_all_cpus)(None)
-    }
-}
-
-impl Drop for DeferredKernelTlbFlush {
-    fn drop(&mut self) {
-        // Best effort: a drop site cannot report failure. Callers that need
-        // the result call `complete`.
-        let _ = self.invalidate();
     }
 }
 
@@ -585,20 +511,15 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         match self.retired_mapping_refs.try_push(reference) {
             Ok(()) => {
                 if self.retired_mapping_refs.is_full() {
-                    let _ = self.flush_pending();
+                    self.flush_pending();
                 }
             }
             Err(reference) => {
                 // The PTE change is already in the summary. Keep this hold
                 // live through completion, then release it with this batch;
                 // carrying it into the next batch would skew the boundaries.
-                if self.flush_pending().is_ok() {
-                    drop(reference);
-                } else {
-                    // No spill capacity and no confirmed retirement: retaining
-                    // this hold permanently is safer than recycling its page.
-                    core::mem::forget(reference);
-                }
+                self.flush_pending();
+                drop(reference);
             }
         }
     }
@@ -719,10 +640,11 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// The target entry must be unused; mapping over an existing entry returns
     /// [`PtError::AlreadyMapped`].
     ///
-    /// This installs no mapping hold. The backing owner must keep the entire
-    /// range live through removal and confirmed invalidation; `finish()` alone
-    /// is not a release proof. Use [`map`](Self::map) or
-    /// [`map_sized`](Self::map_sized) to transfer that responsibility here.
+    /// This installs no mapping hold. The backing owner keeps the entire range
+    /// live while mapped and until `finish()` completes the matching removal.
+    /// Finishing installation does not authorize releasing still-mapped backing.
+    /// Use [`map`](Self::map) or [`map_sized`](Self::map_sized) to transfer the
+    /// mapping's lifetime hold here.
     ///
     /// # Errors
     ///
@@ -1096,9 +1018,9 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     ///
     /// Unlike replace_if_same_raw, this explicitly ends the old managed mapping
     /// while transferring no lifetime hold for the new target. The old hold is
-    /// retired through the existing completion/retention protocol. Success is a
-    /// committed replacement even if an automatic retirement drain is unconfirmed;
-    /// no ordinary error is returned after target publication.
+    /// retired through synchronous invalidation. Success is a committed
+    /// replacement; automatic drains complete before releasing the old hold.
+    /// No ordinary error is returned after target publication.
     ///
     /// # Safety
     /// The caller must own the aligned target allocation for the entire leaf
@@ -1515,87 +1437,31 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         }
     }
 
-    /// Advances automatic retirement for the pending page-table changes.
+    /// Completes retirement for the pending page-table changes.
     ///
-    /// Managed holds are released only after confirmed invalidation. If the
-    /// backend cannot complete, the guard retains those holds and a full retry.
-    /// The receipt describes pending work, not completion; callers releasing
-    /// their own managed owners do not have to inspect a completion flag.
-    ///
-    /// Automatic retention covers only holds transferred through `map`,
-    /// `map_sized` or `replace_if_same`. Keeping a `PageRef` beside a
-    /// raw mapping does not register a mapping hold with this guard.
-    ///
-    /// Use try_finish when permission revocation, raw backing release or another
-    /// synchronous operation must complete before the caller proceeds. Its error
-    /// requires the caller to retain raw backing and withhold completion. Drop
-    /// and bounded retirement drains also advance automatic retirement.
+    /// This is a synchronous boundary. Retired mapping holds are released only
+    /// after the required TLB invalidation has completed. Raw backing owners
+    /// may release removed backing after this method returns.
+    /// The returned receipt reports whether this boundary had pending work.
     pub fn finish(&mut self) -> TlbFlushReceipt {
         let receipt = TlbFlushReceipt::new(self.flush.has_pending());
-        // The guard owns the retry and all retained holds on error. Automatic
-        // callers do not consume this internal completion result.
-        let _ = self.flush_pending();
+        self.flush_pending();
         receipt
     }
 
-    /// Completes pending invalidation before allowing a synchronous operation
-    /// to proceed. Success is a completion boundary, including automatic drains
-    /// already performed by this guard; failure retains a full retry and all
-    /// managed holds still awaiting retirement.
-    ///
-    /// # Errors
-    /// Returns the backend's completion error when remote services are not
-    /// ready, a nested request is deferred, a target times out, or the provider
-    /// cannot establish the requested scope. The caller must not claim that
-    /// permissions were revoked or release raw backing on error.
-    pub fn try_finish(&mut self) -> Result<TlbFlushReceipt, crate::TlbFlushError> {
-        let receipt = TlbFlushReceipt::new(self.flush.has_pending());
-        self.flush_pending()?;
-        Ok(receipt)
-    }
-
-    /// Detaches the pending invalidation of a kernel page-table change.
-    ///
-    /// The PTE writes are already visible; the caller must drop this guard and
-    /// release the lock that protects the table before completing the returned
-    /// handle. That lets CPUs competing for the same lock answer the shootdown
-    /// IPI instead of spinning with interrupts disabled.
-    ///
-    /// Returns `None` when nothing is pending, or when the pending work cannot
-    /// be detached safely: user tables use residency-scoped flushes, fresh
-    /// mappings still need their publication fence, and managed retirements
-    /// must stay with the guard until their invalidation completes.
-    #[must_use = "the caller must complete the invalidation after unlocking"]
-    pub fn defer_kernel_invalidation(&mut self) -> Option<DeferredKernelTlbFlush> {
-        if !self.inner.is_kernel || self.fresh_map || !self.retired_mapping_refs.is_empty() {
-            return None;
-        }
-        let scope = match core::mem::replace(&mut self.flush, ToFlush::None) {
-            ToFlush::None => return None,
-            ToFlush::Full => DeferredKernelTlbFlushScope::Full,
-            ToFlush::Addresses(addresses) => DeferredKernelTlbFlushScope::Addresses(
-                addresses.iter().map(|address| (*address).into()).collect(),
-            ),
-        };
-        Some(DeferredKernelTlbFlush {
-            scope: Some(scope),
-            flush_all_cpus: |vaddr| {
-                let vaddr = vaddr.map(M::VirtAddr::from);
-                M::flush_tlb_all_cpus(vaddr)
-            },
-        })
-    }
-
     #[cfg(not(docsrs))]
-    fn invalidate_pending(&self) -> TlbFlushResult {
+    fn invalidate_pending(&self) {
         if self.inner.is_kernel {
-            return match &self.flush {
-                ToFlush::None => Ok(()),
-                ToFlush::Addresses(addrs) => addrs
-                    .iter()
-                    .try_for_each(|vaddr| M::flush_tlb_all_cpus(Some(*vaddr))),
+            match &self.flush {
+                ToFlush::None => {}
+                ToFlush::Addresses(addrs) => {
+                    for vaddr in addrs {
+                        M::flush_tlb_all_cpus(Some(*vaddr));
+                    }
+                }
                 ToFlush::Full => M::flush_tlb_all_cpus(None),
-            };
+            }
+            return;
         }
         #[cfg(target_arch = "aarch64")]
         let asid = self.current_user_asid();
@@ -1604,47 +1470,40 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
         let invalidate = |vaddr| {
             #[cfg(target_arch = "aarch64")]
             {
-                M::flush_tlb_process_asid(vaddr, asid)
+                M::flush_tlb_process_asid(vaddr, asid);
             }
             #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
             {
-                M::flush_tlb_process_mask(vaddr, target_mask)
+                M::flush_tlb_process_mask(vaddr, target_mask);
             }
             #[cfg(not(any(target_arch = "aarch64", feature = "smp")))]
             {
-                M::flush_tlb_process(vaddr)
+                M::flush_tlb_process(vaddr);
             }
         };
         match &self.flush {
-            ToFlush::None => Ok(()),
+            ToFlush::None => {}
             ToFlush::Addresses(addrs) => {
-                addrs.iter().try_for_each(|vaddr| invalidate(Some(*vaddr)))
+                for vaddr in addrs {
+                    invalidate(Some(*vaddr));
+                }
             }
             ToFlush::Full => invalidate(None),
         }
     }
 
-    fn flush_pending(&mut self) -> TlbFlushResult {
+    #[cfg(docsrs)]
+    fn invalidate_pending(&self) {}
+
+    fn flush_pending(&mut self) {
         let had_pending = self.flush.has_pending();
-        #[cfg(not(docsrs))]
-        let completion = self.invalidate_pending();
-        #[cfg(docsrs)]
-        let completion: TlbFlushResult = Ok(());
-        // A successful invalidation supplies the publication barrier. A failed
-        // hook may not have issued one, so publish fresh entries independently.
-        if self.fresh_map && (!had_pending || completion.is_err()) {
+        self.invalidate_pending();
+        if self.fresh_map && !had_pending {
             M::fence_fresh_map();
         }
         self.fresh_map = false;
-        if completion.is_ok() {
-            self.flush = ToFlush::None;
-            self.retired_mapping_refs.clear();
-        } else {
-            // A prefix of addresses or CPUs may have completed. Retrying the
-            // full scope is required before any remaining hold can end.
-            self.flush = ToFlush::Full;
-        }
-        completion
+        self.flush = ToFlush::None;
+        self.retired_mapping_refs.clear();
     }
 }
 
@@ -1652,9 +1511,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop
     for PageTableMut<'_, M, PTE, H>
 {
     fn drop(&mut self) {
-        if self.flush_pending().is_err() {
-            self.retired_mapping_refs.forget_holds();
-        }
+        self.flush_pending();
     }
 }
 

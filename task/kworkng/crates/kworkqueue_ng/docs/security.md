@@ -282,6 +282,10 @@ tests additionally cover actual parking, callback completion, withdrawal preserv
 physical membership, idle/closed/context handling and independent disable ownership.
 A remote-CPU test holds a per-object IRQ tail after Work publication to verify
 capture retries before physical delivery exits, then exercises the actual wait.
+This IRQ-tail probe and the remote admission-barrier pause run as serial tests:
+parallel mapping tests can pin their controller CPU in synchronous shootdown
+while waiting for the deliberately IRQ-off CPU. Serial execution isolates these
+artificial waits without coupling workqueue tests to TLB transport internals.
 The test gate is released before assertions and all tasks/timers drain before its
 storage is released; it is not a global service replacement. A controlled Running
 provider tests retry before capture for timer, ready and running Work, including

@@ -12,10 +12,9 @@
 //!    residency mask. Used for user page table modifications whose visibility
 //!    is scoped to a single address space.
 //!
-//! 2. **All-CPU flush** (`flush_all_cpus`): the initiator broadcasts IPIs to
-//!    **all** online CPUs via `for_each_present_logical_cpu()`. Used for kernel
-//!    page table modifications that are shared globally and must be visible on
-//!    every CPU.
+//! 2. **All-CPU flush** (`flush_all_cpus`): the initiator targets every present
+//!    CPU after all CPU interrupt services are ready. Shared kernel mappings
+//!    stay frozen during AP startup; before it, only the boot CPU needs a flush.
 //!
 //! Each initiator CPU owns one zero-allocation request slot. A request is
 //! identified by the pair `(initiator_cpu, request_seq)`. Remote CPUs acknowledge
@@ -31,6 +30,16 @@
 //! Implements the [`page_table::TlbFlushIf`] interface defined in the
 //! `page_table` crate, breaking the circular dependency between `page_table` and
 //! `kipi`.
+//!
+//! Runtime calls require task context with IRQs enabled. Hardirq, softirq and
+//! NMI code may handle inbound requests but must not initiate invalidation.
+//! Bootstrap completion is local before remote services are ready. The transport
+//! owns retries and waits for every required acknowledgement; no incomplete
+//! completion result reaches callers.
+//!
+//! Progress requires targets to re-enable IRQs or poll incoming shootdowns
+//! independently of the initiating CPU. An IRQ-off target must not wait for a
+//! task, generic IPI callback or lock owner that can be stalled by this request.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -42,17 +51,18 @@ use kirq::TargetCpu;
 use kspin::NoPreempt;
 use ktime_types::TimeSpan;
 use memaddr::VirtAddr;
-use page_table::{TlbFlushError, TlbFlushIf, TlbFlushResult};
+use page_table::TlbFlushIf;
 
-/// Gate: shootdown IPIs are only sent after all APs are running.
+// Shared kernel mappings are frozen throughout AP startup. Remote flushes
+// become necessary only after every CPU can acknowledge them.
 static ALL_CPUS_STARTED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(unittest)]
-static BEFORE_ACK_HOOK: AtomicUsize = AtomicUsize::new(0);
 
 /// Monotonic sequence allocator per initiator CPU.
 static REQUEST_SLOTS: [ShootdownRequestSlot; kbuild_config::NR_CPUS] =
     [const { ShootdownRequestSlot::new() }; kbuild_config::NR_CPUS];
+
+#[cfg(unittest)]
+static BEFORE_ACK_HOOK: AtomicUsize = AtomicUsize::new(0);
 
 /// Per-target fast path gate for `handle_shootdown()`.
 ///
@@ -75,21 +85,16 @@ cpu_slot_cell! {
 
 const SHOOTDOWN_WARN: TimeSpan = TimeSpan::from_secs(1);
 
-/// Bounded-wait policy for a target that has not acknowledged the request.
+/// Retry and diagnostic policy for a target that has not acknowledged the request.
 ///
-/// A pending fixed IPI is latched and delivered on real x86 hardware even to
-/// an idle target with interrupts enabled, so an unbounded wait would only
-/// ever be correct there. Under emulated delivery (TCG wakeup races) a single
-/// IPI can be silently lost, so:
-/// - `SHOOTDOWN_RESEND_INTERVAL`: re-deliver the IPI periodically; this both
-///   feeds the IRQ-off inbound poll (`handle_shootdown`) and recovers from a
-///   transient delivery loss.
-/// - `SHOOTDOWN_ESCALATE_TIMEOUT`: after sustained non-ack, report loudly.
-/// - `SHOOTDOWN_GIVE_UP_TIMEOUT`: stop waiting, flush the local TLB and
-///   return so the system makes progress instead of hanging forever.
+/// Re-delivery can recover a delayed/lost notification, including emulator
+/// wakeup races. Completion always requires the target's exact request ack:
+/// - `SHOOTDOWN_RESEND_INTERVAL`: re-deliver the IPI periodically to recover
+///   from a transient delivery loss.
+/// - `SHOOTDOWN_ESCALATE_TIMEOUT`: report sustained non-ack periodically; keep waiting
+///   because an incomplete flush cannot be returned to page-table callers.
 const SHOOTDOWN_RESEND_INTERVAL: TimeSpan = TimeSpan::from_secs(1);
 const SHOOTDOWN_ESCALATE_TIMEOUT: TimeSpan = TimeSpan::from_secs(10);
-const SHOOTDOWN_GIVE_UP_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RequestSeq(u64);
@@ -147,7 +152,6 @@ struct ShootdownRequestSlot {
     published_vaddr: AtomicUsize,
     is_flush_all: AtomicBool,
     is_active: AtomicBool,
-    needs_retry_full_flush: AtomicBool,
     targeted_cpus: [AtomicBool; kbuild_config::NR_CPUS],
     acked_seq_by_cpu: [AtomicU64; kbuild_config::NR_CPUS],
 }
@@ -160,7 +164,6 @@ impl ShootdownRequestSlot {
             published_vaddr: AtomicUsize::new(0),
             is_flush_all: AtomicBool::new(false),
             is_active: AtomicBool::new(false),
-            needs_retry_full_flush: AtomicBool::new(false),
             targeted_cpus: [const { AtomicBool::new(false) }; kbuild_config::NR_CPUS],
             acked_seq_by_cpu: [const { AtomicU64::new(RequestSeq::INITIAL.get()) };
                 kbuild_config::NR_CPUS],
@@ -176,7 +179,6 @@ impl ShootdownRequestSlot {
         self.published_vaddr.store(0, Ordering::Relaxed);
         self.is_flush_all.store(false, Ordering::Relaxed);
         self.is_active.store(false, Ordering::Relaxed);
-        self.needs_retry_full_flush.store(false, Ordering::Relaxed);
         for is_targeted in &self.targeted_cpus {
             is_targeted.store(false, Ordering::Relaxed);
         }
@@ -185,10 +187,13 @@ impl ShootdownRequestSlot {
         }
     }
 
-    fn try_activate(&self) -> bool {
-        self.is_active
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+    fn activate(&self) {
+        assert!(
+            self.is_active
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok(),
+            "TLB shootdown re-entered on one CPU"
+        );
     }
 
     fn deactivate(&self) {
@@ -197,14 +202,6 @@ impl ShootdownRequestSlot {
             was_active,
             "deactivating an inactive shootdown request slot"
         );
-    }
-
-    fn request_retry_full_flush(&self) {
-        self.needs_retry_full_flush.store(true, Ordering::Release);
-    }
-
-    fn take_retry_full_flush(&self) -> bool {
-        self.needs_retry_full_flush.swap(false, Ordering::AcqRel)
     }
 
     fn allocate_seq(&self) -> RequestSeq {
@@ -275,31 +272,39 @@ impl ShootdownRequestSlot {
 
 /// Active borrow of the current CPU's shootdown request slot.
 ///
-/// The guard disables preemption for the whole lifetime of the active slot so
-/// that no other task scheduled onto the same CPU can re-enter `flush_remote()`
-/// and reuse the same per-CPU slot before the current shootdown finishes.
+/// The guard disables preemption while leaving IRQs enabled. Another task
+/// cannot reuse this CPU's slot before completion, and interrupt callbacks
+/// cannot initiate shootdown. Incoming IPIs can acknowledge concurrent requests.
 ///
 /// Important: this guard must stay scoped to the request-slot publish/send/wait
 /// window only. It must be dropped before any path that can block or sleep.
 struct ActiveShootdownSlot<'a> {
-    _no_preempt: NoPreempt,
+    _guard: NoPreempt,
     slot: &'a ShootdownRequestSlot,
     initiator: usize,
 }
 
 impl<'a> ActiveShootdownSlot<'a> {
-    fn try_acquire_current() -> Option<Self> {
-        let no_preempt = NoPreempt::new();
+    fn acquire_current() -> Self {
+        assert!(
+            karch::local_irq_enabled(),
+            "runtime TLB shootdown requires enabled IRQs"
+        );
+        assert!(
+            !kirq::context::is_in_hardirq()
+                && !kirq::context::is_serving_softirq()
+                && !kirq::context::is_in_nmi(),
+            "TLB shootdown must not be initiated from hardirq, softirq or NMI context"
+        );
+        let guard = NoPreempt::new();
         let initiator = this_cpu_id().as_usize();
         let slot = &REQUEST_SLOTS[initiator];
-        if !slot.try_activate() {
-            return None;
-        }
-        Some(Self {
-            _no_preempt: no_preempt,
+        slot.activate();
+        Self {
+            _guard: guard,
             slot,
             initiator,
-        })
+        }
     }
 
     fn initiator(&self) -> usize {
@@ -333,10 +338,6 @@ impl<'a> ActiveShootdownSlot<'a> {
     fn acked_snapshot(&self) -> [u64; kbuild_config::NR_CPUS] {
         self.slot.acked_snapshot()
     }
-
-    fn take_retry_full_flush(&self) -> bool {
-        self.slot.take_retry_full_flush()
-    }
 }
 
 impl Drop for ActiveShootdownSlot<'_> {
@@ -345,35 +346,26 @@ impl Drop for ActiveShootdownSlot<'_> {
     }
 }
 
-/// Mark that all secondary CPUs have entered the runtime.
+/// Enables remote TLB shootdown after every CPU's interrupt services are ready.
 ///
-/// Must be called exactly once from the primary CPU after
-/// `start_secondary_cpus()` returns. Before this point `kipi` suppresses TLB
-/// shootdown IPIs because not every target CPU is guaranteed to be able to
-/// receive and acknowledge them.
+/// Call once on the primary CPU after the CPU-service rendezvous, before
+/// admitting runtime kernel mapping changes or starting user processes. Shared
+/// kernel mappings must stay frozen from AP startup until this publication;
+/// each AP flushes locally when installing the runtime kernel page table.
+/// Before AP startup, local completion covers the sole running CPU.
 pub fn mark_all_cpus_started() {
     ALL_CPUS_STARTED.store(true, Ordering::Release);
 }
 
 #[kiface::provide]
 impl TlbFlushIf {
-    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult {
-        flush_remote_ready(vaddr, target_mask)
+    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
+        flush_remote(vaddr, target_mask);
     }
 
-    fn flush_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult {
-        flush_remote_ready(vaddr, all_present_cpu_mask())
+    fn flush_all_cpus(vaddr: Option<VirtAddr>) {
+        flush_remote(vaddr, all_present_cpu_mask());
     }
-}
-
-fn flush_remote_ready(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult {
-    // Shared mappings stay frozen throughout AP startup. Each AP flushes when
-    // installing the stable runtime root, before user residency can exist.
-    if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
-        karch::flush_tlb(vaddr);
-        return Ok(());
-    }
-    flush_remote(vaddr, target_mask)
 }
 
 fn all_present_cpu_mask() -> KCpuMask {
@@ -408,15 +400,19 @@ fn set_last_handled_pending_epoch(epoch: u64) {
 
 /// Shared shootdown logic: publish `vaddr`, send IPIs to every CPU set in
 /// `target_mask` (except self), and spin-wait for acknowledgement of this
-/// exact request sequence. Reports why completion could not be established
-/// when nesting defers the request or the existing bounded wait expires.
-fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult {
-    let should_retry = {
-        let Some(active_slot) = ActiveShootdownSlot::try_acquire_current() else {
-            let initiator = this_cpu_id().as_usize();
-            REQUEST_SLOTS[initiator].request_retry_full_flush();
-            return Err(TlbFlushError::Deferred);
-        };
+/// exact request sequence. Runtime callers must be in task context with IRQs
+/// enabled; hardirq, softirq and NMI callbacks must not initiate mapping changes.
+/// Waiting pins this CPU but leaves IRQs enabled so incoming IPIs can run.
+/// Targets must eventually re-enable IRQs without depending on another task
+/// on this CPU or on locks retained by the initiator.
+fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) {
+    if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
+        karch::flush_tlb(vaddr);
+        return;
+    }
+    {
+        let active_slot = ActiveShootdownSlot::acquire_current();
+        karch::flush_tlb(vaddr);
         let my_cpu = this_cpu_id();
 
         let targets: [Option<LogicalCpuId>; kbuild_config::NR_CPUS] = {
@@ -452,45 +448,15 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResul
 
             let start = khal::time::monotonic_time();
             let mut warned = false;
-            let mut escalated = false;
+            let mut last_stall_report = start;
             for target in targets.iter().flatten() {
                 let mut last_resend = start;
                 while !active_slot.is_acked_by(target.as_usize(), request_seq) {
                     let now = khal::time::monotonic_time();
                     let elapsed = now.saturating_duration_since(start);
-                    // Bounded fallback: the target never acknowledged despite
-                    // periodic re-delivery. On real hardware this is only
-                    // reachable when the target is truly wedged; under TCG it
-                    // also covers an emulator delivery/wakeup loss. Do not spin
-                    // forever: flush the local TLB, report loudly, and return
-                    // so the rest of the system can keep making progress.
-                    if elapsed >= SHOOTDOWN_GIVE_UP_TIMEOUT {
-                        error!(
-                            "tlb shootdown GAVE UP: initiator_cpu={} target_cpu={} elapsed_ms={} \
-                             flush_all={} vaddr={:?} request_seq={} targeted={:?} acked={:?}",
-                            active_slot.initiator(),
-                            target.as_usize(),
-                            elapsed.into_core().as_millis() as u64,
-                            vaddr.is_none(),
-                            vaddr,
-                            request_seq.get(),
-                            active_slot.targeted_snapshot(),
-                            active_slot.acked_snapshot()
-                        );
-                        karch::flush_tlb(vaddr);
-                        return Err(TlbFlushError::TimedOut);
-                    }
-                    // Incoming shootdowns must be drained here. `flush_remote`
-                    // is often reached with IRQs already off (page-table
-                    // `SpinNoIrq`, syscall/fault paths). Waiting only for the
-                    // IPI handler deadlocks when two CPUs wait on each other:
-                    // neither can ack. `handle_shootdown` reads published
-                    // slots directly, so a missed IPI still completes.
-                    handle_shootdown();
-                    // Re-deliver the IPI periodically. This feeds the IRQ-off
-                    // inbound poll above and, critically, recovers from a
-                    // transient delivery loss (e.g. TCG wakeup races) instead
-                    // of waiting on a single IPI that never arrived.
+                    // IRQs stay enabled so concurrent requests are acknowledged
+                    // by the normal IPI handler. Retry a lost notification rather
+                    // than returning before the target has completed this request.
                     if now.saturating_duration_since(last_resend) >= SHOOTDOWN_RESEND_INTERVAL {
                         last_resend = now;
                         kirq::notify_cpu(IPI_IRQ, TargetCpu::Specific(target.as_usize()));
@@ -509,8 +475,10 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResul
                             active_slot.acked_snapshot()
                         );
                     }
-                    if !escalated && elapsed >= SHOOTDOWN_ESCALATE_TIMEOUT {
-                        escalated = true;
+                    if now.saturating_duration_since(last_stall_report)
+                        >= SHOOTDOWN_ESCALATE_TIMEOUT
+                    {
+                        last_stall_report = now;
                         error!(
                             "tlb shootdown STALL sustained: initiator_cpu={} target_cpu={} \
                              elapsed_ms={} request_seq={}; re-delivering but target still not \
@@ -525,21 +493,13 @@ fn flush_remote(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResul
                 }
             }
         }
-
-        active_slot.take_retry_full_flush()
-    };
-
-    if should_retry {
-        return flush_remote(None, all_present_cpu_mask());
     }
-    Ok(())
 }
 
 /// Handle any pending TLB shootdown requests targeting the current CPU.
 ///
-/// Called from the shared IPI interrupt handler, and also polled from
-/// [`flush_remote`] while waiting for remote acks so an IRQ-off waiter can
-/// still acknowledge inbound requests.
+/// Called from the shared IPI interrupt handler. Runtime initiators leave IRQs
+/// enabled while waiting so they can also acknowledge incoming requests.
 ///
 /// The fast path checks this CPU's pending epoch first and returns immediately
 /// when no TLB request has targeted the CPU since the last scan, so generic
@@ -611,7 +571,7 @@ fn run_before_ack_hook_for_test() {
 /// Test helper: trigger a TLB shootdown directly through the kiface facade.
 #[cfg(unittest)]
 pub fn trigger_flush_all(vaddr: Option<VirtAddr>) {
-    assert_eq!(TlbFlushIf::flush_all_cpus(vaddr), Ok(()));
+    TlbFlushIf::flush_all_cpus(vaddr);
 }
 
 unittest::path_mod_test!(tlb_unittest, "../ut-tests/tlb_unittest.rs");

@@ -234,6 +234,19 @@ Safeguards:
 - `IntrManagerIf::notify_cpu` now states this contract as an interface requirement;
 - The AArch64 / RISC-V backends have explicitly added a barrier on the send path.
 
+### 4. Function-pointer restoration in `run_before_ack_hook_for_test()`
+
+This boundary is compiled only under `#[cfg(unittest)]`. Only
+`with_before_ack_hook_for_test()` may install a valid static `fn()` pointer or
+zero in `BEFORE_ACK_HOOK`; scope exit restores a previous value of the same kind.
+Data pointers and closures with borrowed environments must never be stored.
+`run_before_ack_hook_for_test()` excludes zero before converting the integer back
+to the original function-pointer type. Its `SAFETY:` prerequisite is that all
+writes follow this interface and static functions remain valid after scope exit.
+Release/Acquire publication makes the installed value visible to the handler.
+Serial tests must also keep hooks IRQ-safe; restoring the previous value does
+not drain handlers already in flight.
+
 ## Memory-Safety Invariants
 
 The following invariants are critical to both the robustness and the memory safety of `kipi`:
@@ -267,15 +280,16 @@ The following invariants are critical to both the robustness and the memory safe
 - `REQUEST_SLOTS` is sharded by initiating CPU, avoiding a single global pending state shared among initiators;
 - `acked_seq_by_cpu` records acknowledgment progress per target CPU;
 - `PENDING_EPOCH_BY_CPU` only reduces the scan cost of unrelated IPIs and does not change protocol correctness;
-- `needs_retry_full_flush` is used as a fallback re-issue for nested requests on the same CPU, avoiding direct reentrant reuse of the slot.
+- The outgoing slot is exclusive while IRQs and preemption are disabled;
+  inbound invalidations only execute the local operation and publish an ack.
 
 ## Threat Analysis
 
 | ID | Threat | Trigger Condition | Impact | Mitigation |
 |------|------|----------|------|------|
 | T-01 | The target CPU handles the IPI before it observes the request state | The platform `notify_cpu()` lacks a publish barrier | TLB shootdown is lost and the initiating CPU spins forever | Define and implement the publish-before-notify contract in the IRQ backend |
-| T-02 | Two tasks on the same CPU re-enter and reuse the same request slot | Preemption is allowed during the lifetime of `flush_remote()` | Request state is overwritten, which may deadlock or miss a flush | `ActiveShootdownSlot` binds no-preempt to the active slot |
-| T-02a | Two cores' `flush_remote` calls wait on each other's ack | IRQs are off while waiting, so the peer's shootdown is not handled | The whole machine hangs during parallel unmaps such as libc-test | The wait loop polls `handle_shootdown()` and does not depend on this core having entered the IPI handler |
+| T-02 | Same-CPU initiation overwrites an active slot | Recursive task initiation or forbidden handler context | Missed invalidation or deadlock | Preemption exclusion, enabled IRQs, explicit hardirq/softirq/NMI rejection and an exclusive-slot assertion |
+| T-02a | Two cores' `flush_remote` calls wait on each other's ack | IRQs are off while waiting, so the peer's shootdown is not handled | The whole machine hangs during parallel unmaps such as libc-test | Reject runtime IRQ-off callers and leave IRQs enabled while waiting for normal IPI acknowledgement |
 | T-03 | Ordinary IPIs share the same vector and cause pointless full-table scans | Every IPI unconditionally scans the TLB slots | Frequent unrelated IPIs add O(CPU_NUM) hot-path overhead | Per-target `pending_epoch` fast path |
 | T-04 | A caller broadcasts logic unsuitable for interrupt context to other CPUs as a callback | The callback sleeps, takes a big lock, or runs a long path | IPI handler latency, lock-ordering problems, reduced availability | The `kipi` documentation requires callbacks to be suitable for that execution context; the module provides no safety net |
 | T-05 | The queue is enqueued to remotely before it is initialized | An AP has not yet run `init()` but is already an IPI target | The slot is accessed through a raw per-CPU reference before it is ready | The API explicitly checks `IPI_QUEUE_READY` and returns `TargetCpuNotReady` on failure |
@@ -290,7 +304,7 @@ The following invariants are critical to both the robustness and the memory safe
 |------|----------|----------|----------|-----------|
 | F-01 | The target CPU's IPI queue is not initialized | `run_on_cpu` / broadcast fails | The related cross-core operation cannot be performed | Returns `KipiError::TargetCpuNotReady` |
 | F-02 | Queue growth allocation fails | Event cannot be stored | Existing allocator OOM policy is fatal | VecDeque growth remains infallible; QueueFull is not currently emitted |
-| F-03 | The target CPU does not ack the TLB request for a long time | The initiating CPU spin-waits | The page-table modification path stalls, which may look like a system hang | Warns at 1 s, re-sends the IPI every 1 s and escalates at 10 s; after 30 s it logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack (a stale remote TLB entry may remain). The wait loop polls `handle_shootdown` to avoid IRQ-off mutual waits. |
+| F-03 | A required target stops acknowledging TLB requests | The initiator keeps waiting | Its CPU and holders of related locks can stall | Poll inbound requests, resend notifications and report sustained stalls; never release backing on incomplete invalidation or impose a fixed panic deadline |
 | F-04 | The pending epoch is not updated synchronously | The target CPU fast path returns directly without scanning the slots | False negatives / hangs on unit tests or protocol misuse | The production path is encapsulated by `flush_remote()`; unit tests update it synchronously through a helper |
 | F-05 | Callback panics | Dispatch does not complete normally | Kernel panic policy applies | No per-callback panic isolation or continuation guarantee |
 | F-06 | Single-use owner allocation fails | No event is published or notified | Caller decides whether to retry or fail | Return NoMemory and drop captures in sender context |
@@ -298,8 +312,10 @@ The following invariants are critical to both the robustness and the memory safe
 ## Failure Management
 
 - The generic IPI delivery path returns errors as a `Result` instead of failing silently;
-- The main TLB shootdown failure mode is a target CPU that does not ack. The initiator spins with a bounded wait: it warns at 1 s, re-sends the IPI every 1 s, escalates at 10 s, and after 30 s logs an error, flushes only the local TLB and returns `TimedOut` without the target's ack;
-- A nested TLB request on the same CPU does not panic directly; instead it sets `needs_retry_full_flush` and is re-issued after the current request finishes;
+- TLB shootdown returns only after completion; retry and indefinite waiting
+  remain internal, with periodic stall diagnostics and no fixed panic deadline.
+- Initiators mask IRQs and disable preemption. Hardirq, active softirq, NMI and
+  recursive initiation are rejected; runtime callers require enabled IRQs.
 - The requirements on the platform's IPI ordering semantics are written into the interface contract, so implicit dependencies are not scattered across call sites.
 
 ## Privacy Analysis
@@ -326,33 +342,31 @@ Note that diagnostic logs may contain virtual addresses or CPU topology informat
 
 - Check whether every newly added `notify_cpu()` call site depends on publish-before-notify semantics.
 - Check whether any path enters code that may sleep within the lifetime of an `ActiveShootdownSlot`.
-- Check whether `flush_remote` polls `handle_shootdown` while waiting for acks (two cores waiting on each other with IRQs off).
+- Check that runtime `flush_remote` rejects IRQ-off entry and leaves IRQs enabled while waiting for acks.
 - Check whether any new test that hand-builds request slot state updates `pending_epoch` in sync.
 - Check whether a new broadcast callback can really run in the IPI handler context without sleeping or occupying the CPU for a long time.
 - Check whether a new platform IRQ backend honors the ordering contract of `IntrManagerIf::notify_cpu`.
 
 
-## Shootdown completion status for managed data retirement
+## Shootdown completion boundary
 
-The `TlbFlushIf` provider returns `TlbFlushResult` at the internal shootdown /
-retirement boundary. `Ok(())` confirms every requested remote target's exact
-published request, including any required full retry. Local hardware invalidation
-remains synchronous and returns `()`; the architecture metadata hook performs it
-before requesting remote completion.
+`TlbFlushIf` returns only after local invalidation and every selected remote ACK.
+Runtime callers require task context with IRQs enabled; IRQ-off entry,
+hardirq/softirq/NMI and same-CPU reentry are rejected. The initiator disables
+preemption to retain its outgoing slot but leaves IRQs enabled throughout the
+wait. Incoming requests are acknowledged by the normal IPI handler. Other tasks
+on the initiating CPU cannot run until completion: an IRQ-off target must not
+wait for those tasks or locks retained by the initiator. Artificial test pauses
+that require a remote task to release them run serially, isolated from parallel
+mapping tests; production critical sections must finish independently.
 
-Before `mark_all_cpus_started`, APs may already cache kernel translations but
-cannot all acknowledge notifications. A request with a remote target therefore
-returns `NotReady`, not successful completion. A scope with no remote target
-needs no IPI and succeeds after the architecture's local invalidation.
+Remote requests are enabled by `mark_all_cpus_started` after the CPU-service
+rendezvous, before runtime mapping admission and user-process startup. Before
+AP startup only the boot CPU uses the kernel root. Shared kernel mappings stay
+frozen during AP startup, and each AP flushes locally when installing that root.
+Consequently bootstrap completion is local and boot waits need no TLB polling.
+CPU hot-unplug needs a separate protocol.
 
-Same-CPU nesting marks the outer request for a full retry and returns `Deferred`;
-a future outer retry is not present completion proof. The bounded give-up path
-logs and returns `TimedOut`. Request publication, resend and acknowledgement
-ordering are unchanged. The page-table layer owns failed batches and retains or
-pins managed holds; managed object owners do not consume per-flush booleans.
-Synchronous revocation uses `PageTableMut::try_finish` and handles an error rather
-than claiming that stale access was revoked. Raw release still needs such a
-confirmed boundary until its owners are migrated.
-
-Tests cover the closed boot gate with local-only and remote scopes, nested slot
-ownership and empty remote masks without timing assertions or online-CPU mutation.
+Notifications are resent every second with periodic stall diagnostics. A missing
+required ACK keeps the initiator waiting; no timeout success or fixed panic
+policy releases backing. Every target has its IPI queue and interrupt services ready.

@@ -211,11 +211,11 @@ impl From<PtError> for PteReplaceError {
     }
 }
 
-/// Work observed at one automatic page-table retirement boundary.
+/// Work completed at one synchronous page-table retirement boundary.
 ///
-/// This is diagnostic batching information, not a completion proof. Managed
-/// holds remain owned internally until invalidation completes. Call
-/// [`crate::PageTableMut::try_finish`] when synchronous invalidation is required.
+/// [`crate::PageTableMut::finish`] returns only after all required invalidations
+/// complete. This receipt reports whether that boundary had pending work;
+/// intermediate automatic drains are not included.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TlbFlushReceipt {
     had_pending: bool,
@@ -233,30 +233,6 @@ impl TlbFlushReceipt {
         self.had_pending
     }
 }
-
-/// Why a requested TLB invalidation could not complete synchronously.
-///
-/// These outcomes govern retirement inside the page-table layer. They do not
-/// transfer or release a managed mapping hold. Ordinary managed callers rely on
-/// automatic retention; synchronous operations receive an error from
-/// [`crate::PageTableMut::try_finish`] and must not claim revocation completed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TlbFlushError {
-    /// Remote CPU services cannot yet accept and acknowledge shootdowns.
-    NotReady,
-    /// A nested request must wait for its initiator's active request to finish.
-    Deferred,
-    /// At least one required target did not acknowledge before the wait ended.
-    TimedOut,
-    /// The metadata provider cannot establish the requested remote scope.
-    UnsupportedScope,
-}
-
-/// Completion result at the architecture/shootdown retirement boundary.
-///
-/// `Ok(())` confirms the whole requested scope. Errors leave backing retirement
-/// pending; local hardware invalidations that always complete return `()`.
-pub type TlbFlushResult = Result<(), TlbFlushError>;
 
 #[cfg(feature = "kerrno")]
 impl From<PtError> for kerrno::KError {
@@ -338,7 +314,8 @@ pub trait PagingMetaData: Sync + Send {
     /// If `vaddr` is `None`, flushes the entire TLB; otherwise flushes
     /// only the entry mapping `vaddr`. The hook must order preceding PTE writes
     /// and complete the requested invalidation before returning; managed data
-    /// holds can be released immediately afterward.
+    /// holds can be released afterward only when this is the entire required
+    /// scope; use the process/all-CPU hooks for shared mappings.
     fn flush_tlb(vaddr: Option<Self::VirtAddr>);
 
     /// Orders freshly installed page-table entries against other translation
@@ -360,69 +337,59 @@ pub trait PagingMetaData: Sync + Send {
 
     /// Invalidates translations for this user address space.
     ///
-    /// `Ok(())` requires synchronous completion, including architectural
-    /// barriers and any required remote acknowledgements. The default supports
-    /// single-CPU use only; SMP providers must establish their full scope.
-    ///
-    /// # Errors
-    /// Returns an error when completion is unavailable, deferred or timed out.
-    /// The default returns UnsupportedScope in SMP builds.
+    /// Returning means that the local invalidation and every required remote
+    /// acknowledgement have completed. Implementations must handle retryable
+    /// delivery internally and must not return before the requested scope is
+    /// safe to retire.
     #[inline]
-    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) {
+        #[cfg(feature = "smp")]
+        Self::flush_tlb_all_cpus(vaddr);
+        #[cfg(not(feature = "smp"))]
         Self::flush_tlb(vaddr);
-        if cfg!(feature = "smp") {
-            Err(TlbFlushError::UnsupportedScope)
-        } else {
-            Ok(())
-        }
     }
 
     /// Invalidates a user address space for an explicit residency mask.
     ///
-    /// # Errors
-    /// Returns an error unless the whole requested scope completed. The default
-    /// supports an empty remote scope only; SMP architectures override it.
+    /// The default conservatively invalidates all CPUs. Architectures may
+    /// override it to limit shootdown to the supplied residency mask.
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process_mask(
-        vaddr: Option<Self::VirtAddr>,
-        target_mask: KCpuMask,
-    ) -> TlbFlushResult {
-        Self::flush_tlb(vaddr);
-        if target_mask.is_empty() {
-            Ok(())
-        } else {
-            Err(TlbFlushError::UnsupportedScope)
-        }
+    fn flush_tlb_process_mask(vaddr: Option<Self::VirtAddr>, _target_mask: KCpuMask) {
+        Self::flush_tlb_all_cpus(vaddr);
     }
 
     /// Invalidates this address space's ASID when supported by the architecture.
-    /// The default delegates to flush_tlb_process without narrowing its scope.
-    ///
-    /// # Errors
-    /// Returns the delegated completion error; no error authorizes backing reuse.
+    /// The default delegates to [`Self::flush_tlb_process`].
     #[inline]
-    fn flush_tlb_process_asid(vaddr: Option<Self::VirtAddr>, _asid: u16) -> TlbFlushResult {
-        Self::flush_tlb_process(vaddr)
+    fn flush_tlb_process_asid(vaddr: Option<Self::VirtAddr>, _asid: u16) {
+        Self::flush_tlb_process(vaddr);
     }
 
     /// Invalidates kernel translations on all CPUs that can retain them.
-    /// Software shootdown architectures override this hook for the all-CPU scope.
-    ///
-    /// # Errors
-    /// Returns an error unless every relevant CPU completed invalidation. The
-    /// default supports single-CPU use only.
+    /// Every SMP metadata provider must implement the complete remote scope.
+    #[cfg(feature = "smp")]
+    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>);
+
+    /// Invalidates kernel translations on the single CPU.
+    #[cfg(not(feature = "smp"))]
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
-        Self::flush_tlb_process(vaddr)
+    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) {
+        Self::flush_tlb(vaddr);
     }
 }
 
-/// Interface for broadcasting TLB flush to remote CPUs.
+/// Interface for synchronous local and remote TLB invalidation.
 ///
 /// Implemented by the IPI subsystem (e.g. `kipi::tlb`) at link time via
 /// `kiface::provide`. This indirection breaks the
-/// circular dependency between `page_table` and the IPI crate.
+/// circular dependency between `page_table` and the IPI crate. Calls require
+/// task context with IRQs enabled for runtime shootdown; hardirq, active softirq
+/// and NMI callbacks may not initiate it. Providers own bootstrap-local
+/// invalidation, CPU readiness, retry and synchronous completion.
+/// Waiting must leave IRQs enabled for incoming requests. Targets must handle
+/// invalidation independently of the initiating CPU's tasks and retained locks;
+/// synchronous waits may disable preemption.
 #[cfg(feature = "smp")]
 #[kiface::interface]
 pub trait TlbFlushIf {
@@ -434,13 +401,10 @@ pub trait TlbFlushIf {
     /// entries for this address space.
     ///
     /// If `vaddr` is `None`, flush the entire TLB; otherwise flush only the
-    /// entry mapping `vaddr`.  The local CPU flush is the caller's
-    /// responsibility — this method only handles remote CPUs.
-    ///
-    /// # Errors
-    /// Returns an error when remote completion is unavailable, deferred or timed
-    /// out. Only Ok(()) confirms the requested scope.
-    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult;
+    /// entry mapping `vaddr`. The provider pins the initiating CPU across the
+    /// local invalidation and remote acknowledgements. Returning confirms
+    /// completion on the local CPU and every selected remote CPU.
+    fn flush_process_mask(vaddr: Option<VirtAddr>, target_mask: KCpuMask);
 
     /// Flush TLB entries on **all** online CPUs, regardless of task
     /// residency.  This is required for modifications to the global kernel
@@ -448,13 +412,10 @@ pub trait TlbFlushIf {
     /// may hold stale kernel TLB entries.
     ///
     /// If `vaddr` is `None`, flushes the entire TLB; otherwise flushes only the
-    /// entry mapping `vaddr`. The local CPU flush is the caller's
-    /// responsibility — this method only handles remote CPUs.
-    ///
-    /// # Errors
-    /// Returns an error when remote completion is unavailable, deferred or timed
-    /// out. Only Ok(()) confirms the requested scope.
-    fn flush_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult;
+    /// entry mapping `vaddr`. The provider pins the initiating CPU across the
+    /// local invalidation and remote acknowledgements. Returning confirms
+    /// completion on the local CPU and every selected remote CPU.
+    fn flush_all_cpus(vaddr: Option<VirtAddr>);
 }
 
 /// Hooks for allocating and mapping page table frames.

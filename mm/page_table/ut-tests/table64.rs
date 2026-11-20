@@ -2,12 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-use core::ptr::NonNull;
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
+#[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
+use core::{ptr::NonNull, sync::atomic::AtomicBool};
 
 #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
 use kcpu_id_map::KCpuMask;
@@ -16,7 +16,7 @@ use unittest::def_test;
 
 use crate::{
     PageSize, PageTable64, PageTableEntry, PagingFlags, PagingHandler, PagingMetaData,
-    PteReplaceError, TlbFlushResult,
+    PteReplaceError,
 };
 
 #[repr(transparent)]
@@ -117,17 +117,16 @@ impl PagingMetaData for TestMeta {
 
     fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
 
-    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) {
         Self::flush_tlb(vaddr);
-        Ok(())
     }
 
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
-    fn flush_tlb_process_mask(
-        _vaddr: Option<Self::VirtAddr>,
-        _target_mask: KCpuMask,
-    ) -> TlbFlushResult {
-        Ok(())
+    fn flush_tlb_process_mask(_vaddr: Option<Self::VirtAddr>, _target_mask: KCpuMask) {}
+
+    #[cfg(feature = "smp")]
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+        Self::flush_tlb(vaddr);
     }
 }
 
@@ -407,16 +406,15 @@ fn replace_if_same_reports_changed_without_overwrite() {
     );
 }
 
-/// Metadata whose all-CPU invalidation is observable and can fail once.
+/// Metadata whose synchronous all-CPU invalidation is observable.
 ///
-/// Only the deferred-invalidation test uses this type, so its counters cannot
+/// Only the kernel-completion test uses this type, so its counters cannot
 /// be polluted by sibling test cases.
-struct DeferredTestMeta;
+struct CompletionTestMeta;
 
 static ALL_CPU_FLUSHES: AtomicUsize = AtomicUsize::new(0);
-static FAIL_NEXT_ALL_CPU_FLUSH: AtomicBool = AtomicBool::new(false);
 
-impl PagingMetaData for DeferredTestMeta {
+impl PagingMetaData for CompletionTestMeta {
     type VirtAddr = VirtAddr;
 
     const LEVELS: usize = 4;
@@ -433,22 +431,17 @@ impl PagingMetaData for DeferredTestMeta {
 
     fn flush_tlb(_vaddr: Option<Self::VirtAddr>) {}
 
-    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) {
         Self::flush_tlb(vaddr);
-        Ok(())
     }
 
-    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+    fn flush_tlb_all_cpus(vaddr: Option<Self::VirtAddr>) {
         ALL_CPU_FLUSHES.fetch_add(1, Ordering::Relaxed);
-        if FAIL_NEXT_ALL_CPU_FLUSH.swap(false, Ordering::Relaxed) {
-            return Err(crate::TlbFlushError::TimedOut);
-        }
         Self::flush_tlb(vaddr);
-        Ok(())
     }
 }
 
-type DeferredTestPageTable = PageTable64<DeferredTestMeta, TestEntry, TestHandler>;
+type CompletionTestPageTable = PageTable64<CompletionTestMeta, TestEntry, TestHandler>;
 
 #[def_test]
 fn finish_reports_explicit_flush_boundary() {
@@ -469,58 +462,9 @@ fn finish_reports_explicit_flush_boundary() {
 }
 
 #[def_test]
-fn deferred_kernel_invalidation_detaches_the_shootdown() {
-    let mut table = TestPageTable::try_new_kernel().expect("kernel test page table");
-    let mut modify = table.modify();
-
-    assert!(
-        modify.defer_kernel_invalidation().is_none(),
-        "nothing is pending before the first change"
-    );
-    modify
-        .map_raw(
-            vaddr(0x20_0000),
-            paddr(0x60_0000),
-            PageSize::Size4K,
-            PagingFlags::READ,
-        )
-        .expect("map test page");
-    let deferred = modify
-        .defer_kernel_invalidation()
-        .expect("kernel mapping records an invalidation");
-    assert!(
-        !modify.finish().had_pending(),
-        "the detached invalidation must not remain with the guard"
-    );
-    drop(modify);
-    assert_eq!(deferred.complete(), Ok(()));
-}
-
-#[def_test]
-fn deferred_kernel_invalidation_rejects_user_tables() {
-    let mut table = TestPageTable::try_new().expect("user test page table");
-    let mut modify = table.modify();
-
-    modify
-        .map_raw(
-            vaddr(0x20_0000),
-            paddr(0x60_0000),
-            PageSize::Size4K,
-            PagingFlags::READ,
-        )
-        .expect("map test page");
-    assert!(
-        modify.defer_kernel_invalidation().is_none(),
-        "user tables use residency-scoped flushes"
-    );
-}
-
-#[def_test]
-fn deferred_kernel_invalidation_performs_and_retries_the_shootdown() {
+fn kernel_invalidation_completes_once_at_finish_or_drop() {
     ALL_CPU_FLUSHES.store(0, Ordering::Relaxed);
-    FAIL_NEXT_ALL_CPU_FLUSH.store(false, Ordering::Relaxed);
-
-    let mut table = DeferredTestPageTable::try_new_kernel().expect("kernel test page table");
+    let mut table = CompletionTestPageTable::try_new_kernel().expect("kernel test page table");
     let mut modify = table.modify();
     modify
         .map_raw(
@@ -530,30 +474,12 @@ fn deferred_kernel_invalidation_performs_and_retries_the_shootdown() {
             PagingFlags::READ,
         )
         .expect("map test page");
-    let deferred = modify
-        .defer_kernel_invalidation()
-        .expect("kernel mapping records an invalidation");
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        0,
-        "detaching must not sit in the shootdown"
-    );
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 0);
+    modify.finish();
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 1);
     drop(modify);
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        0,
-        "the guard drop must not repeat the detached flush"
-    );
-    assert_eq!(deferred.complete(), Ok(()));
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        1,
-        "complete must perform the all-CPU shootdown"
-    );
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 1);
 
-    // A failed scoped shootdown must be retried as a full flush instead of
-    // silently leaving stale translations.
-    FAIL_NEXT_ALL_CPU_FLUSH.store(true, Ordering::Relaxed);
     let mut modify = table.modify();
     modify
         .map_raw(
@@ -562,17 +488,9 @@ fn deferred_kernel_invalidation_performs_and_retries_the_shootdown() {
             PageSize::Size4K,
             PagingFlags::READ,
         )
-        .expect("map retry page");
-    let deferred = modify
-        .defer_kernel_invalidation()
-        .expect("retry mapping records an invalidation");
+        .expect("map drop-completion page");
     drop(modify);
-    assert_eq!(deferred.complete(), Ok(()));
-    assert_eq!(
-        ALL_CPU_FLUSHES.load(Ordering::Relaxed),
-        3,
-        "a failed attempt must be followed by one full-flush retry"
-    );
+    assert_eq!(ALL_CPU_FLUSHES.load(Ordering::Relaxed), 2);
 }
 
 /// Checks the policy flag, not the presence or effect of either DSB.
@@ -900,17 +818,18 @@ fn sparse_unmap_supports_three_levels_and_high_addresses() {
 
         fn flush_tlb(_vaddr: Option<VirtAddr>) {}
 
-        fn flush_tlb_process(vaddr: Option<VirtAddr>) -> TlbFlushResult {
+        fn flush_tlb_process(vaddr: Option<VirtAddr>) {
             Self::flush_tlb(vaddr);
-            Ok(())
         }
 
         #[cfg(feature = "smp")]
-        fn flush_tlb_process_mask(
-            vaddr: Option<VirtAddr>,
-            _mask: kcpu_id_map::KCpuMask,
-        ) -> TlbFlushResult {
+        fn flush_tlb_process_mask(vaddr: Option<VirtAddr>, _mask: kcpu_id_map::KCpuMask) {
             Self::flush_tlb_process(vaddr)
+        }
+
+        #[cfg(feature = "smp")]
+        fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+            Self::flush_tlb(vaddr);
         }
     }
     let mut table = PageTable64::<ThreeLevelMeta, TestEntry, TestHandler>::try_new().unwrap();
@@ -995,12 +914,12 @@ fn user_page_table_flush_uses_installed_process_mask() {
 mod aarch64_drop {
     use core::{
         ptr::NonNull,
-        sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
+        sync::atomic::{AtomicU16, AtomicUsize, Ordering},
     };
 
     use super::{
         PageSize, PageTable64, PagingFlags, PagingHandler, PagingMetaData, PhysAddr, TestEntry,
-        TestHandler, TestMeta, TlbFlushResult, VirtAddr, def_test, paddr, vaddr,
+        TestHandler, TestMeta, VirtAddr, def_test, paddr, vaddr,
     };
 
     // Only the serial tests below use these probes. The scoped guard resets
@@ -1011,7 +930,6 @@ mod aarch64_drop {
     static OTHER_FLUSHES: AtomicUsize = AtomicUsize::new(0);
     static FREED_FRAMES: AtomicUsize = AtomicUsize::new(0);
     static FREED_WITHOUT_ASID_FLUSH: AtomicUsize = AtomicUsize::new(0);
-    static FAIL_ASID_FLUSH: AtomicBool = AtomicBool::new(false);
 
     struct ProbeGuard;
 
@@ -1027,7 +945,6 @@ mod aarch64_drop {
             OTHER_FLUSHES.store(0, Ordering::Relaxed);
             FREED_FRAMES.store(0, Ordering::Relaxed);
             FREED_WITHOUT_ASID_FLUSH.store(0, Ordering::Relaxed);
-            FAIL_ASID_FLUSH.store(false, Ordering::Relaxed);
         }
     }
 
@@ -1058,17 +975,18 @@ mod aarch64_drop {
             OTHER_FLUSHES.fetch_add(1, Ordering::Relaxed);
         }
 
-        fn flush_tlb_process_asid(vaddr: Option<VirtAddr>, asid: u16) -> TlbFlushResult {
-            if FAIL_ASID_FLUSH.load(Ordering::Relaxed) {
-                return Err(crate::TlbFlushError::Deferred);
-            }
+        fn flush_tlb_process_asid(vaddr: Option<VirtAddr>, asid: u16) {
             if vaddr.is_none() {
                 LAST_ASID.store(asid, Ordering::Relaxed);
                 ASID_FLUSHES.fetch_add(1, Ordering::Relaxed);
             } else {
                 OTHER_FLUSHES.fetch_add(1, Ordering::Relaxed);
             }
-            Ok(())
+        }
+
+        #[cfg(feature = "smp")]
+        fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+            Self::flush_tlb(vaddr);
         }
     }
 
@@ -1163,23 +1081,6 @@ mod aarch64_drop {
     }
 
     #[def_test(serial)]
-    fn user_drop_keeps_table_storage_when_final_asid_retirement_is_unconfirmed() {
-        let _probe = ProbeGuard::new();
-        let asid = AtomicU16::new(9);
-        let mut table = DropPageTable::try_new().expect("user page table");
-        // SAFETY: asid remains live throughout this inactive test table's
-        // destruction; the callback reads only that test-owned atomic.
-        unsafe { table.set_user_asid_provider(NonNull::from(&asid).cast(), current_asid) };
-        map_test_page(&mut table);
-        FAIL_ASID_FLUSH.store(true, Ordering::Relaxed);
-        drop(table);
-        // TestHandler uses a static frame pool, so pinning these synthetic
-        // transfers does not leak allocator backing or require a global reaper.
-        assert_eq!(FREED_FRAMES.load(Ordering::Relaxed), 0);
-        assert_eq!(ASID_FLUSHES.load(Ordering::Relaxed), 0);
-    }
-
-    #[def_test(serial)]
     fn user_drop_without_provider_skips_asid_flush() {
         let _probe = ProbeGuard::new();
         let mut table = DropPageTable::try_new().expect("user page table");
@@ -1238,21 +1139,22 @@ impl PagingMetaData for FreshMapMeta {
         FRESH_MAP_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) -> TlbFlushResult {
+    fn flush_tlb_process(vaddr: Option<Self::VirtAddr>) {
         Self::flush_tlb(vaddr);
-        Ok(())
     }
 
     #[cfg(feature = "smp")]
-    fn flush_tlb_process_mask(
-        vaddr: Option<Self::VirtAddr>,
-        _mask: kcpu_id_map::KCpuMask,
-    ) -> TlbFlushResult {
+    fn flush_tlb_process_mask(vaddr: Option<Self::VirtAddr>, _mask: kcpu_id_map::KCpuMask) {
         Self::flush_tlb_process(vaddr)
     }
 
     fn fence_fresh_map() {
         FRESH_MAP_FENCES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "smp")]
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
+        Self::flush_tlb(vaddr);
     }
 }
 

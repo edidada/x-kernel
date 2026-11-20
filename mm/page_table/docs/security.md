@@ -12,7 +12,7 @@ Callers (memspace, kexec, ...)
    │ safe API: PageTable64::query/query_entry/modify,
    │           PageTableMut::map/map_sized/replace_if_same (consume holds)
    │           map_raw/map_region_raw/remap_raw/replace_if_same_raw
-   │           unmap/protect/finish/try_finish
+   │           unmap/protect/finish
    │
    v
 ┌──────────────────────────────────────────────────────────┐
@@ -135,9 +135,9 @@ borrowed subtrees shared by `copy_from()`.
 `dsb ishst` through the safe `karch::dsb_ishst()` primitive, and synchronously
 invalidates translations with
 `PagingMetaData::flush_tlb_process_asid(None, asid)` before returning table
-frames to the allocator. If that final hook returns an error, Drop pins the
-raw frame transfers and remaining managed data holds; it cannot reclaim them
-based on an unsuccessful completion attempt.
+frames to the allocator. This hook returns only after the architectural
+invalidation completes; Drop then recovers data holds and reclaims table frames.
+There is no fallible ASID-completion result or failure-based pinning branch.
 
 **Invariant**: The provider context remains valid throughout destruction and
 the callback performs read-only access. The caller has already stopped hardware
@@ -154,8 +154,8 @@ needed.
 captured old managed leaf after clear/replacement and invalidation recording.
 `PageTable64::dealloc_entry()` uses the same provider boundary for each owned
 base/huge leaf during inactive-tree destruction, before freeing its containing
-descriptor frame. Borrowed roots are skipped; failed final AArch64 ASID
-completion returns before recovering those outstanding transfers.
+descriptor frame. Borrowed roots are skipped; final AArch64 ASID invalidation
+completes synchronously before recovering those outstanding transfers.
 
 **Invariant**: the normalized PA and exact leaf byte length identify one
 unconsumed transfer created by `mapping_reference_into_raw`. The mutation or
@@ -185,10 +185,10 @@ a provider trust boundary, not a general PA-to-owner lookup. Raw-only
    its first table frame, then releases frames recursively. The provider context
    must outlive the entire destruction sequence.
 3. **TLB consistency**: PTE changes require TLB invalidation to prevent CPUs from
-   using stale mappings. `PageTableMut::finish()` and `Drop` attempt pending
-   invalidations; unconfirmed completion retains managed holds rather than
-   proving permission revocation. Synchronous callers require `try_finish()`
-   to succeed. The one exception is an invalid-to-valid transition on an
+   using stale mappings. `PageTableMut::finish()` and `Drop` synchronously
+   complete pending invalidations before releasing managed holds. Returning
+   also establishes permission revocation for the requested scope. The one
+   exception is an invalid-to-valid transition on an
    architecture that reports `INVALID_TO_VALID_NEEDS_TLBI == false`: no stale
    translation can exist for a slot that was verified unused, so fresh installs
    through `map()`, `map_sized()` or `map_raw()` record a fence request instead
@@ -224,10 +224,9 @@ a provider trust boundary, not a general PA-to-owner lookup. Raw-only
 9. **Release after confirmed invalidation**: the guard automatically retains
    mapping holds transferred through `map`, `map_sized` or `replace_if_same`
    until invalidation completes.
-   Before releasing raw backing removed from a PTE, callers must obtain success
-   from `PageTableMut::try_finish()`; on error they must retain that backing.
-   Neither `finish()` returning nor guard destruction proves raw backing can be
-   released or permission revocation has completed.
+   Before releasing raw backing removed from a PTE, callers must wait for
+   `PageTableMut::finish()` to return. Guard destruction has the same completion
+   contract; explicit finish makes release ordering visible in the caller.
 10. **Non-leaf translation caches**: per-VA leaf invalidation alone does not
     retire cached table-walk descriptors before table frames are reused.
     AArch64 user page table destruction with a registered ASID provider uses
@@ -242,8 +241,8 @@ a provider trust boundary, not a general PA-to-owner lookup. Raw-only
     root range for managed leaves in owned subtrees before any destruction or
     overwrite, and requires prior managed retirements complete. Borrowing copies
     no ownership. Inactive-tree destruction recovers each owned base/huge transfer
-    once before table-frame release, skips borrowed roots, and preserves all
-    unrecovered transfers if the final AArch64 ASID completion fails.
+    once before table-frame release, skips borrowed roots, and performs the final
+    AArch64 ASID invalidation before releasing unrecovered transfers.
 
 ## Thread Safety
 
@@ -290,14 +289,14 @@ Status describes the controls present in this revision:
 |----|--------|--------|---------|-----------------------------|--------|
 | T-01 | `PagingHandler::p2v()` returns an incorrect virtual address, causing invalid memory access through table slices. | High | A faulty conversion or a missing direct-map mapping. | [`PagingHandlerImpl::p2v`](../../../arch/khal/src/paging.rs) delegates through `khal::mem::p2v` to [`kaddr_layout::p2v`](../../kaddr_layout/src/lib.rs), which uses checked addition of `PAGE_OFFSET`; `v2p` rejects addresses outside the linear-map and kernel-image windows. The provider verification conditions below check the remaining mapping obligation. No page-table-local check proves that the returned virtual page is mapped. | Delegated to `khal`, `kaddr_layout`, and the direct-map owner. |
 | T-02 | `PagingHandler::alloc_frame()` returns a live frame again, causing page table frames to alias. | High | Duplicate allocation by the frame allocator. | [`PagingHandlerImpl::alloc_frame`](../../../arch/khal/src/paging.rs) asserts `is_page_allocator_ready()` and calls `kalloc::alloc_page_ref(UsageKind::PageTable)`. [`GlobalAllocator::alloc_pages`](../../kalloc/src/lib.rs) protects PCP access with `IrqSave` and global allocation with `palloc.lock()`. Verify live-frame uniqueness and alignment as specified below. `alloc_table()` zeroes frames but does not detect duplicates. | Delegated to `kalloc` / `alloc-engine`; uniqueness is not rechecked here. |
-| T-03 | A PTE changes without TLB invalidation, leaving stale mappings in use. | High | Direct memory writes bypass `PageTableMut`. | `map`, `map_sized`, `map_raw`, `unmap`, `remap_raw`, `protect`, `replace_if_same` and `replace_if_same_raw` record required invalidations; `PageTableMut::drop` attempts pending invalidation and pins managed holds on failure. `try_finish()` reports completion to synchronous callers. `finish_reports_explicit_flush_boundary` checks pending batching state, not remote completion. Fresh mapping skips invalidation only for a slot verified unused and only when the architecture reports `INVALID_TO_VALID_NEEDS_TLBI == false`; `fresh_map_fences_once_without_invalidating` and `unmap_still_invalidates_on_a_fence_only_architecture` pin that boundary, and `fresh_map_invalidates_when_architecture_requires_it` pins the conservative default. Direct PTE memory writes remain outside this API contract. Kernel-mapping callers that cannot hold the page-table lock across a remote wait use `defer_kernel_invalidation` and complete the detached flush after unlocking (T-13). | Invalidation is recorded; immediate revocation still requires successful synchronous completion. |
+| T-03 | A PTE changes without TLB invalidation, leaving stale mappings in use. | High | Direct memory writes bypass `PageTableMut`. | `map`, `map_sized`, `map_raw`, `unmap`, `remap_raw`, `protect`, `replace_if_same` and `replace_if_same_raw` record required invalidations; `PageTableMut::drop` completes pending invalidation before releasing holds. `finish()` is the explicit synchronous completion boundary. `finish_reports_explicit_flush_boundary` checks pending batching state, not remote completion. Fresh mapping skips invalidation only for a slot verified unused and only when the architecture reports `INVALID_TO_VALID_NEEDS_TLBI == false`; `fresh_map_fences_once_without_invalidating` and `unmap_still_invalidates_on_a_fence_only_architecture` pin that boundary, and `fresh_map_invalidates_when_architecture_requires_it` pins the conservative default. Direct PTE memory writes remain outside this API contract. | Invalidation is recorded; immediate revocation still requires successful synchronous completion. |
 | T-04 | Unsynchronized mutations or aliases of a shared page table cause a data race. | High | Callers bypass exclusive access or mutate shared physical subtrees without coordination. | `PageTable64::modify(&mut self)` requires exclusive Rust access to one table object. The caller must also lock accesses through distinct objects sharing `copy_from()` subtrees; the borrow checker cannot detect those physical aliases. | Partial; shared-subtree synchronization belongs to callers. |
 | T-05 | Dropping a `copy_from` source leaves borrowed entries pointing to freed frames. | High | The source is dropped before its destination. | `copy_from()` marks `borrowed_entries`, and `PageTable64::drop` skips those subtrees. This prevents double release by the borrower but does not keep the source alive. The source-outlives-destination contract must be checked at each call site. | Partial; source lifetime is caller-owned and not type-checked. |
 | T-06 | `map_region_raw` leaves partial mappings after failure. | Medium | An intermediate mapping returns `AlreadyMapped` or `NoMemory`. | `map_region_raw()` returns the first `map_raw()` error without rollback. Reproduce by pre-mapping a later page, mapping a region spanning it, then querying the successful prefix. Callers requiring atomic behavior must clean up that prefix without removing pre-existing mappings. | Accepted limitation; rollback and recovery belong to the caller. |
 | T-07 | An incorrect SEV C-bit position applies the wrong encryption attribute. | High | `kbuild_config::SEV_CBIT_POS` differs from the hardware setting. | `EncodedPtePhys` centralizes C-bit encoding and decoding in `arch/x86_64.rs`; validate the build's `SEV_CBIT_POS` against the deployment hardware. The wrapper does not discover or validate that hardware setting. | Delegated to build and platform configuration. |
 | T-08 | Invalid addresses reach mapping or query operations. | High | A noncanonical virtual address or an unsupported physical address. | Entry points call `vaddr_is_valid()` and, for physical mapping inputs, `paddr_is_valid()`, returning `InvalidAddress` on failure. `test_paging_metadata_bounds` checks physical bounds. These checks establish address format/range, not mapping ownership or the validity of `H::p2v()`. | Mitigated for address range errors; metadata correctness remains a provider contract. |
 | T-09 | A COW commit overwrites an intervening PTE update. | High | The fault handler uses unconditional `remap_raw()` after preparing a page. | `replace_if_same(reference)` and `replace_if_same_raw(paddr)` compare the snapshot and return `Changed` without writing on mismatch. The existing raw compare regression (`replace_if_same_reports_changed_without_overwrite`) preserves its competing-mapping check under the raw API name. Reference-consuming failure drops only the unpublished input hold; callers abort any remaining prepared object state. | Partial; PTE preservation and consumed-input cleanup are implemented, object-state abort remains caller-owned. |
-| T-10 | An old data page is reused before invalidating its former translation. | High | An unmap or COW replacement frees a page before a deferred flush. | Managed mappings internally retain removed holds until confirmed invalidation; incomplete requests retain or pin them. Raw release and synchronous revocation require successful `try_finish()` and backing retention on error; existing raw callers using `finish()` do not meet that boundary. | Enforced for managed holds; raw release ordering remains caller-owned. |
+| T-10 | An old data page is reused before invalidating its former translation. | High | An unmap or COW replacement frees a page before a deferred flush. | Managed mappings retain removed holds until synchronous invalidation completes. Raw release and permission revocation use the same finish boundary; the transport cannot return incomplete. | Enforced for managed holds; raw release ordering remains caller-owned. |
 | T-11 | A cached intermediate descriptor reaches a reused page table frame. | High | An AArch64 user page table is destroyed before retiring its ASID's walk-cache entries. | With a registered provider, `PageTable64::drop` executes `dsb ishst` and `flush_tlb_process_asid(None, asid)` before the first `dealloc_frame()`. `user_drop_invalidates_latest_asid_before_freeing_frames` verifies full-ASID scope, the current ASID, and flush-before-free ordering. | Partial; hardware quiescence and provider lifetime remain address-space-owner obligations. |
 | T-13 | Kernel shootdown waits for a CPU spinning IRQ-off on a retained lock. | High | A caller holds an IRQ-safe lock through synchronous completion. | memspace uses one task mutex for runtime readers, PTE edits and completion. IRQ handlers use its immutable root cache; DMA metadata and MMIO registry spinlocks end before mapping work. | Other callers must also leave IRQs enabled and exclude IRQ-off contention on retained locks. |
 | T-12 | A forged or duplicated managed category causes invalid or double reference recovery. | High | A provider encodes category in public flags/address bits, a raw install sets it, or a copied PTE is treated as another owner. | Only reference-consuming commit creates category after exact-range validation; retained leaf updates preserve it, raw PA changes on managed leaves are rejected, and retirement/destruction recover each outstanding transfer once. Architecture bit selection and the HAL conversion contract require separate audit; ordinary PTE copies are non-owning. | Partial; transaction rules are local, architecture/provider correctness remains trusted. |
@@ -390,11 +389,11 @@ make unittest UNITTEST_CRATE=page_table
 | F-07 | `remap_raw` changes an entry while it is in use. | Uncoordinated access to the same address space. | Stale translations may remain in use before finalization. | Data corruption. | 1 | Callers must synchronize updates and complete the required TLB invalidation before reusing old resources. |
 | F-08 | An invalid address is passed to mapping or query operations. | The caller omits address range validation. | Returns `InvalidAddress`. | The operation is rejected. | 4 | Validate with `vaddr_is_valid`/`paddr_is_valid` at operation entry and return an error. |
 | F-09 | `unmap` clears a non-present entry. | Clearing before checking presence. | Architecture-specific state or reserved bits may be modified incorrectly. | Undefined hardware behavior. | 2 | Check `is_present()` before `clear()`; return `NotMapped` for a non-present entry. |
-| F-10 | `map_region_raw` panics partway through. | The `phys_getter` closure panics. | Some mappings are installed with invalidations still pending. | TLB consistency depends on cleanup running. | 2 | `PageTableMut::drop` attempts recorded invalidations and pins managed holds on failure if destruction runs; raw backing remains the caller's responsibility. Callers must keep `phys_getter` free of panics and cannot rely on unwinding in aborting configurations. |
+| F-10 | `map_region_raw` panics partway through. | The `phys_getter` closure panics. | Some mappings are installed with invalidations still pending. | TLB consistency depends on cleanup running. | 2 | `PageTableMut::drop` completes recorded invalidations before releasing managed holds if destruction runs; raw backing remains the caller's responsibility. Callers must keep `phys_getter` free of panics and cannot rely on unwinding in aborting configurations. |
 | F-11 | Mapping or unmapping runs in interrupt context. | An interrupt handler invokes page table operations. | Locks or shootdown completion may deadlock. | System hang. | 1 | Callers must respect allocator, lock, and TLB completion context requirements; do not use `PageTableMut` in interrupt context without establishing that these requirements are met. |
 | F-12 | Prepared object resources leak after conditional replacement returns `Changed`. | The caller omits cleanup outside the consumed mapping hold, or used the raw API. | A prepared resource or object reference leaks. | Persistent memory leakage. | 2 | `replace_if_same(reference)` automatically drops its unpublished input and preserves the old transfer; object owners still abort other prepared state. `replace_if_same_raw` owns no backing and leaves all prepared-resource cleanup to its caller. |
-| F-13 | An unmapped frame is freed before explicit flush finalization. | Incorrect resource release order. | A stale TLB entry may still access the reused frame. | Isolation failure or data corruption. | 1 | Use owned mapping holds, or release raw backing only after `try_finish()` succeeds and retain it on error; audit `dealloc_frame` and object-page release call sites. |
-| F-14 | Retirement spill reservation fails or the bounded batch fills. | Heap pressure or 256 retained holds. | The batch must drain while the recovered old hold remains live. | Extra invalidation or pinned pages if completion fails. | 2 | Keep 16 holds inline and at most 256 total; attempt intermediate completion while retaining the incoming hold. Release only on confirmation, otherwise retain or pin with a full retry. There is no permanent owner-index allocation/OOM path. |
+| F-13 | An unmapped frame is freed before explicit flush finalization. | Incorrect resource release order. | A stale TLB entry may still access the reused frame. | Isolation failure or data corruption. | 1 | Use owned mapping holds, or release raw backing only after `finish()` returns; audit `dealloc_frame` and object-page release call sites. |
+| F-14 | Retirement spill reservation fails or the bounded batch fills. | Heap pressure or 256 retained holds. | The batch must drain while the recovered old hold remains live. | Extra synchronous invalidation. | 2 | Keep 16 holds inline and at most 256 total; attempt intermediate completion while retaining the incoming hold. Release only after the synchronous drain completes. There is no permanent owner-index allocation/OOM path. |
 | F-15 | A later destination root entry contains an owned managed leaf during `copy_from`. | The caller failed to unmap and retire all destination managed leaves. | Copying is rejected before any subtree is destroyed or overwritten. | Caller precondition failure; existing mappings and transfers remain intact. | 2 | Prescan the entire selected root range before destructive work and require managed retirements complete. Hardware quiescence and source lifetime remain caller obligations. |
 
 ## Failure Handling
@@ -404,11 +403,11 @@ make unittest UNITTEST_CRATE=page_table
   With `feature = "kerrno"`, these convert to `KError`.
   Conditional replacement uses `PteReplaceError` to distinguish page table
   errors from an intervening PTE change that may require a retry.
-- **TLB finalization**: automatic `finish()` / Drop retain managed holds on
-  completion failure. `TlbFlushReceipt::had_pending()` is only batching metadata.
-  `try_finish()` reports synchronous completion as success or `TlbFlushError`;
-  raw release and immediate permission revocation must handle an error. A
-  receipt from automatic progress does not authorize either operation.
+- **TLB finalization**: `finish()` and `Drop` synchronously complete the required
+  invalidation before releasing retired managed holds. `TlbFlushReceipt::had_pending()`
+  reports batching state only; the guarantee comes from `finish()` returning.
+  Callers must retain raw backing until that boundary returns. There is no
+  fallible flush result to propagate or ignore.
 - **Panic policy**: ordinary operation failures use typed errors.
   Traversal macros and `copy_from()` contain `unreachable!()` branches for
   unsupported `LEVELS` values; all provided architectures use three or four
@@ -451,8 +450,8 @@ When modifying this module, verify that:
 - [ ] Every `unsafe` block has a `SAFETY:` comment.
 - [ ] New PTE mutation paths record the required TLB invalidations.
 - [ ] Conditional replacement does not overwrite the current PTE on `Changed`.
-- [ ] Owned mapping holds survive unconfirmed invalidation without caller completion checks.
-- [ ] Raw backing is released only after `PageTableMut::try_finish()` succeeds and remains held on error.
+- [ ] Owned mapping holds survive until synchronous invalidation completes, including intermediate drains.
+- [ ] Raw backing is released only after `PageTableMut::finish()` returns.
 - [ ] Immediate permission revocation is reported complete only after confirmed invalidation.
 - [ ] `PagingHandler` implementations provide injective `p2v` mappings and aligned frame allocation.
 - [ ] `Drop` handles all ownership states, including entries borrowed through `copy-from`.
@@ -463,7 +462,7 @@ When modifying this module, verify that:
 - [ ] Managed category stays private, survives retained-leaf updates, and is never created by raw installs.
 - [ ] Exact-range into_raw/from_raw transfers conserve counts; retired-leaf recovery follows capture/clear and never consumes a raw or borrowed transfer.
 - [ ] `copy_from` checks the whole destination root range before any overwrite, with managed retirements complete.
-- [ ] Inactive-tree Drop recovers each owned base/huge transfer once before frame release; failed final ASID completion preserves unrecovered transfers.
+- [ ] Inactive-tree Drop completes the final AArch64 ASID invalidation before recovering owned transfers or releasing table frames.
 
 ### AArch64 fresh-map publication
 
@@ -537,17 +536,13 @@ Managed leaf changes preserve these invariants:
   A just-recovered hold stays live locally during that completion attempt; only
   confirmation permits Drop. Repeated updates to one VA can share invalidation
   while retiring many distinct holds.
-- Internal software shootdowns retain typed `NotReady`, `Deferred`,
-  `TimedOut` and `UnsupportedScope` errors. Automatic finalization keeps holds
-  and a `Full` retry on unconfirmed completion, without requiring object owners
-  to inspect a completion flag. Before AP interrupt services are ready, a
-  nonempty remote scope is unconfirmed; SMP metadata defaults cannot report
-  remote completion after local-only work. Synchronous revocation still needs
-  successful `try_finish()`; retaining a page does not revoke permissions.
-- If storage cannot retain a recovered hold and the drain is unconfirmed, that
-  hold stays pinned. Guard Drop pins any remaining holds when its retry remains
-  unconfirmed. This bounded-storage fail-closed policy can exhaust RAM under
-  repeated failures; it is not successful reclaim and has no asynchronous reaper.
+- Hardware and software flush hooks complete synchronously. Software transport
+  owns retry, boot readiness and context checks; a stalled target cannot
+  return an incomplete result that a caller might ignore. It continues waiting
+  and periodically reports/retries until the required ack arrives.
+- Full retirement storage or spill OOM drains synchronously with the incoming
+  hold still live. No error-based leak/pinning fallback or asynchronous reaper
+  is needed. Permission revocation uses the same `finish()` boundary.
 - `copy_from` borrows source PTE-owned transfers without duplicating them.
   Borrower mutation is rejected; the source outlives every borrower and must
   invalidate their shared translations. The full destination root-entry range
@@ -556,26 +551,24 @@ Managed leaf changes preserve these invariants:
 - Table Drop requires ended hardware use, no future reactivation, completed
   required retirement and ended borrower access. It walks each owned base/huge
   managed leaf once, recovering and dropping its transfer before descriptor-frame
-  release. Borrowed roots are skipped. A failed final AArch64 user-ASID completion
-  preserves all table frames and unrecovered transfers.
+  release. Borrowed roots are skipped. Final AArch64 user-ASID invalidation
+  completes before any descriptor frame or outstanding transfer is released.
 
 Existing PA-only callers are mechanically moved to `map_raw`, `map_region_raw`,
 `remap_raw` and `replace_if_same_raw`. Production backing allocation, fields
 and destructors in anon/pagecache/filemap/memspace remain deferred. These raw
 mappings have no guard-owned data hold: keeping a `PageRef` elsewhere does not
-register a mapping transfer. Existing raw release paths using `finish()` can
-still free backing after an unconfirmed software shootdown. They remain unsafe
-under that condition until mapping ownership is transferred or raw backing is
-retained on `try_finish()` failure. MMIO and permanent direct-map policy also
-remain externally owned.
+register a mapping transfer. Raw release paths keep backing live until
+synchronous `finish()` returns. MMIO and permanent direct-map policy remain
+externally owned.
 
 The ownership regression fixtures use `map`, `map_sized` and
 `replace_if_same` as the reference-consuming test handles, and the explicit raw
 names for PA-only fixtures. Coverage obligations include transfer/count
 conservation, failed admission and stale-compare cleanup, private category
 persistence across architecture PTE updates, sparse/huge/interior removal,
-permission clears, bounded drains and spill OOM, failed completion and full
-retry, borrowed-destination preflight, live-leaf destruction and aliases with
+permission clears, synchronous bounded drains and spill OOM,
+borrowed-destination preflight, live-leaf destruction and aliases with
 independent holds. The six added transfer, alias, destruction and empty-replacement cases and
 five architecture-category cases are named in the
 [ownership regression coverage](design.md#ownership-regression-coverage). HAL
@@ -605,11 +598,10 @@ validates range, alignment, nonempty access, managed source and exact snapshot
 before publication. A stale compare or validation error consumes neither owner.
 A successful fresh raw PTE must never inherit the source managed bit: only the
 old source transfer is recovered into retirement. No ordinary error follows
-publication, including on unconfirmed automatic drains, so callers cannot mistake
-a committed raw target for an unused candidate and free it. Existing raw replace
-continues to reject a managed physical-address change. No global TLB error-model,
-retry, fail-stop or recovery behavior is added; physical retention and synchronous
-permission revocation remain separate contracts.
+publication, so callers cannot mistake a committed raw target for an unused
+candidate and free it. Existing raw replace continues to reject a managed
+physical-address change. Automatic drains and explicit completion synchronously
+invalidate before releasing retired source holds.
 
 ## RISC-V writable leaf encoding
 

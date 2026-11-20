@@ -16,8 +16,6 @@
 use memaddr::{PhysAddr, VirtAddr};
 pub(crate) use x86_64::structures::paging::page_table::PageTableFlags as PTF;
 
-#[cfg(feature = "smp")]
-use crate::defs::TlbFlushResult;
 use crate::{
     defs::{PageTableEntry, PagingFlags, PagingMetaData},
     table64::{PageTable64, PageTableMut},
@@ -235,18 +233,13 @@ impl PagingMetaData for X64PagingMetaData {
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_process_mask(
-        vaddr: Option<VirtAddr>,
-        target_mask: kcpu_id_map::KCpuMask,
-    ) -> TlbFlushResult {
-        karch::flush_tlb(vaddr);
+    fn flush_tlb_process_mask(vaddr: Option<VirtAddr>, target_mask: kcpu_id_map::KCpuMask) {
         crate::defs::TlbFlushIf::flush_process_mask(vaddr, target_mask)
     }
 
     #[cfg(feature = "smp")]
     #[inline]
-    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) -> TlbFlushResult {
-        karch::flush_tlb(vaddr);
+    fn flush_tlb_all_cpus(vaddr: Option<VirtAddr>) {
         crate::defs::TlbFlushIf::flush_all_cpus(vaddr)
     }
 }

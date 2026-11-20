@@ -27,8 +27,8 @@
 //! - [`PteSnapshot`] / [`PteReplaceError`] — conditional PTE replacement
 //!   contract for COW-style commit paths.
 //! - [`TlbFlushReceipt`] — diagnostic batching information from automatic
-//!   retirement. [`PageTableMut::try_finish`] provides synchronous completion;
-//!   [`TlbFlushError`] describes unavailable, deferred or failed shootdowns.
+//!   retirement. [`PageTableMut::finish`] completes invalidation synchronously
+//!   before releasing retired holds.
 //!
 //! # Architecture support
 //!

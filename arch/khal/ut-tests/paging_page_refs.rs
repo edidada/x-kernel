@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use kalloc::{PageRef, UsageKind, alloc_page_ref};
-use kspin::NoPreemptIrqSave;
+use kspin::{NoPreempt, NoPreemptIrqSave};
 use page_table::PagingHandler;
 use unittest::def_test;
 
@@ -88,7 +88,7 @@ fn copied_root_entries_borrow_the_source_table_storage() {
 
 #[def_test]
 fn managed_data_page_returns_to_inventory_only_after_mapping_retirement() {
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = NoPreempt::new();
     let mut table = PageTable::try_new().unwrap();
     let owner = alloc_page_ref(UsageKind::VirtMem).unwrap();
     let pa = owner.phys_addr();
@@ -110,7 +110,7 @@ fn managed_data_page_returns_to_inventory_only_after_mapping_retirement() {
 
 #[def_test]
 fn replacing_managed_data_keeps_the_old_page_until_finish() {
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = NoPreempt::new();
     let mut table = PageTable::try_new().unwrap();
     let old = alloc_page_ref(UsageKind::VirtMem).unwrap();
     let old_pa = old.phys_addr();
@@ -141,7 +141,7 @@ fn replacing_managed_data_keeps_the_old_page_until_finish() {
 fn exact_and_compound_backing_can_each_protect_one_huge_leaf() {
     const HUGE: usize = 2 * 1024 * 1024;
     for compound in [false, true] {
-        let _guard = NoPreemptIrqSave::new();
+        let _guard = NoPreempt::new();
         let before = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
         let mut table = PageTable::try_new().unwrap();
         let owner = if compound {
@@ -179,7 +179,7 @@ fn exact_and_compound_backing_can_each_protect_one_huge_leaf() {
             kalloc::global_allocator().usages().get(UsageKind::VirtMem),
             before + HUGE
         );
-        edit.try_finish().unwrap();
+        edit.finish();
         assert_eq!(
             kalloc::global_allocator().usages().get(UsageKind::VirtMem),
             before
@@ -189,7 +189,7 @@ fn exact_and_compound_backing_can_each_protect_one_huge_leaf() {
 
 #[def_test(serial)]
 fn inactive_table_destruction_releases_its_live_data_hold() {
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = NoPreempt::new();
     let before = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
     let mut table = PageTable::try_new().unwrap();
     let page = alloc_page_ref(UsageKind::VirtMem).unwrap();
@@ -212,7 +212,7 @@ fn inactive_table_destruction_releases_its_live_data_hold() {
 
 #[def_test(serial)]
 fn managed_alias_retains_real_page_after_source_retirement() {
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = NoPreempt::new();
     let before = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
     let mut table = PageTable::try_new().unwrap();
     let page = alloc_page_ref(UsageKind::VirtMem).unwrap();
@@ -221,10 +221,10 @@ fn managed_alias_retains_real_page_after_source_retirement() {
     let alias = 0x9001000usize.into();
     let mut edit = table.modify();
     edit.map(source, page, MappingFlags::READ).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     edit.map_existing(source, alias).unwrap();
     edit.unmap(source).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     assert_eq!(edit.query(alias).unwrap().0, pa);
     assert_eq!(
         kalloc::global_allocator().usages().get(UsageKind::VirtMem),
@@ -235,7 +235,7 @@ fn managed_alias_retains_real_page_after_source_retirement() {
         kalloc::global_allocator().usages().get(UsageKind::VirtMem),
         before + memaddr::PAGE_SIZE_4K
     );
-    edit.try_finish().unwrap();
+    edit.finish();
     assert_eq!(
         kalloc::global_allocator().usages().get(UsageKind::VirtMem),
         before
@@ -244,7 +244,7 @@ fn managed_alias_retains_real_page_after_source_retirement() {
 
 #[def_test(serial)]
 fn managed_to_external_replacement_keeps_raw_target_externally_owned() {
-    let _guard = NoPreemptIrqSave::new();
+    let _guard = NoPreempt::new();
     let before = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
     let mut table = PageTable::try_new().unwrap();
     let source = alloc_page_ref(UsageKind::VirtMem).unwrap();
@@ -253,7 +253,7 @@ fn managed_to_external_replacement_keeps_raw_target_externally_owned() {
     let address = 0xa000000usize.into();
     let mut edit = table.modify();
     edit.map(address, source, MappingFlags::READ).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     let expected = edit.query_entry(address).unwrap();
     // SAFETY: target retains this exact allocation until the inactive raw leaf
     // is removed and its retirement completes below. It is not consumed by PTE
@@ -272,13 +272,13 @@ fn managed_to_external_replacement_keeps_raw_target_externally_owned() {
         kalloc::global_allocator().usages().get(UsageKind::VirtMem),
         before + 2 * memaddr::PAGE_SIZE_4K
     );
-    edit.try_finish().unwrap();
+    edit.finish();
     assert_eq!(
         kalloc::global_allocator().usages().get(UsageKind::VirtMem),
         before + memaddr::PAGE_SIZE_4K
     );
     edit.unmap(address).unwrap();
-    edit.try_finish().unwrap();
+    edit.finish();
     assert_eq!(
         kalloc::global_allocator().usages().get(UsageKind::VirtMem),
         before + memaddr::PAGE_SIZE_4K
