@@ -503,17 +503,26 @@ impl Process {
     /// still-published exiting worker never lets the counts coincide
     /// prematurely. Returns the worker count after the detach.
     ///
-    /// # Panics
-    ///
-    /// Panics when detaching a worker that was never attached (the count is
-    /// already zero): only the attach/detach pair above may drive this
-    /// counter.
+    /// A detach without a matching attach is a caller bug, but it must not
+    /// panic the kernel: the count saturates at zero.
     pub fn detach_in_process_worker(&self) -> u32 {
-        let prior = self.in_process_workers.fetch_sub(1, Ordering::AcqRel);
+        let mut prior = self.in_process_workers.load(Ordering::Acquire);
+        loop {
+            // Saturate instead of wrapping when a detach has no matching
+            // attach; a mismatched caller must not corrupt the count.
+            let next = prior.saturating_sub(1);
+            match self.in_process_workers.compare_exchange_weak(
+                prior,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => prior = actual,
+            }
+        }
         self.in_process_worker_epoch.fetch_add(1, Ordering::AcqRel);
-        prior
-            .checked_sub(1)
-            .expect("in-process worker count underflow")
+        prior.saturating_sub(1)
     }
 
     /// Returns the number of in-process kernel workers currently attached.
