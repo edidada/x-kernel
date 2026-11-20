@@ -5,10 +5,11 @@
 //! Linux `io_uring` ABI subset used by the async I/O implementation.
 //!
 //! Supported today: `io_uring_setup` with a single shared SQ/CQ mapping,
-//! `io_uring_enter` submission and completion draining, and the NOP/READ/
-//! WRITE/FSYNC opcodes (operation execution is still staged). Unsupported
-//! Linux features (SQPOLL, registered files/buffers, linked SQEs, `io_uring_
-//! register`, IOPOLL, ...) are not advertised in `features`.
+//! `io_uring_enter` submission and completion draining, and the NOP opcode.
+//! Other Linux opcodes are consumed and completed with `-EINVAL` until the
+//! execution phase implements them; unsupported Linux features (SQPOLL,
+//! registered files/buffers, linked SQEs, `io_uring_register`, IOPOLL, ...)
+//! are not advertised in `features`.
 
 use core::mem::{offset_of, size_of};
 
@@ -70,6 +71,9 @@ pub struct IoUringSqe {
     /// User buffer address / first operand.
     pub addr: u64,
     /// Byte count.
+    ///
+    /// The field name is fixed by Linux `struct io_uring_sqe`; the unit is
+    /// bytes.
     pub len: u32,
     /// Opcode-specific flags (rw_flags/fsync_flags/...).
     pub op_flags: u32,
@@ -174,17 +178,13 @@ pub struct IoUringParams {
 }
 
 impl IoUringSqe {
-    /// Returns whether this subset recognizes the opcode.
+    /// Returns whether this subset can execute the opcode.
+    ///
+    /// Only NOP executes in the phase-1 implementation. Other Linux opcodes
+    /// are consumed and completed with `-EINVAL` instead of being reported as
+    /// successful without doing the requested I/O.
     pub fn is_supported_opcode(&self) -> bool {
-        matches!(
-            self.opcode,
-            IORING_OP_NOP
-                | IORING_OP_READV
-                | IORING_OP_WRITEV
-                | IORING_OP_FSYNC
-                | IORING_OP_READ
-                | IORING_OP_WRITE
-        )
+        matches!(self.opcode, IORING_OP_NOP)
     }
 }
 

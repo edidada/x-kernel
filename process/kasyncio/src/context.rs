@@ -134,6 +134,21 @@ impl AsyncContext {
         self.cq_wake.wake();
     }
 
+    /// Publishes a completion that has no in-flight dispatch to retire.
+    ///
+    /// The submit path uses this for an invalid or unsupported SQE, which
+    /// completes with an error without ever reaching a worker. The caller runs
+    /// under the ring lock and wakes waiters with
+    /// [`AsyncContext::wake_completions`] after releasing it.
+    pub(crate) fn push_completion(&self, completion: CompletedOp) {
+        self.inner.lock().completed.push_back(completion);
+    }
+
+    /// Wakes completion waiters after the caller left its ring lock.
+    pub(crate) fn wake_completions(&self) {
+        self.cq_wake.wake();
+    }
+
     /// Moves all published completions out of the context (test observation).
     #[cfg(unittest)]
     pub fn take_completions(&self) -> VecDeque<CompletedOp> {
@@ -173,16 +188,16 @@ impl AsyncContext {
     /// dispatched to a worker run to their natural completion. Never blocks:
     /// the caller is the fd `release` path or a test.
     pub fn shutdown(&self) {
-        let cancelled = {
+        // Marking shutdown, draining `ready`, and staging every cancelled
+        // operation into `completed` is one atomic transition: an observer
+        // that sees `shutdown` must also see the `-ECANCELED` completions.
+        {
             let mut inner = self.inner.lock();
             if inner.shutdown {
                 return;
             }
             inner.shutdown = true;
-            core::mem::take(&mut inner.ready)
-        };
-        if !cancelled.is_empty() {
-            let mut inner = self.inner.lock();
+            let cancelled = core::mem::take(&mut inner.ready);
             inner
                 .completed
                 .extend(cancelled.into_iter().map(|op| CompletedOp {

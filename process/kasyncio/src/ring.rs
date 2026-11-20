@@ -4,9 +4,11 @@
 
 //! Linux `io_uring` shared-ring memory (single-mmap subset).
 //!
-//! The kernel allocates one physically contiguous 2 MiB block and keeps a
-//! direct-map pointer for all ring accesses. Userspace obtains the same pages
-//! through `mmap(fd, IORING_OFF_SQ_RING)` and `mmap(fd, IORING_OFF_SQES)`.
+//! The kernel allocates one physically contiguous block (2 MiB up to 16384
+//! entries, 4 MiB up to Linux `IORING_MAX_ENTRIES`) and keeps a direct-map
+//! pointer for all ring accesses. Userspace obtains the same pages through
+//! `mmap(fd, IORING_OFF_SQ_RING)` and `mmap(fd, IORING_OFF_SQES)`, and the VMA
+//! keeps the block alive after the descriptor closes.
 //!
 //! Layout inside the block:
 //!
@@ -28,23 +30,26 @@ use core::{
     sync::atomic::{Ordering, fence},
 };
 
+use kalloc::{UsageKind, global_allocator};
 use kerrno::{KError, KResult};
-use khal::{mem::p2v, paging::PageSize};
-use memaddr::{PhysAddr, align_up_4k};
-use memspace::backend::SharedPages;
+use khal::mem::v2p;
+use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, align_up_4k};
 
 use crate::{
     abi::{
         IO_URING_CQE_SIZE, IO_URING_SQE_SIZE, IORING_FEAT_SINGLE_MMAP, IoUringCqOffsets,
         IoUringCqe, IoUringSqOffsets, IoUringSqe,
     },
-    context::{AsyncContext, PreparedOp},
+    context::{AsyncContext, CompletedOp, PreparedOp},
 };
 
-/// Backing block size. Large enough for 16384 SQEs plus the CQ ring.
-pub(crate) const RING_MEM_SIZE: usize = 2 * 1024 * 1024;
-/// Maximum supported SQ/CQ depth for this subset.
-pub(crate) const MAX_ENTRIES: u32 = 16_384;
+/// Smallest backing block: enough for 16384 SQEs plus the CQ ring.
+pub(crate) const RING_MIN_MEM: usize = 2 * 1024 * 1024;
+/// Largest backing block: enough for 32768 SQEs plus the CQ ring, matching
+/// Linux `IORING_MAX_ENTRIES`.
+pub(crate) const RING_MAX_MEM: usize = 4 * 1024 * 1024;
+/// Maximum supported SQ/CQ depth, matching Linux `IORING_MAX_ENTRIES`.
+pub(crate) const MAX_ENTRIES: u32 = 32_768;
 
 const SQ_HEAD: usize = 0x00;
 const SQ_TAIL: usize = 0x04;
@@ -56,9 +61,59 @@ const SQ_ARRAY: usize = 0x40;
 
 const CQ_HEADER_SIZE: usize = 0x40;
 
+/// Owns the physically contiguous backing block of one ring.
+///
+/// A user mapping keeps an `Arc` of this object through the VMA's owning
+/// linear runtime, so closing the descriptor before `munmap` cannot free
+/// pages that user PTEs still reference.
+pub(crate) struct RingPages {
+    base: *mut u8,
+    base_paddr: PhysAddr,
+    num_pages: usize,
+}
+
+// SAFETY: the block is one exclusive kernel allocation; the direct-map pointer
+// is stable until Drop, and ring access is synchronized through the shared
+// head/tail words.
+unsafe impl Send for RingPages {}
+// SAFETY: see `Send`.
+unsafe impl Sync for RingPages {}
+
+impl RingPages {
+    fn new(len: usize) -> KResult<Self> {
+        let num_pages = len / PAGE_SIZE_4K;
+        let va = global_allocator()
+            .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::VirtMem)
+            .map_err(|_| KError::NoMemory)?;
+        let base = va as *mut u8;
+        // SAFETY: `va` is a fresh allocation of `len` bytes and `len` is a
+        // multiple of the page size.
+        unsafe { ptr::write_bytes(base, 0, len) };
+        Ok(Self {
+            base,
+            base_paddr: v2p(VirtAddr::from(va)),
+            num_pages,
+        })
+    }
+
+    fn base(&self) -> *mut u8 {
+        self.base
+    }
+
+    fn base_paddr(&self) -> PhysAddr {
+        self.base_paddr
+    }
+}
+
+impl Drop for RingPages {
+    fn drop(&mut self) {
+        global_allocator().dealloc_pages(self.base as usize, self.num_pages, UsageKind::VirtMem);
+    }
+}
+
 /// Kernel-side state and layout of one io_uring ring.
 pub(crate) struct Ring {
-    _pages: Arc<SharedPages>,
+    pages: Arc<RingPages>,
     base: *mut u8,
     base_paddr: PhysAddr,
     sq_entries: u32,
@@ -97,16 +152,21 @@ impl Ring {
         let cqes_off = align_up_4k(cq_head_off + CQ_HEADER_SIZE);
         let sqes_off = align_up_4k(cqes_off + cq_entries as usize * IO_URING_CQE_SIZE);
         let used = sqes_off + entries as usize * IO_URING_SQE_SIZE;
-        if used > RING_MEM_SIZE {
+        let ring_len = if used <= RING_MIN_MEM {
+            RING_MIN_MEM
+        } else {
+            RING_MAX_MEM
+        };
+        if used > ring_len {
             return Err(KError::InvalidInput);
         }
 
-        let pages = Arc::new(SharedPages::new(RING_MEM_SIZE, PageSize::Size2M)?);
-        let base_paddr = *pages.first().ok_or(KError::NoMemory)?;
-        let base = p2v(base_paddr).as_mut_ptr();
+        let pages = Arc::new(RingPages::new(ring_len)?);
+        let base_paddr = pages.base_paddr();
+        let base = pages.base();
 
         let ring = Self {
-            _pages: pages,
+            pages,
             base,
             base_paddr,
             sq_entries: entries,
@@ -115,7 +175,7 @@ impl Ring {
             cq_head_off,
             cqes_off,
             sqes_off,
-            ring_len: RING_MEM_SIZE,
+            ring_len,
             sq_head: 0,
             cq_tail: 0,
         };
@@ -130,12 +190,21 @@ impl Ring {
         ring.write_u32(cq_head_off + 8, cq_entries - 1);
         ring.write_u32(cq_head_off + 12, cq_entries);
         ring.write_u32(cq_head_off + 16, 0);
+        // `cq_flags` is a distinct word after the overflow counter; report its
+        // real offset instead of aliasing the SQ head at offset zero.
+        ring.write_u32(cq_head_off + 20, 0);
         Ok(ring)
     }
 
     /// Returns the physical base address of the ring block.
     pub(crate) fn base_paddr(&self) -> PhysAddr {
         self.base_paddr
+    }
+
+    /// Returns the backing pages so a user mapping can keep them alive after
+    /// the ring file is closed.
+    pub(crate) fn pages(&self) -> Arc<RingPages> {
+        self.pages.clone()
     }
 
     /// Returns the complete mapped block length.
@@ -182,7 +251,7 @@ impl Ring {
             ring_entries: (self.cq_head_off + 12) as u32,
             overflow: (self.cq_head_off + 16) as u32,
             cqes: self.cqes_off as u32,
-            flags: 0,
+            flags: (self.cq_head_off + 20) as u32,
             resv1: 0,
             user_addr: 0,
         }
@@ -194,6 +263,10 @@ impl Ring {
     }
 
     /// Consumes up to `to_submit` SQEs from the shared SQ ring.
+    ///
+    /// Every consumed entry advances the shared SQ head, so an invalid or
+    /// unsupported SQE cannot wedge the ring: it is completed with `-EINVAL`
+    /// and the following entries still run, as in Linux.
     pub(crate) fn submit(&mut self, ctx: &AsyncContext, to_submit: u32) -> KResult<u32> {
         if to_submit > self.sq_entries {
             return Err(KError::InvalidInput);
@@ -203,6 +276,8 @@ impl Ring {
         if to_submit > available {
             return Err(KError::InvalidInput);
         }
+        // Pairs with the user's Release publication of SQ_TAIL: observing the
+        // tail makes every SQE field written before it visible here.
         fence(Ordering::Acquire);
 
         let mask = self.sq_entries - 1;
@@ -212,17 +287,25 @@ impl Ring {
             let array_off = self.sq_array_off + sq_index * 4;
             let sqe_index = self.read_u32(array_off);
             if sqe_index >= self.sq_entries {
-                if submitted == 0 {
-                    return Err(KError::InvalidInput);
-                }
-                break;
+                // The index array is user-shared; consume the entry and report
+                // the error instead of leaving it at the head.
+                ctx.push_completion(CompletedOp {
+                    user_data: 0,
+                    res: -kerrno::LinuxError::EINVAL.into_raw(),
+                });
+                submitted += 1;
+                continue;
             }
             let sqe = self.read_sqe(sqe_index);
             if sqe.flags != 0 || !sqe.is_supported_opcode() {
-                if submitted == 0 {
-                    return Err(KError::InvalidInput);
-                }
-                break;
+                // Unsupported flags/opcodes complete with -EINVAL and are
+                // consumed so later SQEs are not blocked.
+                ctx.push_completion(CompletedOp {
+                    user_data: sqe.user_data,
+                    res: -kerrno::LinuxError::EINVAL.into_raw(),
+                });
+                submitted += 1;
+                continue;
             }
             match ctx.push_ready(PreparedOp {
                 user_data: sqe.user_data,
@@ -261,6 +344,8 @@ impl Ring {
             };
             self.write_cqe(slot, cqe);
             let _ = ctx.pop_completion();
+            // Pairs with the user's Acquire read of the CQ tail: the CQE store
+            // above must be visible before the new tail is published.
             fence(Ordering::Release);
             self.cq_tail = self.cq_tail.wrapping_add(1);
             self.write_u32(self.cq_head_off + 4, self.cq_tail);
@@ -269,15 +354,16 @@ impl Ring {
         Ok(published)
     }
 
-    /// Returns whether the completion ring is full.
-    pub(crate) fn is_cq_full(&self) -> bool {
+    /// Returns the number of CQEs published into the shared ring that the
+    /// user has not consumed yet.
+    pub(crate) fn pending_cqes(&self) -> u32 {
         let cq_head = self.read_u32(self.cq_head_off);
-        self.cq_tail.wrapping_sub(cq_head) >= self.cq_entries
+        self.cq_tail.wrapping_sub(cq_head)
     }
 
     fn read_u32(&self, offset: usize) -> u32 {
         let ptr = self.base.wrapping_add(offset).cast::<u32>();
-        // SAFETY: `offset` is inside the 2 MiB ring block and the header field
+        // SAFETY: `offset` is inside the allocated ring block and the header field
         // is aligned and initialized before publication.
         unsafe { ptr::read_volatile(ptr) }
     }

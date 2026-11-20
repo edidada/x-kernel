@@ -56,47 +56,59 @@ impl AsyncioFile {
     /// Submits SQEs, grows the worker pool, and optionally waits for
     /// completions to be published into the CQ ring.
     ///
-    /// Returns the number of operations accepted from this call. A full
-    /// completion ring ends the wait early without losing staged completions;
-    /// the next `enter` publishes them.
+    /// `min_complete` is clamped to the completion-ring size, as Linux does.
+    /// Returns the number of operations accepted from this call; when SQEs
+    /// were accepted, a later worker-spawn or wait failure does not replace
+    /// that count (the operations are already queued and will complete).
     ///
     /// # Errors
     ///
-    /// Rejects `min_complete` above the completion-ring size with
-    /// `InvalidInput`, and forwards SQE validation, enqueue, worker-spawn,
-    /// ring-access, and wait errors.
+    /// Forwards SQE validation, enqueue, and worker-spawn/wait errors only
+    /// when no SQE was accepted.
     pub fn enter(
         &self,
         to_submit: u32,
         min_complete: u32,
         timeout: Option<TimeSpan>,
     ) -> KResult<u32> {
-        if min_complete > self.ring.lock().cq_entries() {
-            return Err(KError::InvalidInput);
-        }
+        let min_complete = min_complete.min(self.ring.lock().cq_entries());
         let submitted = self.ring.lock().submit(&self.context, to_submit)?;
+        // Validation rejections were staged without a wake (the ring lock was
+        // held); publish the wake now that it is released.
+        self.context.wake_completions();
         // Also cover work left queued by an earlier failed spawn: the growth
         // check is a no-op when the queue does not exceed idle capacity.
-        ensure_worker(&self.context)?;
-        if min_complete == 0 {
-            self.ring.lock().flush_completions(&self.context)?;
-        } else {
-            self.wait_for_completions(min_complete, timeout)?;
+        if let Err(error) = ensure_worker(&self.context) {
+            return if submitted == 0 {
+                Err(error)
+            } else {
+                Ok(submitted)
+            };
         }
-        Ok(submitted)
+        let result = if min_complete == 0 {
+            self.ring
+                .lock()
+                .flush_completions(&self.context)
+                .map(|_| ())
+        } else {
+            self.wait_for_completions(min_complete, timeout)
+        };
+        match result {
+            Ok(()) => Ok(submitted),
+            // Linux keeps the accepted count when the wait was interrupted or
+            // the context closed under it; the caller can retry the wait.
+            Err(_) if submitted > 0 => Ok(submitted),
+            Err(error) => Err(error),
+        }
     }
 
     fn wait_for_completions(&self, min_complete: u32, time_limit: Option<TimeSpan>) -> KResult<()> {
         let deadline = time_limit.map(|span| khal::time::monotonic_time() + span);
-        let mut published = 0;
         loop {
-            published += self.ring.lock().flush_completions(&self.context)?;
-            if published >= min_complete {
-                return Ok(());
-            }
-            if self.ring.lock().is_cq_full() {
-                // The user must consume CQEs before more can be published;
-                // returning now is preferable to spinning in the kernel.
+            self.ring.lock().flush_completions(&self.context)?;
+            // The shared CQ ring may already hold unconsumed completions from
+            // an earlier enter; Linux counts those toward min_complete.
+            if self.ring.lock().pending_cqes() >= min_complete {
                 return Ok(());
             }
             if self.context.is_shutdown() && !self.context.has_completions() {
@@ -207,7 +219,9 @@ impl FileOperations for AsyncioFops {
             ),
             _ => return Err(kvfs::VfsError::InvalidInput),
         };
-        mapper.map_physical(PhysAddrRange::from_start_size(start, len))
+        // The VMA keeps the ring pages alive after the descriptor closes,
+        // matching Linux's page-reference ownership for the ring mapping.
+        mapper.map_physical_owned(PhysAddrRange::from_start_size(start, len), ring.pages())
     }
 
     fn release(&self, _inode: &kvfs::VfsInode, file: &VfsFile) -> VfsResult<()> {

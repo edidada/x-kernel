@@ -5,11 +5,11 @@
 Everything that crosses the user/kernel boundary here is untrusted until
 validated:
 
-- **SQE contents** (once the submission ring lands): opcode, flags, fds,
-  lengths, offsets, and user pointers arrive from userspace. The submit
-  path resolves fds through the caller's fd table with normal permission
-  checks and validates flag bits and reserved fields before an operation
-  is queued; unknown bits are rejected, not ignored.
+- **SQE contents**: opcode, flags, fds, lengths, offsets, and user pointers
+  arrive from userspace. The submit path validates the index array, SQE flags,
+  and opcode before queueing; a rejected entry is consumed and completed with
+  `-EINVAL` (preserving its `user_data` where it is readable), so it cannot
+  block later entries and the client still learns which request failed.
 - **User buffers**: operations carrying user VAs execute on a worker that
   is a thread of the owning process, so every access goes through the
   standard guarded user-memory path (`osvm`/`kuaccess`) with fault
@@ -19,14 +19,17 @@ validated:
 - **Ring memory**: ring pages are user-mappable and writable by design. The
   kernel keeps its own `sq_head`/`cq_tail`, masks every user-published index,
   validates every SQE (supported opcode, zero `flags`, bounded array index),
-  and only publishes CQEs it generated. The pages are owned by the open file,
-  so the descriptor must stay open while its mappings are in use (liburing's
-  `io_uring_queue_exit` munmaps before closing); closing the last descriptor
-  stops workers and drains staged completions.
-- **`io_uring_enter` arguments**: unknown enter flags and a non-NULL signal
-  mask are rejected; `to_submit` beyond the user-published tail or the ring
-  depth is rejected. A subset that needs interruptible enter must add signal
-  masking rather than silently ignoring it.
+  and only publishes CQEs it generated. The pages are owned by the file while
+  it is open and by the VMA's owning linear runtime while a mapping exists, so
+  closing the last descriptor before `munmap` frees nothing that user PTEs
+  still reference; closing it stops workers and drains staged completions.
+- **`io_uring_enter` arguments**: unknown enter flags are rejected; a non-NULL
+  signal mask is rejected only when `IORING_ENTER_GETEVENTS` requests the wait
+  this subset cannot service (Linux never reads the mask otherwise).
+  `to_submit` beyond the user-published tail or the ring depth is rejected;
+  `min_complete` is clamped to the CQ depth as Linux does. A non-io_uring fd
+  returns `EOPNOTSUPP`, matching Linux. The setup descriptor is installed
+  close-on-exec unconditionally.
 
 ## Worker credentials and reach
 

@@ -9,9 +9,10 @@ submitting user thread. Syscall ABI decoding for `io_uring_setup` and
 `io_uring_enter` stays in `ksyscall`; ring allocation, mmap, and file lifecycle
 live here.
 
-The synchronous syscall surface is untouched; async entry is additive and
-incrementally enabled (read, write, fsync, splice, sendfile,
-copy_file_range first).
+The synchronous syscall surface is untouched; async entry is additive.
+Phase 1 executes `IORING_OP_NOP`; other Linux opcodes are consumed and
+completed with `-EINVAL` until the operation dispatch (`ops.rs`) lands, so a
+client never observes a fake success for I/O the kernel did not perform.
 
 Supported: one shared SQ/CQ mmap (`IORING_FEAT_SINGLE_MMAP`), SQE submission,
 CQE draining, and `IORING_ENTER_GETEVENTS`. Non-goals for this phase: SQPOLL,
@@ -32,8 +33,11 @@ process/kasyncio/src/
 └── lib.rs       re-exports
 ```
 
-`ops.rs` (operation decode/dispatch) remains the next step: `execute()` is
-still a placeholder that completes every accepted SQE with result `0`.
+`ops.rs` (operation decode/dispatch) remains the next step: only NOP is
+accepted onto the ready queue, and `execute()` completes it with result `0`.
+Any other opcode, nonzero SQE flags, or out-of-range SQE index is consumed and
+completed with `-EINVAL`, so an invalid entry cannot wedge the submission
+ring.
 
 ## Execution model
 
@@ -79,9 +83,12 @@ here explicitly to avoid rework under an ABI-compatibility pretext.
   `cq_wake` (published completions).
 - The ready queue is bounded by `READY_LIMIT` (1024); a full queue reports
   `WouldBlock` to the submitter.
-- The ring lives in one physically contiguous 2 MiB block. The kernel accesses
+- The ring lives in one physically contiguous block: 2 MiB for up to 16384
+  entries, 4 MiB up to Linux `IORING_MAX_ENTRIES` (32768). The kernel accesses
   it through the direct map; userspace obtains the same pages through
-  `mmap(fd, IORING_OFF_SQ_RING)` and `mmap(fd, IORING_OFF_SQES)`. The kernel
+  `mmap(fd, IORING_OFF_SQ_RING)` and `mmap(fd, IORING_OFF_SQES)`. The VMA
+  holds an owning linear runtime over the block, so `close(fd)` before
+  `munmap` keeps the pages alive exactly as Linux's ring page references do. The kernel
   keeps its own `sq_head` and `cq_tail`; user-owned `sq_tail`/`cq_head` are read
   from the shared header. Volatile field accesses plus acquire/release fences
   separate SQE/CQE payload publication from index updates.
@@ -101,7 +108,15 @@ outcomes, and its user cookie is observable in exactly one completion:
 
 A submission rejected at enqueue produces no completion — the submitter
 observes the error directly (`WouldBlock` on a full queue,
-`BadFileDescriptor` on a shut-down context).
+`BadFileDescriptor` on a shut-down context). An SQE rejected by validation
+(nonzero flags, unsupported opcode, out-of-range index) is different: it is
+consumed, the SQ head advances, and it completes with `-EINVAL`, so later
+SQEs still run.
+
+`io_uring_enter` clamps `min_complete` to the CQ depth and counts CQEs already
+visible in the shared ring; it returns the accepted SQE count even when a
+later worker-spawn or wait step fails, and the wait returns as soon as the
+shared ring holds enough unconsumed CQEs.
 
 ## Worker exit contract
 
@@ -115,22 +130,18 @@ by the ordinary exit path — when any of the following holds:
 2. **Thread exit / process group exit**: the group-exit SIGKILL broadcast
    reaches workers through the same `interruptible` waits the synchronous
    syscalls use, so blocked operations unwind with `-EINTR`.
-3. **Pending `SIGKILL`**: a worker never re-enters userspace, where
+3. **Last ordinary thread gone**: `Process::has_only_in_process_workers`
+   compares the worker count with the published-thread count under a worker
+   epoch, so a concurrent attach/detach rejects the snapshot instead of
+   letting a worker retire while an ordinary thread is still live. Workers
+   re-evaluate at least once per `IDLE_PARK_BOUND` (200 ms); the last
+   `do_exit` then completes the process tail.
+4. **Pending `SIGKILL`**: a worker never re-enters userspace, where
    fatal-signal delivery normally happens, so the idle path probes the
    thread's pending-signal set after every task-interrupt wake. `kill -9`
    on a worker tid therefore ends the worker. Handler-visible fatal
    signals other than `SIGKILL` still require a userspace return and are
    out of scope for phase 1.
-4. **Last ordinary thread gone**: the final ordinary (non-worker) thread's
-   plain exit must not strand parked workers holding membership — that
-   would stall `waitpid` forever. Workers re-evaluate at least once per
-   `IDLE_PARK_BOUND` (200 ms) whether `Process::has_only_in_process_workers`
-   holds — an explicit per-process worker counter maintained by the spawn
-   (attach after membership publication) and retire (detach before
-   membership removal) paths, so it cannot be forged through task naming
-   and is conservative under races. The last `do_exit` then completes the
-   process tail. This also removes the need for a cross-context notifier
-   when a process owns several async contexts.
 
 ## Known limitations
 
@@ -138,7 +149,8 @@ by the ordinary exit path — when any of the following holds:
   park bound (not a cross-context wake) is what eventually retires their
   workers. Latency in that corner is bounded but not prompt.
 - Completions are staged in a kernel-side deque and published to the CQ ring
-  by `io_uring_enter` (or the next enter after a full ring). User buffers and
-  real operation dispatch still wait for the `ops.rs` step.
+  by `io_uring_enter` (or the next enter after a full ring). Only NOP executes
+  until the `ops.rs` step; other opcodes complete with `-EINVAL` and are never
+  reported as successful without doing the requested I/O.
 - Handler-visible fatal signals other than `SIGKILL` still require a
   userspace return; workers only self-terminate on pending `SIGKILL`.

@@ -17,6 +17,7 @@ ignored = ["kns"]
 [dependencies]
 anon_inodefs.workspace = true
 kcred.workspace = true
+kalloc.workspace = true
 kerrno.workspace = true
 khal.workspace = true
 klogger.workspace = true
@@ -29,7 +30,6 @@ ktime_types.workspace = true
 kvfs.workspace = true
 kns.workspace = true
 memaddr.workspace = true
-memspace.workspace = true
 posix-process.workspace = true
 posix-types.workspace = true
 unittest.workspace = true
