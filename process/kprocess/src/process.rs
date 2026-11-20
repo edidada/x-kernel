@@ -129,6 +129,10 @@ pub struct Process {
     /// atomic suffices; ordering documents the attach/detach contract on the
     /// accessor methods.
     in_process_workers: AtomicU32,
+    /// Sequence counter advanced on every worker attach/detach, so
+    /// [`Process::has_only_in_process_workers`] can reject a snapshot taken
+    /// across a worker-count change.
+    in_process_worker_epoch: AtomicU32,
 }
 
 impl Process {
@@ -470,6 +474,7 @@ impl Process {
             retained_nsproxy: SpinNoPreempt::new(None),
             pid_publication_slot: SpinNoIrq::new(None),
             in_process_workers: AtomicU32::new(0),
+            in_process_worker_epoch: AtomicU32::new(0),
         })
     }
 
@@ -487,7 +492,9 @@ impl Process {
     ///
     /// Returns the worker count after the attach.
     pub fn attach_in_process_worker(&self) -> u32 {
-        self.in_process_workers.fetch_add(1, Ordering::AcqRel) + 1
+        let count = self.in_process_workers.fetch_add(1, Ordering::AcqRel) + 1;
+        self.in_process_worker_epoch.fetch_add(1, Ordering::AcqRel);
+        count
     }
 
     /// Accounts an in-process kernel worker detaching from this process.
@@ -503,6 +510,7 @@ impl Process {
     /// counter.
     pub fn detach_in_process_worker(&self) -> u32 {
         let prior = self.in_process_workers.fetch_sub(1, Ordering::AcqRel);
+        self.in_process_worker_epoch.fetch_add(1, Ordering::AcqRel);
         prior
             .checked_sub(1)
             .expect("in-process worker count underflow")
@@ -519,13 +527,20 @@ impl Process {
     /// This is the "last ordinary thread is gone" condition: subsystems that
     /// keep kernel-mode sibling threads (such as `kasyncio` workers) use it
     /// to retire them when no ordinary thread can submit, exit, or service
-    /// them anymore. The comparison races with thread publication and exit,
-    /// so callers must tolerate both a stale `false` (harmless: workers stay
-    /// and re-check) and a transient `true` (callers retire, which the
-    /// attach/detach ordering above keeps safe).
+    /// them anymore. A stale `false` is harmless (workers stay and re-check);
+    /// a stale `true` would retire a worker while an ordinary thread is still
+    /// live, so the worker count and published-thread count must come from
+    /// one stable snapshot. The epoch rejects any snapshot taken across a
+    /// worker attach/detach, and the loop retries.
     pub fn has_only_in_process_workers(&self) -> bool {
-        let workers = self.in_process_worker_count();
-        workers > 0 && workers as usize == self.thread_count()
+        loop {
+            let epoch = self.in_process_worker_epoch.load(Ordering::Acquire);
+            let workers = self.in_process_worker_count();
+            let threads = self.thread_count();
+            if self.in_process_worker_epoch.load(Ordering::Acquire) == epoch {
+                return workers > 0 && workers as usize == threads;
+            }
+        }
     }
 
     fn attach_prepared_locked(
