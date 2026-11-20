@@ -24,7 +24,7 @@ const-str = "0.6.2"
 kplat-macros = { path = "../kplat-macros" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-ktime_types.workspace = true
+kiface-power-api.workspace = true
 
 [package.metadata.docs.rs]
 all-features = true

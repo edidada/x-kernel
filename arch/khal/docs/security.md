@@ -373,7 +373,7 @@ production backing lifetime correctness.
 
 ## Reset-aware sleep obligations
 
-The HAL re-exports the contract defined in [kplat](../../../platforms/kplat/docs/security.md#x86-system-sleep) as
+The HAL re-exports the contract defined in [kiface-power-api](../../../util/kiface/crates/power-api/docs/security.md) as
 `power::SystemSleepIf`. Its reset-aware operations are unsafe because the provider cannot establish
 scheduler, device and saved-stack ownership. Callers must serialize PM, pin the
 boot CPU, exclude hotplug, retain all contexts through AP callback join and
