@@ -1909,7 +1909,7 @@ fn shared_setuid_exec_resets_ids_without_permitted_growth() {
 #[def_test]
 fn scheduler_capability_is_scoped_to_the_target_user_namespace() {
     let child = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false).unwrap();
-    let mut caller = Cred::root();
+    let mut caller = Cred::root().with_user_namespace(child.clone());
     let sys_nice = CapSet::from_bits(1 << crate::CAP_SYS_NICE);
     caller
         .set_capabilities(CapSets::new(sys_nice, sys_nice, CapSet::EMPTY))

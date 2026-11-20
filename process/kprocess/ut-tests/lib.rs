@@ -2321,7 +2321,7 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
 }
 
 #[def_test(serial)]
-fn test_zombie_keeps_namespaces_until_reap() {
+fn test_zombie_retains_namespace_owner_after_task_drop() {
     let init = ensure_init();
     let child = init.fork(581);
     let task = publish_test_thread(&child, 581);
@@ -2336,9 +2336,10 @@ fn test_zombie_keeps_namespaces_until_reap() {
     // owner independently of that runtime.
     drop(task);
 
-    // Linux releases nsproxy in release_task(), not do_exit(), so an unreaped
-    // zombie still serves /proc/<pid>/ns/* lookups (runc/kata pin namespaces
-    // of an already-exited container init through those files).
+    // Production drops the exited Task (and its runtime) after the final
+    // switch; the zombie must still retain the namespace owner independently.
+    // The real do_exit path is covered by posix-process's
+    // `do_exit_retains_namespaces_until_reap`.
     child
         .mnt_ns()
         .expect("waitable zombie must keep its namespace owner");
