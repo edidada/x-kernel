@@ -51,3 +51,13 @@ fn crc32c_matches_bitwise_reference_across_lengths_and_seeds() {
         }
     }
 }
+
+#[def_test]
+fn crc32c_chained_updates_match_one_shot() {
+    let data = b"the quick brown fox jumps over the lazy dog";
+    for split in 0..=data.len() {
+        let seed = 0x1122_3344;
+        let chained = crc32c(crc32c(seed, &data[..split]), &data[split..]);
+        assert_eq!(chained, crc32c(seed, data), "split {split}");
+    }
+}
