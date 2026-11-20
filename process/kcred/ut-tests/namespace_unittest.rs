@@ -471,6 +471,9 @@ fn gid_self_map_requires_the_namespace_owner() {
     let root = Cred::root();
     namespace.set_setgroups_allowed(false).unwrap();
     let mut attacker = Cred::root();
+    attacker
+        .set_resgid(Some(1001), Some(1001), Some(1001))
+        .unwrap();
     let sys_admin = CapSet::from_bits(1 << CAP_SYS_ADMIN);
     attacker
         .set_capabilities(CapSets::new(sys_admin, CapSet::FULL, CapSet::EMPTY))

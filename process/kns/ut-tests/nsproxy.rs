@@ -617,3 +617,34 @@ fn test_newuser_rejects_a_chrooted_fs_root() {
         Err(UnshareError::NotPermitted)
     ));
 }
+
+#[def_test]
+fn test_newuser_depth_is_reported_before_the_chroot_error() {
+    let mut namespace = kcred::initial_user_namespace();
+    let writer = Cred::root();
+    for _ in 0..33 {
+        let child = UserNamespace::new_child(&namespace, 0, 0, false).unwrap();
+        child
+            .write_uid_map(&writer, &writer, alloc::vec![kcred::IdMapExtent::new(0, 0, 1).unwrap()])
+            .unwrap();
+        child
+            .write_gid_map(&writer, &writer, alloc::vec![kcred::IdMapExtent::new(0, 0, 1).unwrap()])
+            .unwrap();
+        namespace = child;
+    }
+    let proxy = make_nsproxy();
+    let base = make_fs(&proxy);
+    let sub = base.root().dentry().lookup("mnt").unwrap();
+    let chroot_fs = FsStruct::new(kvfs::Path::new(base.root().mount().clone(), sub));
+    let context = UnshareContext {
+        cred: Arc::new(Cred::new(0, 0).with_user_namespace(namespace)),
+        fs_shared_with_others: false,
+        unshare_fs: false,
+        unshare_files: false,
+        current_cgroup: Some(test_cgroup()),
+    };
+    assert!(matches!(
+        proxy.prepare_unshare(NamespaceFlags::NEWUSER, context, &chroot_fs),
+        Err(UnshareError::NoSpace)
+    ));
+}
