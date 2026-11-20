@@ -19,8 +19,8 @@ fn bitmap_checksum_matches_linux_seeded_bitmap_crc() {
     assert_eq!(bitmap_checksum(&bitmap, seed), crc32c(seed, &bitmap));
 }
 
-/// Bit-at-a-time reference implementation, kept independent of the table the
-/// production path builds.
+/// Bit-at-a-time reference implementation, kept independent of the `crc`
+/// crate used by the production path.
 fn reference_crc32c(mut crc: u32, bytes: &[u8]) -> u32 {
     const POLYNOMIAL: u32 = 0x82f6_3b78;
     for byte in bytes {
@@ -34,7 +34,7 @@ fn reference_crc32c(mut crc: u32, bytes: &[u8]) -> u32 {
 }
 
 #[def_test]
-fn table_crc32c_matches_bitwise_reference_across_lengths_and_seeds() {
+fn crc32c_matches_bitwise_reference_across_lengths_and_seeds() {
     let mut data = [0u8; 1031];
     let mut state = 0x9e37_79b9u32;
     for byte in &mut data {

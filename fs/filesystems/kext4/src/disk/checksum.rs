@@ -2,42 +2,20 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-const CRC32C_POLYNOMIAL: u32 = 0x82f6_3b78;
+use crc::{CRC_32_ISCSI, Crc};
 
-/// Reflected CRC32C lookup table.
-///
-/// Entry `i` is the register value after running byte `i` through all eight
-/// polynomial steps. The old bit-at-a-time loop did that work on every byte of
-/// every checksummed block; metadata updates checksum several 4 KiB blocks per
-/// syscall, which made the arithmetic the dominant cost of a create or unlink.
-const fn crc32c_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut index = 0;
-    while index < 256 {
-        let mut crc = index as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ CRC32C_POLYNOMIAL
-            } else {
-                crc >> 1
-            };
-            bit += 1;
-        }
-        table[index] = crc;
-        index += 1;
-    }
-    table
-}
+/// Linux ext4 uses the reflected CRC32C polynomial with a caller-supplied raw
+/// register value and no final complement. `CRC_32_ISCSI` supplies the
+/// polynomial and table; its public `Digest` applies the algorithm's
+/// initial/final reflections and XOR, so convert the raw register to and from
+/// that representation here.
+static CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
-static CRC32C_TABLE: [u32; 256] = crc32c_table();
-
-/// Updates a Linux-style CRC32C value without applying a final complement.
-pub(crate) fn crc32c(mut crc: u32, bytes: &[u8]) -> u32 {
-    for &byte in bytes {
-        crc = (crc >> 8) ^ CRC32C_TABLE[((crc ^ u32::from(byte)) & 0xff) as usize];
-    }
-    crc
+/// Updates a Linux-style raw CRC32C register without a final complement.
+pub(crate) fn crc32c(crc: u32, bytes: &[u8]) -> u32 {
+    let mut digest = CRC32C.digest_with_initial(crc.reverse_bits());
+    digest.update(bytes);
+    digest.finalize() ^ u32::MAX
 }
 
 pub(crate) fn group_descriptor_checksum(
