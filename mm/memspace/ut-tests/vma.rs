@@ -4,7 +4,7 @@
 
 use kerrno::KError;
 use khal::paging::{MappingFlags, PageSize};
-use memaddr::{PAGE_SIZE_4K, VirtAddr};
+use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use unittest::def_test;
 use vmobj::{AnonObjectId, FileObjectId, VmObjectId};
 
@@ -188,6 +188,68 @@ fn vma_set_exact_unmap_removes_only_target_area() {
 }
 
 #[def_test]
+fn vma_set_overlapping_walk_matches_the_cloned_snapshot() {
+    fn overlap_starts(set: &VmAreaSet, start: usize, size: usize) -> alloc::vec::Vec<usize> {
+        set.overlapping(VirtAddrRange::from_start_size(vaddr(start), size))
+            .map(|area| area.start().as_usize())
+            .collect()
+    }
+
+    let mut set = VmAreaSet::new();
+    set.insert(test_area(0x1000, PAGE_SIZE_4K * 4, 10));
+    set.insert(test_area(0x6000, PAGE_SIZE_4K * 2, 20));
+    set.insert(test_area(0x9000, PAGE_SIZE_4K * 2, 30));
+    set.insert(test_area(0x20000, PAGE_SIZE_4K * 2, 40));
+
+    // A request that begins inside the first area reaches back to it, and an
+    // area starting exactly at the end address is half-open and untouched.
+    assert_eq!(
+        overlap_starts(&set, 0x3000, PAGE_SIZE_4K * 7),
+        alloc::vec![0x1000, 0x6000, 0x9000]
+    );
+    assert_eq!(overlap_starts(&set, 0x5000, PAGE_SIZE_4K), alloc::vec![]);
+    assert_eq!(
+        overlap_starts(&set, 0x5000, PAGE_SIZE_4K * 2),
+        alloc::vec![0x6000]
+    );
+    // A zero-size request covers no address at all.
+    assert_eq!(overlap_starts(&set, 0x5000, 0), alloc::vec![]);
+    // 0xb000..0x20000 is a hole longer than a two-page request that starts in
+    // it, so the next candidate begins past the end address. The window stays
+    // empty rather than becoming reversed; a request long enough to reach that
+    // candidate still finds it.
+    assert_eq!(
+        overlap_starts(&set, 0xc000, PAGE_SIZE_4K * 2),
+        alloc::vec![]
+    );
+    assert_eq!(
+        overlap_starts(&set, 0x2000, PAGE_SIZE_4K * 3),
+        alloc::vec![0x1000]
+    );
+    assert_eq!(
+        overlap_starts(&set, 0xc000, PAGE_SIZE_4K * 21),
+        alloc::vec![0x20000]
+    );
+
+    // The borrowing walk and the cloning snapshot cover the same window.
+    for (start, size) in [
+        (0x1000, PAGE_SIZE_4K * 10),
+        (0x4000, PAGE_SIZE_4K * 5),
+        (0xc000, PAGE_SIZE_4K * 2),
+        (0xc000, PAGE_SIZE_4K * 21),
+        (0x2000, PAGE_SIZE_4K * 3),
+    ] {
+        let range = VirtAddrRange::from_start_size(vaddr(start), size);
+        let snapshot = set
+            .collect_overlapping(range)
+            .iter()
+            .map(|area| area.start().as_usize())
+            .collect::<alloc::vec::Vec<_>>();
+        assert_eq!(snapshot, overlap_starts(&set, start, size));
+    }
+}
+
+#[def_test]
 fn vma_set_protect_middle_preserves_non_permission_metadata() {
     let mut set = VmAreaSet::new();
     set.insert(test_area(0x1000, PAGE_SIZE_4K * 3, 30).with_inheritance(VmInheritance::DontCopy));
@@ -222,6 +284,75 @@ fn vma_set_protect_preserves_file_metadata_offsets() {
 }
 
 #[def_test]
+fn vma_set_protect_across_holes_preserves_boundaries_and_commitment_flags() {
+    let mut set = VmAreaSet::new();
+    for (start, page_count, page_offset) in [
+        (0x1000, 1, 1),
+        (0x4000, 3, 40),
+        (0x9000, 3, 90),
+        (0xe000, 1, 140),
+    ] {
+        set.insert(
+            test_area(start, PAGE_SIZE_4K * page_count, page_offset)
+                .with_accounted(start == 0x4000)
+                .with_noreserve(start == 0x9000),
+        );
+    }
+    let writable = MappingFlags::READ | MappingFlags::WRITE;
+
+    // Include the containing predecessor and clip the last VMA while leaving
+    // the hole and the neighbors outside the requested range untouched.
+    set.protect(vaddr(0x5000), PAGE_SIZE_4K * 6, MappingFlags::READ);
+    assert_eq!(
+        ranges(&set),
+        alloc::vec![
+            (0x1000, 0x2000, 1),
+            (0x4000, 0x5000, 40),
+            (0x5000, 0x7000, 41),
+            (0x9000, 0xb000, 90),
+            (0xb000, 0xc000, 92),
+            (0xe000, 0xf000, 140),
+        ]
+    );
+    for area in set.iter() {
+        let is_protected = matches!(area.start().as_usize(), 0x5000 | 0x9000);
+        let expected = if is_protected {
+            MappingFlags::READ
+        } else {
+            writable
+        };
+        assert_eq!(area.flags(), expected);
+        assert_eq!(area.max_flags(), writable);
+        assert_eq!(
+            area.is_accounted(),
+            area.start() >= vaddr(0x4000) && area.end() <= vaddr(0x7000)
+        );
+        assert_eq!(
+            area.is_noreserve(),
+            area.start() >= vaddr(0x9000) && area.end() <= vaddr(0xc000)
+        );
+    }
+
+    // A predecessor ending exactly at the start must be excluded even when
+    // the request begins in a hole. Splitting the next VMA keeps its policy.
+    set.protect(vaddr(0x7000), PAGE_SIZE_4K * 3, MappingFlags::WRITE);
+    assert_eq!(set.find(vaddr(0x5000)).unwrap().flags(), MappingFlags::READ);
+    let changed = set.find(vaddr(0x9000)).unwrap();
+    assert_eq!(changed.end(), vaddr(0xa000));
+    assert_eq!(changed.flags(), MappingFlags::WRITE);
+    assert!(changed.is_noreserve());
+    let retained = set.find(vaddr(0xa000)).unwrap();
+    assert_eq!(retained.flags(), MappingFlags::READ);
+    assert_eq!(retained.page_offset(), 91);
+    assert!(retained.is_noreserve());
+
+    let before = ranges(&set);
+    set.protect(vaddr(0), PAGE_SIZE_4K, MappingFlags::empty());
+    set.protect(vaddr(0xc000), PAGE_SIZE_4K * 2, MappingFlags::empty());
+    assert_eq!(ranges(&set), before);
+}
+
+#[def_test]
 fn vma_set_protect_middle_derives_anon_offset_from_page_offset() {
     let start = vaddr(0x1000);
     let mut set = VmAreaSet::new();
@@ -243,7 +374,10 @@ fn vma_set_protect_middle_derives_anon_offset_from_page_offset() {
     set.protect(start + PAGE_SIZE_4K, PAGE_SIZE_4K, MappingFlags::READ);
 
     let middle = set.find(start + PAGE_SIZE_4K).expect("middle VMA exists");
-    assert_eq!(middle.private_anon_offset_for(middle.start()), Some(8 * PAGE_SIZE_4K as u64));
+    assert_eq!(
+        middle.private_anon_offset_for(middle.start()),
+        Some(8 * PAGE_SIZE_4K as u64)
+    );
 }
 
 #[def_test]
@@ -267,8 +401,13 @@ fn vma_set_unmap_head_derives_anon_offset_from_page_offset() {
 
     set.unmap(start, PAGE_SIZE_4K);
 
-    let remaining = set.find(start + PAGE_SIZE_4K).expect("remaining VMA exists");
-    assert_eq!(remaining.private_anon_offset_for(remaining.start()), Some(6 * PAGE_SIZE_4K as u64));
+    let remaining = set
+        .find(start + PAGE_SIZE_4K)
+        .expect("remaining VMA exists");
+    assert_eq!(
+        remaining.private_anon_offset_for(remaining.start()),
+        Some(6 * PAGE_SIZE_4K as u64)
+    );
 }
 
 #[def_test]

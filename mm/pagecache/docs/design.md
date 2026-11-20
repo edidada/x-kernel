@@ -29,7 +29,8 @@ The implementation is split into private modules by responsibility, and the crat
 - `mapping_pages.rs`: the container, the resident tree/dirty marks under the lock, and dirty reconciliation;
 - `folio.rs`: page allocation, data access, uptodate/dirty/writeback state, and release;
 - `folio_batch.rs`: the bounded reference set shared by read, writeback and truncate, and the page-locked read access interface;
-- `filemap.rs`: lookup, batch collection of consecutive references, materialize and insert-if-absent;
+- `filemap.rs`: lookup, batch collection of consecutive references, materialize and insert-if-absent, and the page-locked write access
+  interface that reconciles the dirty index around the callback;
 - `readahead.rs`: bounded missing-range lookup, page reservation and transfer of read initialization ownership;
 - `truncate.rs`: page removal on size change, tail-page zeroing and final teardown;
 - `invalidate.rs`: byte-range invalidation of clean resident folios, reporting
@@ -204,7 +205,9 @@ error recording, background scheduling, and fsync semantics.
   folio; cache replacement updates the index reference.
 - `copy_to_uninit` fully copies the initialized page under the original page's own lock; removal does not forbid copying, and EOF is checked by the caller;
 - one mutex protects the resident folio tree and the dirty index;
-- The folio lock protects bytes, readahead state and charge attachment. The existing atomic flags also hold dirty, uptodate and invalidation state, allowing final detachment without taking the content lock;
+- The folio lock protects bytes and readahead state. Cache quota is owned by the
+  mapping index; atomic dirty/uptodate/invalidation flags allow final detachment
+  without taking the content lock;
 - when the resident tree, the dirty index and the folio state are checked together, the lock order is fixed as
   folio lock → MappingPages state lock; under the index lock only a non-blocking try_lock is allowed, and on failure the index lock is released before waiting.
   The folio access closure completes dirty index reconciliation while holding the page lock;
@@ -214,6 +217,11 @@ error recording, background scheduling, and fsync semantics.
 - `visit_resident_folios` collects the resident references and positions of at most 31 pages in one index snapshot; then, while
   visiting page by page, an already initialized hit takes only the folio lock. A non-uptodate/invalidated candidate is looked up again,
   and an initialization error is not turned into a hole; the owner holds invalidate shared over the whole batch;
+- `MappingPages::with_write_folio` is the page-locked write counterpart of the read accessor: kvfs buffered-write batching calls it to copy
+  and dirty one resident folio under its own lock while holding no mapping index lock, and it reconciles the dirty index when the callback
+  changes the dirty bit, on both the success and the failure path; invalidated or non-uptodate slots return `None` and the
+  caller falls back to the single-folio path. The caller must already exclude truncate and invalidation through the inode data lock,
+  and a batched tail-release hook (`BatchedWriteOperations::release_write_run_tail`) runs once for the run after the per-folio locks are released;
 - `with_folio` exposes only uptodate data; a failed initialization keeps the non-uptodate page for retry,
   and truncate does not mark its partial content dirty; `readahead_folios` uses a fixed-capacity FolioBatch to keep and lock the missing page span,
   keeps the page lock after the callback returns, takes the index lock to recheck identity and remove the unconsumed suffix, then releases the page lock;
@@ -262,7 +270,8 @@ the surviving truncated tail is zeroed after writeback completes and re-added to
 
 MappingPagesState Drop has exclusive access to the index and atomically invalidates
 each entry, clearing dirty without waiting for its content lock. Read tokens
-retain their page, capacity charge and backing resources independently; a later
+retain their physical page and backing resources independently; cache quota is
+returned at detachment. A later
 completion cannot reinsert a detached page. Writeback completion either borrows
 the index or retains its complete mapping owner, so it cannot overlap final
 index destruction. Owners that must drain I/O
@@ -289,13 +298,37 @@ state. Ordinary access callbacks receive `FolioGuard`, which has no mutable proj
 updates the cache index reference. Existing pins retain exactly the old object,
 including its original synchronization, without retaining the replacement.
 
-`PinnedFolio` owns one reference to this same object. `map_readonly(self, ...)`
-consumes the access pin and returns a `#[must_use] MappedFolio` ownership token.
-The mapping owner stores that token until the PTE is removed and its TLB
-invalidation completes. Publication remains unsafe because its owner must
-validate EOF and exclude invalidation through the enclosing VFS guard.
-`MappedFolio::map_readonly(&self, ...)` publishes another PTE of the retained
-object, for fork or reconstruction, and returns its own ownership token.
+`Folio` owns one independent order-zero `PageRef`. `PinnedFolio` retains
+that stable content object. `map_readonly(self, ...)` acquires a separate physical
+hold and installs a managed PTE; its optional `MappedFolio` result retains the
+content object for private COW. No READ/WRITE/EXECUTE permission returns `None`
+and installs no leaf or token. A copied file PTE receives its own hold.
+
+Folio destruction releases its own PageRef without checking TLB state. Removing
+or replacing a PTE transfers that PTE's hold into page-table retirement; only the
+page-table layer decides when that hold can end. A content token may be dropped
+once its corresponding leaf is removed or replaced, including while retirement
+is pending. EOF, content locking and permission validation remain separate
+requirements of publication. `MappedFolio::map_readonly` retains the same object
+for a child content token while obtaining an independent managed mapping hold.
+
+### Cache-residency quota
+
+`CacheResidency` counts cache identities, not physical allocations. A winning
+insert charges one page under the mapping index lock. Removing that identity by
+truncate, invalidation, final mapping destruction or explicit cache cleanup
+returns the charge in the same cache-state transition, even if a pin, content
+token, PTE or TLB-retirement hold keeps the old physical page alive. A physical
+reference never authorizes or prolongs a filesystem cache quota entry. If a
+separate physical-memory budget is needed, it must have a distinct API and
+accounting policy; `CacheResidency` is not that mechanism.
+
+Candidates that lose insert-if-absent and rejected admissions never consume a
+charge. Readahead admissions are released when unconsumed reservations are
+removed. The provider belongs to the mapping, not each page, and the release
+callback is bounded/nonblocking under the mapping's existing accounting contract.
+Managed PTE references independently protect physical storage through TLB
+retirement without charging the cache a second time.
 
 `copy_to_uninit` accepts exactly one page through an array reference, encoding
 the destination length and full initialization guarantee without a runtime
@@ -311,28 +344,22 @@ counter or registry. The physical address is derived from the stable allocation.
 ## Residency admission and initialization
 
 The inode address space retains the invalidate lock covering EOF, cache
-reservation and read submission. Transferred folio locks serialize later completion with truncate.
-The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under its folio and index locks. That successful admission
-attaches one provider-owned capacity charge to the stable folio. Detaching the
-cache identity does not return it: pins, mapping tokens and read batches keep
-the physical allocation and its charge alive together. Cloning never charges
-again. After the last reference drops, Folio frees the physical allocation and
-returns its charge with neither the folio nor mapping index lock held. The
-charge retains the provider even when the inode mapping has already gone away.
-Providers must not reenter mappings, acquire folio locks, or perform I/O.
-Release and final provider destruction must not sleep: the last reference can
-be released by I/O completion. Admission still requires task context.
-For memfs, the provider is its filesystem-owned quota, so lock order is cache
-folio -> index -> quota limit; remount and statfs never acquire cache locks.
-Speculative physical storage remains outside the admission policy until insertion.
+reservation and read submission. Transferred folio locks serialize later
+completion with truncate. The filesystem supplies one `CacheResidency` provider
+when constructing an inode mapping. Only a winning new cache identity calls
+`try_add_folio()` under the folio and index locks. Removing that identity calls
+`remove_folio()` exactly once as part of the index transition; surviving Folio,
+PTE and retirement references do not retain or multiply that charge. Admission
+still requires task context. Providers do not reenter mappings or block under
+the cache index lock. Speculative physical storage remains outside quota until
+publication.
 
 The cache publishes non-uptodate reservations before filesystem I/O and keeps
 its index lock out of I/O, preserving the current main concurrency contract.
-Unconsumed readahead reservations detach while locked and release their charges
-when the batch drops its final references after unlocking. Failed reads retain
-their non-uptodate reservation and charge until retry or removal.
+Unconsumed readahead reservations detach while locked and release their cache
+charge at detachment. Failed reads remain charged only while their reservation
+is still resident; after removal, later references may preserve bytes but do not
+consume tmpfs cache capacity.
 
 `visit_resident_folios` snapshots only one bounded page range. Missing identities
 are reported as None from that snapshot and never reserved or initialized. This

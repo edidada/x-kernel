@@ -69,8 +69,8 @@ fn ns_reaper_is_exited(ns: &Arc<PidNamespace>) -> bool {
         .is_some_and(|reaper| reaper.is_exited())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProcessExitState {
     Running = 0,
     Zombie  = 1,
@@ -272,6 +272,17 @@ impl Process {
         self.exit_state() == ProcessExitState::Zombie
     }
 
+    /// Returns `true` while a task is still attached to this process, i.e. it
+    /// runs or is a zombie that has not been reaped — Linux
+    /// `pid_has_task(pid, PIDTYPE_PID)`.
+    ///
+    /// Only a reaped (`Dead`) process has been detached from its pid, so
+    /// reported-pid consumers such as pidfd fdinfo keep naming an
+    /// exited-but-unreaped child and report absence afterwards.
+    pub fn has_attached_task(&self) -> bool {
+        self.exit_state() != ProcessExitState::Dead
+    }
+
     pub(super) fn exit_state(&self) -> ProcessExitState {
         self.exit_state.load(Ordering::Acquire)
     }
@@ -307,16 +318,6 @@ impl Process {
         self.lifecycle.exit_event()
     }
 
-    /// Adds exited-thread CPU time to this process's accumulated counters.
-    pub(crate) fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
-        self.lifecycle.accumulate_exited_thread_time(utime, stime);
-    }
-
-    /// Returns accumulated exited-thread user and kernel time.
-    pub fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
-        self.lifecycle.exited_thread_time()
-    }
-
     /// Adds reaped-child CPU time to this process's accumulated counters.
     pub(crate) fn accumulate_child_time(&self, utime: TimeSpan, stime: TimeSpan) {
         self.lifecycle.accumulate_child_time(utime, stime);
@@ -350,6 +351,7 @@ impl Process {
         publication: ProcessExitPublication,
         prepare_sigchld: impl Fn(&Arc<Process>) -> Option<(T, bool)>,
     ) -> ProcessExitTransition<T> {
+        self.finish_exiting_thread_runtime();
         loop {
             let snapshot = self.exit_parent_snapshot();
             let prepared = self.prepare_child_exit_signal_for_snapshot(&snapshot, &prepare_sigchld);
@@ -658,14 +660,17 @@ impl Process {
         };
 
         let exit_code = child.exit_code();
-        let (thread_utime, thread_stime) = child.exited_thread_time();
+        // Report the reaped child's adjusted thread-group user/system plus its
+        // own accumulated descendant totals. The group split is already
+        // adjusted; the descendant totals were accumulated adjusted at each reap.
+        let (own_utime, own_stime) = child.process_cpu_times();
         let (child_utime, child_stime) = child.child_time();
         let waited = WaitedChild {
             process: child.clone(),
             pid,
             exit_code,
-            total_utime: thread_utime.saturating_add(child_utime),
-            total_stime: thread_stime.saturating_add(child_stime),
+            total_utime: own_utime.saturating_add(child_utime),
+            total_stime: own_stime.saturating_add(child_stime),
             consumed: mode == WaitReapMode::Consume,
         };
 

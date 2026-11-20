@@ -19,6 +19,67 @@ zeros only a negative nice. A Deadline parent without the flag is refused
 
 ## Background
 
+### Fair PELT
+
+`pelt.rs` implements the flat Fair subset of Linux v6.12 PELT. The reference
+is [pelt.c](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/pelt.c)
+and the Fair attach/reweight/new-task rules in
+[fair.c](https://github.com/torvalds/linux/blob/v6.12/kernel/sched/fair.c).
+Time uses 1024 ns units and 1024 units per period, with the same 32-period
+half-life table, segment accumulation, divider and integer rounding. Long
+gaps are processed in constant time. Accumulators use u64 and saturating
+arithmetic; in particular util_sum is wider than Linux's u32 to avoid wrap
+when many incoming histories temporarily exceed one CPU's capacity.
+
+Each FairEntity contains an RQ-protected EntityLoad; FairClass owns the queue
+aggregate. Before any class mutation, Scheduler advances queue history with
+the previous runnable weight/count, including the off-tree Fair runner, and
+whether Fair was executing. The current entity is updated at the same point;
+waiting entities are updated lazily on selection, removal, reweight or query.
+New entities start with full nice-weighted load and a utilization estimate
+limited to half the destination's remaining capacity, with runnable history
+initialized to that estimate. Initialization occurs on first Fair activation.
+
+The entity states are New, Runnable, Blocked and Detached. Yield/preempt keep
+history attached. Block leaves its decaying contribution in the queue, without
+retaining a task owner or scanning sleeping tasks. Same-queue wake refreshes
+the entity without adding the contribution again. Migration, exit and leaving
+Fair remove history; destination activation aligns sums to its decay phase
+before attaching. Nice updates synchronize with the old weight, then replace
+only the weighted contribution. A blocked task waking on another CPU requires
+`detach_blocked_pelt` under its old owner lock before destination enqueue.
+
+`fair_pelt` reports queue history independently of higher-class eligibility;
+`task_pelt` refreshes an entity to the last queue clock sample. Callers needing
+fresh queue data first use `update(Account)` under the same RQ lock. ksched
+adds no atomic snapshots, timer events, allocations or task lists. ktask uses
+this history for periodic Fair balancing; spawn/wake placement and local
+preemption keep their existing policies. CPU/frequency
+scaling is neutral and wall time is not corrected for IRQ/steal time. Task
+groups, RT/DL/IRQ aggregates, hardware pressure and UTIL_EST are outside this
+implementation. The regression cases are in `ut-tests/pelt.rs`.
+
+`fair_balance_stats` exposes queue history, Fair runnable/queued counts
+(including parked waiters), and whether the entire CPU is idle. An empty Fair
+queue on an RT/Deadline-running CPU is not idle. `steal_fair` refreshes this
+source snapshot under its RQ lock and visits only Fair waiters, unlike the
+RT-first idle-pull `steal`. Higher classes never veto Fair migration: even a
+sole Fair waiter behind an RT runner can migrate, and an RT-running queue may
+accept Fair migrate-in without changing its runner.
+Each call examines at most the supplied number of tree entries, skips parked
+entities, refreshes candidate PELT and calls the host predicate with both
+histories. The host validates task state, `!on_cpu`, affinity and migration
+benefit; it must not reenter the scheduler or acquire another RQ lock.
+
+FairClass remembers the last examined deadline key. The next balance scan
+starts after that key using the tree's O(log N) range lookup; an exhausted
+suffix resets the cursor for the following pass. Pinned prefixes therefore
+cannot permanently hide later candidates. No additional task owner or tree
+index is retained. Successful removal uses the existing lag-saving dequeue
+and PELT detach. The host releases the source lock before destination
+`MigrateIn` publication, which restores lag and attaches the history at the
+destination decay phase. Deterministic cases live in `ut-tests/fair_balance.rs`.
+
 ### Reference ownership and destruction
 
 `Scheduler<T, Owner = Arc<SchedTask<T>>>` keeps the original standard `Arc` by

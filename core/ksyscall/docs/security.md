@@ -1,5 +1,14 @@
 # ksyscall security and reliability
 
+## Exec fixture allocation boundary
+
+Unittest partial-install callback ownership is allocated before `de_thread()`.
+Owner allocation failure cannot introduce a recoverable return after that
+irreversible step. The prepared observer still runs under the target MM lock;
+moving preparation earlier does not relax its lock-order or capture-lifetime
+requirements. This change is absent from non-unittest exec paths and does not
+make nested exec allocations fallible.
+
 ## x86_64 signal-return input
 
 Signal-frame pointers, lengths, register values and xstate bytes are untrusted.
@@ -69,7 +78,7 @@ resource owners
 
 ## Unsafe inventory
 
-The production code contains four audited unsafe sites; all carry inline `SAFETY:`
+The production code contains five audited unsafe sites; all carry inline `SAFETY:`
 notes. There are no hand-written unsafe traits, FFI, or inline assembly.
 
 | Site | Operation | Invariant |
@@ -77,6 +86,7 @@ notes. There are no hand-written unsafe traits, FFI, or inline assembly.
 | `sys.rs` (`sethostname`) | stack `[u8; N]` reborrowed as `MaybeUninit<u8>` for copy-from-user | the array is live with trivially initializable bytes; only `buf[..len]` is read after the copy (same pattern as `devfs/nodes/loop.rs`) |
 | `task/clone3.rs` | fully initialized `#[repr(C)]` integer struct viewed as `MaybeUninit<u8>` for a versioned in-place user copy | `kargs` is zero-initialized first, so bytes beyond the caller's struct version stay zero; the reinterpretation is size-preserving |
 | `time/posix_timer.rs` | read of `sigevent._sigev_un._tid` | guarded by `sigev_notify == SIGEV_THREAD_ID`, the ABI-defined selector for that union arm; the tid is validated positive and owned by the process before use |
+| `time/posix_timer.rs` | read of `sigevent.sigev_value.sival_ptr` | `UserRead` copied every `sigevent` byte; this full-width union member is converted to opaque bits and never dereferenced |
 | `task/execve.rs` | replace current MM and activate its page table | candidate comes from `new_user_empty`, all old-user inputs are owned, no old-MM lock or user-copy window crosses activation; post-exchange errors are fatal and user entry requires complete image/context setup |
 
 The unittest exit-tail fixture additionally calls the replacement helper with
@@ -170,19 +180,31 @@ registered wakeups rather than polling or a timer.
 - Capability, seccomp, and `no_new_privileges` security ABIs must not
   return success inconsistent with actual enforcement. `PR_SET_NO_NEW_PRIVS`
   records the flag on the calling thread and returns success; seccomp install
-  consults it. Exec applies Linux's no-file-capability transition, merges
+  consults it. The loader samples the executable's set-ID bits and file
+  capability set and applies them through `Cred::apply_exec_with_security`: a
+  `nosuid` mount suppresses both, `no_new_privs` declines only the identity
+  change while the capability set is still applied and clamped, a malformed
+  attribute fails the exec with `EINVAL`, and file permitted capabilities are
+  bounded by the capability bounding set (a privileged root keeps its bounding
+  reconstruction on top),
+  merges
   ambient capabilities into permitted after the growth clamp, and clears
-  ambient when the effective GID leaves the old filesystem/supplementary
-  groups. When privileged-root reconstruction would grow permitted or the
-  group identity changes under `no_new_privs` or cross-process `CLONE_FS`
+  ambient when an identity changed or the effective GID leaves the old
+  filesystem/supplementary groups. When privileged-root reconstruction would
+  grow permitted or the
+  identity changes under `no_new_privs` or cross-process `CLONE_FS`
   sharing, a growing set is intersected with the pre-exec set; effective/group
   IDs reset to real IDs when `no_new_privs` is set or the pre-exec credential
   lacks effective `CAP_SETUID`. The cross-process
   `CLONE_FS` sharing sample and `in_exec` admission are atomic with runtime
   adoption, so a child cannot attach after the sample and before credentials
-  are committed. There is no setuid/setgid or file-capability elevation today;
-  adding one must extend this transition and refuse elevation under the flag
-  instead of silently dropping the guarantee.
+  are committed. Under that guard `ksyscall` takes one sample of the sharing
+  state and `no_new_privs`, has the loader rebuild `AT_EUID`/`AT_EGID` and
+  `AT_SECURE` from a transition preview, and then commits the same sample, so
+  the published identity and the installed credentials agree. An undeliverable
+  effective file capability set fails the exec with `EPERM` before the address
+  space is replaced, so a rejected exec leaves the old image and credentials
+  untouched.
 - `unshare` and `setns` require effective `CAP_SYS_ADMIN`, matching the
   `UnshareContext::privileged` input documented in `kns`: both syscalls refuse
   namespace creation or entry without that capability, standing in for
@@ -401,9 +423,11 @@ the syscall wait layer.
 
 ### Signed clock-ID validation
 
-Queries, wall-clock setting, clock sleeps and timerfd creation share the signed
-`time::clock_id::parse_clock_id` boundary. Unsupported negative/dynamic and unknown positive
-IDs return InvalidInput before user-memory access. Recognizing an enum does not
+Queries, wall-clock setting, clock sleeps and timerfd creation share signed
+clock-ID parsing. Queries and POSIX timer creation resolve encoded process
+scheduler clocks only for the current process (queries also accept the
+calling thread ID); they cannot use that encoding to access another process.
+Unsupported IDs return InvalidInput before user-memory access. Recognizing an enum does not
 grant support for every syscall: the existing setter, sleep and timerfd subsets
 and their error ordering remain enforced. The timerfd backend accepts only
 `TimerFdClock`, so invalid integer IDs cannot silently select REALTIME.
@@ -460,3 +484,12 @@ The context resolves a live published user owner and exposes its nonblocking
 exit flag; arbitrary user TIDs never become raw task references. Ordinary
 WAKE uses the checked API so it cannot select PI state. PI faults retry outside
 bucket/graph locks; `ERESTARTNOINTR` is returned only after cancellation wins.
+
+### Poll descriptor-array capacity
+
+The caller's `nfds` cannot directly request an unbounded kernel allocation:
+the common `do_sys_poll` path rejects counts above current
+`RLIMIT_NOFILE` with `EINVAL` before reading the array. The existing rlimit
+provider caps the hard limit at Linux's `sysctl_nr_open` default. Zero count
+never accesses a NULL descriptor pointer; invalid `ppoll` timeout or mask
+inputs are checked before array admission.

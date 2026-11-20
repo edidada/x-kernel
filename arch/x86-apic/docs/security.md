@@ -184,9 +184,16 @@ obligations, not properties proven by a bitmap or by KIRQ software in-flight.
 
 ## Sleep snapshot lifetime
 
-The unsafe IOAPIC snapshot phases require stable installed controller identities,
-route mutation exclusion and valid retained mappings. Other CPUs must be parked
-while routing is captured/reconstructed. Original masks may be restored only
-when every consumer reachable from newly enabled IRQs is usable. Preallocation
-prevents heap work while IRQs are disabled. A missing owned controller after
-preparation is an invariant violation, not a recoverable partial resume.
+The caller of `SavedIoApics::mask_all` must first prepare snapshot storage
+with `SavedIoApics::prepare`. All other CPUs must be parked, local IRQs
+disabled and route mutations excluded until the snapshot restores delivery.
+Preallocated storage avoids heap work with IRQs disabled. Controller identities
+must remain stable across these phases.
+
+Before `SavedIoApics::restore_masked`, restore controller mappings, disable
+local IRQs, hold remote CPUs and exclude external route mutations. A missing
+owned controller after preparation violates the snapshot invariant.
+
+Before `SavedIoApics::resume` restores the original masks, device, controller
+and time recovery must be complete. Every resource reachable from any newly
+enabled IRQ must be usable.

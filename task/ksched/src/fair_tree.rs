@@ -456,10 +456,7 @@ impl<A: FairTreeAdapter> FairTree<A> {
             .map(|ptr| node(ptr).min_vruntime)
     }
 
-    pub(crate) fn earliest_eligible(&self, avg: i64) -> Option<DeadlineKey> {
-        self.search(avg, || {})
-    }
-
+    #[cfg(any(test, unittest))]
     fn search(&self, avg: i64, mut visit: impl FnMut()) -> Option<DeadlineKey> {
         let mut next = self.context.mutation.root.get();
         while let Some(ptr) = next {
@@ -481,6 +478,16 @@ impl<A: FairTreeAdapter> FairTree<A> {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Value<A>> {
         self.tree.iter()
+    }
+
+    /// Resume a bounded balance scan without walking its previous prefix.
+    pub(crate) fn iter_after(&self, key: Option<DeadlineKey>) -> impl Iterator<Item = &Value<A>> {
+        use intrusive_collections::Bound;
+
+        self.tree.range(
+            key.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
+            Bound::<&DeadlineKey>::Unbounded,
+        )
     }
 }
 

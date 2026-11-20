@@ -12,13 +12,16 @@
 use core::{arch::naked_asm, fmt::Debug};
 
 use memaddr::VirtAddr;
-use x86_64::registers::mxcsr::MxCsr;
+use x86_64::{
+    PrivilegeLevel,
+    registers::{mxcsr::MxCsr, segmentation::SegmentSelector},
+};
 
 use super::xstate::ExtendedState;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExceptionContext {
     /// General-purpose register rax.
     pub rax: u64,
@@ -142,6 +145,14 @@ impl ExceptionContext {
         self.rip = rip as _;
     }
 
+    /// Returns whether this trap interrupted user mode (CPL 3).
+    ///
+    /// The saved `CS` RPL equals [`PrivilegeLevel::Ring3`], the same privilege
+    /// the user code selector (`gdt::UCODE64`) is built with.
+    pub fn user_mode(&self) -> bool {
+        SegmentSelector(self.cs as u16).rpl() == PrivilegeLevel::Ring3
+    }
+
     /// Gets the stack pointer.
     pub const fn sp(&self) -> usize {
         self.rsp as _
@@ -261,7 +272,7 @@ struct ContextSwitchFrame {
 ///
 /// See <https://www.felixcloutier.com/x86/fxsave> for more details.
 #[repr(C, align(16))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FxStateBlock {
     /// FPU control word.
     pub fpu_ctrl: u16,
@@ -502,6 +513,8 @@ impl TaskContext {
 /// switch or `prepare_initial_frame`, with a valid return address and ABI
 /// stack alignment. Keep both stacks and context slots live until resumed,
 /// with the next task's FP state and address space already installed.
+// SAFETY: The scheduler passes writable current-rsp storage in rdi and a valid next-rsp pointer
+// in rsi; the naked body only pushes/pops callee-saved registers and switches stacks.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64) {
     naked_asm!(

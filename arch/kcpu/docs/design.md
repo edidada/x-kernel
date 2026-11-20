@@ -69,9 +69,16 @@ ID before publication. Add synthetic register/firmware tests and extend procfs's
 per-architecture formatter and spelling table. Keep hardware filtering in kcpu
 and Linux field names in procfs. Update both crates' design/security documents.
 
-These are per-CPU diagnostic snapshots, not Linux's system-wide capability
-intersection. AT_HWCAP/AT_HWCAP2 generation and scheduler placement policy remain
-separate; this change does not synchronize those interfaces with cpuinfo.
+`cpu_info()` returns per-CPU diagnostic snapshots. `CpuInfo::hwcap()` converts
+one CPU's *usable* set into the Linux `AT_HWCAP` encoding, `for_each_cpu_info()`
+iterates the published snapshots as the public building block for system-wide
+queries, and `system_hwcap()` folds that iteration into the intersection exec
+publishes as `AT_HWCAP`. The intersection is required because the scheduler may
+migrate a process to any online core after exec, and a frozen auxiliary-vector
+word cannot be revised; Linux reaches the same answer from its sanitised
+system-wide feature registers. `current_cpu_info()` still reports the calling
+core for callers that need per-core detail. Scheduler placement policy remains
+separate and is not synchronized with cpuinfo.
 
 ## x86_64 extended state
 
@@ -163,6 +170,19 @@ arch/kcpu/
 └── README.md
 ```
 
+### Cross-crate interface: active-frame privilege classification
+
+`active_exception_user_mode()` is a public crate-root interface (re-exported
+through `khal::context`). Provider: `kcpu`, reading the privilege bit of the
+per-CPU active trapframe published by `ExceptionContextGuard` on every trap
+entry, including the user-return IRQ arms that bypass the kernel trap handler.
+Consumer: the scheduler CPU-timer tick classification in `ktask`
+(`on_timer_fire`), which charges the due periodic tick as user or system time
+for the interrupted task. Calling context: IRQ context on the owning CPU, with
+ordinary IRQs masked for the slot load; it returns `None` when no frame is
+active, which the consumer treats as kernel/system context. It reads only the
+privilege bit and never copies or retains the frame.
+
 ## Test Layout
 
 Guest tests are mounted into their original parent modules through `unittest::path_mod_test!`, and the files are located in `ut-tests/` at the crate root. Module names, visibility, `super` access, and registration paths remain unchanged; the original outer architecture conditions and `cfg(unittest)` are retained, and the macro also provides the guest gate.
@@ -171,17 +191,17 @@ Guest tests are mounted into their original parent modules through `unittest::pa
 | --- | --- | --- |
 | `lib.rs` | 1 | None |
 | `excp.rs` | 3 | None |
-| `active_exception_context.rs` | 5 | None, all serial |
+| `active_exception_context.rs` | 8 | None, all serial |
 | `userspace_common.rs` | 3 | None |
-| `aarch64.rs` | 7 | AArch64 |
+| `aarch64.rs` | 8 | AArch64, of which 1 case is serial |
 | `aarch64_current_unittest.rs` | 1 | AArch64, existing file changed to path mounting |
-| `x86_64.rs` | 6 | x86_64 |
+| `x86_64.rs` | 7 | x86_64, of which 1 case is serial |
 | `x86_cpuinfo.rs` | 13 | x86_64 |
 | `x86_xstate.rs` | 3 | x86_64 (YMM cases need `fp-simd`) |
 | `x86_64_userspace.rs` | 2 | x86_64 and `fp-simd` |
-| `riscv.rs` | 4 | riscv32 or riscv64 |
+| `riscv.rs` | 5 | riscv32 or riscv64, of which 1 case is serial |
 | `riscv_hwprobe.rs` | 7 | riscv32 or riscv64, of which 2 cases are serial |
-| `loongarch64.rs` | 5 | LoongArch64 |
+| `loongarch64.rs` | 6 | LoongArch64, of which 1 case is serial |
 
 The actual number of guest cases is determined jointly by the architecture, features and test filters, according to the runtime registration list.
 `tests/host/aarch64_userspace_host.rs`, which `src/aarch64/userspace.rs` originally mounted under `cfg(test)`,

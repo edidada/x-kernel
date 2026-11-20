@@ -14,7 +14,6 @@ use ksignal::{Signo, send_sig_current};
 use ktask::future::{block_on, poll_io};
 use linux_raw_sys::ioctl::FIONREAD;
 use memaddr::PAGE_SIZE_4K;
-use osvm::VirtMutPtr;
 
 use crate::{
     FMode, FileOperations, Kiocb, VfsFile, VfsFileBuilder, VfsInode, VfsResult, poll_file_io,
@@ -178,7 +177,7 @@ impl PipeObject {
         pipe
     }
 
-    pub(crate) fn new_fifo() -> Arc<Self> {
+    pub(crate) fn new_empty() -> Arc<Self> {
         Self::alloc()
     }
 
@@ -491,24 +490,26 @@ impl PipeObject {
         }
     }
 
-    fn open_fifo(&self, access: PipeAccess, nonblocking: bool) -> KResult<u64> {
+    fn open(&self, access: PipeAccess, nonblocking: bool, is_pipe: bool) -> KResult<u64> {
         let (partner_counter, pipe_generation, wake_readers, wake_writers) = {
             let mut state = self.state.lock();
-            if access == PipeAccess::Write && nonblocking && state.readers == 0 {
+            if !is_pipe && access == PipeAccess::Write && nonblocking && state.readers == 0 {
                 return Err(KError::from(LinuxError::ENXIO));
             }
 
             let partner_counter = match access {
-                PipeAccess::Read if !nonblocking && state.writers == 0 => Some(state.w_counter),
-                PipeAccess::Write if state.readers == 0 => Some(state.r_counter),
+                PipeAccess::Read if !is_pipe && !nonblocking && state.writers == 0 => {
+                    Some(state.w_counter)
+                }
+                PipeAccess::Write if !is_pipe && state.readers == 0 => Some(state.r_counter),
                 PipeAccess::Read | PipeAccess::Write | PipeAccess::ReadWrite => None,
             };
-            let pipe_generation = if access == PipeAccess::Read && nonblocking && state.writers == 0
-            {
-                state.w_counter
-            } else {
-                0
-            };
+            let pipe_generation =
+                if !is_pipe && access == PipeAccess::Read && nonblocking && state.writers == 0 {
+                    state.w_counter
+                } else {
+                    0
+                };
             let (wake_readers, wake_writers) = add_access(&mut state, access)?;
             (partner_counter, pipe_generation, wake_readers, wake_writers)
         };
@@ -738,8 +739,8 @@ fn pipe_ioctl(file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
     let pipe = PipeObject::from_file(file)?;
     match cmd {
         FIONREAD => {
-            // `write_vm` validates typed user-pointer alignment before writing.
-            (arg as *mut i32).write_vm(pipe.readable_len() as i32)?;
+            // The ABI-bounded byte copy accepts misaligned user addresses.
+            posix_types::UserPtr::<i32>::from(arg).write_vm(pipe.readable_len() as i32)?;
             Ok(0)
         }
         _ => Err(KError::NotATty),
@@ -787,121 +788,36 @@ fn register_pipe_poll(
     Ok(())
 }
 
+fn open_pipe(inode: &VfsInode, file: &mut VfsFileBuilder, is_pipe: bool) -> VfsResult<()> {
+    let access = PipeAccess::from_mode(file.mode())?;
+    let pipe = inode.acquire_pipe()?;
+    let generation = match pipe.open(access, file.is_nonblocking(), is_pipe) {
+        Ok(generation) => generation,
+        Err(error) => {
+            inode.release_pipe(&pipe);
+            return Err(error);
+        }
+    };
+    file.stream_open();
+    file.set_pipe_generation(generation);
+    file.set_private_data(pipe);
+    Ok(())
+}
+
 struct PipeFileOperations;
 
 impl FileOperations for PipeFileOperations {
-    fn fsync(
-        &self,
-        _file: &VfsFile,
-        _range: core::ops::Range<u64>,
-        _data_only: bool,
-    ) -> VfsResult<()> {
-        Err(KError::InvalidInput)
-    }
-
-    fn supports_read(&self) -> bool {
-        true
-    }
-
-    fn supports_write(&self) -> bool {
-        true
-    }
-
-    fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        let read = pipe_read(file, buf)?;
-        if read > 0 {
-            file.file_accessed();
-        }
-        Ok(read)
-    }
-
-    fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
-        let read = pipe_read_iter(iocb, iter)?;
-        if read > 0 {
-            iocb.file().file_accessed();
-        }
-        Ok(read)
-    }
-
-    // Timestamps update only after the bytes are already queued for the
-    // reader, and a timestamp failure propagates as the syscall result. This
-    // mirrors Linux `pipe_write()` (`err = file_update_time(filp);
-    // if (err) ret = err;` after the copy loop, fs/pipe.c:617) and the shared
-    // pathname FIFO table below. Reachability differs between the two: the
-    // anonymous-pipe inode uses `empty_inode_operations()`, whose common
-    // `setattr` fallback cannot fail for times-only updates, so propagation
-    // here is defensive parity rather than a reachable error path; pathname
-    // FIFOs keep their backend filesystem table, whose `setattr` can fail,
-    // making the propagated error reachable there by design.
-    fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        let written = pipe_write(file, buf)?;
-        if written > 0 {
-            file.file_update_time()?;
-        }
-        Ok(written)
-    }
-
-    /// See [`Self::write`] for the timestamp-update contract.
-    fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
-        let written = pipe_write_iter(iocb, iter)?;
-        if written > 0 {
-            iocb.file().file_update_time()?;
-        }
-        Ok(written)
-    }
-
-    fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
-        pipe_ioctl(file, cmd, arg)
-    }
-
-    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
-        Some(pipe_poll(file))
-    }
-
-    fn register_poll(
-        &self,
-        file: &VfsFile,
-        context: &mut PollContext<'_>,
-        events: IoEvents,
-    ) -> Result<(), PollRegisterError> {
-        register_pipe_poll(file, context, events)
-    }
-
-    fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
-        let pipe = PipeObject::from_file(file)?;
-        pipe.close(file.mode())?;
-        // Anonymous pipes do not use the pathname-FIFO slot on `VfsInode`.
-        let _ = pipe.release_file();
-        Ok(())
-    }
-}
-
-struct FifoFileOperations;
-
-impl FileOperations for FifoFileOperations {
-    fn fsync(
-        &self,
-        _file: &VfsFile,
-        _range: core::ops::Range<u64>,
-        _data_only: bool,
-    ) -> VfsResult<()> {
-        Err(KError::InvalidInput)
-    }
-
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        let access = PipeAccess::from_mode(file.mode())?;
-        let pipe = inode.acquire_fifo_pipe()?;
-        let pipe_generation = match pipe.open_fifo(access, file.is_nonblocking()) {
-            Ok(pipe_generation) => pipe_generation,
-            Err(error) => {
-                inode.release_fifo_pipe(&pipe);
-                return Err(error);
-            }
-        };
-        file.stream_open();
-        file.set_pipe_generation(pipe_generation);
-        file.set_private_data(pipe);
-        Ok(())
+        open_pipe(inode, file, true)
+    }
+
+    fn fsync(
+        &self,
+        _file: &VfsFile,
+        _range: core::ops::Range<u64>,
+        _data_only: bool,
+    ) -> VfsResult<()> {
+        Err(KError::InvalidInput)
     }
 
     fn supports_read(&self) -> bool {
@@ -913,35 +829,19 @@ impl FileOperations for FifoFileOperations {
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        let read = pipe_read(file, buf)?;
-        if read > 0 {
-            file.file_accessed();
-        }
-        Ok(read)
+        pipe_read(file, buf)
     }
 
     fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
-        let read = pipe_read_iter(iocb, iter)?;
-        if read > 0 {
-            iocb.file().file_accessed();
-        }
-        Ok(read)
+        pipe_read_iter(iocb, iter)
     }
 
     fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        let written = pipe_write(file, buf)?;
-        if written > 0 {
-            file.file_update_time()?;
-        }
-        Ok(written)
+        pipe_write(file, buf)
     }
 
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
-        let written = pipe_write_iter(iocb, iter)?;
-        if written > 0 {
-            iocb.file().file_update_time()?;
-        }
-        Ok(written)
+        pipe_write_iter(iocb, iter)
     }
 
     fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
@@ -964,8 +864,88 @@ impl FileOperations for FifoFileOperations {
     fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
         let pipe = PipeObject::from_file(file)?;
         pipe.close(file.mode())?;
-        inode.release_fifo_pipe(&pipe);
+        inode.release_pipe(&pipe);
         Ok(())
+    }
+}
+
+// Linux `fifo_pipe_read` and `fifo_pipe_write` add timestamps around the
+// anonymous-pipe data path; pipe I/O itself does not update them.
+struct FifoFileOperations;
+
+impl FileOperations for FifoFileOperations {
+    fn fsync(
+        &self,
+        file: &VfsFile,
+        range: core::ops::Range<u64>,
+        data_only: bool,
+    ) -> VfsResult<()> {
+        PIPE_FILE_OPERATIONS.fsync(file, range, data_only)
+    }
+
+    fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        open_pipe(inode, file, false)
+    }
+
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        let read = PIPE_FILE_OPERATIONS.read(file, buf, offset)?;
+        if read > 0 {
+            file.file_accessed();
+        }
+        Ok(read)
+    }
+
+    fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
+        let read = PIPE_FILE_OPERATIONS.read_iter(iocb, iter)?;
+        if read > 0 {
+            iocb.file().file_accessed();
+        }
+        Ok(read)
+    }
+
+    fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
+        let written = PIPE_FILE_OPERATIONS.write(file, buf, offset)?;
+        if written > 0 {
+            file.file_update_time()?;
+        }
+        Ok(written)
+    }
+
+    fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
+        let written = PIPE_FILE_OPERATIONS.write_iter(iocb, iter)?;
+        if written > 0 {
+            iocb.file().file_update_time()?;
+        }
+        Ok(written)
+    }
+
+    fn ioctl(&self, file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
+        PIPE_FILE_OPERATIONS.ioctl(file, cred, cmd, arg)
+    }
+
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        PIPE_FILE_OPERATIONS.poll(file)
+    }
+
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        PIPE_FILE_OPERATIONS.register_poll(file, context, events)
+    }
+
+    fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        PIPE_FILE_OPERATIONS.release(inode, file)
     }
 }
 

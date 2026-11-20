@@ -7,10 +7,14 @@
 extern crate alloc;
 
 mod basic_nodes;
+mod boot_id;
+mod cpu_text_error;
 mod device_nodes;
 mod irq_nodes;
 mod mem_nodes;
 mod name;
+#[cfg(feature = "net")]
+mod net_nodes;
 mod root;
 #[cfg(feature = "sysrq")]
 mod sysrq_nodes;

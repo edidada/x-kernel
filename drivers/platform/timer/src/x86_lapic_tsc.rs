@@ -110,7 +110,7 @@ impl kiface_time_api::ClockResumeIf {
 }
 
 /// Platform-provided fallback configuration for the x86 timer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerConfig {
     /// Nominal TSC frequency used for the calibration timeout and final fallback.
     pub nominal_frequency: Frequency,
@@ -130,7 +130,7 @@ impl TimerConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TscFrequency {
     Pit(Frequency),
     /// Bounded PIT sample whose uncertainty exceeded the trustworthy limit.
@@ -296,12 +296,12 @@ fn discover_tsc_frequency(platform_frequency: Frequency) -> TscFrequency {
         &CpuId::new(),
         platform_frequency,
         |nominal, _is_qemu_tcg| {
-            calibrate_samples(nominal, |timeout, start_gap| {
+            calibrate_samples(nominal, |timeout_tsc_ticks, start_gap| {
                 x86_64::instructions::interrupts::without_interrupts(|| {
                     let mut probe = KernelCalibrationProbe {
                         pit: PitChannel2::acquire(),
                     };
-                    measure_with(&mut probe, timeout, start_gap)
+                    measure_with(&mut probe, timeout_tsc_ticks, start_gap)
                 })
             })
             .and_then(|(frequency, is_degraded)| {

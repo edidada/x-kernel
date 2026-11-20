@@ -1553,15 +1553,17 @@ fn test_timestamp_authorization_distinguishes_current_and_explicit_values() {
         .unwrap();
     let other = Cred::new(2000, 200);
 
-    root.set_times(
-        Some(SetattrTime::Current(SystemTime::from_unix_seconds(10))),
-        Some(SetattrTime::Current(SystemTime::from_unix_seconds(11))),
-        &other,
-    )
-    .unwrap();
+    let before = root.inode().current_time();
+    root.set_times(Some(SetattrTime::Current), Some(SetattrTime::Current), &other)
+        .unwrap();
+    let after = root.inode().current_time();
     let metadata = root.metadata();
-    assert_eq!(metadata.atime, SystemTime::from_unix_seconds(10));
-    assert_eq!(metadata.mtime, SystemTime::from_unix_seconds(11));
+    // A touch resolves every field from the single clock sample taken inside
+    // the update, so the three timestamps agree and fall within the window.
+    assert!(metadata.atime >= before);
+    assert!(metadata.atime <= after);
+    assert_eq!(metadata.atime, metadata.mtime);
+    assert_eq!(metadata.mtime, metadata.ctime);
     assert_eq!(
         root.set_times(
             Some(SetattrTime::Explicit(SystemTime::from_unix_seconds(20))),
@@ -1571,11 +1573,7 @@ fn test_timestamp_authorization_distinguishes_current_and_explicit_values() {
         Err(VfsError::OperationNotPermitted)
     );
     assert_eq!(
-        root.set_times(
-            Some(SetattrTime::Current(SystemTime::from_unix_seconds(30))),
-            None,
-            &other,
-        ),
+        root.set_times(Some(SetattrTime::Current), None, &other),
         Err(VfsError::OperationNotPermitted)
     );
 }
@@ -1697,6 +1695,29 @@ fn test_update_cmtime_advances_mtime_and_ctime() {
 }
 
 #[def_test]
+fn test_setattr_current_then_auto_publish_keeps_times_monotonic() {
+    let fs = mock_filesystem(StatFsFlags::empty());
+    let root = Mount::new_root(&fs).root_path();
+    let cred = kcred::initial_cred();
+    seed_times(&root, SystemTime::from_unix_seconds(1));
+
+    let before = root.inode().current_time();
+    root.set_times(Some(SetattrTime::Current), Some(SetattrTime::Current), &cred)
+        .expect("set_times accepts current values");
+    let after_setattr = root.inode().times();
+    assert!(after_setattr.modified_at >= before);
+    assert_eq!(
+        after_setattr.modified_at, after_setattr.changed_at,
+        "one sample must resolve mtime and ctime"
+    );
+
+    assert_eq!(root.update_cmtime(), Ok(()));
+    let after_update = root.inode().times();
+    assert!(after_update.modified_at >= after_setattr.modified_at);
+    assert!(after_update.changed_at >= after_setattr.changed_at);
+}
+
+#[def_test]
 fn test_readonly_mount_skips_time_updates() {
     let fs = mock_filesystem(StatFsFlags::empty());
     let root = Mount::new_root_with_flags(&fs, MountFlags::RDONLY).root_path();
@@ -1725,4 +1746,285 @@ fn test_non_relatime_overwrites_future_atime() {
     root.touch_atime();
 
     assert!(inode.times().accessed_at >= before);
+}
+
+#[def_test]
+fn test_move_mount_rejects_target_inside_source_subtree() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let child_fs = mock_filesystem(StatFsFlags::empty());
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+    let child = namespace.attach(&mountpoint, &child_fs).unwrap();
+    let child_root = child.root_path();
+
+    // Target equal to the source mount root: ELOOP, tree unchanged.
+    assert_eq!(
+        namespace.move_mount_to(&child_root, &child_root),
+        Err(VfsError::FilesystemLoop)
+    );
+    // Target strictly inside the source subtree: ELOOP, tree unchanged.
+    let inside = lookup_child_in_mount(&child_root, "mnt").unwrap();
+    assert_eq!(
+        namespace.move_mount_to(&child_root, &inside),
+        Err(VfsError::FilesystemLoop)
+    );
+    // The source is still attached at its original mountpoint (a rejected move
+    // must not detach it).
+    assert!(Arc::ptr_eq(
+        lookup_no_follow(&root, "mnt").unwrap().mount(),
+        &child
+    ));
+    assert!(child.location().is_some());
+}
+
+#[def_test]
+fn test_recursive_bind_clones_submounts_reachably() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let host_fs = mock_filesystem(StatFsFlags::empty());
+    let sub_fs = mock_filesystem(StatFsFlags::empty());
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+
+    let host_mp = lookup_child_in_mount(&root, "mnt").unwrap();
+    let host = namespace.attach(&host_mp, &host_fs).unwrap();
+    let host_root = host.root_path();
+    let sub_mp = lookup_child_in_mount(&host_root, "mnt").unwrap();
+    let sub = namespace.attach(&sub_mp, &sub_fs).unwrap();
+    let sub_root = sub.root_path();
+
+    // Recursive bind of the host subtree (host + sub) onto a directory. This
+    // exercises the happy path: a submount under the bind source is cloned and
+    // stays reachable under the new bind root.
+    let target = lookup_child_in_mount(&sub_root, "mnt").unwrap();
+    let bind = namespace.attach_bind_recursive(&host_root, &target).unwrap();
+    let bind_root = bind.root_path();
+
+    // The cloned submount must be reachable under the new bind root.
+    let cloned_sub = lookup_no_follow(&bind_root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(cloned_sub.mount().super_block(), &sub_fs));
+
+    // Lazy unmount removes the whole cloned tree without leaking registrations.
+    namespace.detach_tree(&bind_root).unwrap();
+}
+
+#[def_test]
+fn test_recursive_bind_skips_sibling_submounts_outside_source() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let host_fs = mock_filesystem(StatFsFlags::empty());
+    let sibling_fs = mock_filesystem(StatFsFlags::empty());
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let cred = kcred::initial_cred();
+
+    let host_mp = lookup_child_in_mount(&root, "mnt").unwrap();
+    let host = namespace.attach(&host_mp, &host_fs).unwrap();
+    let host_root = host.root_path();
+
+    // A sibling submount on a branch (host/alt) different from the bind source.
+    let alt = host_root
+        .mkdir("alt", NodePermission::default(), &cred)
+        .unwrap();
+    let sibling = namespace.attach(&alt, &sibling_fs).unwrap();
+
+    // Bind source is host/mnt, a plain subdirectory of the host mount (no mount
+    // there), so collect_subtree(host) also yields the sibling at host/alt.
+    let source = lookup_child_in_mount(&host_root, "mnt").unwrap();
+    let target = host_root
+        .mkdir("target", NodePermission::default(), &cred)
+        .unwrap();
+    let bind = namespace.attach_bind_recursive(&source, &target).unwrap();
+    let bind_root = bind.root_path();
+
+    // The sibling lies outside the bind source subtree and must not be cloned
+    // under the new root (the unfiltered code grafted it at an unreachable
+    // dentry, making unmount permanently EBUSY and leaking the registration).
+    assert!(bind_root.mount().children().is_empty());
+    assert!(Arc::ptr_eq(
+        lookup_no_follow(&host_root, "alt").unwrap().mount(),
+        &sibling
+    ));
+
+    // With no unreachable cloned child, a plain unmount succeeds.
+    namespace.detach(&bind_root).unwrap();
+}
+
+#[def_test]
+fn test_clone_mount_tree_reproduces_a_stacked_mountpoint() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let lower_fs = mock_filesystem(StatFsFlags::empty());
+    let upper_fs = mock_filesystem(StatFsFlags::empty());
+
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+    let mountpoint = lookup_child_in_mount(&root, "mnt").unwrap();
+
+    // Two mounts stacked on one mountpoint: Linux keeps the upper one visible
+    // and chains the lower one through its overmount link. Each gets a distinct
+    // devname because every mock reports the same filesystem name, so the
+    // devname is the only thing that tells the layers apart in an assertion.
+    let lower = namespace
+        .attach_with_flags_and_devname(&mountpoint, &lower_fs, MountFlags::empty(), Some("lower"))
+        .unwrap();
+    let upper = namespace
+        .attach_with_flags_and_devname(&mountpoint, &upper_fs, MountFlags::empty(), Some("upper"))
+        .unwrap();
+    let visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(visible.mount(), &upper));
+    assert!(!Arc::ptr_eq(&lower, &upper));
+    assert_eq!(visible.mount().devname(), Some("upper"));
+    let source_lower = visible.mount().covered_mount().unwrap();
+    assert_eq!(
+        source_lower.devname(),
+        Some("lower"),
+        "the source stack is upper over lower"
+    );
+
+    // `open_tree(OPEN_TREE_CLONE)` must reproduce that stack, top over bottom.
+    // A clone that dropped the displaced mount, or installed the layers in the
+    // wrong order, shows a different visible devname or a different layer
+    // underneath.
+    let (cloned_root, kept) = namespace.clone_mount_tree(&root).unwrap();
+    let cloned_mountpoint = lookup_no_follow(&cloned_root.root_path(), "mnt").unwrap();
+    let cloned_visible = cloned_mountpoint.mount();
+    assert!(
+        !Arc::ptr_eq(cloned_visible, &upper),
+        "the clone must not alias the source's mount"
+    );
+    assert_eq!(
+        cloned_visible.devname(),
+        Some("upper"),
+        "the clone's visible layer is the top of the source stack"
+    );
+    let covered = cloned_visible
+        .covered_mount()
+        .expect("the lower layer survives the clone");
+    assert_eq!(
+        covered.devname(),
+        Some("lower"),
+        "the layer under the clone's top is the source stack's bottom"
+    );
+    assert!(
+        !Arc::ptr_eq(&covered, cloned_visible),
+        "the stack has two distinct layers, not one mount covering itself"
+    );
+    assert!(
+        kept.iter().any(|mount| Arc::ptr_eq(mount, cloned_visible))
+            && kept.iter().any(|mount| Arc::ptr_eq(mount, &covered)),
+        "both cloned layers are handles the caller keeps alive"
+    );
+    assert!(
+        !Arc::ptr_eq(&covered, &lower),
+        "the clone copies the layers instead of sharing the source's"
+    );
+
+    // The source stack is untouched.
+    let source_visible = lookup_no_follow(&root, "mnt").unwrap();
+    assert!(Arc::ptr_eq(source_visible.mount(), &upper));
+    let source_lower = source_visible.mount().covered_mount().unwrap();
+    assert!(
+        Arc::ptr_eq(&source_lower, &lower),
+        "the source still covers its own lower mount"
+    );
+}
+
+
+#[def_test]
+fn content_writes_strip_set_id_bits_unless_fsetid_is_held() {
+    let privileged_bits = NodePermission::SET_UID
+        | NodePermission::SET_GID
+        | NodePermission::OWNER_READ
+        | NodePermission::GROUP_EXEC;
+    let caller = kcred::Cred::new(1000, 1000);
+    let stripped = Path::strip_write_privileges(privileged_bits, 1000, &caller);
+    assert!(!stripped.contains(NodePermission::SET_UID));
+    assert!(!stripped.contains(NodePermission::SET_GID));
+    assert!(stripped.contains(NodePermission::OWNER_READ));
+    assert!(stripped.contains(NodePermission::GROUP_EXEC));
+
+    // A set-GID bit without group-execute is the mandatory-locking mark, and a
+    // writer inside the file's group keeps it (`should_remove_suid()` plus
+    // `setattr_should_drop_sgid()`).
+    let lock_mark = NodePermission::SET_GID | NodePermission::OWNER_READ;
+    assert!(Path::strip_write_privileges(lock_mark, 1000, &caller).contains(NodePermission::SET_GID));
+    // A writer outside the file's group drops set-GID even without group-exec.
+    assert!(!Path::strip_write_privileges(lock_mark, 2000, &caller).contains(NodePermission::SET_GID));
+
+    // Effective CAP_FSETID preserves both privileged bits.
+    let privileged = kcred::Cred::root();
+    assert!(privileged.has_cap(kcred::CAP_FSETID));
+    assert_eq!(
+        Path::strip_write_privileges(privileged_bits, 2000, &privileged).bits(),
+        privileged_bits.bits()
+    );
+}
+
+#[def_test]
+fn immutable_targets_reject_revocation_before_touching_capabilities() {
+    // A cap-only immutable file has no set-ID metadata to update, so the
+    // immutable check must happen before the capability store is touched.
+    let init = crate::VfsInodeInit::new(
+        1,
+        0,
+        crate::Umode::new(
+            NodeType::RegularFile,
+            NodePermission::from_bits_truncate(0o755),
+        ),
+    )
+    .with_owner_links_and_rdev(0, 0, 1, Default::default());
+    let inode = VfsInode::new_file_with_flags(
+        Arc::new(MockDirOps::new(StatFsFlags::empty(), 1)),
+        crate::NodeFlags::IMMUTABLE,
+        init,
+    );
+    let root = Dentry::new_file_from_inode(inode, None, String::new());
+    let path = Mount::new_root(&mock_superblock(root, StatFsFlags::empty())).root_path();
+    let inode = path.inode();
+    let _mount_guard = path.lock_writable_mount().unwrap();
+    let _privilege_guard = inode.lock_privileges();
+
+    assert_eq!(
+        path.file_remove_privs_locked(&Cred::root()),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(
+        inode.file_capability_state(),
+        crate::FileCapabilityState::Unknown
+    );
+}
+
+#[def_test]
+fn set_gid_without_group_execute_still_drops_for_a_writer_outside_the_group() {
+    // Set-GID without group-execute is normally the mandatory-locking mark,
+    // but `setattr_should_drop_sgid()` still drops it for a writer outside the
+    // file's group. The S_NOSEC fast path must not skip that update.
+    let mode = NodePermission::SET_GID | NodePermission::OWNER_READ | NodePermission::OWNER_WRITE;
+    let fs = mock_regular_file_filesystem(mode);
+    let path = Mount::new_root(&fs).root_path();
+    let outsider = Cred::new(2000, 200);
+    {
+        let _guard = path.lock_writable_mount().unwrap();
+        path.file_remove_privs(&outsider).unwrap();
+    }
+    assert!(
+        !path
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_GID)
+    );
+
+    // A writer inside the file's group keeps the lock mark.
+    path.chmod(mode, &Cred::new(1000, 100)).unwrap();
+    let member = Cred::new(3000, 100);
+    {
+        let _guard = path.lock_writable_mount().unwrap();
+        path.file_remove_privs(&member).unwrap();
+    }
+    assert!(
+        path.metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_GID)
+    );
 }

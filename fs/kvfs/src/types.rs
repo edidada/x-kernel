@@ -12,7 +12,7 @@ use crate::Dentry;
 
 /// Filesystem node type values.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeType {
     Unknown         = 0,
     Fifo            = 0o1,
@@ -248,7 +248,7 @@ pub struct InodeTimes {
 }
 
 /// Filesystem node metadata update.
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MetadataUpdate {
     /// File size
     pub size: Option<u64>,
@@ -268,17 +268,23 @@ pub struct MetadataUpdate {
 /// Requested timestamp value together with its authorization semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetattrTime {
-    /// Set the timestamp to the current wall-clock value.
-    Current(SystemTime),
+    /// Set the timestamp to the current wall-clock value, resolved when the
+    /// update is applied.
+    Current,
     /// Set the timestamp to a caller-supplied value.
     Explicit(SystemTime),
 }
 
 impl SetattrTime {
-    /// Returns the resolved timestamp written to the filesystem.
-    pub const fn value(self) -> SystemTime {
+    /// Resolves the request against a shared clock sample.
+    ///
+    /// - `now`: the wall-clock value sampled once for the whole update.
+    ///
+    /// Returns: the timestamp written to the filesystem.
+    pub const fn resolve(self, now: SystemTime) -> SystemTime {
         match self {
-            Self::Current(value) | Self::Explicit(value) => value,
+            Self::Current => now,
+            Self::Explicit(value) => value,
         }
     }
 }

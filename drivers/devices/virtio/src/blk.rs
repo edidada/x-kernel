@@ -232,8 +232,8 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// The host serializes close, supplies a fresh closing-task notification,
     /// then withdraws disk lookup and waits without device/registry locks. Keep
     /// IRQ and completion processing active until the drain signal is observed.
-    /// Live is accepting with a transport; Closing retains a transport without
-    /// accepting; Closed has neither. This method does not destroy the transport.
+    /// Closing a suspended disk keeps admission closed and cancels resume before
+    /// releasing the state lock. The transport remains owned until finish_close.
     ///
     /// # Panics
     /// Panics if another close is already draining this device.
@@ -241,9 +241,10 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         let is_drained = {
             let mut state = self.state.lock();
             assert!(
-                state.is_accepting || state.device.is_none(),
+                state.is_accepting || state.is_suspended || state.device.is_none(),
                 "concurrent block close"
             );
+            state.is_suspended = false;
             state.is_accepting = false;
             if state.active_requests == 0 {
                 true

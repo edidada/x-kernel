@@ -6,7 +6,10 @@
 `klazy::Once`. Missing slots return `None` without initialization or waiting;
 readers perform no register access or firmware parsing. CPU-local detection runs
 before scheduling, while RISC-V firmware publication may identify unstarted APs.
-No reset/hotplug lifetime or global migration-safe feature intersection is claimed.
+No reset/hotplug lifetime is claimed. The migration-safe intersection is the
+one `system_hwcap()` folds from the identified CPUs; it is recomputed on each
+call rather than maintained as state, so a CPU that comes online later is
+included the next time the word is published.
 
 AArch64/LoongArch register reads use the existing architecture dependency's safe
 read interfaces; this adds no local unsafe code. Numeric identity fields cannot
@@ -18,9 +21,15 @@ unrecognized extension. Firmware's hardware assertions remain trusted.
 
 FP/SIMD claims require supported kernel context preservation; SVE, RISC-V V/Zve,
 and LoongArch LSX/LASX are omitted. This reporting policy does not enable those
-units, constrain userspace instruction execution, change hwprobe, or update ELF
-auxiliary-vector capabilities. Callers must account for per-CPU differences and
-the independent contracts of those interfaces.
+units, constrain userspace instruction execution, or change hwprobe.
+
+`CpuInfo::hwcap()` converts the same usable set into the `AT_HWCAP` encoding for
+one CPU, and `system_hwcap()` intersects the identified CPUs before exec
+publishes the word. Both steps are conservative: a bit is announced only when
+the kernel deems it usable and every online CPU advertises it, so user-selected
+instruction paths stay valid after a migration. Only the aarch64 encoding is
+produced; other architectures report zero, which is a claim of no capability
+rather than a grant.
 
 ## x86_64 CPU capability reporting
 
@@ -201,6 +210,16 @@ attempts restoration on the original slot and the current CPU slot; before switc
 CPU's slot, and restores it to the current CPU after switching back. This API immediately copies the trapframe by value and returns a snapshot,
 avoiding exposing to the caller a borrowed reference that could become invalid after the trap returns.
 
+### 2a. `active_exception_user_mode()` privilege-field read (`active_exception_context.rs:94-108`)
+
+```rust
+Some(unsafe { (*(ptr as *const ExceptionContext)).user_mode() })
+```
+
+**Invariant**: `ptr` must point to a live `ExceptionContext` installed on this CPU, and ordinary IRQs must stay masked between loading the slot and reading the field.
+
+**Why it is safe**: the pointer is installed only by `ExceptionContextGuard::new` from a live `&ExceptionContext` on this CPU. The read runs inside `with_current_irq_disabled`, so the trap-handler stack owning the frame cannot unwind or migrate between the load and the dereference. Unlike entry 2 it reads only the privilege field (`user_mode()`) instead of copying the whole frame and retains nothing, so no borrowed reference escapes. A zero slot yields `None` without dereferencing.
+
 ### 3. `prepare_initial_frame` (`x86_64/ctx.rs:367-379`)
 
 ```rust
@@ -240,6 +259,10 @@ field of the next task. The callee-saved register layout is consistent with `Con
 
 **Why it is safe**: the layouts of `FpState`/`FpuState`/`FxStateBlock` are guaranteed by
 `static_assertions` or `repr(C, align(...))` to match what the instructions expect.
+
+On aarch64, the 32 128-bit vector registers occupy the first 512 bytes; `fpcr` and
+`fpsr` are 32-bit fields at offsets 512 and 516. The naked assembly must access
+both fields as 32-bit words and must not read or write the trailing alignment padding.
 
 ### 5a. x86_64 signal-frame FP/SIMD restore (`x86_64/xstate.rs`)
 

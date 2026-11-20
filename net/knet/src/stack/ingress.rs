@@ -4,8 +4,9 @@
 
 //! Network-layer ingress processing outside the router lock.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
+use hashbrown::HashMap;
 use ktime_types::MonotonicInstant;
 use smoltcp::wire::{IpAddress as SmoltcpIpAddress, IpProtocol, Ipv6Packet, TcpPacket};
 
@@ -13,16 +14,40 @@ use super::socket_set::SocketSetState;
 use crate::{
     LISTEN_TABLE,
     buf::PacketBuf,
+    device::net_rx::RxPacket,
     ip::{Ipv4Address, Ipv4Cidr},
+    netfilter::FilterConfig,
     network::{
         fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
-        ipv4::{self, Icmpv4Error, Ipv4Header},
+        ipv4::{self, Icmpv4Error, Ipv4Header, forward::Ipv4ForwardInput},
     },
     udp, udp_err,
 };
 
+/// Work retained together until the shared stack and router can accept it.
+pub(crate) struct IngressBatch {
+    pub(crate) local: Vec<PacketBuf>,
+    pub(crate) forward: Vec<Ipv4ForwardInput>,
+    pub(crate) control: Vec<Vec<u8>>,
+}
+
+impl IngressBatch {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            local: Vec::with_capacity(capacity),
+            forward: Vec::with_capacity(capacity),
+            control: Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.forward.is_empty() && self.control.is_empty()
+    }
+}
+
 pub(crate) struct IngressProcessor {
     local_ipv4_addrs: Vec<Ipv4Cidr>,
+    device_names: HashMap<i32, String>,
     ipv4_reassembler: Ipv4Reassembler,
 }
 
@@ -30,8 +55,13 @@ impl IngressProcessor {
     pub(crate) fn new() -> Self {
         Self {
             local_ipv4_addrs: Vec::new(),
+            device_names: HashMap::new(),
             ipv4_reassembler: Ipv4Reassembler::new(),
         }
+    }
+
+    pub(crate) fn update_device_names<'a>(&mut self, names: impl Iterator<Item = (i32, &'a str)>) {
+        self.device_names = names.map(|(id, name)| (id, String::from(name))).collect();
     }
 
     pub(crate) fn update_local_ipv4_addrs(&mut self, addrs: &[Ipv4Cidr]) {
@@ -63,36 +93,41 @@ impl IngressProcessor {
         expired.timer_events
     }
 
-    /// Consumes `packets` and appends work for the shared stack and control TX.
+    /// Consumes `packets` and appends local, forwarding, and control work.
     ///
     /// The output batches may contain work retained from an earlier poll round
     /// whose shared destination lock was contended.
     pub(crate) fn handle_rx_packets(
         &mut self,
         timestamp: MonotonicInstant,
-        packets: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        filter: &FilterConfig,
+        packets: &mut Vec<RxPacket>,
+        batch: &mut IngressBatch,
     ) {
         for packet in packets.drain(..) {
-            self.handle_rx_packet(timestamp, packet, accepted_packets, control_packets);
+            match packet {
+                RxPacket::Network(packet) => {
+                    self.handle_rx_packet(timestamp, filter, packet, batch)
+                }
+                RxPacket::LocalUdp(packet) => self.resume_local_udp(packet, &mut batch.control),
+            }
         }
     }
 
     fn handle_rx_packet(
         &mut self,
         timestamp: MonotonicInstant,
+        filter: &FilterConfig,
         packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batch: &mut IngressBatch,
     ) {
         let Some(ip_packet) = packet.network_packet() else {
             return;
         };
         match ipv4::ip_version(ip_packet) {
-            Some(4) => self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets),
+            Some(4) => self.handle_ipv4_input(timestamp, filter, packet, batch),
             Some(6) => {
-                accepted_packets.push(packet);
+                batch.local.push(packet);
             }
             _ => debug!("Dropping packet with invalid IP version"),
         }
@@ -101,9 +136,9 @@ impl IngressProcessor {
     fn handle_ipv4_input(
         &mut self,
         timestamp: MonotonicInstant,
+        filter: &FilterConfig,
         mut packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batch: &mut IngressBatch,
     ) {
         if crate::ipv4::validate_input_packet(&mut packet).is_err() {
             return;
@@ -113,52 +148,41 @@ impl IngressProcessor {
                 .expect("validated IPv4 header");
 
         if !self.is_local_ipv4_destination(header.dst_addr()) {
+            if let Some(packet) = Ipv4ForwardInput::from_validated(packet) {
+                batch.forward.push(packet);
+            }
             return;
         }
 
         if header.is_fragmented() {
             match self.ipv4_reassembler.reassemble(packet, timestamp) {
                 Ipv4ReassemblyResult::Complete(packet) => {
-                    self.handle_ipv4_input(timestamp, packet, accepted_packets, control_packets)
+                    self.handle_ipv4_input(timestamp, filter, packet, batch)
                 }
                 Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => {}
             }
             return;
         }
 
-        if header.protocol() == ipv4::PROTOCOL_UDP {
-            let packet_type = packet.packet_type();
-            let is_broadcast_or_multicast = header.is_broadcast_or_multicast();
-            let packet = match udp::prepare_ipv4_packet(packet) {
-                Ok(packet) => packet,
-                Err(_) => return,
-            };
-            let (disposition, returned_packet) = udp::deliver_ipv4_packet(packet);
-            match disposition {
-                udp::InputDisposition::Accepted => return,
-                udp::InputDisposition::NoSocket if !is_broadcast_or_multicast => {
-                    let Some(packet) = returned_packet else {
-                        return;
-                    };
-                    let Some(ip_packet) = packet.packet().network_packet() else {
-                        return;
-                    };
-                    queue_icmpv4_error(
-                        control_packets,
-                        Icmpv4Error::PortUnreachable,
-                        packet_type,
-                        ip_packet,
-                    );
-                    return;
-                }
-                udp::InputDisposition::NoSocket => return,
-            }
+        let protocol = header.protocol();
+        let is_broadcast_or_multicast = header.is_broadcast_or_multicast();
+        let emit_protocol_unreachable = should_emit_protocol_unreachable(header);
+        let indev = self.device_names.get(&packet.ifindex());
+        if !indev.is_some_and(|name| filter.accept_input(&packet, name)) {
+            return;
         }
 
-        if should_emit_protocol_unreachable(header) {
+        if protocol == ipv4::PROTOCOL_UDP {
+            if let Ok(packet) = udp::prepare_ipv4_packet(packet) {
+                deliver_local_udp(packet, is_broadcast_or_multicast, &mut batch.control);
+            }
+            return;
+        }
+
+        if emit_protocol_unreachable {
             if let Some(ip_packet) = packet.network_packet() {
                 queue_icmpv4_error(
-                    control_packets,
+                    &mut batch.control,
                     Icmpv4Error::ProtocolUnreachable,
                     packet.packet_type(),
                     ip_packet,
@@ -168,7 +192,21 @@ impl IngressProcessor {
         }
 
         udp_err::inspect_icmpv4_error(&packet);
-        accepted_packets.push(packet);
+        batch.local.push(packet);
+    }
+
+    fn resume_local_udp(&self, packet: udp::PreparedUdpPacket, control_packets: &mut Vec<Vec<u8>>) {
+        let Some(header) = packet
+            .packet()
+            .network_packet()
+            .and_then(|bytes| Ipv4Header::parse_header_only(bytes).ok())
+        else {
+            return;
+        };
+        if self.is_local_ipv4_destination(header.dst_addr()) {
+            let is_broadcast_or_multicast = header.is_broadcast_or_multicast();
+            deliver_local_udp(packet, is_broadcast_or_multicast, control_packets);
+        }
     }
 
     fn is_local_ipv4_destination(&self, dst_addr: Ipv4Address) -> bool {
@@ -178,6 +216,27 @@ impl IngressProcessor {
                 .local_ipv4_addrs
                 .iter()
                 .any(|addr| addr.address() == dst_addr || addr.broadcast() == Some(dst_addr))
+    }
+}
+
+fn deliver_local_udp(
+    packet: udp::PreparedUdpPacket,
+    is_broadcast_or_multicast: bool,
+    control_packets: &mut Vec<Vec<u8>>,
+) {
+    let (disposition, returned) = udp::deliver_ipv4_packet(packet);
+    if disposition == udp::InputDisposition::NoSocket && !is_broadcast_or_multicast {
+        let Some(packet) = returned else {
+            return;
+        };
+        if let Some(bytes) = packet.packet().network_packet() {
+            queue_icmpv4_error(
+                control_packets,
+                Icmpv4Error::PortUnreachable,
+                packet.packet().packet_type(),
+                bytes,
+            );
+        }
     }
 }
 

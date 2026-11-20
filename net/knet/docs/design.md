@@ -52,8 +52,27 @@ locks needed by reclaim: nonblocking controls connection waiting, not allocator
 permissions. NoMemory can precede empty-queue WouldBlock; Unix/vsock reservation
 can also fail before transport validation. Each blocked accept retains one
 reserved slot, avoiding connection loss without a queue rollback protocol.
-Portable driver-class owners, boxed packet buffers, async-trait futures,
+Portable driver-class owners, boxed packet buffers,
 nested Arc/Vec allocations and dynamic workers remain outside this migration.
+
+## Inline Unix accept futures
+
+Unix transport accept uses inherent async methods and an explicit enum match,
+not async-trait boxed futures. Synchronous operations retain enum_dispatch.
+The concrete and enum futures are Send and borrow their transport; construction
+does not execute the accept body. This changes the internal Rust interface:
+generic callers cannot request accept through UnixTransportOps alone.
+
+The connection queues, lock scopes, validation and dequeue order are unchanged.
+Dropping a pending future drops its existing wait registration; dropping an
+unpolled future does not consume a queued connection. The socket KBox is still
+reserved before transport accept. Event/channel internals and accepted endpoint
+construction may still allocate, so this is not allocation-free accept.
+
+Tests check Send and a 2048-byte future-size ceiling on the supported targets,
+plus cancellation, unpolled drop, retry and data transfer for stream and
+seqpacket enum dispatch. The ceiling bounds the future object only, not total
+call-stack usage. Datagram accept retains its InvalidInput result.
 
 ## Bridge receive buffers
 
@@ -78,6 +97,18 @@ use `unittest::path_mod_test!` at the original scope. Netlink and socket test
 helpers move with their cases. Runtime timer probes retain their original
 hang bounds and observe the boot-created service; migration does not install
 another service or change its registration.
+
+Ethernet and UDP test wake counters use fallible `KBox` allocation during
+sleepable setup and retain their leaked static lifetime for raw wakers.
+The RX-budget fixture keeps a narrow `std_box_in_kernel_tests` exception:
+the production `NetDeviceImpl` driver contract requires a standard `Box<TestNic>`
+coerced to its driver trait object.
+Four additional method-local exceptions preserve the driver buffer protocol:
+`recv` and `alloc_tx_buf` allocate standard boxed `NetBuf` owners from the pool
+and transfer them through `into_handle`. Their paired consumers, `recycle_rx`
+and `send`, reconstruct those owners through `NetBuf::from_handle` and drop
+them exactly once. These allocation/reconstruction pairs retain the driver's
+standard Box ownership contract rather than substituting a kernel allocator.
 
 ## Role
 
@@ -351,6 +382,26 @@ access and truncation invalidate derived offsets, checksum state and UDP metadat
 Fragment data does not imply a complete transport header. ICMP quotes permit
 truncated payloads; unfinished output derives its length from packet storage.
 
+### IPv4 Forwarding Preparation
+
+`network/ipv4/forward.rs` owns unicast forwarding admission, TTL updates,
+fragmentation, and ICMP failure preparation. Its input is already normalized by
+IPv4 ingress. It preserves remote endpoints and inherited fragment fields;
+failures retain the original header for a separately routed ICMP reply.
+Routing and scheduling belong to Router.
+
+Router owns forwarding route selection and output queues. The selected device,
+next hop and neighbor source stay with pending fragments, with one fragment per
+TX work item. Disabling forwarding or retiring the device/source drops pending
+output. Ingress transfers validated forwarding inputs through `IngressBatch`
+and the bounded Router queue. Each namespace starts with forwarding disabled;
+`/proc/sys/net/ipv4/ip_forward` controls it under the Router lock. Physical
+receive traffic still belongs to the initial stack.
+
+FORWARD inspects the route-selected datagram after TTL preparation and before
+fragmentation. Remaining fragments resume after that decision without repeating
+filter counters or TTL updates. Forwarded traffic bypasses local INPUT/OUTPUT.
+
 ### IPv4 Filter Table Model
 
 `netfilter/filter` stores IPv4 filtering policies as immutable ordered rules
@@ -432,6 +483,33 @@ Generation exhaustion rejects publication rather than reusing an earlier value.
 Rejected updates preserve the current state. These operations require sleepable
 task context; table construction and counter collection allocate bounded storage.
 The global store starts with empty ACCEPT chains.
+
+Local IPv4 input runs INPUT after reassembly, before transport delivery and
+ICMP error handling. The service keeps interface names indexed by ifindex and
+refreshes them on device removal or rename; a missing input device drops the
+packet. INPUT has no output interface. Loopback reserves a NetRx slot before
+evaluating UDP input in task context. Full queues reject packets without INPUT
+counts; filtering and parsing release the slot on drop. The queue lock is released
+before taking the configuration's sleepable read lock.
+Receive work distinguishes ordinary network input from local UDP delivery after
+INPUT acceptance. Unmatched loopback UDP keeps its `PreparedUdpPacket` in the
+deferred queue and resumes local delivery without evaluating or counting INPUT
+again, including across a table replacement. `PacketBuf` carries no filter progress.
+Interface-name updates take Router before ingress; packet matching takes ingress
+before the filter read lock and never calls back into Router.
+
+### Local IPv4 output
+
+Router applies OUTPUT to local IPv4 datagrams after route selection and header
+finalization, before fragmentation or device transmission, including loopback
+and control replies. Broadcast copies are checked per output device.
+TX queues and dispatch budgets count complete datagrams; queue rejection precedes
+OUTPUT, and fragments or device retries do not repeat evaluation or counting.
+Queued packets use the table current at dispatch time; a later DROP is not
+reported to the sending socket.
+
+The adapter exposes its built-in table names for `/proc/net/ip_tables_names`;
+unqualified iptables-save enumerates the same global filter table it can query.
 
 ### Legacy IPv4 Table Compatibility
 
@@ -874,9 +952,9 @@ socket cannot keep receiving or pin its numeric port ID.
 
 `bind` installs the requested 32-bit `nl_groups` mask. Bits the protocol does
 not implement are masked off instead of rejected, matching `netlink_bind`.
-`NETLINK_ROUTE` advertises 36 route groups, but only the first 32 fit in
-`nl_groups`; groups 33 through 36 require `NETLINK_ADD_MEMBERSHIP`, which this
-stack does not yet implement. `NETLINK_KOBJECT_UEVENT` exposes all 32 group bits,
+`NETLINK_ROUTE` advertises 36 route groups, but only the first 32 fit in the
+modeled 32-bit mask; groups 33 through 36 are unreachable here because
+`NETLINK_ADD_MEMBERSHIP` enforces the same 32-group bound. `NETLINK_KOBJECT_UEVENT` exposes all 32 group bits,
 mirroring Linux's `__netlink_kernel_create` minimum group count; kernel-originated
 uevents use group 1. `getsockname` reports the effective mask. Route notifications use group `g` with the bit
 `1 << (g - 1)`: link, neighbor, IPv4 address, and IPv4 route events map to
@@ -895,10 +973,42 @@ changed, so a rejected bind leaves the previous subscription untouched. POSIX
 `bind` passes the syscall credential through `Socket::bind_with_cred`;
 credential-free `SocketOps::bind` callers have no administrative authority.
 
-Kernel publishers deliver a message only to live, bound sockets whose mask
-contains the event group. Delivery snapshots the registry under its lock, then
-enqueues and wakes receivers after releasing it. Receive queues model Linux's
-default `sk_rcvbuf` of 212992 bytes. `SO_RCVBUF` clamps its hint to
+Kernel publishers deliver a message only to live sockets whose mask contains
+the event group: bound sockets from the port registry plus unbound sockets that
+hold a subscription, which `NETLINK_ADD_MEMBERSHIP` links into a broadcast list
+of its own (Linux's `mc_list`). Delivery snapshots both under the registry lock
+and de-duplicates a socket that appears in both, then enqueues and wakes
+receivers after releasing it. Receive queues model Linux's
+default `sk_rcvbuf` of 212992 bytes. The general socket layer applies the same
+`sock_setsockopt` rule to every family: `SO_SNDBUF`/`SO_RCVBUF` clamp the hint
+to the modeled `wmem_max`/`rmem_max` (4 MiB), double it, and floor it at
+`SOCK_MIN_SNDBUF`/`SOCK_MIN_RCVBUF` (4608/2304), while `SO_SNDBUFFORCE` and
+`SO_RCVBUFFORCE` skip only the clamp. `getsockopt` reports the doubled value,
+which is what a client that sets N and reads back expects.
+
+`SIOCOUTQ` and `SIOCINQ`/`FIONREAD` are served by `SocketOps::queue_lengths`, a
+per-transport queue-depth query rather than a generic counter. Unix stream and
+seqpacket report their channel occupancy on both sides, which is what
+`unix_inq_len` sums for `SOCK_STREAM`/`SOCK_SEQPACKET` and what
+`unix_outq_len` reports for the peer's unread bytes. UDP reports the head
+datagram's payload length for `SIOCINQ`, as `udp_ioctl` does through
+`first_packet_length`; its `SIOCOUTQ` is 0 because `send` hands each datagram to
+the device before it returns. TCP reports its receive queue for `SIOCINQ` and
+its unsent transmit buffer for `SIOCOUTQ`, and a listening TCP or unix socket
+answers `EINVAL` to `SIOCINQ` like `tcp_ioctl` and `unix_inq_len`.
+
+A transport that cannot inspect its own queue returns `None`, and the ioctl
+answers `ENOTTY`, which is what an unsupported socket ioctl has always
+answered. Unix datagram is the only such transport today: `unix_inq_len` would
+report its head message's length, but the messages live in an
+`async_channel::Receiver` with no peek, so the length is not readable without
+consuming a message the caller did not ask for. A fabricated 0 is not an
+acceptable substitute. glibc 2.43's resolver issues `FIONREAD` on its UDP
+socket after each query and abandons the lookup with `EAI_AGAIN` when it reads
+0, even though the reply is already queued, so answering 0 for a queue this
+layer cannot see breaks name resolution. Reporting the real head length for
+unix datagram needs a peekable queue, which is a separate change to how
+messages are enqueued, dequeued and woken. `SO_RCVBUF` clamps its hint to
 `net.core.rmem_max` (4 MiB), doubles it, and applies the
 `SOCK_MIN_RCVBUF` floor of 2304; `getsockopt` reports the effective limit.
 Lowering the limit does not purge packets already queued. Admission adds the
@@ -1356,7 +1466,7 @@ Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/servic
 
 ### TX Routing
 
-UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
+UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue as complete datagrams after size and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
 
 TCP connection setup and UDP connect/send resolve IPv4 endpoints through the
 same output lookup used by route queries. Its result carries the effective
@@ -1379,14 +1489,14 @@ wildcard bind addresses retain their listening meaning.
 | 3 | &emsp;check broadcast permission and select an active output route |
 | 4 | &emsp;source = bound_source if set, otherwise route-selected source |
 | 5 | &emsp;**if** output device is not loopback: |
-| 6 | &emsp;&emsp;check data-queue capacity for the expected packet count |
+| 6 | &emsp;&emsp;check data-queue capacity for one datagram |
 | 7 | &emsp;build UDP checksum and IPv4 header |
 | 8 | &emsp;choose DF from `IP_MTU_DISCOVER` and route MTU |
-| 9 | &emsp;fragment oversized IPv4 output; return `EMSGSIZE` if DF forbids it |
+| 9 | &emsp;check output size; return `EMSGSIZE` if DF forbids fragmentation |
 | 10 | &emsp;**if** output device is loopback: |
-| 11 | &emsp;&emsp;dispatch fragments immediately |
+| 11 | &emsp;&emsp;dispatch the complete datagram immediately |
 | 12 | &emsp;**else**: |
-| 13 | &emsp;&emsp;enqueue all fragments with the bound interface, or return `WouldBlock` |
+| 13 | &emsp;&emsp;enqueue the complete datagram with the bound interface, or return `WouldBlock` |
 | 14 | &emsp;release Router |
 | 15 | &emsp;network_poller().notify(Tx); network_poller().assist_once() |
 | 16 | **Procedure** `dispatch_budgeted(tx_budget)` |
@@ -1396,11 +1506,11 @@ wildcard bind addresses retain their listening meaning.
 | 20 | &emsp;&emsp;**if** IPv4: |
 | 21 | &emsp;&emsp;&emsp;prepare IPv4 length/checksum fields |
 | 22 | &emsp;&emsp;&emsp;**if** limited broadcast: |
-| 23 | &emsp;&emsp;&emsp;&emsp;validate source and replicate to interfaces allowed by binding |
+| 23 | &emsp;&emsp;&emsp;&emsp;validate source; run OUTPUT and fragment for each interface allowed by binding |
 | 24 | &emsp;&emsp;&emsp;**else**: |
 | 25 | &emsp;&emsp;&emsp;&emsp;look up longest-prefix route |
 | 26 | &emsp;&emsp;&emsp;&emsp;validate bound interface and local source |
-| 27 | &emsp;&emsp;&emsp;&emsp;send through route device to gateway or destination |
+| 27 | &emsp;&emsp;&emsp;&emsp;run OUTPUT, then fragment and send through route device to gateway or destination |
 | 28 | &emsp;&emsp;**else if** IPv6 multicast: |
 | 29 | &emsp;&emsp;&emsp;replicate to all devices |
 | 30 | &emsp;&emsp;**else if** IPv6 unicast: |
@@ -1510,13 +1620,27 @@ Before a packet enters a PCB queue, the loopback send path validates the datagra
 
 Each PCB reserves 1,024 `VecDeque` slots at creation. This follows the Linux `__udp_enqueue_schedule_skb` pattern, where `__skb_queue_tail` inserts an existing `skb` while holding `sk_receive_queue.lock`. Accordingly, `enqueue` performs only an occupancy check and inserts an existing handle while running in softirq context under `SpinNoIrq`. If the queue is full, it releases the queue lock before reclaiming the packet. `MSG_PEEK` increments the `PacketBuf` reference count under the lock and copies the payload after releasing it.
 
-The shared `NET_RX_QUEUE` is also protected by `SpinNoIrq` and is used by loopback transmit, `NetRx`, and task-context `poll_rx`. Its `pending_udp` and `deferred` queues both contain pointer-sized `PacketBuf` values. `NetRx` removes already-annotated entries from `pending_udp` under its budget for UDP delivery; the task poller removes other packets from `deferred`. Capacity accounting includes both queue lengths and all in-flight packets, so producers cannot consume slots that are temporarily vacant while a packet is being delivered to a PCB. If a UDP packet matches no PCB, this path retains unique ownership, clears the packet metadata, and moves it to `deferred`.
+The shared `NET_RX_QUEUE` is protected by `SpinNoIrq` and used by loopback transmit,
+`NetRx`, and task-context `poll_rx`. `pending_udp` holds pointer-sized
+`PreparedUdpPacket` values. The FIFO `deferred` queue holds `RxPacket` work:
+ordinary network input or prepared UDP that has passed INPUT. Both queues reserve
+their full capacity before use. NetRx moves unmatched UDP to `deferred` with its
+prepared view intact. Router and Service carry this receive stage to ingress,
+which resumes UDP delivery after INPUT. PacketBuf and PCB queue handles remain
+pointer-sized; deferred queue and ingress batch elements include the stage tag.
+Capacity accounting includes both queue lengths and all in-flight packets, so
+producers cannot consume slots temporarily vacant during PCB delivery.
 
 `IngressProcessor::ipv4_reassembler` owns reassembly queues and is protected by `Service::ingress`, a `Mutex<IngressProcessor>`. The global `SERVICE` is a `LazyInit<Service>` with separate component locks.
 
 The UDP socket lifecycle and local endpoint use separate `RwLock`s, while the peer endpoint uses `SpinNoIrq` for softirq lookup. The asynchronous-error queue has its own mutex; error status, shutdown flags, and receive-error enablement use atomics. Socket-local waiter sets report data, errors, write readiness, and shutdown independently of device RX notifications.
 
 ### TCP and Unix Stream Synchronization
+
+`TCP_INFO` queries return `EOPNOTSUPP` until a diagnostic snapshot is available.
+The error is returned before socket-option copyout, leaving the caller's output
+buffer and length unchanged. A successful zero-length result would leave
+applications interpreting their existing buffer contents as TCP statistics.
 
 TCP read and write waiters subscribe to separate socket-local `PollSet`s. Each set aggregates waiters behind smoltcp's single waker slot for that direction; data, transmit-buffer capacity, and protocol state changes wake only that socket's waiters. Local read shutdown wakes the read set, and entering `Listening` wakes existing interests so they can register for accept events. TCP readiness does not subscribe to device RX or global protocol-timer notifications: the network poller owns protocol progress independently of blocked socket operations.
 
@@ -1599,7 +1723,7 @@ Loopback UDP is delivered directly to the PCB within the transmit path's bottom-
 
 RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms soft time limit. Staged smoltcp APIs bound ingress and egress work. TX stages share one budget, as do the main and final RX stages, allowing loopback TCP and ICMP to complete a device round trip within one assist. Control traffic takes priority over data traffic. Router, Interface, or socket-set contention ends the round with `has_more` set. IPv4 reassembly processing acquires the `IngressProcessor` lock only for pending expiry events; contention preserves those events while TX continues. Expiry events are processed under the timer budget across successive rounds.
 
-TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP registers socket-local read/write wakers with smoltcp, while raw sockets use the shared protocol source for send notifications. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
+TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` whenever a non-peeking read consumes data; protocol processing decides whether to advertise the enlarged window. TCP registers socket-local read/write wakers with smoltcp, while raw sockets use the shared protocol source for send notifications. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
 ### Socket File I/O
 

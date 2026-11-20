@@ -18,7 +18,7 @@
 
 use alloc::sync::Arc;
 
-use intrusive_collections::intrusive_adapter;
+use intrusive_collections::{LinkedList, intrusive_adapter};
 
 #[cfg(any(target_arch = "x86_64", unittest))]
 use crate::backend::msi::MsiReservation;
@@ -26,6 +26,7 @@ use crate::backend::msi::MsiReservation;
 mod local;
 
 use kcompletion::{Completion, DeferredWake};
+use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId};
 use klazy::Once;
 use kspin::{SpinNoIrq, SpinNoIrqGuard};
 
@@ -33,6 +34,7 @@ use kspin::{SpinNoIrq, SpinNoIrqGuard};
 use super::index::PreparedWithdrawal;
 use super::{
     action_set::{ActionSet, RetiredAction},
+    retirement::{RetirementAdapter, RetirementSlot},
     unhandled::{UnhandledIrqReport, UnhandledIrqState},
 };
 #[cfg(unittest)]
@@ -48,7 +50,7 @@ mod registry;
 pub use registry::DYNAMIC_VIRQ_BASE;
 #[cfg(unittest)]
 pub use registry::RcuIndexProbe;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", unittest))]
 pub(crate) use registry::free_msi_if_unused;
 #[cfg(any(target_arch = "x86_64", unittest))]
 pub(crate) use registry::publish_msi_reservation;
@@ -278,6 +280,22 @@ impl IrqDescRuntimeState {
         self.is_msi
     }
 
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: teardown queries are used only by the x86 MSI \
+                      backend"
+        )
+    )]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        allow(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: MSI teardown queries are used only by \
+                      the x86 MSI backend"
+        )
+    )]
     const fn is_unused(&self) -> bool {
         !self.has_actions() && self.teardown_depth == 0
     }
@@ -357,6 +375,9 @@ pub(super) struct IrqStateDesc {
     is_managed: bool,
     // One-way storage lifecycle state, distinct from reversible action teardown.
     is_retired: bool,
+    // Persistent fact for procfs visibility; never cleared on action removal.
+    has_action_history: bool,
+    retirement_slots: LinkedList<RetirementAdapter>,
     // Unlike transient teardown, a failed NMI close keeps enable admission shut.
     is_nmi_closing: bool,
     has_nmi_shutdown: bool,
@@ -388,6 +409,8 @@ impl IrqStateDesc {
             runtime: IrqDescRuntimeState::new(desc),
             is_managed: false,
             is_retired: false,
+            has_action_history: false,
+            retirement_slots: LinkedList::new(RetirementAdapter::NEW),
             is_nmi_closing: false,
             has_nmi_shutdown: false,
             flow: None,
@@ -426,11 +449,15 @@ impl IrqStateDesc {
     }
 
     pub(super) fn publish_regular_action(&mut self, prepared: &mut PreparedAction) -> bool {
-        self.flow.is_some()
+        let installed = self.flow.is_some()
             && !self.affinity.has_failed_programming
             && !self.is_retired
             && !self.has_nmi_shutdown
-            && self.runtime.publish_regular_action(prepared)
+            && self.runtime.publish_regular_action(prepared);
+        if installed {
+            self.has_action_history = true;
+        }
+        installed
     }
 
     #[cfg(unittest)]
@@ -488,6 +515,7 @@ impl IrqStateDesc {
     pub(super) fn install_nmi_action(&mut self) {
         debug_assert!(self.can_install_nmi_action());
         self.runtime.has_nmi_action = true;
+        self.has_action_history = true;
     }
 
     /// Admission remains closed until local action publications are withdrawn.
@@ -563,7 +591,11 @@ impl IrqStateDesc {
         {
             return None;
         }
-        self.runtime.publish_shared_action(prepared)
+        let token = self.runtime.publish_shared_action(prepared);
+        if token.is_some() {
+            self.has_action_history = true;
+        }
+        token
     }
 
     #[cfg(unittest)]
@@ -581,6 +613,14 @@ impl IrqStateDesc {
 
     pub(super) fn action_count(&self) -> usize {
         self.runtime.action_count()
+    }
+
+    /// Returns whether any installed action refuses user-originated routing.
+    ///
+    /// Line exclusion must be held. The scan is control-plane only; dispatch
+    /// never evaluates owner policy.
+    pub(super) fn has_user_affinity_restriction(&self) -> bool {
+        self.runtime.actions.has_user_affinity_restriction()
     }
 
     /// Captures membership under Line exclusion for an admitted traversal.
@@ -817,6 +857,22 @@ impl IrqStateDesc {
         self.runtime.is_msi()
     }
 
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: teardown queries are used only by the x86 MSI \
+                      backend"
+        )
+    )]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        allow(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: MSI teardown queries are used only by \
+                      the x86 MSI backend"
+        )
+    )]
     pub(super) fn is_unused(&self) -> bool {
         !self.is_managed
             && !self.has_nmi_shutdown
@@ -827,6 +883,93 @@ impl IrqStateDesc {
 
     pub(super) fn is_retired(&self) -> bool {
         self.is_retired
+    }
+
+    pub(super) fn has_action_history(&self) -> bool {
+        self.has_action_history
+    }
+
+    /// Computes the first-action policy without publishing it.
+    ///
+    /// The caller commits the returned mask only after action publication
+    /// succeeds. Explicit requested values and source-managed defaults are
+    /// retained/left unknown.
+    pub(super) fn prepare_initial_affinity_policy(&self) -> Result<Option<KCpuMask>, IrqDescError> {
+        self.prepare_initial_affinity_policy_with(kcpu_id_map::present_mask())
+    }
+
+    pub(super) fn prepare_initial_affinity_policy_with(
+        &self,
+        present: Option<KCpuMask>,
+    ) -> Result<Option<KCpuMask>, IrqDescError> {
+        if self.has_action_history || self.affinity.requested.is_some() {
+            return Ok(None);
+        }
+        match self.desc.affinity {
+            crate::IrqAffinity::Cpu(cpu) => {
+                if cpu >= kbuild_config::NR_CPUS {
+                    return Err(IrqDescError::InvalidCpu { cpu });
+                }
+                let mut mask = KCpuMask::new();
+                mask.set_logical(LogicalCpuId::new(cpu), true);
+                Ok(Some(mask))
+            }
+            crate::IrqAffinity::Any if self.is_ordinary_affinity_source() => {
+                present.map(Some).ok_or(IrqDescError::NotReady)
+            }
+            crate::IrqAffinity::Any => Ok(None),
+        }
+    }
+
+    pub(super) fn commit_initial_affinity_policy(&mut self, policy: Option<KCpuMask>) {
+        if let Some(policy) = policy
+            && self.affinity.requested.is_none()
+        {
+            self.affinity.requested = Some(policy);
+        }
+    }
+
+    fn is_ordinary_affinity_source(&self) -> bool {
+        self.flow.is_some()
+            && self.flow != Some(crate::IrqFlow::PerCpu)
+            && !self
+                .desc
+                .flags
+                .intersects(IrqFlags::MSI | IrqFlags::PER_CPU)
+            && !self.has_nmi_action()
+            && !self.has_nmi_shutdown
+    }
+
+    pub(super) fn register_retirement(&mut self, slot: Arc<RetirementSlot>) -> bool {
+        if self.is_retired {
+            return false;
+        }
+        self.retirement_slots.push_back(slot);
+        true
+    }
+
+    pub(super) fn remove_retirement(&mut self, slot: &Arc<RetirementSlot>) {
+        if self.is_retired {
+            return;
+        }
+        let target = Arc::as_ptr(slot);
+        let mut cursor = self.retirement_slots.cursor_mut();
+        cursor.move_next();
+        while let Some(ptr) = cursor.get_ptr() {
+            if ptr.as_ptr() == target.cast_mut() {
+                cursor.remove();
+                return;
+            }
+            cursor.move_next();
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", unittest))]
+    pub(super) fn take_retirements(&mut self) -> LinkedList<RetirementAdapter> {
+        core::mem::replace(
+            &mut self.retirement_slots,
+            LinkedList::new(RetirementAdapter::NEW),
+        )
     }
 
     #[cfg(unittest)]
@@ -865,6 +1008,7 @@ impl IrqStateDesc {
     }
 
     /// Trigger reconfiguration cannot repair a failed routing transaction.
+    #[cfg(unittest)]
     pub(super) fn require_affinity_ready(&self) -> Result<(), IrqDescError> {
         if self.affinity.has_failed_programming {
             return Err(IrqDescError::ConfigurationFailed {
@@ -874,7 +1018,7 @@ impl IrqStateDesc {
         Ok(())
     }
 
-    /// Like [`Self::require_affinity_ready`], but admits a masked deferred
+    /// Like `require_affinity_ready`, but admits a masked deferred
     /// retry so activation can run the controller's recovery transaction.
     pub(super) fn require_affinity_activation_ready(&self) -> Result<(), IrqDescError> {
         if self.affinity.has_failed_programming
@@ -919,6 +1063,16 @@ impl IrqStateDesc {
             assert!(state.install_regular_action(action));
         }
         state
+    }
+
+    #[cfg(unittest)]
+    pub(super) fn set_action_history_for_tests(&mut self) {
+        self.has_action_history = true;
+    }
+
+    #[cfg(unittest)]
+    pub(super) fn clear_action_history_for_tests(&mut self) {
+        self.has_action_history = false;
     }
 
     #[cfg(unittest)]

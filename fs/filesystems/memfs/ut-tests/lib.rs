@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::vec;
+
 use linux_raw_sys::general::{O_CREAT, O_EXCL, O_RDWR, O_WRONLY};
 use unittest::{assert, assert_eq, def_test};
 
@@ -343,6 +345,30 @@ fn tmpfs_write_end_updates_vfs_inode_size() {
 }
 
 #[def_test]
+fn tmpfs_growth_and_overwrite_publish_the_accepted_size_and_contents() {
+    let fs = shmem::new_tmpfs(SuperBlockFlags::empty()).unwrap();
+    let root = Mount::new_root(&fs).root_path();
+    let file = create_copy_test_file(&root, "growth");
+    assert_eq!(file.write_from(b"old", &mut 0), Ok(3));
+
+    let mut expected = vec![0x51; 2 * memaddr::PAGE_SIZE_4K];
+    assert_eq!(file.write_from(&expected, &mut 0), Ok(expected.len()));
+    assert_eq!(file.inode().size(), expected.len() as u64);
+    assert_eq!(file.path().getattr().unwrap().size, expected.len() as u64);
+    let mut output = vec![0; expected.len() + 1];
+    assert_eq!(file.read_from(&mut output, &mut 0), Ok(expected.len()));
+    assert_eq!(&output[..expected.len()], expected.as_slice());
+
+    let overwrite = vec![0x62; memaddr::PAGE_SIZE_4K];
+    assert_eq!(file.write_from(&overwrite, &mut 0), Ok(overwrite.len()));
+    expected[..overwrite.len()].copy_from_slice(&overwrite);
+    assert_eq!(file.inode().size(), expected.len() as u64);
+    assert_eq!(file.path().getattr().unwrap().size, expected.len() as u64);
+    assert_eq!(file.read_from(&mut output, &mut 0), Ok(expected.len()));
+    assert_eq!(&output[..expected.len()], expected.as_slice());
+}
+
+#[def_test]
 fn tmpfs_fsync_preserves_file_contents_and_accepts_directories() {
     let fs = shmem::new_tmpfs(SuperBlockFlags::empty()).unwrap();
     let root = Mount::new_root(&fs).root_path();
@@ -449,6 +475,141 @@ fn create_copy_test_file(root: &kvfs::Path, name: &str) -> Arc<VfsFile> {
         .open_with_flags_at(root, root, O_RDWR | O_CREAT | O_EXCL,
             NodePermission::from_bits_truncate(0o600), NodePermission::empty(), kcred::initial_cred())
         .unwrap()
+}
+
+#[def_test]
+fn writes_revoke_with_the_writing_credential_not_the_opener() {
+    let fs = MemoryFs::new().unwrap();
+    let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+    let file = create_copy_test_file(&root, "writer-cred");
+    file.path()
+        .chmod(
+            NodePermission::from_bits_truncate(0o4755),
+            &kcred::initial_cred(),
+        )
+        .unwrap();
+    assert!(
+        file.path()
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_UID)
+    );
+
+    // The descriptor was opened by root, whose effective CAP_FSETID would keep
+    // the bit; the writing task is unprivileged and must still revoke it.
+    let writer = kcred::Cred::new(2000, 200);
+    assert_eq!(file.write_from_as(b"x", &mut 0, &writer), Ok(1));
+    assert!(
+        !file
+            .path()
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_UID)
+    );
+}
+
+#[def_test]
+fn native_copies_revoke_with_the_writing_credential_not_the_opener() {
+    let fs = MemoryFs::new().unwrap();
+    let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+    let input = create_copy_test_file(&root, "copy-cred-src");
+    let output = create_copy_test_file(&root, "copy-cred-dst");
+    output
+        .path()
+        .chmod(
+            NodePermission::from_bits_truncate(0o4755),
+            &kcred::initial_cred(),
+        )
+        .unwrap();
+    assert_eq!(input.write_from(b"payload", &mut 0), Ok(7));
+
+    let writer = kcred::Cred::new(2000, 200);
+    let (mut input_pos, mut output_pos) = (0u64, 0u64);
+    assert_eq!(
+        kvfs::copy_file_range_as(
+            &input,
+            kvfs::TransferPosition::At(&mut input_pos),
+            &output,
+            kvfs::TransferPosition::At(&mut output_pos),
+            7,
+            false,
+            &writer,
+        ),
+        Ok(7)
+    );
+    assert!(
+        !output
+            .path()
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_UID)
+    );
+}
+
+#[def_test]
+fn truncation_revokes_with_the_truncating_credential() {
+    let fs = MemoryFs::new().unwrap();
+    let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+    let file = create_copy_test_file(&root, "trunc-cred");
+    file.path()
+        .chmod(
+            NodePermission::from_bits_truncate(0o4755),
+            &kcred::initial_cred(),
+        )
+        .unwrap();
+
+    let writer = kcred::Cred::new(2000, 200);
+    assert_eq!(file.truncate_as(0, &writer), Ok(()));
+    assert!(
+        !file
+            .path()
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_UID)
+    );
+}
+
+#[def_test]
+fn sendfile_style_transfers_revoke_with_the_writing_credential() {
+    let fs = MemoryFs::new().unwrap();
+    let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+    let input = create_copy_test_file(&root, "send-cred-src");
+    let output = create_copy_test_file(&root, "send-cred-dst");
+    output
+        .path()
+        .chmod(
+            NodePermission::from_bits_truncate(0o4755),
+            &kcred::initial_cred(),
+        )
+        .unwrap();
+    assert_eq!(input.write_from(b"payload", &mut 0), Ok(7));
+
+    let writer = kcred::Cred::new(2000, 200);
+    let (mut input_pos, mut output_pos) = (0u64, 0u64);
+    assert_eq!(
+        kvfs::transfer_files_as(
+            &input,
+            kvfs::TransferPosition::At(&mut input_pos),
+            &output,
+            kvfs::TransferPosition::At(&mut output_pos),
+            7,
+            false,
+            &writer,
+        ),
+        Ok(7)
+    );
+    assert!(
+        !output
+            .path()
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_UID)
+    );
 }
 
 #[def_test]

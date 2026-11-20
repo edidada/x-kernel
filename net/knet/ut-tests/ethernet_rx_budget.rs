@@ -58,6 +58,15 @@ impl NetDevice for TestNic {
         64
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: NetBufPool::alloc_boxed supplies the standard Box transferred by into_handle; recycle_rx reconstructs and drops that RX owner"
+    )]
     fn recv(&self) -> DriverResult<NetBufHandle> {
         let frame = self
             .state
@@ -72,6 +81,15 @@ impl NetDevice for TestNic {
         Ok(buffer.into_handle())
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: NetBuf::from_handle reconstructs the standard Box transferred by recv via into_handle, then drops it exactly once"
+    )]
     fn recycle_rx(&self, buffer: NetBufHandle) -> DriverResult {
         // SAFETY: recv creates every RX handle with NetBuf::into_handle and
         // transfers it only to the Ethernet poll, which returns it exactly once.
@@ -88,6 +106,15 @@ impl NetDevice for TestNic {
         Ok(())
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: NetBufPool::alloc_boxed supplies the standard Box transferred by into_handle; send reconstructs and drops that TX owner"
+    )]
     fn alloc_tx_buf(&self, size: usize) -> DriverResult<NetBufHandle> {
         let mut buffer = self.pool.alloc_boxed().expect("test TX buffer");
         buffer
@@ -96,6 +123,15 @@ impl NetDevice for TestNic {
         Ok(buffer.into_handle())
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        std_box_in_kernel_tests,
+        reason = "CG-049-no-std-box-in-kernel-tests: NetBuf::from_handle reconstructs the standard Box transferred by alloc_tx_buf via into_handle, then drops it exactly once"
+    )]
     fn send(&self, buffer: NetBufHandle) -> DriverResult {
         // SAFETY: alloc_tx_buf creates every TX handle with
         // NetBuf::into_handle and transfers ownership here exactly once.
@@ -107,6 +143,16 @@ impl NetDevice for TestNic {
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: NetDeviceImpl requires the production driver's \
+              standard Box owner for TestNic"
+)]
 fn device(frames: impl IntoIterator<Item = Vec<u8>>) -> (EthernetDevice, Arc<RxState>) {
     let state = Arc::new(RxState {
         frames: Mutex::new(frames.into_iter().collect()),
@@ -236,7 +282,10 @@ fn dropped_frames_exhaust_budget_and_rotate_to_another_device() {
     assert_eq!(drain.work_done, 1);
     assert_eq!(packets.len(), 1);
     assert!(drain.has_more);
-    assert_eq!(packets[0].ifindex(), 3);
+    assert!(matches!(
+        &packets[0],
+        crate::device::net_rx::RxPacket::Network(packet) if packet.ifindex() == 3
+    ));
     assert_eq!(first_state.received.load(Ordering::Relaxed), 2);
     assert_eq!(second_state.recycled.load(Ordering::Relaxed), 1);
 

@@ -1000,6 +1000,21 @@ fn inline_xattr_offset(inode_len: usize, extra_isize: u16) -> Ext4Result<usize> 
     Ok(offset)
 }
 
+/// Returns whether the inline attribute area holds a valid entry header.
+///
+/// The area is a fixed slice of the inode body, so it is never empty and an
+/// emptiness test cannot stand in for "no attributes". ext4 writes the ibody
+/// magic only when at least one inline attribute exists; an unused area stays
+/// all zeroes. Backends use this as the `S_NOSEC`-style probe, which keeps an
+/// ordinary content write from touching the attribute store.
+pub(crate) fn inline_xattrs_present(bytes: &[u8]) -> bool {
+    bytes.len() >= disk_xattr::XATTR_IBODY_HEADER_SIZE
+        && matches!(
+            codec::le_u32(bytes, 0),
+            Ok(magic) if magic == disk_xattr::XATTR_MAGIC
+        )
+}
+
 fn read_inline_xattrs_from_bytes(bytes: &[u8]) -> Ext4Result<Vec<Ext4Xattr>> {
     let mut xattrs = Vec::new();
     if bytes.len() < disk_xattr::XATTR_IBODY_HEADER_SIZE {
@@ -1356,6 +1371,16 @@ fn external_xattr_block_action(
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    vec_shift_in_loop,
+    reason = "CG-009-vec-shift-in-loop: inline xattrs are bounded by the inode's u16-sized inline \
+              byte region (at most 65,535 bytes)"
+)]
 fn plan_xattr_expansion_storage(
     inline_xattrs: &[Ext4Xattr],
     external_xattrs: &[Ext4Xattr],
@@ -1410,6 +1435,9 @@ fn plan_xattr_expansion_storage(
         let Some((entry_index, _)) = covering_entry.or(fallback_entry) else {
             return Ok(None);
         };
+        // Keep stable order: accepted duplicate keys are observable through
+        // get_xattr, which returns the first matching entry. The fixed inode
+        // inline region bounds this shift (at most 65,535 encoded bytes).
         external_xattrs.push(inline_xattrs.remove(entry_index));
     }
     sort_xattrs(&mut external_xattrs);

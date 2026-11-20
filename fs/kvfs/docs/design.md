@@ -1,5 +1,27 @@
 # kvfs - Design Document
 
+## Unit-test ownership boundaries
+
+Local polling futures use stack pinning with lexical destruction boundaries;
+cancellation assertions run after the future and its registrations are dropped.
+Block-device fixtures retain narrowly exempted standard Box owners because
+`Gendisk::alloc` still requires them. The UT lint does not change that driver
+ownership contract.
+
+## Writeback test fixture ownership
+
+The guest writeback fixtures in `ut-tests/address_space/writeback.rs` prepare
+their operations with `KBox::new` before publishing an inode or starting worker
+tasks. These setup sites run in sleepable task context without holding mapping,
+inode or fixture locks, so they use the default KERNEL allocation policy.
+`deferred_mapping` returns allocation errors to its test caller before inode
+construction. Tests require successful fixture preparation before proceeding.
+
+`KBox::leak` preserves the existing static operations-reference contract. These
+per-test operations intentionally survive for the guest lifetime, as their Box
+predecessors did; this change does not introduce fixture reclamation or alter
+the production writeback protocol.
+
 ## Superblock private owners
 
 `SuperBlock::{new_with_flags_and_private,try_new_with_flags_and_private,
@@ -57,6 +79,17 @@ Symlink entries are cached by the same mapping. kvfs provides
 `/dev/ptmx -> pts/ptmx`, so the call direction is devfs -> kvfs. The target is
 stored in the inode and returned by `read_link` without being re-resolved.
 
+File creation and hard links in simple directories are opt-in. The default
+`SimpleDirOps::create_file` and `SimpleDirOps::install_link` reject both
+operations, matching pseudo filesystems such as procfs and sysfs whose
+directories must stay immutable from userspace. Filesystems that mirror a
+writable backing store — ramfs-backed devtmpfs directories — override the two
+hooks; `SimpleDirInodeOperations` then routes `vfs_create` and `vfs_link`
+through them and instantiates the negative dentry like every other
+create-like callback. Link accounting is symmetric: `install_link` increments
+the target inode's link count and `DirMapping::unlink` decrements it, so
+`stat` nlink tracks the alias count for hook-backed filesystems.
+
 ## Same-superblock mount reuse
 
 Mounting a filesystem over the root of its own superblock with no requested
@@ -72,17 +105,71 @@ SimpleDirOps::child_names returns a fallibly allocated KBox iterator. DirMapping
 releases its entries lock after collecting the name snapshot; ChainedDirOps owns
 both child iterators and releases the first if the second fails. The outer owner
 also propagates NoMemory. All use the default KERNEL policy. The getdents path
-obtains an owned file handle; VfsFile::iterate_dir samples/updates position with
-separate lock acquisitions and holds no position lock over iterate_shared.
-SimpleDir::read_dir_at constructs the child iterator before publishing even dot
-entries. These paths require sleepable task context, enabled IRQs/preemption,
-and no non-sleepable RCU section or lock required by reclaim/IO/FS callbacks.
-There is no current held-lock reason to restrict these allocations to NOWAIT or
-NOFS; future callers must preserve this contract.
+obtains an owned file handle; VfsFile::iterate_dir samples/updates f_pos with
+short position-lock acquisitions but holds no position lock over
+iterate_shared. Instead it holds the directory operation mutex across the whole
+read-execute-commit sequence. SimpleDir::read_dir_at constructs the child
+iterator before publishing even dot entries. These paths require sleepable task
+context, enabled IRQs/preemption, and no non-sleepable RCU section or lock
+required by reclaim/IO/FS callbacks. There is no current held-lock reason to
+restrict these allocations to NOWAIT or NOFS; future callers must preserve this
+contract.
+
+### Directory position serialization
+
+`VfsFile::position` is the sole f_pos storage. A separate
+`VfsFile::dir_position: Mutex<()>` serializes directory position operations:
+
+- `iterate_dir()` acquires it before sampling f_pos, holds it through
+  `iterate_shared()`, commits `ctx.pos()` on success and error, then releases it.
+- `llseek()` acquires the same lock for a directory before dispatching the
+  operation. `SEEK_CUR` therefore observes a committed f_pos.
+- Lock order is `dir_position -> position -> filesystem/source locks`; the
+  position lock is not held across the directory callback.
+- Directory callbacks must not re-enter `iterate_dir()` or `llseek()` on the
+  same open file.
+- `set_position()` is used in production only by `iterate_dir()`; other
+  production position changes use `llseek()`. Direct `position_lock()` users are
+  regular-file/stream paths and tests, not directory position changes.
+- `dup` shares the same `VfsFile`, so it shares this lock and f_pos. Independent
+  opens have independent locks.
 
 A dynamic child may disappear between its name snapshot and lookup. Directory
 reads skip only `NotFound` for that child and retain the later entries' cookies.
 Snapshot-construction errors and other lookup failures still propagate.
+
+## Sparse simple directories
+
+`SimpleDirOps::sparse_source()` is a default-`None` opt-in. A source implements
+`SparseDirSource` (first/next key, canonical name, current object by key/name,
+and path lookup by name). `new_sparse_dir_inode()` wraps it in a private adapter;
+`child_names()` on that adapter is intentionally `OperationNotSupported`, and the
+first version does not compose sparse with `ChainedDirOps`.
+
+The per-open `SparseDirCursor` is installed in the open file's private data by
+`SimpleDirFileOperations::open()` and is owned by the same `VfsFile` as f_pos, so
+`dup` shares it. kvfs owns dot/dotdot, cookies, seek, continuation and error
+state. Cookies are 0 start, 1 dot, 2 dotdot, then one ordinal per accepted data
+entry; source keys and `d_ino` are never cookies. Cookie values are bounded by
+`i64::MAX`, and sparse directories reject `SEEK_END`.
+
+Formatting and object resolution are source responsibilities:
+
+- `name_for_key()`/`lookup_key()` NotFound skips a vanished candidate without
+  advancing the output cookie;
+- the returned dentry's current name must match the enumerated name;
+- helper checks reject empty names, dot names, `/`, and NUL;
+- source names are unique by contract; kvfs does not allocate a full name table.
+
+Sink rejection retains the pending key and does not advance cursor/cookie.
+EOF is not cached: the next iterate retries `next_key(last_key)`, so later keys
+are visible. A seek beyond EOF preserves the requested f_pos and returns 0; a
+later insertion can make that ordinal visible and triggers an O(cookie) rebuild.
+For sparse directories, a positive seek beyond `i64::MAX` returns `EOVERFLOW`
+and leaves f_pos unchanged; `SEEK_END` is rejected with `EINVAL`.
+Sequential reading advances by visited candidates, not by a full re-scan; many
+vanished candidates can increase work. The open-file directory operation lock
+(`dir_position`) remains the only serialization mechanism around iterate/seek.
 
 ## Fallible mount-transaction private state
 
@@ -109,6 +196,14 @@ no context, and permits a later retry. The constructor returns `KResult`, so
 VFS forwards its error directly. A ready context is reused without
 allocation. Queries and unlocking an inode without a context remain allocation
 free. Lock-record allocations are unchanged by this migration.
+
+The same context also hosts file leases: `FileLockLists` keeps a third
+`lease` list, reached through `FileOperations::set_lease`/`get_lease` on
+VfsFile and broken by `VfsInode::break_leases` on open and path truncate.
+Lease requests consult the inode open counts (`read_count`/`write_count`)
+against the requesting description's own contributions, the Linux
+`lease_open_conflict` check, inside the same state mutex that serializes
+the POSIX and flock domains.
 
 The inode guest regression injects a local initialization failure and verifies
 absence, successful retry, and reuse without invoking another allocator.
@@ -317,6 +412,17 @@ not readiness: consumers still query the file in the current calling context.
 Event filtering and weak registration introduce no additional owner or source
 list. An expired captured source must not fall back to the default path.
 
+## Cross-crate interface
+
+- `Path::dentry_is_mount_root(&self) -> bool` (`src/mount.rs`): reports whether
+  the path's dentry is its mount's root dentry (Linux `path_mounted`,
+  `dentry == mnt_root`), independent of overmount visibility. Provider: kvfs;
+  consumer: `posix/fs` for the statx `STATX_ATTR_MOUNT_ROOT` attribute; call
+  direction `statx(2)` -> `sys_statx` -> `Path::dentry_is_mount_root`. The
+  related `Path::is_mount_root` is `pub(crate)` and additionally requires the
+  mount to be the parent's topmost child mount; it serves mount/umount and
+  mount-stacking validation, not the statx attribute.
+
 ## Scope
 
 - `src/open_flags.rs`: normalization of raw `O_*` arguments and the open intent.
@@ -389,7 +495,7 @@ pipe/FIFO follows the three-layer ownership of Linux `inode`, `pipe_inode_info`,
 ```text
 VfsInode
 ├── shared stateless FifoFileOperations
-└── fifo_pipe: Option<Arc<PipeObject>>
+└── pipe: Option<Arc<PipeObject>>
 
 PipeObject
 └── buffer, files, readers/writers, r_counter/w_counter, rd_wait/wr_wait
@@ -399,6 +505,12 @@ VfsFile
 ├── pipe_generation
 └── private_data -> PipeObject
 ```
+
+Anonymous pipes and FIFOs share the inode pipe slot. The last close clears the
+slot; a later open creates a new session. Reopening anonymous pipes does not
+wait for a peer, whereas FIFO opens retain their partner-waiting semantics.
+Both use the same data operations. Like Linux `fs/pipe.c`, only the FIFO
+wrappers update access and modification timestamps after successful I/O.
 
 `PipeObject` corresponds to `pipe_inode_info`, not to a file-operation table. The pipe module must live in the
 same fs-core crate as `VfsInode`: the inode needs to hold the concrete pipe session, and the pipe file
@@ -454,7 +566,8 @@ full `i64` range as a conservative default; after the filesystem fill operation 
 it queries this capability once, and it is then persisted by the sole `SuperBlock`. A filesystem may explicitly override it based on the on-disk format or protocol state, just as Linux
 `fill_super()` sets `s_time_*`; KVFS does not create a parallel
 format object and does not duplicate this state in the bridge.
-`VfsInode::current_time()` rounds and clamps the current time;
+`VfsInode::current_time()` samples the tick-granular coarse realtime clock,
+then rounds and clamps it;
 `truncate_timestamp()` applies the same conversion to explicit values. Explicit
 setattr, automatic I/O updates, and namespace helpers apply superblock policy
 before comparison and filesystem callbacks. Backends then apply format-specific
@@ -466,6 +579,19 @@ original request. Raw setters only store values without repeating policy lookup.
 This follows Linux's separation between `current_time()`/`timestamp_truncate()`
 and `inode_set_*_to_ts()`, while allowing FAT-style distinct atime and mtime/ctime
 invariants.
+All KVFS timestamps, automatic and "set to now" alike, come from that one
+tick-granular clock, so publications serialized by the inode data lock never
+report an earlier value while the wall clock is not stepped backward. Backend
+metadata paths that journal timestamps directly (quota flag updates, unlink)
+and concurrent shared writable faults are outside that serialization and may
+publish second-granularity or cross-tick values. `set_times` takes the inode data
+lock, matching the buffered-write and `fallocate` order, and samples one clock
+value that resolves every `Current` request and the derived ctime, so an
+explicit touch publishes identical mtime and ctime and cannot interleave with
+a concurrent buffered write. Linux further upgrades a write stamp to
+fine-grained time once an inode's ctime has been queried (multigrain
+timestamps); KVFS has no per-inode queried state, so writes inside one tick
+publish the same mtime and ctime.
 
 `FileSystemType` corresponds to Linux `struct file_system_type` and describes the name of a filesystem implementation,
 whether it needs a backing device, `init_fs_context`, and type flags. `init_fs_context` installs the statically shared `FsContextOperations` for each
@@ -507,7 +633,9 @@ block-special inodes uniformly install KVFS's `DefaultBlkdevFileOperations`, cor
 after withdrawal or device-number reuse. The claim preserves `O_EXCL`; ioctl uses
 the current nonblocking flag. Last-file release closes once.
 A block-device special inode has no canonical block address space yet, so mmap returns ENODEV; the medium-change invalidation protocol must be implemented before enabling it.
-KVFS supplies checked argument access and `has_sys_admin` from the current caller.
+KVFS supplies checked argument access and `has_sys_admin` from the current caller;
+the scalar argument is read through `posix_types::UserConstPtr`, whose `UserRead`
+bound constrains the ABI type at the call site.
 The ioctl path receives the syscall caller's `&Cred`, without retaining extra credentials.
 Generic block commands and the driver fallback for unknown commands are dispatched uniformly by `BlockDevice::ioctl`. An ordinary close and write do not implicitly flush; only an explicit fsync passes the
 durability request to the backend. KVFS maintains no second `dev_t -> DeviceFileOps` table;
@@ -757,7 +885,7 @@ Inode metadata modifications are likewise authorized uniformly by `Path` and the
   with write permission on the inode; explicit values and mixed
   `UTIME_NOW`/`UTIME_OMIT` permit only the owner or effective `CAP_FOWNER`.
 
-`SetattrTime` carries only the authorization information of "current value/explicit value" within a single call, and the persisted `MetadataUpdate`
+`SetattrTime` records only the authorization semantics of each requested timestamp: `Current` is a unit variant that `resolve(now)` maps to the update's single clock sample, while `Explicit(SystemTime)` carries a caller-supplied value. The persisted `MetadataUpdate`
 contains only the resolved atime/mtime/ctime values; the call context is not saved in the inode or namei state.
 Automatic I/O updates use `InodeUpdateTime`, corresponding to Linux
 `FS_UPD_ATIME` / `FS_UPD_CMTIME`, and invoke filesystem `update_time`. Authorized
@@ -893,11 +1021,26 @@ original root at `put_old`. All fallible checks are completed before the first m
 tree behind. `mount_edge_detach` is the shared single-edge detach primitive (restore covers / delete the child index + clear the
 location), reused by pivot and by the later MS_MOVE.
 
-`MntNamespace::make_mount_private()` and `make_mount_slave()` only validate that the target is a registered mount root and record no propagation state. KVFS does not yet have
-shared propagation groups, so slave and private behave equivalently: without a shared master, a slave receives no propagation events.
-Each of the two validates its call separately (`MS_PRIVATE`/`MS_SLAVE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns
-`EINVAL`), to prevent illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) is accepted only when the source subtree's mount count is
-zero, in which case the result is identical to cloning a single mount; otherwise it returns `EINVAL` instead of silently flattening the mount tree.
+`MntNamespace::make_mount_private()`, `make_mount_slave()`, `make_mount_shared()` and `make_mount_unbindable()` only validate
+that the target is a registered mount root and record no propagation state. KVFS does not yet have shared propagation groups, so all
+four behave equivalently: without a shared master a slave receives no events, a shared mount propagates nothing, and an unbindable
+mount has no peer to refuse. `MS_SHARED` is accepted rather than rejected because systemd remounts the namespace root `MS_SHARED`
+after `pivot_root`, and an `EINVAL` there aborts the switch-root. Each entry validates its call separately (`MS_PRIVATE`,
+`MS_SLAVE`, `MS_SHARED` and `MS_UNBINDABLE` may carry `MS_REC`/`MS_SILENT`, and any other combination returns `EINVAL`), to prevent
+illegal flags from being silently swallowed. A recursive bind (`MS_BIND | MS_REC`) clones the source subtree:
+`attach_bind_recursive()` re-grafts each cloned child under its cloned parent, so only submounts at or below the bind source are
+included and the tree is never silently flattened. (`clone_mount_tree()` is the separate entry point behind `open_tree(OPEN_TREE_CLONE)`.)
+
+### Detached mounts and the new mount API
+
+`MntNamespace::clone_mount_tree()` produces the detached tree behind `open_tree(OPEN_TREE_CLONE)`: it clones the mount at the
+resolved path, then walks that mount's subtree and installs each clone under the clone of its parent, returning the root together with
+every clone so the caller (the mount fd) keeps the whole tree alive. `create_detached_mount()` and `attach_detached_mount()` are the
+pair behind `fsmount` and `move_mount`; the attach consumes the detached mount and restores it if the graft fails, so a failed move
+does not spend the descriptor. `set_mount_attributes()` and `set_mount_attributes_on()` apply a translated `MOUNT_ATTR_*` set/clear
+pair to the mount at a path or to a mount object directly (`AT_EMPTY_PATH`), optionally recursing into the subtree. The
+`CAP_SYS_ADMIN` check lives in the syscall layer, which is the boundary that owns it; the namespace methods validate only mount
+identity and flag legality.
 
 ### Pathname and Open Files
 
@@ -981,14 +1124,29 @@ zeroing the range, which frees no blocks.
 A file without independent backing uses the inode operation's default truncate implementation; a filesystem with backing state
 overrides it and completes its own preparation before calling `truncate_setsize()`.
 
-`AddressSpaceOperations` provides only folio read, writeback, and cache-state callbacks; it no longer goes through the byte-level
-`read_at`/`write_at` default forwarding. Byte reads that a filesystem needs can stay in its private backing helper,
+`AddressSpaceOperations` provides folio read, writeback, cache-state and
+per-folio buffered-write callbacks (`write_begin`/`write_end`); it no longer
+goes through the byte-level `read_at`/`write_at` default forwarding. A backend
+that wants batched buffered writes additionally exposes a
+`BatchedWriteOperations` vtable through `batched_write_ops()`; the mapping
+samples it once at construction, and `None` keeps every write on the per-folio
+path. Byte reads that a filesystem needs can stay in its private backing helper,
 and are reused explicitly by `read_folio` and `readahead`.
 
 `simple_write_end` stays in `kvfs::libfs` and serves only ramfs/memfs-style aops.
-After a block-device filesystem completes its own write-end, it publishes the accepted `i_size` via `AddressSpace::write_end_set_size()`
+A per-folio write-end of a block-device filesystem publishes the accepted `i_size` via `AddressSpace::write_end_set_size()`
 within the same generic-write data-lock and copied-folio-lock critical section, instead of disguising ext4 semantics as a
-libfs helper.
+libfs helper. Batched tail release publishes no size because a batched run never extends the visible size.
+
+`WriteEndRequest` contains the matching `WriteBeginRequest` range and copied
+byte count. The generic writer validates the range's exclusive end before
+admission, and copying is bounded by the range length. `write_end_set_size`
+compares the accepted end against the inode's current size under the caller's
+inode data lock and publishes growth.
+The hook returns at most the copied count and publishes a nonempty accepted
+prefix before returning success. The generic writer can then advance its local
+EOF bound for cache preparation and batch admission. Zero-byte cancellation
+preserves the file length.
 
 `AddressSpace` itself holds the object-id, the mapped views, the statically shared `AddressSpaceOperations` and
 `i_pages: MappingPages`. This field embeds the cache container directly without a separate `Arc` allocation, corresponding to Linux
@@ -1285,12 +1443,55 @@ released with its last reference; hard links share the same active session becau
 ## Known limitations
 
 - The effective process capability set now covers DAC, sticky directories,
-  xattr, chown/chmod, and related checks; LSM, ACL, user-namespace ID mapping,
-  idmapped mounts, and file capabilities are not supported. Ambient
+  xattr, chown/chmod, and related checks; LSM, ACL, user-namespace ID mapping
+  and idmapped mounts are not supported. The `security.capability` attribute is
+  stored and validated here (revisions 1–3, version 3 only for this kernel's
+  namespace root) but decoded by `kcred` at exec. Ambient
   capabilities are not a separate filesystem input; they affect a check only
   after becoming effective. `trusted.*` access and `security.*` mutation require
-  effective `CAP_SYS_ADMIN`; user xattr modification in a sticky directory also
-  requires directory ownership or effective `CAP_FOWNER`.
+  effective `CAP_SYS_ADMIN`; `security.capability` mutation instead requires
+  effective `CAP_SETFCAP`; user xattr modification in a sticky directory also
+  requires directory ownership or effective `CAP_FOWNER`. Content writes strip
+  set-UID always and set-GID when group-execute marks it as a privilege or the
+  writer is outside the file's group, unless the writer holds effective
+  `CAP_FSETID`, and drop `security.capability`; chown drops the attribute
+  before publishing the new owner or mode. The revocation tests the writing
+  task's credential, which the syscall entry supplies, because Linux's
+  `capable(CAP_FSETID)` is the current task and not the descriptor's opener
+  credential. Every revocation first rejects an immutable inode, and a write
+  whose position is at or beyond the file size limit skips the revocation and
+  lets the backend rule, so an `EFBIG` does not strip privileges. A per-inode
+  privilege lock, taken after the writable-mount lock and before the inode
+  data lock, covers the revocation and the backend content or metadata change
+  it protects; `setxattr`, `chown`, `chmod`, file-attribute changes,
+  `truncate`, `fallocate`, native `copy_file_range` and exec
+  security-metadata sampling take the same lock. The revocation runs before
+  the first content or size commit, so a failed backend leaves the privileges
+  removed (the safe direction) and a failed revocation leaves the content and
+  length untouched. `chown` samples owner/mode and authorizes inside the lock,
+  not from a pre-lock snapshot. Content-changing paths bump the inode's content
+  generation; the exec ELF-header cache keys entries on it and reloads after an
+  in-place rewrite, while executable deny-write remains unimplemented.
+  Writes take an
+  `S_NOSEC`-style fast path: when the inode has no set-ID bit to clear for
+  this writer and reports no extended-attribute storage (ext4 derives that
+  from its attribute block and inline area at load, and `setxattr` marks the
+  inode), the write touches no filesystem metadata. `VfsInode` also caches whether
+  `security.capability` is present, packed with a generation counter: the first
+  revocation on an inode with attribute storage performs one lookup and records
+  the answer only while no concurrent capability operation intervened. A
+  removal snapshots the generation before the backend delete and publishes
+  `Absent` only through a compare-and-swap; a losing update degrades to
+  `Unknown`, so a concurrent `setxattr` can never be masked by a stale absence.
+  A file that never carried capabilities costs no attribute transaction on
+  later writes or ownership changes. Empty writes return before the revocation, and native
+  `copy_file_range` revokes on the output through the same entry point before
+  the backend copies, because it bypasses the write path. The boundary takes
+  the writing task's credential so `copy_file_range`, `splice` and `sendfile`
+  evaluate `CAP_FSETID` and group membership for the task that performs the
+  transfer rather than for the descriptor's opener. An empty write skips
+  only the revocation: it still reaches the backend, so a filesystem's own
+  denial (`EPERM` for a quota-exhausted writer, for example) keeps applying.
 - Backends such as FAT that cannot natively express Unix UID/GID cannot fully persist the creator identity.
 - The current POSIX rename path does not support `RENAME_WHITEOUT`.
 - The superblock dentry cache has no Linux-style LRU/shrinker yet.
@@ -1305,12 +1506,97 @@ released with its last reference; hard links share the same active session becau
 
 ## Sequential record rendering errors
 
+`SeqIterator::try_start`/`try_next` are default-compatible fallible entries:
+`Ok(None)` is EOF and `Err` is an observation failure. Existing `start`/`next`
+implementations continue to work through the default adapters. `SeqFile` resets
+the failed record and lets a later offset-zero read retry; an observation error is
+never converted to EOF.
+
 `SeqIterator::try_show` defaults to the existing `show` formatter and maps its
 formatting failure to `Io`. Iterators that need a filesystem error may override
 it, for example to preserve procfs `NoSuchProcess` when a weak target expires.
-`SeqFile` discards the failed record and resets its iterator before returning the
-error. Successful records use the existing per-open buffer and offset semantics;
-no second snapshot or credential cache is introduced.
+`SeqFile` retains a failed item in per-open `pending_item` when formatting fails,
+so the next sequential read retries that item instead of advancing past it. If
+the read already copied a successful prefix, the prefix is returned and the
+failed item is retried on the next read; if no bytes were copied, the error is
+returned immediately. An explicit offset-zero reset discards the pending item
+and starts a fresh traversal. Successful records use the existing per-open
+buffer and offset semantics; no second snapshot or credential cache is
+introduced.
+
+When `try_start`/`try_next` itself fails after a successful prefix, the error is
+stored in a recovery transition; the next sequential read reports it without
+advancing the file position. The following read rewinds the iterator and rebuilds
+its position from the committed byte offset with `seek_to`, then retries the
+failed position. The iterator is not trusted to preserve its cursor across an
+error. `SeqIterator::Item` must be `Send` because the pending item is retained
+across read calls, not only during one formatting operation.
+
+### SeqFile read recovery state
+
+The read path has one private recovery state rather than independent
+`pending_item`/`pending_error`/`needs_reposition` flags:
+
+```text
+ReadRecovery<T>:
+  Ready
+  RetryItem(T)
+  ReportThenReposition(VfsError)
+  Reposition
+
+RecordFailure<T>:
+  Observe(VfsError)
+  Format { item: T, error: VfsError }
+```
+
+`fill_next_entry` is the only producer of `RecordFailure`; it reports whether
+the iterator cursor failed or an item failed formatting. `read`/`read_iter` only
+decide whether the failure follows copied bytes (short read) or precedes them
+(error). A formatting failure always becomes `RetryItem`, including at a
+nonzero offset with no successful prefix; an observation failure becomes
+`ReportThenReposition` only after a prefix, otherwise `Reposition`.
+
+Transitions:
+
+| Current | Event | Next |
+| --- | --- | --- |
+| `Ready` | record formatted | `Ready` |
+| `Ready` | format failure | `RetryItem(item)` |
+| `Ready` | observation failure, prefix copied | `ReportThenReposition(error)` |
+| `Ready` | observation failure, no prefix | `Reposition` |
+| `RetryItem(item)` | next read | retry the same item, then `Ready` |
+| `ReportThenReposition(error)` | next read | return `error`, remain `Reposition` |
+| `Reposition` | next read | `rewind` + `seek_to(committed offset)`, then `Ready` |
+| any | offset 0 reset | `Ready` |
+
+Buffer data, `buf_read_pos`, `last_file_offset`, `started`, and `is_eof` remain
+separate because they describe data/position, not failure recovery. Scalar
+`read` uses the kernel kvec iterator destination and delegates to `read_iter`, so
+both entries share one copy/position/recovery loop.
+
+### Sequential lazy/open and vectored reads
+
+`SeqFileInode::new_regular` keeps its existing eager iterator creation and
+synthetic 1 MiB size. The opt-in `new_regular_with_options` form adds:
+
+- `lazy_open`: open validates identity but does not create the iterator or
+  observe content; the first read/read_iter creates it.
+- `validate_open` once at open and `validate_read` on every read/read_iter.
+- `max_record_bytes` and a private `RecordBuffer` that preserves `NoMemory` /
+  `FileTooLarge` through a `fmt::Write` side channel; formatters cannot consume
+  or clear the real error.
+- `read_iter` on `SeqFile`/`SeqFileInode`: one request pins one record buffer and
+  does not restart the iterator per page. `SeqFile` remains the sole read-state
+  owner.
+- `SeekEndPolicy`: legacy consumers retain the old synthetic size; new dynamic
+  single-record consumers may reject `SEEK_END` and report size 0.
+- Optional `SeqCommandOptions`: the same inode can use the command transport for
+  writes; read state does not copy or retry commands. A complete command write
+  does not advance `f_pos`, and a zero-length write returns success without
+  invoking the provider callback.
+
+`SeqFileInode::open` is the VFS adapter that invokes the optional command
+callback; `SeqFile` itself owns only the read buffer/offset.
 
 ## Per-open generated-file snapshots
 
@@ -1341,14 +1627,17 @@ writes fail with `InvalidInput`; read-only writes fail with `BadFileDescriptor`.
 
 `AddressSpace::with_pinned_file_page()` initializes a stable page object while
 holding the invalidation read lock. The callback validates EOF and consumes the
-pin through `map_readonly`, storing its must-use `MappedFolio` token alongside
-the PTE. Before materialization, the provider rejects page offsets at/beyond EOF
-and overflowing indices under the same lock, without allocation or quota charge.
-The callback still validates its exact byte range; its failure retains a valid
-initialized page and its charge for ordinary cache reuse. Truncate submits
+pin through `map_readonly`, storing its optional `MappedFolio` content token
+alongside an installed PTE. Before materialization, the provider rejects page
+offsets at/beyond EOF and overflowing indices under the same lock, without
+allocation or quota charge. The callback still validates its exact byte range;
+its failure retains a valid initialized resident page and its cache quota for
+ordinary reuse. Detachment later returns quota regardless of retained physical
+references. Truncate submits
 invalidation before detaching cache entries, but a busy
-MM may queue that submission. Only completed PTE removal and TLB invalidation
-permit releasing mapping tokens; cache removal alone does not.
+MM may queue that submission. Managed file PTEs retain independent physical
+references through page-table retirement. Content tokens retain the stable
+object for COW and can release their own references without waiting for TLB.
 
 `PinnedFolio` and `MappedFolio` retain the same `Arc<Folio>` that owns its page
 and content lock. Ordinary access uses a restricted `FolioGuard`; initialization
@@ -1356,30 +1645,27 @@ uses an owning `FolioRead` that can be transferred to completion;
 cache replacement changes an index reference, not a published object's identity.
 The original page remains copyable under its original lock after detachment,
 without retaining its replacement. Copies do not by themselves prove current EOF
-or freeze bytes against truncate. Pins and tokens share the stable page and its
-physical-allocation quota charge without an additional statistics subsystem.
+or freeze bytes against truncate. Pins and tokens share the stable page object;
+its physical lifetime is independent of cache-residency quota.
 
 ## tmpfs quota integration with resident initialization
 
 The inode address space retains the invalidate lock covering EOF, cache
-reservation and read submission. Transferred folio locks serialize later completion with truncate. The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under folio and index locks. Its single capacity charge stays
-with the stable folio after cache detachment, while any pin, mapping token or
-batch retains the allocation. Clones do not charge again. Final release frees
-the physical page before returning capacity, outside both locks; the charge
-keeps its provider alive independently of mapping destruction.
-Providers must not reenter mappings, acquire folio locks, or perform I/O.
-Release and final provider destruction must not sleep: the last reference can
-be released by I/O completion. Admission still requires task context.
-For memfs, the provider is its filesystem-owned quota, so lock order is cache
-folio -> index -> quota limit; remount and statfs never acquire cache locks.
-Speculative physical storage remains outside the admission policy until insertion.
+reservation and read submission. The filesystem supplies one `CacheResidency`
+provider when constructing the mapping. A winning cache identity is charged
+before publication; removing that identity returns capacity once in the same
+index transition. Pins, read batches, managed PTEs and retirement holds retain
+physical pages independently and neither multiply nor extend filesystem quota.
+Callbacks run in task context under the cache index lock and must not block,
+reenter the mapping, or take locks whose holders wait for it. For memfs,
+admission retains folio -> index -> quota limit ordering; removal decrements its
+quota counter atomically. Remount/statfs never acquire cache locks. Speculative
+physical storage is uncharged until cache publication.
 
 The cache publishes non-uptodate reservations before filesystem I/O and keeps
 its index lock out of I/O, preserving the current main concurrency contract.
-Unconsumed readahead reservations detach while locked and return capacity only
-after their final allocation reference is dropped outside the locks.
+Unconsumed readahead reservations detach while locked and return capacity at
+that detachment, while their physical owners remain independently retained.
 
 
 ## Unrecoverable filesystem write failure
@@ -1567,11 +1853,15 @@ discard clean folios in the range. A folio that stayed dirty is reported as
 `ResourceBusy` after the clean ones were already discarded, matching Linux
 partial invalidation.
 
-Buffered `write()` and the mmap write fault share one exclusion boundary: the
-folio instantiation and dirty window of the write path holds the invalidate read
-lock, matching `page_mkwrite`, so a truncate or range invalidation holding the
-write lock cannot discard a page between its residency check and its dirty
-publication. Registered views cover page-aligned file ranges only: a partial tail
+Buffered `write()` and the mmap write fault publish their dirty state while
+holding the folio lock, which cache discard also takes before marking a
+detached identity, so neither path can lose a page between its residency check
+and its dirty publication. The fault additionally holds the invalidate read
+guard across its EOF recheck and PTE publication; `write()` runs under the
+inode data lock instead, matching Linux `generic_perform_write`, which holds no
+invalidate lock here. Truncate, range invalidation and mapping revocation all
+take that data lock, so none of them interleaves with a buffered write.
+Registered views cover page-aligned file ranges only: a partial tail
 page is COW or zero-filled and owns no cache reference, so the view ends on the
 page boundary instead of reaching into that anonymous tail. Executable images
 register their private file views at load with a live invalidation handle, so the
@@ -1637,15 +1927,81 @@ pagecache; repeated dirtying through writable PTEs remains dependent on G.
 
 ### Buffered acceptance and live writeback EOF
 
-Copying, dirty publication, write_end acceptance and visible i_size publication
-finish under the same folio lock and invalidate read guard. A successful-copy
-write_end hook may update reservations and inode metadata, but cannot reacquire
-the folio, invalidate the cache or wait for writeback. Copy-failure cancellation
-and short-accept/error cache rollback run after releasing these guards. The
-writer retains its inode data lock; completion never needs that lock.
+A single-folio buffered write copies, dirties, accepts in `write_end` and
+publishes visible i_size under one folio lock. A batched run of already-resident
+pages copies and dirties each slot under its own folio lock, then releases the
+whole run's unaccepted tail once through the batched-write tail-release hook
+after those locks are released; the published count is decided by the generic
+path and the release hook's return type cannot change it. The batch never
+extends the visible size, so tail release publishes no size and the slot is
+accepted as soon as it is dirty.
+A successful-copy `write_end` hook may update reservations and inode metadata,
+but cannot reacquire the folio, invalidate the cache or wait for writeback.
+Cancellation releases only the units that the matching admission newly reserved,
+never reservations owned by earlier writes. Copy-failure cancellation and
+short-accept/error cache rollback run after releasing those guards. The writer
+retains its inode data lock; completion never needs that lock.
 
 All cache writeback adapters pass one control object and a live inode-size
 supplier. Pagecache selects a finite target independently of EOF and samples
 valid bytes after locking each candidate. No pending-size field, copied EOF,
 pass owner or extra lifecycle lock is introduced. These buffered guarantees do
 not capture stores through an already writable PTE.
+
+## Direct I/O engine skeleton
+
+`fs/kvfs/src/direct_io.rs` defines the backend contract for the generic direct
+I/O engine. It mirrors Linux `iomap_begin`/`iomap_end`; the engine itself lives
+in `kvfs` and will be wired into `read_iter`/`write_iter` in a later change.
+
+- `DioMapping` returns one contiguous run with its full file bounds
+  (`offset`, `length_bytes`) and device bounds (`device_offset`), not clamped
+  to the request. `offset` is a file-space byte offset; `device_offset` is the
+  backing device byte offset of the same first byte, so file byte `offset + k`
+  maps to device byte `device_offset + k`. `DioMappingFlags` mirrors the flags
+  a filesystem reports from `iomap_begin` (same bit values); the engine
+  currently consumes `NEW`, which marks a run allocated by this write whose
+  uncovered bytes must stay zero instead of exposing stale data.
+- `DioDirection::{Read, Write}` states the request direction explicitly; Linux
+  carries the same intent as the `IOMAP_WRITE` flag (no flag implies a read).
+  On a write the filesystem chooses the concrete allocation form (initialized,
+  unwritten, or fallback to buffered I/O) from its own format and inode state.
+- `dio_end_io` is called exactly once per mapping returned by a write map
+  call, including when `written_bytes` is zero. It settles
+  `length_bytes - written_bytes` bytes (unreserve, keep unwritten), converts
+  `[pos, pos + written_bytes)`, and extends the visible size to
+  `pos + written_bytes`. Device errors are reported to the request issuer by
+  the engine and do not need to be re-derived by the filesystem.
+- The engine holds the inode data lock for the whole request (shared for reads
+  and overwrites, exclusive when allocating or extending). `dio_map_blocks`
+  runs under that lock; `dio_end_io` runs under the exclusive lock and
+  publishes size with the `*_locked` helpers; the locking variants acquire the
+  same lock and would deadlock there.
+- Journal handles started by either callback must be stopped before the
+  callback returns. `dio_map_blocks` must leave allocation metadata committed
+  by then because the engine submits data bios only after it returns;
+  `dio_end_io` must likewise finish its conversion and size publication before
+  returning.
+- No fixed per-bio byte limit exists. The engine submits one bio per mapping
+  run and the block layer splits it by device limits, as buffered I/O and
+  writeback do. The engine's owned bounce buffer may use an internal
+  allocation stride, which does not affect splitting semantics.
+- `dio_alignment` is the offset/length alignment in bytes; memory alignment is
+  guaranteed by the engine's owned bounce buffer.
+
+No call site uses the engine yet. `O_DIRECT` still falls back to buffered I/O,
+and `FMode::CAN_ODIRECT` remains an informational open-time flag.
+## Open validation
+
+`SimpleFileOps::validate_open()` and `SimpleDirOps::validate_open()` are opt-in
+defaults returning success. `SimpleFile` invokes the file hook exactly once
+before delegating to its selected file-operation object; `SimpleDir`'s file
+operations invoke the directory hook exactly once at directory open. Existing
+closures and helper users need no changes. Validation is an open-admission
+decision only: metadata callbacks such as `link_count()` are not a substitute
+for it.
+
+The writable `SnapshotCommand` backend, its per-open generation state and its
+tests have been removed. Writable command semantics are now owned by
+`SeqFileInode` plus the shared complete-command transport; ordinary
+`CommandFile` and read-only snapshot helpers are unchanged.

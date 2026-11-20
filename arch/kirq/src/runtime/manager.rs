@@ -111,25 +111,48 @@ pub fn prepare_percpu_forwarding(
 }
 
 /// Options for installing a regular IRQ handler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqRegisterOptions {
     auto_enable: bool,
+    user_affinity_restricted: bool,
 }
 
 impl IrqRegisterOptions {
     /// Register and enable the IRQ line after successful handler installation.
     pub const fn auto_enable() -> Self {
-        Self { auto_enable: true }
+        Self {
+            auto_enable: true,
+            user_affinity_restricted: false,
+        }
     }
 
     /// Register the handler but leave delivery disabled until explicit enable.
     pub const fn disabled() -> Self {
-        Self { auto_enable: false }
+        Self {
+            auto_enable: false,
+            user_affinity_restricted: false,
+        }
+    }
+
+    /// Declares that this regular action's source owner does not permit
+    /// user-originated routing changes.
+    ///
+    /// This is a user-only restriction, not Linux `IRQF_NOBALANCING`: the
+    /// trusted kernel setter and automatic initial routing are unchanged. The
+    /// flag is published with the action and disappears with its last owner.
+    pub const fn restrict_user_affinity(mut self) -> Self {
+        self.user_affinity_restricted = true;
+        self
     }
 
     /// Returns whether successful registration should enable the line.
     pub const fn should_auto_enable(self) -> bool {
         self.auto_enable
+    }
+
+    /// Returns whether this action declares a user-affinity restriction.
+    pub const fn is_user_affinity_restricted(self) -> bool {
+        self.user_affinity_restricted
     }
 }
 
@@ -164,7 +187,7 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
 /// source. Consumers that register a handler must use [`Self::virq`]; consumers
 /// that need trigger or controller details must use this descriptor rather than
 /// reconstructing a default one from the logical number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MappedIrq {
     /// OS-visible logical IRQ number.
     pub virq: Virq,
@@ -173,7 +196,7 @@ pub struct MappedIrq {
 }
 
 /// A firmware interrupt declaration that could not be mapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FwIrqMapError {
     /// No IRQ domain is registered for the specifier's exact controller node.
     ControllerNotReady,
@@ -974,10 +997,15 @@ fn register_prepared_locked(
         warn!("register handler for IRQ {virq} failed");
         return Ok(false);
     }
+    let initial_policy = entry.prepare_initial_affinity_policy()?;
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
     super::affinity::apply_deferred_before_activation(entry)?;
+    if options.is_user_affinity_restricted() {
+        prepared.set_user_affinity_restricted();
+    }
     let installed = entry.publish_regular_action(prepared);
     debug_assert!(installed, "duplicate regular action was checked above");
+    entry.commit_initial_affinity_policy(initial_policy);
     let mut plan = if options.should_auto_enable() {
         entry.prepare_auto_enable()
     } else {
@@ -1094,6 +1122,7 @@ fn register_shared_prepared_locked(
         warn!("register shared handler for IRQ {virq} failed");
         return Ok(None);
     }
+    let initial_policy = entry.prepare_initial_affinity_policy()?;
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
     super::affinity::apply_deferred_before_activation(entry)?;
     let was_first_action = !entry.has_actions();
@@ -1101,6 +1130,7 @@ fn register_shared_prepared_locked(
         warn!("register shared handler for IRQ {virq} failed");
         return Ok(None);
     };
+    entry.commit_initial_affinity_policy(initial_policy);
     let mut plan = if was_first_action {
         entry.prepare_auto_enable()
     } else {

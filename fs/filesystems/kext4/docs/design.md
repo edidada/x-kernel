@@ -1,5 +1,12 @@
 # KExt4 — Design Document
 
+## Unit-test storage owners
+
+Buffer-test devices retain their original Vec inside the mutex without an
+intermediate boxed-slice conversion; accesses and failure injection are unchanged.
+The test block-device factory still transfers a standard Box to `Gendisk::alloc`
+and carries a narrow UT lint exception for that unmigrated driver contract.
+
 ## Prepared VFS mount owner
 
 `fill_super` prepares `KBox<Ext4Mount>` with NOWAIT before transferring it to
@@ -1151,7 +1158,7 @@ context, which parses it from the opaque mount data and stores it in the single 
 The positive options that Linux enables by default, `user_xattr` and `acl`, are accepted as mount-data compatibility spellings, but no unused per-mount field is created for them; the syntax compatibility of `acl` does not widen the current KVFS POSIX ACL permission semantics.
 
 Buffered write applies the inode-format limit in `FileOperations::write_iter()`, inside the inode data critical
-section of generic write, and then `write_begin()` queries the core mapping. A shared-file write
+section of generic write, and then `write_begin()` (forwarding to the batched `batch_write_begin()`) queries the core mapping. A shared-file write
 fault applies the same limit inside the address-space invalidate shared lock and the folio lock, and then calls
 `page_mkwrite()`. Both entry points add hole blocks to the same delayed set; therefore a non-`SYNC`
 FIEMAP can uniformly report the `DELALLOC | UNKNOWN` produced by both write entry points, without scanning dirty folios to guess the allocation
@@ -1436,8 +1443,9 @@ publication. The callback runs under the inode data lock, before folio locking
 and user-data copying; zero-length or rejected writes do not update timestamps.
 It checks live immutable policy before generic size limits, including for empty
 requests, so already-open quota files remain protected during quota activation.
-Shared writable faults retain KVFS `file_update_time()`. Both entries use VFS
-`current_time()` and its superblock range and precision clipping, including when
+Shared writable faults retain KVFS `file_update_time()`. Both entries use KVFS
+`current_time()`, which samples the tick-granular coarse realtime clock and
+applies superblock range and precision clipping, including when
 `KFEAT_FS_TIMES=n`. This feature does not
 disable VFS write-time or explicit timestamp updates; the adapter's optional
 timestamp helper must not substitute epoch values for these updates.
@@ -1450,8 +1458,11 @@ Other timestamp updates use KVFS `generic_update_time`, also used by the default
 callback, to publish only fields confirmed by `setattr`. Explicit setattr/utimensat
 retains its journaled mutation path.
 
-`prepare_buffered_write` reads the mapping format, applies its file-size limit,
-and updates timestamps under one inode-state write lock. `Ext4Mount` retains the
+`prepare_buffered_write` clips the request from atomically published inode
+flags and caller-supplied limits without the inode-state lock, and publishes
+automatic timestamps through a state-lock read of the resident pair that
+enters the write section only when the sampled coarse timestamp differs.
+`Ext4Mount` retains the
 immutable timestamp/bitmap-size capabilities, huge-file feature and journal
 identity established before mount publication. Buffered admission reads the live
 journal abort projection through this retained identity and checks VFS writability;
@@ -1771,7 +1782,20 @@ the finite queue prefix and flushes completion captures, covering old clean and
 detached owners. Mapped submission retains its earlier-allocation metadata drain.
 
 write_end settles delalloc reservations and publishes accepted i_size under the
-copied folio lock; its fast path takes no cache/lifecycle wait. Short-accept and
-copy-failure rollback waits happen after that lock is released. Generic scans
-sample live EOF per folio and charge attempted work independently of completion
-prefixes. Existing inode, extent and queued-I/O lifetime owners remain unchanged.
+copied folio lock for a single-page write; a batched run settles through the
+`BatchedWriteOperations` vtable instead, unlocked, publishing no size and
+releasing only the reservation units that `batch_write_begin` newly created. Its
+fast path takes no cache/lifecycle wait. Short-accept and copy-failure rollback
+waits happen after that lock is released.
+Complete writes and complete batched runs return from reservation settlement
+before resolving the filesystem-private inode, superblock, mount or block size;
+those objects are needed only to release an unaccepted reservation tail.
+Single-page completion passes the nonempty accepted end to the address-space
+size helper, which reads the inode's current size and publishes growth under the
+inode data lock. The completion request contains only its prepared range and
+copied count. The generic writer validates the range's exclusive end before
+admission, and completion counts stay within that range. Short writes and
+cancellation release only their token-owned unaccepted tail.
+Generic scans sample live EOF per folio and charge attempted work independently
+of completion prefixes. Existing inode, extent and queued-I/O lifetime owners
+remain unchanged.

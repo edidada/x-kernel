@@ -9,13 +9,54 @@
 //! and 9P are wired in the crate root.
 
 use alloc::{string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use kdevice::{BindingRef, BusId, DeviceCore, DeviceId, DeviceLocation, DeviceObject, DriverId};
+use kdevice::{
+    BindingRef, BusId, DeviceCore, DeviceId, DeviceLocation, DeviceObject, DeviceState, DriverId,
+    PublicationId,
+};
 
 /// A typed runtime capability with a live parent device object.
 pub struct ClassDevice<T> {
     inner: Arc<ClassDeviceInner<T>>,
+}
+
+/// Non-cloneable credential for explicitly revoking one publication.
+pub struct ClassPublication<T> {
+    device: ClassDevice<T>,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationState {
+    Published    = 0,
+    Activating   = 1,
+    Notifying    = 2,
+    Available    = 3,
+    Revoking     = 4,
+    RevokeFailed = 5,
+    Revoked      = 6,
+}
+
+impl PublicationState {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Published,
+            1 => Self::Activating,
+            2 => Self::Notifying,
+            3 => Self::Available,
+            4 => Self::Revoking,
+            5 => Self::RevokeFailed,
+            6 => Self::Revoked,
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: only PublicationState \
+                          discriminants are stored"
+            )]
+            _ => panic!("invalid publication state"),
+        }
+    }
 }
 
 struct ClassDeviceInner<T> {
@@ -26,6 +67,19 @@ struct ClassDeviceInner<T> {
     /// this exact runtime's lifecycle; neither goes back to the parent's
     /// current driver metadata or binding slot.
     binding: BindingRef,
+    publication_id: PublicationId,
+    /// Publication state machine. Writers publish the state (and the fact that
+    /// node/callback bookkeeping for that state is complete) with Release or
+    /// AcqRel; readers in `state()` use Acquire. This pairs every
+    /// `Activating`/`Notifying`/`Available` visibility decision with the
+    /// preceding activation/node setup, and every `Revoking`/`Revoked`
+    /// decision with the exact executor handoff.
+    publication_state: AtomicU8,
+    /// Set by `request_revoke` under the class-registry lock with Release.
+    /// `is_available`, `find_*_publication` and device enumeration observe it
+    /// with Acquire so a revoke request closes visibility immediately, before
+    /// deferred node/unpublish cleanup finishes.
+    revoke_requested: AtomicBool,
     runtime: T,
     name: String,
     device_kind: DeviceKind,
@@ -69,6 +123,10 @@ impl<T> Clone for ClassDevice<T> {
 
 impl<T> ClassDevice<T> {
     /// Create a class device with runtime-provided identity metadata.
+    ///
+    /// Test-only fixture path: it reads the parent's current binding slot and
+    /// is intentionally unavailable to production callers.
+    #[cfg(unittest)]
     pub fn try_new_with_info(
         parent: Arc<DeviceObject>,
         inner: T,
@@ -86,6 +144,14 @@ impl<T> ClassDevice<T> {
         )
     }
 
+    /// Fixture/test constructor that reads the parent's current binding slot.
+    ///
+    /// Production publication uses [`Self::try_new_for_publication`] with the
+    /// binding captured in the driver context: a raw stable object can be held
+    /// long after its binding was replaced, and reading the slot here would
+    /// silently attribute the handle to whichever binding is current at
+    /// construction time.
+    #[cfg(unittest)]
     pub(crate) fn try_new_with_class_metadata(
         parent: Arc<DeviceObject>,
         inner: T,
@@ -98,10 +164,82 @@ impl<T> ClassDevice<T> {
         // (the normal in-probe publication stage) has complete metadata and is
         // accepted; terminal or detached bindings are not.
         let binding = parent.binding_ref().ok_or(DriverError::BadState)?;
+        Self::try_new_with_binding(parent, binding, inner, name, device_kind, irq, metadata)
+    }
+
+    /// Construct a class device from an explicitly captured binding instance.
+    ///
+    /// The caller supplies the `BindingRef` it obtained in a lifecycle write
+    /// context (probe/remove/adoption), so the class identity is pinned to
+    /// exactly the binding that is publishing it, never to a later replacement
+    /// in the parent's slot.
+    #[cfg(unittest)]
+    pub(crate) fn try_new_with_binding(
+        parent: Arc<DeviceObject>,
+        binding: BindingRef,
+        inner: T,
+        name: String,
+        device_kind: DeviceKind,
+        irq: Option<usize>,
+        metadata: ClassDeviceMetadata,
+    ) -> DriverResult<Self> {
+        let publication_id = PublicationId::allocate()?;
+        let device = Self::try_new_for_publication(
+            parent,
+            binding,
+            publication_id,
+            inner,
+            name,
+            device_kind,
+            irq,
+            metadata,
+        )?;
+        // Test-only convenience constructor: a synthetic handle over an
+        // already-Active fixture is immediately usable. Production publish
+        // always uses try_new_for_publication and starts Published so the
+        // normal activation path registers nodes/notifies subscribers.
+        if device.binding_ref().is_active() {
+            device.inner.publication_state.store(
+                PublicationState::Available as u8,
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+        Ok(device)
+    }
+
+    /// Construct one publication with an already allocated identity.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: constructor keeps \
+                  publication fields explicit"
+    )]
+    pub(crate) fn try_new_for_publication(
+        parent: Arc<DeviceObject>,
+        binding: BindingRef,
+        publication_id: PublicationId,
+        inner: T,
+        name: String,
+        device_kind: DeviceKind,
+        irq: Option<usize>,
+        metadata: ClassDeviceMetadata,
+    ) -> DriverResult<Self> {
+        if matches!(
+            binding.state(),
+            DeviceState::Removing | DeviceState::Removed
+        ) {
+            return Err(DriverError::BadState);
+        }
+        // Even on an already-Active binding, a new publication must start
+        // Published so the normal activation path registers its node and
+        // notifies subscribers exactly once.
+        let initial_state = PublicationState::Published;
         Ok(Self {
             inner: Arc::new(ClassDeviceInner {
                 parent,
                 binding,
+                publication_id,
+                publication_state: AtomicU8::new(initial_state as u8),
+                revoke_requested: AtomicBool::new(false),
                 runtime: inner,
                 name,
                 device_kind,
@@ -109,6 +247,157 @@ impl<T> ClassDevice<T> {
                 metadata,
             }),
         })
+    }
+
+    /// The exact binding instance captured by this class handle.
+    ///
+    /// Used to revoke the matching device node and to select terminal entries
+    /// during retirement. The reference identifies one instance; it grants no
+    /// lifecycle write permission.
+    pub fn binding_ref(&self) -> &BindingRef {
+        &self.inner.binding
+    }
+
+    /// Identity of this publication within the parent binding.
+    pub fn publication_id(&self) -> PublicationId {
+        self.inner.publication_id
+    }
+
+    #[cfg(unittest)]
+    pub fn publication_state_name(&self) -> &'static str {
+        match self.state() {
+            PublicationState::Published => "Published",
+            PublicationState::Activating => "Activating",
+            PublicationState::Notifying => "Notifying",
+            PublicationState::Available => "Available",
+            PublicationState::Revoking => "Revoking",
+            PublicationState::RevokeFailed => "RevokeFailed",
+            PublicationState::Revoked => "Revoked",
+        }
+    }
+
+    fn state(&self) -> PublicationState {
+        PublicationState::from_u8(self.inner.publication_state.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn begin_activation(&self) -> bool {
+        self.inner
+            .publication_state
+            .compare_exchange(
+                PublicationState::Published as u8,
+                PublicationState::Activating as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn revoke_requested(&self) -> bool {
+        self.inner.revoke_requested.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn commit_notification(&self) -> bool {
+        if self.revoke_requested() {
+            return false;
+        }
+        self.inner
+            .publication_state
+            .compare_exchange(
+                PublicationState::Activating as u8,
+                PublicationState::Notifying as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn finish_notification(&self) -> bool {
+        if self.revoke_requested() {
+            return false;
+        }
+        self.inner
+            .publication_state
+            .compare_exchange(
+                PublicationState::Notifying as u8,
+                PublicationState::Available as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn take_activation_revoke(&self) -> bool {
+        let state = self.state();
+        if !matches!(
+            state,
+            PublicationState::Activating | PublicationState::Notifying
+        ) {
+            return false;
+        }
+        self.inner
+            .publication_state
+            .compare_exchange(
+                state as u8,
+                PublicationState::Revoking as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn request_revoke(&self) -> bool {
+        self.inner.revoke_requested.store(true, Ordering::Release);
+        matches!(
+            self.state(),
+            PublicationState::Activating | PublicationState::Notifying
+        )
+    }
+
+    pub(crate) fn begin_executor(&self) -> bool {
+        self.inner
+            .publication_state
+            .compare_exchange(
+                PublicationState::Published as u8,
+                PublicationState::Revoking as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+            || self
+                .inner
+                .publication_state
+                .compare_exchange(
+                    PublicationState::Available as u8,
+                    PublicationState::Revoking as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            || self
+                .inner
+                .publication_state
+                .compare_exchange(
+                    PublicationState::RevokeFailed as u8,
+                    PublicationState::Revoking as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+    }
+
+    pub(crate) fn mark_revoke_failed(&self) {
+        let _ = self.inner.publication_state.compare_exchange(
+            PublicationState::Revoking as u8,
+            PublicationState::RevokeFailed as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    pub(crate) fn finish_revoked(&self) {
+        self.inner
+            .publication_state
+            .store(PublicationState::Revoked as u8, Ordering::Release);
     }
 
     /// Parent device object in the driver-core object graph.
@@ -191,14 +480,24 @@ impl<T> ClassDevice<T> {
         map(select(&self.inner.runtime))
     }
 
-    /// Whether the captured binding is currently `Active`.
+    /// Whether this publication currently accepts new use.
     ///
-    /// This observes only the binding instance captured at construction; it
+    /// True only for `Activating`/`Notifying`/`Available`, with no revoke
+    /// request, while the captured binding is `Active`. A revoke request
+    /// closes this immediately, even if cleanup or an already committed
+    /// callback is still pending. This observes only the captured binding; it
     /// does not query the parent's current state or consume an in-use
-    /// admission. Treat it as an instantaneous availability check, not as a
-    /// guarantee that a later hardware operation is safe.
+    /// admission, and it is not a guarantee that a later hardware operation is
+    /// safe.
     pub fn is_available(&self) -> bool {
-        self.inner.binding.is_active()
+        !self.revoke_requested()
+            && matches!(
+                self.state(),
+                PublicationState::Activating
+                    | PublicationState::Notifying
+                    | PublicationState::Available
+            )
+            && self.inner.binding.is_active()
     }
 
     pub(crate) fn input_physical_location(&self) -> &str {
@@ -215,6 +514,54 @@ impl<T> ClassDevice<T> {
             .input_identity
             .as_ref()
             .map_or("", |identity| identity.unique_id.as_str())
+    }
+}
+
+impl<T> ClassPublication<T> {
+    pub(crate) fn new(device: ClassDevice<T>) -> Self {
+        Self { device }
+    }
+
+    /// Consumer handle for this publication.
+    pub fn device(&self) -> ClassDevice<T> {
+        self.device.clone()
+    }
+
+    /// Parent device identity.
+    pub fn id(&self) -> DeviceId {
+        self.device.id()
+    }
+
+    /// Publication identity.
+    pub fn publication_id(&self) -> PublicationId {
+        self.device.publication_id()
+    }
+
+    /// Exact binding captured by the publication.
+    pub fn binding_ref(&self) -> &BindingRef {
+        self.device.binding_ref()
+    }
+
+    /// Whether this publication still accepts new use.
+    pub fn is_available(&self) -> bool {
+        self.device.is_available()
+    }
+
+    /// Revoke this publication.
+    ///
+    /// The credential is intentionally not `Clone`; dropping it does not
+    /// revoke. The caller must be in task context suitable for the class
+    /// backend's unpublish operation.
+    pub fn revoke(&self) -> DriverResult<RevocationOutcome> {
+        crate::revoke_publication(self.device.device_kind(), self.device.publication_id())
+    }
+}
+
+impl<T> core::ops::Deref for ClassPublication<T> {
+    type Target = ClassDevice<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.device
     }
 }
 
@@ -249,11 +596,32 @@ impl<T> core::fmt::Debug for ClassDevice<T> {
 
 /// Notification callback invoked after a typed runtime capability is activated.
 pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync>;
+/// Callback invoked after one publication is fully revoked.
+pub type ClassRemovalCallback = Arc<dyn Fn(DeviceId, PublicationId) + Send + Sync>;
+
+/// Result of an explicit publication revocation request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RevocationOutcome {
+    /// Node is silent, backend unpublish and removed callbacks completed.
+    Completed,
+    /// A live activation/revocation executor owns completion.
+    Deferred,
+    /// The publication is already fully revoked.
+    AlreadyRevoked,
+}
+
+pub(crate) enum RevocationStart<T> {
+    Execute(ClassDevice<T>),
+    Deferred,
+    AlreadyRevoked,
+    Failed,
+}
 
 /// Typed registry for one runtime device class.
 pub(crate) struct ClassRegistry<T> {
     devices: Vec<ClassDevice<T>>,
     availability_subscribers: Vec<ClassAvailabilityCallback<T>>,
+    removed_subscribers: Vec<ClassRemovalCallback>,
 }
 
 impl<T> ClassRegistry<T> {
@@ -262,16 +630,22 @@ impl<T> ClassRegistry<T> {
         Self {
             devices: Vec::new(),
             availability_subscribers: Vec::new(),
+            removed_subscribers: Vec::new(),
         }
     }
 
-    /// Publish one runtime class device.
+    /// Publish one exact runtime class publication.
     ///
-    /// Linux device registration rejects duplicate identities; replacement is
-    /// a remove-then-add lifecycle rather than an implicit registry update.
+    /// The key is `PublicationId`, not `DeviceId`: the same stable device and
+    /// binding may own several capabilities of this class. A duplicate
+    /// publication identity is rejected, but sibling publications are
+    /// independent.
     pub(crate) fn publish(&mut self, device: ClassDevice<T>) -> DriverResult<()> {
-        let id = device.id();
-        if self.devices.iter().any(|existing| existing.id() == id) {
+        if self
+            .devices
+            .iter()
+            .any(|existing| existing.publication_id() == device.publication_id())
+        {
             return Err(DriverError::AlreadyExists);
         }
         self.devices.push(device);
@@ -287,14 +661,6 @@ impl<T> ClassRegistry<T> {
             .collect()
     }
 
-    /// Find a currently active device in this class.
-    pub(crate) fn find(&self, id: DeviceId) -> Option<ClassDevice<T>> {
-        self.devices
-            .iter()
-            .find(|device| device.id() == id && device.is_available())
-            .cloned()
-    }
-
     /// Subscribe to future availability notifications for this class.
     pub(crate) fn subscribe_available(&mut self, callback: ClassAvailabilityCallback<T>) {
         self.availability_subscribers.push(callback);
@@ -305,10 +671,92 @@ impl<T> ClassRegistry<T> {
         self.availability_subscribers.clone()
     }
 
-    /// Remove a class device by parent device ID.
-    pub(crate) fn remove(&mut self, id: DeviceId) -> Option<ClassDevice<T>> {
-        let pos = self.devices.iter().position(|device| device.id() == id)?;
-        Some(self.devices.swap_remove(pos))
+    /// Find one currently available publication by exact identity.
+    pub(crate) fn find_publication(&self, publication: PublicationId) -> Option<ClassDevice<T>> {
+        self.devices
+            .iter()
+            .find(|device| device.publication_id() == publication && device.is_available())
+            .cloned()
+    }
+
+    /// Internal lookup including non-available entries.
+    pub(crate) fn publication_entry(&self, publication: PublicationId) -> Option<ClassDevice<T>> {
+        self.devices
+            .iter()
+            .find(|device| device.publication_id() == publication)
+            .cloned()
+    }
+
+    /// Internal full-state snapshot for retirement/activation scans.
+    pub(crate) fn all_publications_for_device(&self, id: DeviceId) -> Vec<ClassDevice<T>> {
+        self.devices
+            .iter()
+            .filter(|device| device.id() == id)
+            .cloned()
+            .collect()
+    }
+
+    /// Public device-level enumeration; unavailable/revoking entries are hidden.
+    pub(crate) fn available_publications_for_device(&self, id: DeviceId) -> Vec<ClassDevice<T>> {
+        self.devices
+            .iter()
+            .filter(|device| device.id() == id && device.is_available())
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn request_revoke(&mut self, publication: PublicationId) -> RevocationStart<T> {
+        let Some(device) = self.publication_entry(publication) else {
+            return RevocationStart::AlreadyRevoked;
+        };
+        let state = device.state();
+        if matches!(
+            state,
+            PublicationState::Activating | PublicationState::Notifying
+        ) {
+            device.request_revoke();
+            return RevocationStart::Deferred;
+        }
+        if state == PublicationState::Revoking {
+            return RevocationStart::Deferred;
+        }
+        if state == PublicationState::Revoked {
+            return RevocationStart::AlreadyRevoked;
+        }
+        if device.begin_executor() {
+            RevocationStart::Execute(device)
+        } else {
+            RevocationStart::Failed
+        }
+    }
+
+    pub(crate) fn removed_callbacks(&self) -> Vec<ClassRemovalCallback> {
+        self.removed_subscribers.clone()
+    }
+
+    pub(crate) fn mark_revoke_failed(&mut self, publication: PublicationId) {
+        if let Some(device) = self.publication_entry(publication) {
+            device.mark_revoke_failed();
+        }
+    }
+
+    pub(crate) fn remove_publication(
+        &mut self,
+        publication: PublicationId,
+    ) -> Option<ClassDevice<T>> {
+        let index = self
+            .devices
+            .iter()
+            .position(|device| device.publication_id() == publication)?;
+        Some(self.devices.swap_remove(index))
+    }
+
+    pub(crate) fn subscribe_removed(&mut self, callback: ClassRemovalCallback) {
+        self.removed_subscribers.push(callback);
+    }
+
+    pub(crate) fn available_callbacks(&self) -> Vec<ClassAvailabilityCallback<T>> {
+        self.availability_callbacks()
     }
 }
 
@@ -317,3 +765,6 @@ impl<T> Default for ClassRegistry<T> {
         Self::new()
     }
 }
+
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/generic.rs");

@@ -267,6 +267,14 @@ impl ExceptionContext {
         self.sepc = pc;
     }
 
+    /// Returns whether this trap interrupted user mode.
+    ///
+    /// `sstatus.SPP` (Supervisor Previous Privilege) is `User` when the
+    /// interrupted context ran in U-mode.
+    pub fn user_mode(&self) -> bool {
+        self.sstatus.spp() == sstatus::SPP::User
+    }
+
     /// Gets the stack pointer.
     pub const fn sp(&self) -> usize {
         self.regs.sp
@@ -484,6 +492,8 @@ impl TaskContext {
 /// Floating-point access must be enabled on this CPU. Prevent task switches
 /// while saving so all registers belong to the same task; the destination
 /// state must remain exclusively borrowed for the assembly writes.
+// SAFETY: The FP-enabled caller passes a writable FpState in a0; the naked body only stores
+// floating registers and fcsr before returning.
 #[cfg(feature = "fp-simd")]
 #[unsafe(naked)]
 unsafe extern "C" fn save_fp_registers(fp_state: &mut FpState) {
@@ -502,6 +512,8 @@ unsafe extern "C" fn save_fp_registers(fp_state: &mut FpState) {
 /// Floating-point access must be enabled on this CPU, and the source must
 /// contain valid saved or initial FP state. Prevent task switches and ensure
 /// no live kernel FP values depend on the registers replaced by this call.
+// SAFETY: The FP-enabled caller passes a populated FpState in a0; the naked body only reloads
+// floating registers and fcsr before returning.
 #[cfg(feature = "fp-simd")]
 #[unsafe(naked)]
 unsafe extern "C" fn restore_fp_registers(fp_state: &FpState) {
@@ -520,6 +532,8 @@ unsafe extern "C" fn restore_fp_registers(fp_state: &FpState) {
 /// Floating-point access must be enabled on this hart. Prevent task
 /// switches, and save any previous task's live FP state before clearing
 /// registers. No live kernel FP values may depend on those registers.
+// SAFETY: The FP-enabled caller requires zeroed floating registers; the naked body only clears
+// them and returns without a Rust prologue.
 #[cfg(feature = "fp-simd")]
 #[unsafe(naked)]
 unsafe extern "C" fn clear_fp_registers() {
@@ -538,6 +552,8 @@ unsafe extern "C" fn clear_fp_registers() {
 /// resume address established by `TaskContext::init` or an earlier switch.
 /// Keep both contexts and stacks live until their saved continuations finish;
 /// FP state and address-space state must already match the next task.
+// SAFETY: The scheduler passes valid current and next TaskContext pointers in a0/a1; the naked
+// body only swaps the RISC-V callee-saved registers, ra, and sp.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(

@@ -118,6 +118,14 @@ and the state cannot disagree with the screen.
 framebuffer's resource without touching the binding. There is no `fb_id == 0`
 case: zero and every other unknown id return `ENOENT`, as in Linux.
 
+A present transfers the framebuffer's own geometry, not the object's size. When
+a framebuffer does not cover its whole object it is displayed through a view
+resource created from that geometry, and the two can differ: a GEM object with
+832 rows can hold a 1280x800 framebuffer. Asking the host to transfer the
+object's rows would name rows the view resource does not have, and the display
+rejects the command (`EIO`). Linux derives the same rectangle from the plane
+state's `crtc_w`/`crtc_h` in `virtio_gpu_cmd_transfer_to_host_2d`.
+
 The scanout slot keeps three separate facts: `bound` (the plane's logical
 framebuffer, zero when disabled), `scanning` (the framebuffer of the resource
 the host was last asked to display, which outlives `bound`) and `uncertain`
@@ -209,6 +217,16 @@ display before it overwrites the pixels.
   that the object owns, and returns a new handle. A descriptor that is not one
   of this driver's dma-bufs is `EINVAL`.
 
+  The flag word admits exactly `DRM_CLOEXEC | DRM_RDWR`, which is what
+  `drm_prime_handle_to_fd_ioctl` accepts; any other bit is `EINVAL`. `DRM_RDWR`
+  is `O_RDWR`, and Linux forwards the whole word to `get_unused_fd_flags()`, so
+  the only bit with an effect here is `DRM_CLOEXEC` — but the check must still
+  admit `DRM_RDWR`, because Mesa's `gbm_bo_get_fd_for_plane` exports the buffer
+  it renders into with both flags set (`0x80002`). Rejecting it failed every
+  swapchain allocation and left the compositor with no buffer at all, while the
+  3D path itself was already working. A handle this file does not hold is
+  `ENOENT`, matching Linux's failed `drm_gem_object_lookup`.
+
   One card has one import per dma-buf (`drm_gem_prime_import`'s attachment
   lookup): the second import of the same buffer — through another descriptor
   or through a re-export of it — resolves to the object the file already
@@ -220,6 +238,15 @@ display before it overwrites the pixels.
   `DMA_BUF_IOCTL_EXPORT/IMPORT_SYNC_FILE` move the reservation's fence through a
   sync_file. `DRM_CAP_PRIME` reports import and export only because both are
   implemented.
+
+  The descriptor is opened with `FMode::LSEEK`. Its ops answer
+  `lseek(SEEK_END, 0)` with the buffer size and `lseek(SEEK_SET, 0)` with zero,
+  matching `dma_buf_llseek`, which keeps the idiomatic SEEK_END(0)/SEEK_SET(0)
+  pattern working; every other whence, and any non-zero offset, is `EINVAL`. The
+  mode flag is load-bearing: `VfsFile::llseek` rejects the syscall with `ESPIPE`
+  when the open mode lacks it, before the file's own `llseek` op runs. Mesa
+  sizes an imported buffer this way before mapping it, so a descriptor that
+  cannot seek is not importable.
 - Client property blobs are owned by the creating file and the id registry.
   `DESTROY_BLOB` accepts only an id in the calling file's set: an existing id
   owned by another file, or a driver-owned system blob, is `EPERM`, while an
@@ -497,3 +524,14 @@ The other half of the Linux design — unmapping a `vma` and revoking its
 offset when a client unmaps — has no hook in this kernel's VFS, so mappings
 keep the object alive until the card goes away. That boundary is unchanged
 and is recorded here rather than papered over.
+
+## Virtual display timing
+
+When the connector has no usable EDID modes, KMS builds a 60 Hz mode from
+the visible geometry and the fixed horizontal and vertical blanking. The
+geometry and totals must fit the UAPI's 16-bit timing fields. The pixel
+clock is calculated with a 64-bit product and converted from Hz to kHz
+after multiplication. A connector with an unrepresentable fallback
+geometry exposes no synthetic mode. The CRTC query can still report an
+explicitly committed mode. An implicit legacy modeset requires a valid
+fallback mode before it creates a blob.

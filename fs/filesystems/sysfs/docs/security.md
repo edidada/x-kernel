@@ -25,7 +25,7 @@ components by the cdev registration API; virtual uevent attributes are read-only
 
 ## Analysis scope
 
-This analysis covers `src/lib.rs` and the kernel tests in `ut-tests/lib.rs`;
+This analysis covers `src/lib.rs`, `src/block_nodes.rs` and their kernel tests;
 no source module or test-only path is excluded. `kdevice` owns
 device-node identity, numbering, state, and ordered lifecycle callbacks;
 `kdevice-uevent` owns formatting and netlink delivery; KVFS owns filesystem
@@ -89,7 +89,7 @@ registry/projection lock cycle.
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | Crafted uevent write injects arbitrary properties | Medium — forged properties could misclassify a device or trigger unintended user-space policy | User writes binary or `KEY=VALUE` data | Only a trimmed action from the fixed action set is accepted; all properties are kernel-generated. |
+| T-01 | Crafted uevent write injects arbitrary properties | Medium — forged properties could misclassify a device or trigger unintended user-space policy | User writes binary or `KEY=VALUE` data | Only the token before the first space is read (after dropping one trailing newline or NUL), and only when it names one of the fixed actions (`add`, `remove`, `change`, ...); any other whitespace stays inside the token and is refused with `EINVAL`, and everything after the first space is ignored. The device's properties are kernel-generated and are never taken from the write. |
 | T-02 | Broken symlink redirects discovery outside sysfs | Medium — consumers could resolve the wrong device or escape the intended projection | A new path has a different nesting depth | `relative_symlink` derives the target from both component lists and has unit coverage for class and device links. |
 | T-03 | Removal event races a stale attribute operation | Medium — an add/change event or stale snapshot could appear after remove | Hot-unplug races an open sysfs file | Atomic node state blocks new operations; the `Removing` write guard waits for in-flight operations before automatic remove publication. |
 | T-04 | Driver text injects extra uevent fields | Medium — spoofed kernel metadata could change udev matching and device permissions | A device name contains control bytes | Control characters are replaced before building the NUL-delimited netlink payload. |
@@ -112,8 +112,8 @@ payloads, or user credentials.
 
 ## Known limitations
 
-- Only the input and DRM class projections required by current drivers are
-  implemented.
+- Input/DRM character classes and registered whole block disks are projected.
+  Block partitions and physical-bus canonical block paths are not implemented.
 - Driver directories expose binding identity but do not implement bind/unbind
   control files.
 - Ordinary attributes use mode `0444`; `uevent` uses `0644`. There is no
@@ -140,3 +140,33 @@ payloads, or user credentials.
 - Add path-resolution tests when introducing a deeper canonical layout.
 - Keep all new driver-provided uevent values behind the shared uevent
   formatter's control-character sanitization.
+
+## System view attributes
+
+`cpuN/{online,present,possible}`, `memoryN/{phys_index,state,online}`, and the
+global CPU/memory masks are all `0444`. The projection is read-only by design:
+there is no online write path, no hotplug state machine, and no userspace input
+that can change device presence or online state in this layer.
+
+## Block statistics trust and lifetime
+
+The block registry validates single-component names and rejects duplicate names
+and device-number ranges. Sysfs accepts identity only from that registry. It
+never exposes an arbitrary driver-provided pathname. Block attributes have mode
+0444; VFS rejects writes before the read callback. The stat callback copies a
+consistent disk-owned snapshot under a short accounting lock, releases it and
+then formats text. It performs no media access and exposes no data contents.
+
+Block registry callbacks run outside its lock. Sysfs serializes re-snapshot,
+tree rebuild and dentry invalidation through its existing event lock. Each open
+attribute checks canonical device identity on every read: withdrawal and dev_t
+reuse cannot redirect an old handle to a replacement disk. A read admitted
+before withdrawal may return its prior snapshot; reads do not retain a device
+registry lock across formatting or accounting. Unlike hardware DeviceNode
+removal, block inventory does not quiesce already admitted attribute reads.
+
+All counters come from block I/O; sysfs does not increment them. Unsupported
+merges/discards are zero and times reflect the host monotonic clock without a
+synthetic minimum. Current backends cannot report partial bytes on failure, so
+failed operations contribute no successful sectors. The interface is diagnostic
+and does not itself prove durable storage or expose partition statistics.

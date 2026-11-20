@@ -69,6 +69,9 @@ xkernel-agent docker vhost-vsock container-vsock
 `jenkins`（`1000:1000`）；设备组 `36` 由流水线在运行时通过 `--group-add 36`
 加入，镜像内不预置。
 
+运行套件由 Starry Test Harness 自动选择加速：同架构且 KVM 可用时使用 KVM，
+否则使用 TCG；用例可单独指定 TCG。
+
 宿主机必须将 `/dev/kvm` 和 `/dev/vhost-vsock` 持久设置为 group `36`、mode
 `0660`。流水线只显式传入这两个设备并执行 `--group-add 36`，不使用
 `--privileged`、root 用户或 Docker Socket。
@@ -194,10 +197,12 @@ lint 只检查当前配置实际编译的代码，因此两边分别覆盖对应
 每个检查在该 leg 的独立 workspace 中使用对应平台的 `qemu_defconfig` 执行
 `make defconfig`、`make dylint_test` 和 `make dylint`，并使用独立的
 `/xkernel-target/dylint-<platform>` 构建输出目录。
-aarch64 分支在保留上述普通配置检查的同时，额外依次执行
-`make UNITTEST=y clippy` 和 `make UNITTEST=y dylint`，覆盖 Cargo `unittest`
-feature 选入的测试专用 optional 依赖。仅传 `--cfg unittest` 不会启用这些依赖；
-x86_64 分支没有这两次额外扫描，因此该测试依赖图的 lint 覆盖目前仅在 aarch64。
+Both architecture legs additionally run `make UNITTEST=y clippy` followed by
+`make UNITTEST=y dylint`. This selects the optional test dependencies and
+enforces CG-049's standard Box restriction in compiled kernel unit tests.
+Passing `--cfg unittest` alone does not select those dependencies. Explicit
+per-item exceptions retain unmigrated driver/VCPU ownership contracts and
+tests specifically exercising standard Box or GlobalAlloc behavior.
 aarch64 分支完成这两次扫描后，再向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make olddefconfig`
 并确认该选项生效后，在同一构建输出目录再运行一次 `make dylint`。只有打开锁统计时，
 `static_lock!` 才展开为注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都

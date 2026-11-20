@@ -673,7 +673,7 @@ struct ExtentStatus {
     kind: ExtentStatusKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ExtentStatusKind {
     /// Initialized storage, not a guarantee that dirty data is durable.
     Written,
@@ -844,6 +844,17 @@ pub(crate) enum OrphanLocation {
 }
 
 impl Ext4InodeState {
+    /// Returns whether publishing `timestamp` would change a resident write timestamp.
+    ///
+    /// - `timestamp`: coarse wall-clock sample the current operation would publish.
+    ///
+    /// Returns: `true` when `mtime` or `ctime` differs from `timestamp`; `false`
+    /// means [`publish_write_timestamps`](Self::publish_write_timestamps) would
+    /// leave both values and dirty flags untouched.
+    fn needs_write_timestamp(&self, timestamp: Ext4Timestamp) -> bool {
+        self.metadata.mtime != timestamp || self.metadata.ctime != timestamp
+    }
+
     fn publish_write_timestamps(&mut self, timestamp: Ext4Timestamp) {
         self.has_dirty_mtime |= self.metadata.mtime != timestamp;
         self.has_dirty_ctime |= self.metadata.ctime != timestamp;
@@ -1613,12 +1624,28 @@ impl Ext4Inode {
         })
     }
 
-    /// Clips a regular buffered write and publishes its automatic timestamps
-    /// under the same state lock that selects its mapping-format size limit.
+    /// Clips a regular buffered write and publishes its automatic timestamps.
     ///
     /// The caller holds KVFS data protection and has checked mount/journal
     /// writability. `None` means the nonempty write starts at or beyond the
     /// limit; rejected and empty requests leave timestamps unchanged.
+    ///
+    /// The clip reads only atomically published flags and caller-supplied
+    /// limits, so it runs without the state lock. Linux likewise separates the
+    /// two duties and skips timestamp work when nothing changed
+    /// (`need_cmtime_update`): the resident pair is compared in the read
+    /// section and the write section runs only when the sampled timestamp
+    /// differs. Repeated writes inside one coarse clock interval therefore
+    /// never enter the write section.
+    ///
+    /// The comparison is stable across the two sections for the writers that
+    /// can change a resident write timestamp: buffered writes
+    /// (`write_iter_with_prepare`), `set_times`, `fallocate`, truncate and
+    /// xattr hold the inode data lock exclusively, and writable faults hold it
+    /// shared. Metadata paths outside that lock (chmod/chown ctime auto-fill,
+    /// quota flag updates, unlink) can publish a different value; when they
+    /// interleave, skipping keeps the value they published instead of
+    /// overwriting it with this write's older sample.
     pub(crate) fn prepare_buffered_write(
         &self,
         offset: u64,
@@ -1627,19 +1654,19 @@ impl Ext4Inode {
         bitmap_max_size: u64,
         timestamp: Ext4Timestamp,
     ) -> Option<usize> {
-        self.update_state(|state| {
-            debug_assert_eq!(self.kind, InodeKind::RegularFile);
-            if count == 0 {
-                return Some(0);
-            }
-            let max_size = inode_max_file_size(self.flags(), extent_max_size, || bitmap_max_size);
-            if offset >= max_size {
-                return None;
-            }
-            let remaining = usize::try_from(max_size - offset).unwrap_or(usize::MAX);
-            state.publish_write_timestamps(timestamp);
-            Some(count.min(remaining))
-        })
+        debug_assert_eq!(self.kind, InodeKind::RegularFile);
+        if count == 0 {
+            return Some(0);
+        }
+        let max_size = inode_max_file_size(self.flags(), extent_max_size, || bitmap_max_size);
+        if offset >= max_size {
+            return None;
+        }
+        let remaining = usize::try_from(max_size - offset).unwrap_or(usize::MAX);
+        if self.with_state(|state| state.needs_write_timestamp(timestamp)) {
+            self.update_state(|state| state.publish_write_timestamps(timestamp));
+        }
+        Some(count.min(remaining))
     }
 
     /// Updates generic allocated-block accounting in the resident inode.
@@ -1755,6 +1782,18 @@ impl Ext4Inode {
 
     pub(crate) fn file_acl_block(&self) -> u64 {
         self.with_metadata(|metadata| metadata.file_acl)
+    }
+
+    /// Returns whether this inode stores any extended attributes.
+    ///
+    /// Either an external attribute block or an inline attribute area can hold
+    /// `security.capability`, so the VFS keeps the `S_NOSEC`-style fast path
+    /// disabled for both. The inline area is a fixed slice of the inode body
+    /// and is never empty, so presence follows its ibody magic instead.
+    pub(crate) fn has_extended_attributes(&self) -> bool {
+        self.with_metadata(|metadata| {
+            metadata.file_acl != 0 || crate::xattr::inline_xattrs_present(&metadata.inline_xattr)
+        })
     }
 
     pub(crate) fn extra_isize(&self) -> u16 {
@@ -1920,6 +1959,11 @@ impl Ext4Inode {
     /// Extent and counter validation precede quota and mount admission, so
     /// publishing admitted reservations cannot return an insertion error.
     ///
+    /// Returns: the logical block ranges this call newly reserved, in ascending
+    /// order. Subranges already covered by a reservation, or proven inside the
+    /// initialized extent prefix, are not listed: the caller may only cancel
+    /// what it owns.
+    ///
     /// # Locking
     ///
     /// The closure must not call back into `Ext4Inode` state accessors (see
@@ -1937,12 +1981,12 @@ impl Ext4Inode {
         reason = "CG-029-shallow-control-flow: TODO(cg): legacy delayed-allocation reservation; \
                   move the per-extent mapping walk and hole coalescing into a helper"
     )]
-    pub(crate) fn reserve_delalloc_range(
+    pub(crate) fn reserve_delalloc_range_into(
         &self,
         sb: &Ext4SbInfo,
         start: LogicalBlock,
         block_count: u64,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<Vec<(u64, u64)>> {
         let end = start
             .get()
             .checked_add(block_count)
@@ -1962,7 +2006,7 @@ impl Ext4Inode {
             && range_end_bytes != 0
             && range_end_bytes <= self.initialized_extent_end.load(Ordering::Acquire)
         {
-            return Ok(());
+            return Ok(Vec::new());
         }
         self.update_state(|state| {
             regular_file_extent_mutation_supported(
@@ -1977,13 +2021,13 @@ impl Ext4Inode {
                 self.size(),
             ) {
                 self.publish_initialized_extent_end(state, sb.layout().block_size());
-                return Ok(());
+                return Ok(Vec::new());
             }
             if state.reserved_data_blocks > sb.delalloc_reserved_blocks() {
                 return Err(Ext4Error::InvalidDelayedAllocationState);
             }
             if block_count == 0 {
-                return Ok(());
+                return Ok(Vec::new());
             }
             let root = InodeMappingRoot {
                 inode_flags: self.flags(),
@@ -2034,7 +2078,7 @@ impl Ext4Inode {
             // mutex pair guards the aggregate against concurrent reserves, not
             // an empty range against itself.
             if reserved == 0 {
-                return Ok(());
+                return Ok(Vec::new());
             }
             // Check-then-act admission stays inside one critical section so the
             // capacity check sees the same snapshot that the accumulation
@@ -2068,7 +2112,7 @@ impl Ext4Inode {
                 return Err(error);
             }
             insert_unreserved_delalloc_extents_in_state(state, &holes, new_reserved_data_blocks);
-            Ok(())
+            Ok(holes)
         })
     }
 
@@ -2512,7 +2556,7 @@ impl Ext4SbInfo {
 
     /// Reserves unallocated blocks in one logical range for delayed allocation.
     ///
-    /// Delegates to [`Ext4Inode::reserve_delalloc_range`], which serializes
+    /// Delegates to [`Ext4Inode::reserve_delalloc_range_into`], which serializes
     /// the reserve sequence on the per-inode state lock instead of a
     /// mount-wide lock; callers are expected to hold only a shared mount
     /// guard.
@@ -2520,18 +2564,23 @@ impl Ext4SbInfo {
     /// in-file overwrites reuse them while no delayed reservations remain.
     /// Extent mutations and size shrink invalidate the cached ranges.
     ///
+    /// Returns: the logical block ranges newly reserved by this call; empty when
+    /// the range was already reserved or proven initialized. A buffered write
+    /// threads this list into its completion so cancellation cannot release
+    /// reservations owned by earlier writes.
+    ///
     /// # Errors
     ///
     /// Returns an aborted-journal, extent-validation, overflow, accounting,
     /// or no-space error without publishing a partial mount reservation.
-    pub(crate) fn reserve_delalloc_range(
+    pub(crate) fn reserve_delalloc_range_into(
         &self,
         inode: &Ext4Inode,
         start: LogicalBlock,
         block_count: u64,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<Vec<(u64, u64)>> {
         self.ensure_writable()?;
-        inode.reserve_delalloc_range(self, start, block_count)
+        inode.reserve_delalloc_range_into(self, start, block_count)
     }
 
     /// Releases delayed-allocation reservations overlapping a logical range.

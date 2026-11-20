@@ -13,12 +13,12 @@ use ksignal::{SignalStack, api::ThreadSignalManager};
 use kspin::SpinNoIrq;
 use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
-use ktime_types::{MonotonicInstant, TimeSpan};
+use ktime_types::TimeSpan;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeSessionCtxTrait;
 
 use super::{
-    cpu_time::{CpuTimeState, CpuTimeStatistics},
+    cpu_time::{PrevCputime, ThreadCpuTime},
     restart::RestartSlot,
 };
 use crate::{
@@ -73,7 +73,7 @@ impl PreparedUserClone {
 }
 
 /// Linux nice value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct NiceValue(i32);
 
 impl NiceValue {
@@ -121,7 +121,7 @@ impl Default for NiceValue {
 }
 
 /// Consistent scheduler policy/priority snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedulerParameters {
     policy: Option<u32>,
     priority: i32,
@@ -179,7 +179,26 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
-    time: CpuTimeStatistics,
+    time: ThreadCpuTime,
+    /// Monotonic adjustment history for this thread's user/system split.
+    prev_cputime: PrevCputime,
+    /// Coalesces periodic CPU-timer work requests until this task returns to
+    /// userspace.
+    ///
+    /// Publication relationship covered by every ordering on this bit:
+    /// producer is the local timer tick ([`Thread::request_cpu_timer_work`]),
+    /// whose `Release` store publishes the relaxed raw tick additions the
+    /// same tick just performed ([`ThreadCpuTime`]) and the armed-gate
+    /// value it read. Observers are the user-return probe
+    /// ([`Thread::has_pending_cpu_timer_work`], `Acquire` load) and the
+    /// consumer in the return tail ([`Thread::take_cpu_timer_work`], `AcqRel`
+    /// swap). Their `Acquire` side pairs with the tick's `Release`, so a poll
+    /// runs on samples at least as recent as the tick that requested it. The
+    /// swap is a single `AcqRel` RMW: it consumes exactly one coalesced
+    /// request even when a tick on the way to another return re-arms the bit
+    /// concurrently, and its `Release` side orders that re-request after the
+    /// consumption instead of letting it be lost to a stale `false`.
+    cpu_timer_work_pending: AtomicBool,
     nice: AtomicI32,
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
@@ -279,7 +298,9 @@ impl Thread {
                 cred: RwLock::new(cred),
                 clear_child_tid: AtomicUsize::new(0),
                 robust_list_head: AtomicUsize::new(0),
-                time: CpuTimeStatistics::new(),
+                time: ThreadCpuTime::new(),
+                prev_cputime: PrevCputime::new(),
+                cpu_timer_work_pending: AtomicBool::new(false),
                 nice: AtomicI32::new(NiceValue::default().as_i32()),
                 scheduler: Mutex::new(SchedulerState::default()),
                 is_exiting: AtomicBool::new(false),
@@ -311,6 +332,10 @@ impl Thread {
     /// Copies this thread's blocked signal mask before publication; the child's
     /// private and process-wide pending queues start empty even with shared actions.
     ///
+    /// When `config.cgroup_target` is set (`clone3(CLONE_INTO_CGROUP)`), the
+    /// child's membership reservation is charged against that node instead of
+    /// this thread's cgroup; the caller must already have authorized the target.
+    ///
     /// # Errors
     ///
     /// Forwards cgroup reservation/commit, identity allocation, namespace, MM and
@@ -319,9 +344,15 @@ impl Thread {
     /// changed parent/namespace contracts, and Unsupported for an unimplemented
     /// namespace request. Thread and signal-slot allocation use NOWAIT under the cgroup
     /// transaction mutex and may return NoMemory. The prepared child is not activated.
-    pub fn prepare_process_fork(&self, config: ProcessForkConfig) -> KResult<PreparedUserClone> {
+    pub fn prepare_process_fork(
+        &self,
+        mut config: ProcessForkConfig,
+    ) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
-        let charge = self.cgroup.reserve_child()?;
+        let charge = match config.cgroup_target.take() {
+            Some(target) => target.reserve_task()?,
+            None => self.cgroup.reserve_child()?,
+        };
         let files = self
             .files
             .fork(matches!(config.fd_table, crate::ForkFdTable::Shared))?;
@@ -733,60 +764,66 @@ impl Thread {
         self.process().pid()
     }
 
-    /// Settles the elapsed interval and returns sampled user and kernel CPU time.
+    /// Reads the committed raw user/system counters.
     ///
-    /// May sample another thread; settlement uses the lock-free accounting
-    /// atomics, so it is safe from any context that may read another thread.
-    pub fn sample_cpu_time(&self) -> (TimeSpan, TimeSpan) {
-        self.time.sample(khal::time::monotonic_time())
+    /// Lock-free and settlement-free: a query may sample another thread from
+    /// any context that may read it. Only the owning CPU's periodic tick writes
+    /// these counters, so a remote read never advances them.
+    pub(crate) fn raw_cpu_time(&self) -> (u64, u64) {
+        self.time.raw()
     }
 
-    /// Returns the sum of user and kernel CPU time consumed by this thread.
-    pub fn cpu_time(&self) -> TimeSpan {
-        let (utime, stime) = self.sample_cpu_time();
-        utime.saturating_add(stime)
-    }
-
-    /// Publishes the CPU-accounting mode at a user/kernel boundary.
+    /// Charges one periodic accounting tick to the interrupted context.
     ///
-    /// This is one relaxed store: the elapsed interval is settled later at a
-    /// timer tick, a context switch or a query. Keeping the boundary lock-free
-    /// and clock-free removes it from the syscall fast path.
-    pub fn record_cpu_time_mode(&self, state: CpuTimeState) {
-        self.time.record_mode(state);
+    /// Owning-CPU only, from the periodic tick with IRQs masked. `user_tick`
+    /// classifies the interrupted frame; `tick_ns` is `TICK_NSEC`.
+    pub(crate) fn account_tick(&self, user_tick: bool, tick_ns: u64) {
+        self.time.account_tick(user_tick, tick_ns);
     }
 
-    /// Settles the unsettled interval up to the given monotonic timestamp.
+    /// Returns this thread's adjusted user/system time.
     ///
-    /// Called from the timer tick with the interrupted task's current mode.
-    pub fn settle_cpu_time_at(&self, now: MonotonicInstant) {
-        self.time.settle(now);
+    /// `rtime_ns` is the thread's scheduler-runtime sample. The caller refreshes
+    /// the current task before reading it; a remote thread contributes its
+    /// committed runtime. The raw tick split is scaled against that runtime and
+    /// kept monotonic by `prev_cputime`.
+    pub fn cpu_time_adjusted(&self, rtime_ns: u64) -> (TimeSpan, TimeSpan) {
+        let (utime, stime) = self.time.raw();
+        let (utime, stime) = self.prev_cputime.adjust(utime, stime, rtime_ns);
+        (TimeSpan::from_nanos(utime), TimeSpan::from_nanos(stime))
     }
 
-    /// Starts a fresh accounting interval after this thread is switched in.
-    pub fn activate_cpu_time(&self) {
-        self.time.activate(khal::time::monotonic_time());
-    }
-
-    /// Settles and closes the accounting interval before this thread switches out.
-    pub fn deactivate_cpu_time(&self) {
-        self.time.deactivate(khal::time::monotonic_time());
-    }
-
-    /// Publishes the exit sample and refuses later switch-in intervals.
+    /// Requests a CPU-timer poll for this task at its next user return.
     ///
-    /// Distinct from [`Self::set_exit`]: that flag is visible to PI adoption
-    /// while this thread can still be charged for cleanup.
-    pub fn finalize_cpu_time(&self) {
-        self.time.finalize(khal::time::monotonic_time());
+    /// Called from interrupt context by the periodic tick. Requests are
+    /// coalesced: the `Release` store publishes this tick's raw counter
+    /// additions, and repeated ticks before a return add no work. Gated by
+    /// the process armed flag, so a task group with no CPU timers never sets
+    /// the bit. See [`Thread::cpu_timer_work_pending`] for the ordering
+    /// contract.
+    pub(crate) fn request_cpu_timer_work(&self) {
+        if self.process().cpu_timers_armed() {
+            self.cpu_timer_work_pending.store(true, Ordering::Release);
+        }
     }
 
-    /// Returns whether this thread's process has an armed CPU timer.
+    /// Returns whether a periodic tick requested CPU-timer work for this task.
     ///
-    /// Lets the user-return fast path decide whether timer polling is needed
-    /// without reaching into the process runtime.
-    pub fn has_armed_cpu_timers(&self) -> bool {
-        self.process().cpu_timers_armed()
+    /// Lock-free probe for the user-return fast path; the `Acquire` load pairs
+    /// with the tick's `Release` store. A `true` answer may be consumed only
+    /// by [`Thread::take_cpu_timer_work`].
+    pub fn has_pending_cpu_timer_work(&self) -> bool {
+        self.cpu_timer_work_pending.load(Ordering::Acquire)
+    }
+
+    /// Consumes one coalesced CPU-timer work request.
+    ///
+    /// Returns `true` at most once per tick request; the `AcqRel` swap both
+    /// observes the requesting tick's raw additions and orders a concurrent
+    /// re-request after this consumption. See
+    /// [`Thread::cpu_timer_work_pending`] for the full ordering contract.
+    pub(crate) fn take_cpu_timer_work(&self) -> bool {
+        self.cpu_timer_work_pending.swap(false, Ordering::AcqRel)
     }
 
     /// Temporarily swaps the blocked-signal mask while executing `f`.

@@ -18,8 +18,17 @@ pub(crate) mod compat;
     not(unittest),
     expect(
         dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: packet-path consumers of the private filter \
-                  evaluator follow in IKIXDM"
+        reason = "CG-024-lint-exceptions: dead_code: remaining filter hooks and management \
+                  adapters follow in IKIXDM"
     )
 )]
 mod filter;
+
+pub(crate) use filter::config::{FilterConfig, global};
+#[cfg(unittest)]
+pub(crate) use filter::{
+    chain::{Chain, FilterHook},
+    matcher::{BaseMatch, InterfacePattern, Negated},
+    rule::{Rule, Target, Verdict},
+    table::FilterTable,
+};

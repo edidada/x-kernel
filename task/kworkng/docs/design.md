@@ -1,5 +1,28 @@
 # Prepared Workqueue API
 
+## Benchmark Fixture Ownership
+
+Soak producers transfer fallibly prepared task entries to the existing prepared
+task constructor. The boot coordinator prepares the complete group before
+activation; entry failure rejects the run with no partially started group.
+KERNEL permissions require sleepable, reclaim-safe task context without locks
+needed by reclaim. The production worker creation protocol is unchanged.
+
+The opt-in release benchmark stack-pins its two ordinary Work fixtures. The
+producer retains each Work and its captures through every submission and final
+flush/cancel; lexical scope then ends their lifetime. Preparation and final
+drain remain outside the measured interval. Owned delayed work and dynamic
+worker construction are unchanged.
+
+## Unit-Test Callback Ownership
+
+Static-publication fixtures intentionally leak KBox-owned Work for the guest's
+lifetime to satisfy the static submission contract. Owned-handle release tests
+use KBox-erased reusable callbacks while retaining their existing capture-drop
+and execution-context checks. These test allocations use NOWAIT and fail before
+publication. The kalloc-types dependency is used by kernel unit-test modules;
+it adds no production callback-storage change.
+
 ## Partition Table Preparation
 
 Default initialization reserves three `PreparedQueue` tables after validating

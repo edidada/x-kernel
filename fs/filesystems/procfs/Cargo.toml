@@ -9,12 +9,13 @@ homepage.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-shear]
-# cfg(unittest) assertions in ut-tests/basic_nodes_root.rs use log::LevelFilter;
-# cargo-shear ignores ut-tests sources, but guest UT needs a regular dependency.
+# cfg(unittest) assertions in ut-tests are not scanned by cargo-shear, but
+# guest UT needs a regular dependency.
 ignored = ["log"]
 
 [features]
 default = []
+net = ["dep:knet"]
 sysrq = ["ktask/snapshot"]
 tee = ["kprocess/tee", "dep:tee_task_iface"]
 lock_stat = ["dep:klockstat", "klockstat/stats"]
@@ -26,7 +27,10 @@ vmm = ["dep:kvmm"]
 kalloc-types.workspace = true
 kfd_objects.workspace = true
 kbuild_config.workspace = true
+kirq.workspace = true
+kerrno.workspace = true
 kcred.workspace = true
+knet = { workspace = true, optional = true }
 kns.workspace = true
 kvfs.workspace = true
 macros.workspace = true
@@ -35,10 +39,12 @@ kalloc.workspace = true
 kcpu.workspace = true
 kcpu_id_map.workspace = true
 kdevice.workspace = true
+entropy.workspace = true
 khal.workspace = true
 klockstat = { workspace = true, optional = true }
 klogger.workspace = true
 kprocess.workspace = true
+ksync.workspace = true
 ktask.workspace = true
 ktty.workspace = true
 ktime_types.workspace = true

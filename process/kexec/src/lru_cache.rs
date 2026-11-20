@@ -11,7 +11,7 @@ use core::mem::replace;
 ///
 /// It maintains a fixed-capacity storage and uses doubly-linked list indices
 /// to track the usage order from MRU to LRU.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct LruCache<V, const CAP: usize> {
     storage: Vec<CacheNode<V>>,
     mru_idx: u16,
@@ -19,7 +19,7 @@ pub(super) struct LruCache<V, const CAP: usize> {
 }
 
 /// Internal node for the LRU cache linked list.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct CacheNode<V> {
     payload: V,
     prev: u16,
@@ -94,6 +94,7 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
     }
 
     /// Returns an iterator over the cache items, ordered from MRU to LRU.
+    #[cfg(unittest)]
     pub(super) fn items(&self) -> LruIter<'_, V, CAP> {
         LruIter::<V, CAP> {
             cache: self,
@@ -149,11 +150,13 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
 }
 
 /// Iterator over the `LruCache` items, from MRU to LRU.
+#[cfg(unittest)]
 pub(super) struct LruIter<'a, V, const CAP: usize> {
     cache: &'a LruCache<V, CAP>,
     pos: u16,
 }
 
+#[cfg(unittest)]
 impl<'a, V, const CAP: usize> Iterator for LruIter<'a, V, CAP> {
     type Item = &'a V;
 

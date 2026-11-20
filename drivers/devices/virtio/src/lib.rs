@@ -40,7 +40,7 @@ pub use self::blk::{PART_BITS as VIRTIO_BLK_PART_BITS, VIRTIO_BLK_MAJOR, VirtIoB
 #[cfg(feature = "gpu")]
 mod gpu;
 #[cfg(feature = "gpu")]
-pub use self::gpu::VirtIoGpuDev;
+pub use self::gpu::{GpuHost, VirtIoGpuDev};
 
 #[cfg(feature = "input")]
 mod input;
@@ -93,7 +93,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 pub use self::socket::VirtIoVsockDev;
 
 /// Read-only identification of a VirtIO MMIO device.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MmioIdentification {
     /// The version of the VirtIO MMIO transport supported by the device.
     pub version: MmioVersion,

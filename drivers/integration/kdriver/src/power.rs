@@ -7,7 +7,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use driver_base::{DriverError, DriverResult};
-use kdevice::{DeviceDriver, DeviceIdentity, DeviceLocation, DeviceObject};
+use kdevice::{BindingRef, DeviceIdentity, DeviceLocation, DeviceObject, DriverObject};
 use pci::{Cam, DeviceFunction, PciBus, PciConfigAccess};
 
 /// Returns the boot-discovered ACPI S3 package without evaluating AML in PM.
@@ -25,7 +25,8 @@ struct PciState {
 
 struct Participant {
     device: Arc<DeviceObject>,
-    driver: Arc<dyn DeviceDriver>,
+    driver: Arc<DriverObject>,
+    binding: BindingRef,
     depth: usize,
 }
 
@@ -65,9 +66,11 @@ impl PowerDevices {
                 continue;
             };
             let device = kdevice::find_device(record.id).ok_or(DriverError::BadState)?;
-            let driver = kdevice::find_driver(driver_id)
-                .ok_or(DriverError::BadState)?
-                .ops();
+            let driver = kdevice::find_driver(driver_id).ok_or(DriverError::BadState)?;
+            let binding = device.binding_ref().ok_or(DriverError::BadState)?;
+            if binding.driver_id() != driver_id {
+                return Err(DriverError::BadState);
+            }
             if !driver.supports_suspend() {
                 log::warn!("system sleep unsupported by driver {}", driver.name());
                 return Err(DriverError::Unsupported);
@@ -127,6 +130,7 @@ impl PowerDevices {
             devices.push(Participant {
                 device,
                 driver,
+                binding,
                 depth,
             });
         }
@@ -147,7 +151,11 @@ impl PowerDevices {
     /// Propagates the failing driver or config-space error.
     pub fn suspend(&mut self) -> DriverResult<()> {
         for participant in &self.devices {
-            participant.driver.suspend(participant.device.clone())?;
+            participant.device.power_transition(
+                &participant.binding,
+                &participant.driver,
+                false,
+            )?;
             self.suspended += 1;
         }
         if let Some(config) = &self.config {
@@ -186,7 +194,9 @@ impl PowerDevices {
         }
         while self.suspended != 0 {
             let participant = &self.devices[self.suspended - 1];
-            participant.driver.resume(participant.device.clone())?;
+            participant
+                .device
+                .power_transition(&participant.binding, &participant.driver, true)?;
             self.suspended -= 1;
         }
         if let Some(config) = &self.config {

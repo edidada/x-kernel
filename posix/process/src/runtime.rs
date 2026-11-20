@@ -13,9 +13,8 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
 use kprocess::{
-    AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction,
-    current_user_process_address_space, current_user_thread, poll_cpu_timers_for, process_exit,
-    process_signals, scheduler,
+    AsThread, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process_address_space,
+    current_user_thread, poll_cpu_timers_for, process_exit, process_signals, scheduler,
 };
 use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
 use ktask::{PreparedTaskEntry, TaskInner, current};
@@ -26,7 +25,7 @@ use linux_raw_sys::general::{
 };
 use linux_sysno::Sysno;
 use memspace::PageFaultOutcome;
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_ipc::SHM_MANAGER;
 
 /// Prepares a consuming user entry before process/thread creation starts.
@@ -86,7 +85,7 @@ pub(crate) fn run_user_thread_loop(
 
     if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
         // The child is already published; a failed TID writeback must not prevent it running.
-        let _ = tid.write_vm(thr.tid());
+        let _ = posix_types::UserPtr::from(tid).write_vm(thr.tid());
     }
 
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
@@ -97,9 +96,6 @@ pub(crate) fn run_user_thread_loop(
         let _ = ktask::freezer::checkpoint();
         let reason = uctx.run(
             || {
-                // Publish user mode only; the interval is settled by the next
-                // tick, context switch or query, not on this boundary.
-                thr.record_cpu_time_mode(CpuTimeState::User);
                 // SAFETY: UserContext masks IRQs and performs only audited
                 // RCU-free architecture transfer after this callback. The loop
                 // holds no RCU scope; task/thread references have independent ownership.
@@ -112,9 +108,6 @@ pub(crate) fn run_user_thread_loop(
                 unsafe { krcu::exit_user_quiescent() };
             },
         );
-        // The trap has been taken; the rest of this iteration is kernel work.
-        // Publish it for the next tick so long kernel work settles as stime.
-        thr.record_cpu_time_mode(CpuTimeState::Kernel);
         let mut runtime_action = UserThreadRuntimeAction::Continue;
 
         match reason {
@@ -131,6 +124,8 @@ pub(crate) fn run_user_thread_loop(
                 if outcome.is_retryable() {
                     ktask::check_preempt_pending();
                     continue;
+                } else if outcome == PageFaultOutcome::OutOfMemory {
+                    kill_current_process_for_oom(addr.as_usize());
                 } else if !outcome.is_resolved() {
                     // Linux distinguishes backing-store rejection from a
                     // protection or unmapped-address fault through si_code.
@@ -229,7 +224,7 @@ pub(crate) fn run_user_thread_loop(
 /// Returns whether the user-return tail has work beyond a plain re-entry.
 ///
 /// Packs the independent lock-free projections into one probe: a deliverable
-/// signal, an interrupted task, an armed CPU timer, a pending reschedule, a
+/// signal, an interrupted task, pending CPU-timer work, a pending reschedule, a
 /// signal-return restart decision, and a syscall restart errno. A `false`
 /// result lets the loop skip signal scanning, timer polling, the scheduling
 /// checkpoint and restart handling. Deferred RCU cleanup is not skipped: the
@@ -242,21 +237,21 @@ fn syscall_return_has_work(
     runtime_action != UserThreadRuntimeAction::Continue
         || thr.signal_manager().may_have_signal()
         || current().is_interrupted()
-        || thr.has_armed_cpu_timers()
+        || thr.has_pending_cpu_timer_work()
         || ktask::needs_resched()
         || uctx.syscall_restart_error().is_some()
 }
 
 /// Robust futex list node for robust mutexes.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, AnyBitPattern)]
+#[derive(Debug, Copy, Clone, AnyBitPattern, posix_types::UserRead)]
 struct RobustList {
     next: *mut RobustList,
 }
 
 /// Head of a robust futex list with pending operation state.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, AnyBitPattern)]
+#[derive(Debug, Copy, Clone, AnyBitPattern, posix_types::UserRead)]
 struct RobustListHead {
     list: RobustList,
     futex_offset: c_long,
@@ -277,8 +272,8 @@ fn decode_robust_pointer(pointer: *mut RobustList) -> (*mut RobustList, bool) {
 ///
 /// Layout matches the Linux robust-futex ABI: TID in the low bits, plus
 /// `FUTEX_OWNER_DIED` / `FUTEX_WAITERS` in the high bits.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RobustFutexWord(u32);
 
 impl RobustFutexWord {
@@ -349,7 +344,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     // SAFETY: `head` comes from the task's registered robust-list head, and we
     // only take the address of its embedded sentinel field for list termination checks.
     let end_ptr = unsafe { &raw const (*head).list };
-    let Some(head) = head.read_vm().ok() else {
+    let Some(head) = posix_types::UserConstPtr::from(head).read_vm().ok() else {
         return;
     };
     let mut entry = head.list.next;
@@ -362,7 +357,11 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
         if core::ptr::eq(entry_address, end_ptr.cast_mut()) {
             break;
         }
-        let Some(next_entry) = entry_address.read_vm().map(|node| node.next).ok() else {
+        let Some(next_entry) = posix_types::UserConstPtr::from(entry_address.cast_const())
+            .read_vm()
+            .map(|node| node.next)
+            .ok()
+        else {
             break;
         };
         if entry_address != pending_address
@@ -559,7 +558,10 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     kfutex::global_table().exit_pi(&curr.clone());
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
-    if clear_child_tid.write_vm(0).is_ok() {
+    if posix_types::UserPtr::from(clear_child_tid)
+        .write_vm(0)
+        .is_ok()
+    {
         let key = process.address_space().and_then(|address_space| {
             let address_space = address_space.lock();
             kfutex::FutexKey::resolve(&address_space, clear_child_tid as usize, false)
@@ -581,14 +583,12 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     // publish process completion while a sibling still owns descriptors.
     thr.files().exit_files();
     thr.detach_cgroup();
+    // Membership removal hands this thread's raw user/system and scheduler
+    // runtime to the group totals under the membership lock, reserves the
+    // sole last-thread continuation and retires the global TID. The last
+    // thread's handoff completes in `complete_process_exit` after cleanup,
+    // before the parent can observe it.
     let is_last_thread = process_exit::finish_thread_exit(process, &curr, exit_code);
-
-    // Membership removal reserves the sole last-thread continuation and retires
-    // the global TID. Close its accounting interval before process cleanup and
-    // parent-visible completion; the current runtime remains installed.
-    thr.finalize_cpu_time();
-    let (thread_utime, thread_stime) = thr.sample_cpu_time();
-    process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
     if is_last_thread {
         #[cfg(feature = "tee")]
@@ -613,6 +613,9 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
         if let Err(err) = process.exit_fs() {
             error!("exit_fs on process exit failed: {err:?}");
         }
+        // Release the namespace proxy in the exiting task's context. Leaving
+        // it for ProcessRuntime::drop can run netns teardown from IRQ/reclaim
+        // context after the task object is freed.
         if let Err(err) = process.exit_namespaces() {
             error!("exit_namespaces on process exit failed: {err:?}");
         }
@@ -642,6 +645,22 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
             let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
     }
+}
+
+// Without reclaim or global victim selection, terminate the allocating
+// process so its MM can release backing. A valid exhausted mapping is not an
+// unmapped address, and retrying without reclaim cannot make progress.
+fn kill_current_process_for_oom(address: usize) {
+    warn!(
+        "page-fault OOM: killing pid={} at {address:#x}",
+        current_user_thread().pid()
+    );
+    // Ordinary SIGKILL has no receipt and PendingSignals queues only its bit,
+    // without allocating a node, so signal admission cannot return QueueFull.
+    // Released signal configuration instead makes raise_signal_fatal exit
+    // directly. This current-user-thread call therefore has no error result.
+    raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGKILL))
+        .expect("ordinary SIGKILL admission requires no signal queue storage");
 }
 
 /// Queues a fatal signal for the current thread or exits the thread.

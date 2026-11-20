@@ -336,6 +336,53 @@ pub trait FileOperations: Send + Sync + 'static {
         file.inode().file_locks()?.apply(request, is_blocking)
     }
 
+    /// Applies a file lease; the `generic_setlease` default for filesystems
+    /// whose lease semantics are the inode lock context's. Filesystems with
+    /// private lease backings (delegations) override this method.
+    ///
+    /// `fd` identifies the requestor's descriptor in the break SIGIO;
+    /// `self_wcount`/`self_rcount` are the requestor's own share of the inode
+    /// open counts (Linux `lease_open_conflict`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for inodes that hold no leases, and forwards
+    /// `WouldBlock` (`EAGAIN`) conflicts from the lease context.
+    fn set_lease(
+        &self,
+        file: &VfsFile,
+        request: &crate::FileLock,
+        fd: i32,
+        self_wcount: usize,
+        self_rcount: usize,
+    ) -> VfsResult<()> {
+        if file.node_type() != NodeType::RegularFile {
+            // Linux generic_setlease accepts only regular files and
+            // directories; the fcntl entry already rejects directories, and
+            // no in-kernel caller sets a lease on a special file.
+            return Err(VfsError::InvalidInput);
+        }
+        if request.kind() == crate::FileLockType::Unlock
+            && file.inode().existing_file_locks().is_none()
+        {
+            // Linux generic_delete_lease with no lock context: nothing to remove.
+            return Err(VfsError::WouldBlock);
+        }
+        file.inode()
+            .file_locks()?
+            .set_lease(file.inode(), request, fd, self_wcount, self_rcount)
+    }
+
+    /// Reports the lease held by this open file description; the
+    /// `__fcntl_getlease` default. An inode without a lock context holds none.
+    fn get_lease(&self, file: &VfsFile) -> VfsResult<crate::FileLockType> {
+        Ok(file
+            .inode()
+            .existing_file_locks()
+            .map(|context| context.get_lease(crate::FileLockOwner::ofd(file)))
+            .unwrap_or(crate::FileLockType::Unlock))
+    }
+
     /// Flushes an open file description.
     fn flush(&self, _file: &VfsFile) -> VfsResult<()> {
         Ok(())
@@ -714,16 +761,70 @@ impl VfsFileBuilder {
                     | NodeType::Fifo
                     | NodeType::Socket
             );
-        let _write_guard = if holds_write_access {
-            Some(location.path().lock_writable_mount()?)
-        } else {
-            None
-        };
+        // Linux's open path admits a writer with a transient
+        // `mnt_want_write()` in `may_open()` that is released long before
+        // `do_dentry_open()` publishes `i_writecount` (`file_get_write_access`
+        // then only checks the mount's read-only state; it never sleeps). Our
+        // write admission is a blocking lock and a read-only remount samples
+        // the inode write counts, so validate admission transiently here,
+        // before publishing any count: an open still waiting for admission
+        // must not show up as an active writer to a pending remount.
+        if holds_write_access {
+            let _admission = location.path().lock_writable_mount()?;
+        }
         if holds_write_access {
             location.inode().acquire_write_access();
             self.mode.insert(FMode::WRITER);
         }
+        // Linux `i_readcount_inc` for read-only opens, then `break_lease`
+        // before the filesystem open: the count is published first so a
+        // concurrent lease request either sees it or its break below wakes
+        // it (both orders are serialized on the inode lock state mutex).
+        let holds_read_access =
+            self.mode.contains(FMode::READ) && !self.mode.contains(FMode::WRITE);
+        if holds_read_access {
+            location.inode().acquire_read_access();
+        }
+        // Break leases outside the superblock write-admission guard. A
+        // conflicting lease can make this wait up to `LEASE_BREAK_TIME`,
+        // and Linux performs the open-path `break_lease` without holding
+        // mount/superblock write admission, so an unprivileged lease holder
+        // must not be able to stall remount/umount through our read guard.
+        // Publishing the counts first keeps lease requests atomic against
+        // this open either way; the admission guard taken below is re-validated
+        // after the break, so a read-only remount that won the intervening
+        // window fails this open instead of proceeding.
+        let break_result = location.inode().break_leases(
+            self.mode.contains(FMode::WRITE),
+            self.flags.contains(OpenFlags::NONBLOCK),
+        );
+        if let Err(error) = break_result {
+            if holds_read_access {
+                location.inode().release_read_access();
+            }
+            if holds_write_access {
+                location.inode().release_write_access();
+            }
+            return Err(error);
+        }
+        let _write_guard = if holds_write_access {
+            match location.path().lock_writable_mount() {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    if holds_read_access {
+                        location.inode().release_read_access();
+                    }
+                    location.inode().release_write_access();
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         if let Err(error) = operations.open(location.inode().as_ref(), &mut self) {
+            if holds_read_access {
+                location.inode().release_read_access();
+            }
             if holds_write_access {
                 location.inode().release_write_access();
             }
@@ -736,6 +837,9 @@ impl VfsFileBuilder {
                 | OpenFlags::TRUNCATE,
         );
         if let Err(error) = self.mark_opened() {
+            if holds_read_access {
+                location.inode().release_read_access();
+            }
             if holds_write_access {
                 location.inode().release_write_access();
             }
@@ -829,6 +933,7 @@ impl VfsFileBuilder {
             slots: Mutex::new(slots),
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
+            dir_position: Mutex::new(()),
             readahead: Mutex::new(readahead),
             writeback_error_cursor: Mutex::new(writeback_error_cursor),
             filesystem_error_cursor: Mutex::new(filesystem_error_cursor),
@@ -849,6 +954,10 @@ pub struct VfsFile {
     slots: Mutex<FileSlots>,
     flags: AtomicU32,
     position: Mutex<u64>,
+    /// Serializes directory position operations. `position` remains the sole
+    /// f_pos storage; this lock only prevents iterate/seek from interleaving
+    /// their read-execute-commit sequences.
+    dir_position: Mutex<()>,
     pub(crate) readahead: Mutex<crate::file_ra::FileRaState>,
     writeback_error_cursor: Mutex<u64>,
     filesystem_error_cursor: Mutex<u64>,
@@ -874,6 +983,10 @@ impl VfsFile {
     ) -> VfsResult<Arc<Self>> {
         let mut file = VfsFileBuilder::cloned_from(self, flags, open_flags, f_op);
         file.mark_opened()?;
+        // Linux file_init_path accounting for opens built outside do_dentry_open.
+        if flags.contains(FMode::READ) && !flags.contains(FMode::WRITE) {
+            self.inode().acquire_read_access();
+        }
         file.finish()
     }
 
@@ -891,6 +1004,10 @@ impl VfsFile {
         let mut file = VfsFileBuilder::cloned_from(self, flags, open_flags, f_op);
         file.set_private_data(private_data);
         file.mark_opened()?;
+        // Linux file_init_path accounting for opens built outside do_dentry_open.
+        if flags.contains(FMode::READ) && !flags.contains(FMode::WRITE) {
+            self.inode().acquire_read_access();
+        }
         file.finish()
     }
 
@@ -973,7 +1090,7 @@ impl VfsFile {
         self.inode().check_mutable()?;
         // Timestamp policy may acquire filesystem locks; keep it outside the folio.
         self.file_update_time()?;
-        self.mapping().page_mkwrite(
+        let result = self.mapping().page_mkwrite(
             index,
             |pos, len| {
                 if let Some(ops) = self.operations().mapping_operations() {
@@ -982,7 +1099,11 @@ impl VfsFile {
                 Ok(())
             },
             update_mapping,
-        )
+        );
+        if result.is_ok() {
+            self.inode().bump_content_generation();
+        }
+        result
     }
 
     /// Waits for the resources needed by a shared write fault without an MM lock.
@@ -1082,8 +1203,18 @@ impl VfsFile {
     /// Descriptor-based truncation uses the authority established by the open
     /// file description and therefore does not repeat pathname DAC checks.
     pub fn truncate(&self, len: u64) -> VfsResult<()> {
+        let cred = self.cred();
+        self.truncate_as(len, cred)
+    }
+
+    /// Truncates using `cred`, the task performing the truncation.
+    ///
+    /// Linux `do_truncate()` revokes set-ID bits and file capabilities with
+    /// the current task's `CAP_FSETID`, so `ftruncate(2)` passes its caller's
+    /// credential rather than the opener's.
+    pub fn truncate_as(&self, len: u64, cred: &Cred) -> VfsResult<()> {
         self.verify_mode(FMode::WRITE)?;
-        self.path().truncate_opened(len)
+        self.path().truncate_opened(len, cred)
     }
 
     fn verify_io_area(&self, pos: u64, count: usize) -> VfsResult<()> {
@@ -1099,16 +1230,22 @@ impl VfsFile {
     }
 
     fn verify_read_area(&self, pos: u64, count: usize) -> VfsResult<()> {
-        self.verify_mode(FMode::READ)?;
-        if !self.mode().contains(FMode::CAN_READ) {
+        let mode = self.mode();
+        if !mode.contains(FMode::READ) || mode.contains(FMode::PATH) {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        if !mode.contains(FMode::CAN_READ) {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)
     }
 
     fn verify_write_area(&self, pos: u64, count: usize) -> VfsResult<()> {
-        self.verify_mode(FMode::WRITE)?;
-        if !self.mode().contains(FMode::CAN_WRITE) {
+        let mode = self.mode();
+        if !mode.contains(FMode::WRITE) || mode.contains(FMode::PATH) {
+            return Err(VfsError::BadFileDescriptor);
+        }
+        if !mode.contains(FMode::CAN_WRITE) {
             return Err(VfsError::InvalidInput);
         }
         self.verify_io_area(pos, count)?;
@@ -1161,10 +1298,37 @@ impl VfsFile {
         self.write_iter(&mut iter)
     }
 
+    /// Revokes privileges a content change would otherwise leave behind.
+    ///
+    /// Transfer paths that bypass [`Self::write_iter_from`] — native
+    /// `copy_file_range` backends in particular — call this before modifying
+    /// the target, exactly as Linux `vfs_copy_file_range()` calls
+    /// `file_remove_privs()` on the output.
+    pub fn file_remove_privs(&self) -> VfsResult<()> {
+        let cred = self.cred();
+        self.file_remove_privs_as(cred)
+    }
+
+    /// Revokes privileges using `cred`, the task performing the transfer.
+    ///
+    /// Linux `file_remove_privs()` tests the current task's effective
+    /// `CAP_FSETID` and group membership, so transfer syscalls pass their
+    /// caller's credential rather than the opener's.
+    pub fn file_remove_privs_as(&self, cred: &Cred) -> VfsResult<()> {
+        let _write_guard = self.path().lock_writable_mount()?;
+        self.path().file_remove_privs(cred)
+    }
+
     /// Writes to this open file using a caller-owned position.
     pub fn write_from(&self, buf: &[u8], pos: &mut u64) -> VfsResult<usize> {
         let mut iter = iov_iter_kvec_source(buf);
         self.write_iter_from(&mut iter, pos)
+    }
+
+    /// Writes using `cred` for write-time privilege revocation.
+    pub fn write_from_as(&self, buf: &[u8], pos: &mut u64, cred: &Cred) -> VfsResult<usize> {
+        let mut iter = iov_iter_kvec_source(buf);
+        self.write_iter_from_as(&mut iter, pos, cred)
     }
 
     /// Writes from an iterator, locking and advancing `f_pos` only for non-streams.
@@ -1178,38 +1342,74 @@ impl VfsFile {
 
     /// Writes to this open file from an iterator source using a caller-owned position.
     pub fn write_iter_from(&self, iter: &mut IovIterSource<'_>, pos: &mut u64) -> VfsResult<usize> {
+        let cred = self.cred();
+        self.write_iter_from_as(iter, pos, cred)
+    }
+
+    /// Writes from an iterator using `cred` for write-time privilege checks.
+    ///
+    /// Linux `file-remove-privs` consults the writing task's effective
+    /// `CAP_FSETID` (`capable()`), not the credential captured when the file
+    /// was opened, so syscall entry points pass the current credential here.
+    pub fn write_iter_from_as(
+        &self,
+        iter: &mut IovIterSource<'_>,
+        pos: &mut u64,
+        cred: &Cred,
+    ) -> VfsResult<usize> {
         let _write_guard = if self.mode().contains(FMode::WRITER) {
             Some(self.path().lock_writable_mount()?)
         } else {
             None
         };
-        if self.is_stream() {
-            self.verify_write_area(0, iter.count())?;
-            let mut iocb = Kiocb::new(self, 0);
-            self.operations().write_iter(&mut iocb, iter)
-        } else if self.flags().contains(OpenFlags::APPEND)
-            && self.inode().node_type() != NodeType::BlockDevice
-        {
-            // Block devices keep the caller's position for appends: Linux
-            // `blkdev_write_iter` writes at `ki_pos` and never repositions to
-            // the capacity end like regular-file append handling does.
-            let end = self.size();
-            self.verify_write_area(end, iter.count())?;
-            let mut iocb = Kiocb::new(self, end);
-            let written = self.operations().write_iter(&mut iocb, iter)?;
-            if written != 0 {
-                *pos = iocb.ki_pos();
-            }
-            Ok(written)
+        // Block devices keep the caller's position for appends: Linux
+        // `blkdev_write_iter` writes at `ki_pos` and never repositions to the
+        // capacity end like regular-file append handling does.
+        let appends_at_end = self.flags().contains(OpenFlags::APPEND)
+            && self.inode().node_type() != NodeType::BlockDevice;
+        let start = if self.is_stream() {
+            0
+        } else if appends_at_end {
+            self.size()
         } else {
-            self.verify_write_area(*pos, iter.count())?;
-            let mut iocb = Kiocb::new(self, *pos);
-            let written = self.operations().write_iter(&mut iocb, iter)?;
-            if written != 0 {
-                *pos = iocb.ki_pos();
-            }
-            Ok(written)
+            *pos
+        };
+        // Reject an impossible range before touching metadata.
+        self.verify_write_area(start, iter.count())?;
+        // Linux runs its generic write checks before `file_remove_privs()`, so
+        // a write the filesystem rejects with `EFBIG` must not revoke the
+        // file's privileges first. A position at or beyond the size limit is
+        // always such a write; leave the decision (and any earlier denial,
+        // such as an immutable inode's `EPERM`) to the backend.
+        let beyond_size_limit =
+            self.inode().node_type() == NodeType::RegularFile && start >= self.max_file_size();
+        // Linux `vfs_write()` drops set-UID/set-GID bits and the file
+        // capability attribute before the filesystem sees the data, so a
+        // writable privileged executable cannot keep authority it no longer
+        // matches. The privilege lock covers the revocation and the backend
+        // write, so a concurrent `setxattr` cannot install a capability
+        // between them. An empty or doomed write changes no content and takes
+        // no revocation; it still reaches the backend so its own checks report
+        // as before.
+        let revokes_privileges =
+            iter.count() > 0 && !beyond_size_limit && self.mode().contains(FMode::WRITER);
+        let privilege_inode = revokes_privileges.then(|| self.inode());
+        let _privilege_guard = privilege_inode
+            .as_ref()
+            .map(|inode| inode.lock_privileges());
+        if revokes_privileges {
+            self.path().file_remove_privs_locked(cred)?;
         }
+        let mut iocb = Kiocb::new(self, start);
+        let written = self.operations().write_iter(&mut iocb, iter)?;
+        if written != 0 {
+            // Invalidate content-keyed consumers (the exec ELF header cache).
+            self.inode().bump_content_generation();
+        }
+        if !self.is_stream() && written != 0 {
+            *pos = iocb.ki_pos();
+        }
+        Ok(written)
     }
 
     pub(crate) fn file_accessed(&self) {
@@ -1238,18 +1438,26 @@ impl VfsFile {
     /// Requires sleepable task context with IRQs/preemption enabled, outside
     /// non-sleepable RCU sections and locks needed by reclaim, IO or filesystem
     /// callbacks. Directory implementations may allocate with the default
-    /// KERNEL policy. No position lock is held across the implementation call.
+    /// KERNEL policy.
+    ///
+    /// Directory iteration holds `dir_position` across reading f_pos, calling
+    /// the implementation and committing `ctx.pos()`, including error exits.
+    /// `position` itself is only held for the short read/commit steps; the
+    /// operation lock is what prevents another iterate or llseek from
+    /// interleaving with this sequence. Directory callbacks must not re-enter
+    /// iterate/llseek on the same open description.
     pub fn iterate_dir(&self, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
         if self.inode().node_type() != NodeType::Directory {
             return Err(VfsError::NotADirectory);
         }
         self.verify_mode(FMode::READ)?;
 
+        let _dir_position = self.dir_position.lock();
         ctx.set_pos(self.position());
-        let directory = self
-            .operations()
-            .dir_operations()
-            .ok_or(VfsError::NotADirectory)?;
+        let Some(directory) = self.operations().dir_operations() else {
+            self.set_position(ctx.pos());
+            return Err(VfsError::NotADirectory);
+        };
         let result = directory.iterate_shared(self, ctx);
         self.set_position(ctx.pos());
         result
@@ -1264,6 +1472,11 @@ impl VfsFile {
     }
 
     /// Locks this file's `f_pos`.
+    ///
+    /// This is the single position storage, but it is not the directory
+    /// operation lock. Directory position changes must go through
+    /// [`Self::iterate_dir`] or [`Self::llseek`], which hold `dir_position`.
+    /// Direct callers in production must not bypass that sequence.
     pub fn position_lock(&self) -> MutexGuard<'_, u64> {
         self.position.lock()
     }
@@ -1278,6 +1491,10 @@ impl VfsFile {
     }
 
     /// Sets this file's `f_pos`.
+    ///
+    /// Directory iteration is the only production caller; tests may use it
+    /// directly. Other production code must use [`Self::llseek`] so the
+    /// directory operation lock is respected.
     pub fn set_position(&self, position: u64) {
         *self.position_lock() = position;
     }
@@ -1382,6 +1599,56 @@ impl VfsFile {
         }
     }
 
+    /// Requests a file lease on this open file description; Linux
+    /// `vfs_setlease` plus the `fcntl(F_SETLEASE)` request construction.
+    ///
+    /// The lease belongs to the open file description (Ofd identity), matching
+    /// Linux using the filp as `fl_owner`. `fd` is reported in the break SIGIO
+    /// and refreshed on every call (Linux `lm_setup`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `LinuxError::EACCES` unless the caller owns the inode or holds
+    /// `CAP_LEASE`; forwards `InvalidInput` from the lease dispatch and
+    /// `WouldBlock` (`EAGAIN`) for open-count or lease conflicts.
+    pub fn set_lease(
+        &self,
+        cred: &Cred,
+        fd: i32,
+        pid: i32,
+        kind: crate::FileLockType,
+    ) -> VfsResult<()> {
+        let inode = self.inode();
+        if cred.fsuid() != inode.metadata().uid && !cred.has_cap(kcred::CAP_LEASE) {
+            return Err(LinuxError::EACCES.into());
+        }
+        // Linux lease_open_conflict: this filp's own contribution to the inode
+        // open counts, as seen by the write-lease exclusivity check.
+        let mode = self.mode();
+        let (self_wcount, self_rcount) = if mode.contains(FMode::WRITE) {
+            (1, 0)
+        } else if mode.contains(FMode::READ) {
+            (0, 1)
+        } else {
+            (0, 0)
+        };
+        let request = crate::FileLock::new(
+            crate::FileLockOwner::ofd(self),
+            pid,
+            kind,
+            0,
+            0, // whole file
+        )?;
+        self.operations()
+            .set_lease(self, &request, fd, self_wcount, self_rcount)
+    }
+
+    /// Reports the lease held by this open file description; Linux
+    /// `fcntl(F_GETLEASE)`. Pending break targets report their post-break type.
+    pub fn get_lease(&self) -> VfsResult<crate::FileLockType> {
+        self.operations().get_lease(self)
+    }
+
     /// Removes all record locks for an owner. Descriptor close supplies the
     /// files owner; final release supplies the OFD owner. Cleanup cannot fail
     /// to the caller and does not allocate in the local lock implementation.
@@ -1439,10 +1706,20 @@ impl VfsFile {
     }
 
     /// Changes this open file offset.
+    ///
+    /// Directory seeks take the same `dir_position` operation lock as
+    /// [`Self::iterate_dir`], so a seek cannot land between iteration's f_pos
+    /// read and commit. The callback still owns the actual position update.
     pub fn llseek(&self, offset: i64, whence: i32) -> VfsResult<u64> {
         if !self.mode().contains(FMode::LSEEK) {
             return Err(VfsError::from(LinuxError::ESPIPE));
         }
+        let is_directory = self.inode().node_type() == NodeType::Directory;
+        let _dir_position = if is_directory {
+            Some(self.dir_position.lock())
+        } else {
+            None
+        };
         self.operations().llseek(self, offset, whence)
     }
 
@@ -1475,16 +1752,43 @@ impl VfsFile {
     /// keeps a batch from carrying a stale size snapshot past a disk-size
     /// advance.
     pub fn fallocate(&self, flags: FallocateFlags, offset: u64, len: u64) -> VfsResult<()> {
+        let cred = self.cred();
+        self.fallocate_as(flags, offset, len, cred)
+    }
+
+    /// [`Self::fallocate`] with the calling task's credential.
+    ///
+    /// Linux `vfs_fallocate()` calls `file_modified()` after a successful
+    /// backend call, so the privilege revocation uses the current task, not
+    /// the descriptor's opener.
+    pub fn fallocate_as(
+        &self,
+        flags: FallocateFlags,
+        offset: u64,
+        len: u64,
+        cred: &Cred,
+    ) -> VfsResult<()> {
         let _write_guard = self.path().lock_writable_mount()?;
         let inode = self.inode();
         let operations = self.operations();
         if !operations.supported_fallocate_modes().contains(flags) {
             return Err(VfsError::from(LinuxError::EOPNOTSUPP));
         }
+        let _privilege_guard = inode.lock_privileges();
         let _data_guard = inode.lock_data();
+        // Recheck under the data lock: a concurrent `FS_IOC_SETFLAGS` also
+        // takes it, so IMMUTABLE cannot be installed between the check and the
+        // first backend write.
         inode.check_mutable()?;
+        // Linux `setattr_prepare()` removes inherited privileges before the
+        // filesystem commits any content or size change; revoke before the
+        // backend can partially allocate and then fail.
+        self.path().file_remove_privs_locked(cred)?;
         let _invalidate_guard = self.mapping().lock_invalidate_exclusive();
-        operations.fallocate(self, flags, offset, len)
+        let result = operations.fallocate(self, flags, offset, len);
+        // A failed backend may still have committed a prefix (kext4).
+        inode.bump_content_generation();
+        result
     }
 
     /// Returns this file's backend fallocate capability mask.
@@ -1542,6 +1846,13 @@ impl VfsFile {
 impl Drop for VfsFile {
     fn drop(&mut self) {
         self.remove_posix_locks(crate::FileLockOwner::ofd(self));
+        // locks_remove_file also drops this description's lease; the error
+        // only reports that no lease was held.
+        if !self.is_path()
+            && let Some(locks) = self.inode().existing_file_locks()
+        {
+            let _ = locks.delete_lease(crate::FileLockOwner::ofd(self));
+        }
         let _ = self.operations().flock(
             self,
             &crate::FileLock::unlock(crate::FileLockOwner::flock(self)),
@@ -1556,6 +1867,13 @@ impl Drop for VfsFile {
         };
         if old_mode.contains(FMode::WRITER) {
             self.inode().release_write_access();
+        }
+        // put_file_access: a read-only opened file released its i_readcount.
+        if old_mode.contains(FMode::OPENED)
+            && old_mode.contains(FMode::READ)
+            && !old_mode.contains(FMode::WRITE)
+        {
+            self.inode().release_read_access();
         }
 
         if let Err(err) = release_result {

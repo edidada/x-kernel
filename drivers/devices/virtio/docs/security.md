@@ -27,6 +27,8 @@ Upper subsystems (block / network / display / input / vsock / 9p)
 │  │ net.rs: NetBuf::from_handle()                           │ │
 │  │ net.rs: receive_begin() / receive_complete()            │ │
 │  │ net.rs: transmit_begin() / transmit_complete()          │ │
+│  │ contracts/vsock: TX buffer slices                       │ │
+│  │ socket.rs: transmit begin/complete                      │ │
 │  │ modules: unsafe impl Send/Sync                          │ │
 │  └─────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
@@ -56,14 +58,15 @@ disable the hardware interrupt, while masking the shared line would also block
 completion notifications for other devices, including blk. Command updates
 preserve all other bits so memory access and DMA capability remain enabled.
 
-The PCI display scanout path also polls only through `transfer_to_host_2d`,
-`set_scanout`, and `resource_flush`, and it registers no IRQ handler. Probing
-must therefore disable INTx for this function as well; otherwise the host holds
-the level-triggered line high with no one to acknowledge it, and graphics load
-repeatedly traps. Display never installs an interrupt owner afterward, so the
-mask is final. This differs from input, which masks first and re-enables the
-line after registering a handler. Command updates likewise set only
-`INTERRUPT_DISABLE`, preserve all other bits, and never mask the shared line.
+The PCI display function enables INTx after registering its shared handler.
+The handler returns `IrqEvent::NOT_HANDLED` when the device ISR is empty.
+Only the submitting task recycles a used chain, after matching its token,
+while its input and output buffers are still borrowed. A mismatched ID retires
+both queues: the driver waits for device reset, detaches the submitted chain
+using the original buffers, and rejects further commands.
+Unbinding drains that task before withdrawing IRQ delivery. An unresponsive
+device can stall an outstanding command or reset acknowledgement; a timeout alone would not make it
+safe to release buffers still owned by the device.
 
 `virtio` is a classic hardware or virtual-hardware boundary module. It directly
 connects VirtIO devices exposed by the VMM, platform transports, and the
@@ -224,12 +227,12 @@ or drop order.
   other mapping entry points and drivers that do not claim are outside this
   guarantee.
 
-### 2. VirtIO GPU Scanout Resource Backing (`gpu.rs:166-188`)
+### 2. VirtIO GPU Scanout Resource Backing (`gpu.rs:309-393`)
 
 The `DisplayDevice` trait no longer exposes `fb()` or a `FrameBuffer` type, and
 the driver no longer constructs slices from a raw framebuffer pointer. GPU pixel
-backing is allocated by a DRM dumb buffer or fbdev shadow buffer and passed as a
-physical address and length to `create_scanout_resource()`. The virtio-gpu
+backing is allocated by a DRM dumb buffer or fbdev shadow buffer and passed in a
+`ScanoutWindow` to `create_scanout_resource()`. The virtio-gpu
 driver only attaches that backing to a 2D resource and later submits
 `TRANSFER_TO_HOST_2D`, `SET_SCANOUT`, and `RESOURCE_FLUSH` on page flip.
 
@@ -245,14 +248,17 @@ driver only attaches that backing to a 2D resource and later submits
 
 - DRM dumb-buffer lifetime management.
 
-The `scanout` field (`ScanoutBinding`) of `VirtIoGpuDev` caches only the confirmed resource ID and
-rectangle for scanout 0 and shares the same GPU-state lock as control-queue
-operations. Each presentation still submits `TRANSFER_TO_HOST_2D` first and
-`RESOURCE_FLUSH` last; `SET_SCANOUT` is sent only when the resource or rectangle
-changes. The driver publishes cached state only after that command succeeds and
-clears it only after resource unref succeeds. A device error therefore cannot
-turn an unconfirmed binding into an active binding or let a destroyed resource
-remain eligible for reuse.
+The `VirtIoGpuInner::scanout` field (`ScanoutBinding`) caches only the confirmed
+resource ID and rectangle for scanout 0. It is protected by `GpuState::inner`,
+the sleepable operation mutex reached through `VirtIoGpuDev.0`, together with
+the control queues. A guest-rendered presentation submits `TRANSFER_TO_HOST_2D`
+first; a host-rendered presentation skips that transfer. Both submit
+`RESOURCE_FLUSH` last, and `SET_SCANOUT` is sent only when the resource or
+rectangle changes. The driver publishes cached state only after `SET_SCANOUT`
+succeeds, clears it on any presentation error, and clears a matching binding
+after successful resource unref. A device error therefore cannot turn an
+unconfirmed binding into an active binding or let a destroyed resource remain
+eligible for reuse.
 
 ### 3. `receive_begin` In `VirtIoNetDev::try_new()` (`net.rs:263-278`)
 
@@ -363,12 +369,42 @@ is correct.
 - `VirtIoNetDev::recv()`, where the token and buffer come from the same array
   index.
 
-### 8. `unsafe impl Send/Sync` In Device Modules (`blk.rs`, `gpu.rs`, `input.rs`, `net.rs`, `socket.rs`, `virtio_9p.rs`)
+### 8. Vsock TX Buffer Slices And Descriptor Completion
+(`contracts/vsock`, `socket.rs`)
+
+`VsockTxBuf::header()`, `payload()`, `frame()`, and their mutable variants
+construct slices from the buffer's fixed pool slot. The virtio adapter passes
+`frame()` to `transmit_begin()`, and `reclaim_completed_tx_locked()` passes the
+same frame to `transmit_complete()`.
+
+**Invariants:**
+
+- Each `VsockTxBuf` exclusively owns one fixed pool slot.
+- The pool never reallocates its backing `Vec` after construction.
+- Header and payload lengths are validated against the slot capacity before a
+  slice is formed.
+- The packet remains in `tx_bufs[token]` from submission until completion is
+  reclaimed.
+- The descriptor token used for completion is the same token returned by
+  `transmit_begin()`, and its buffer is the packet stored at that index.
+
+**Why it is safe:** Ownership prevents aliasing of the slot while a packet is
+being encoded or transmitted. The in-flight table keeps the owning handle and
+therefore its pool storage alive for the entire device-use interval. A failed
+completion restores the packet to its token slot before returning the error.
+
+**Callers:**
+
+- `VsockTxBuf` slice accessors in `drivers/contracts/vsock`.
+- `VirtIoVsockDev::queue_tx_buf()` and
+  `VirtIoVsockDev::reclaim_completed_tx_locked()`.
+
+### 9. `unsafe impl Send/Sync` In Device Modules (`blk.rs`, `input.rs`, `net.rs`, `socket.rs`, `virtio_9p.rs`)
 
 ```rust
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
 unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
-// Similarly for VirtIoGpuDev, VirtIoInputState, VirtIoNetDev,
+// Similarly for VirtIoInputState, VirtIoNetDev,
 // VirtIoVsockDev, and VirtIo9pDev.
 ```
 
@@ -378,9 +414,11 @@ contracts.
 
 **Why it is safe:**
 
-- blk, gpu, socket, and virtio_9p: every access to the underlying device goes
-  through the adapter's internal `SpinNoIrq`, so shared `&self` access cannot
-  race.
+- blk, socket, and virtio_9p: every access to the underlying device goes
+  through the adapter's internal `SpinNoIrq`, so shared `&self` access cannot race.
+- gpu: The compiler derives `Send` and `Sync` from the transport and lock
+  types. Task operations hold the sleepable mutex, and the IRQ handler
+  accesses registers under `SpinNoIrq`.
 - input: `VirtIoInputState` manually implements `Send` and `Sync`; every access
   to the underlying input device is serialized by its `SpinNoIrq`. The
   notification callback is protected by a separate `SpinNoIrq`, is invoked
@@ -388,8 +426,11 @@ contracts.
   re-enter the driver.
 - net: Internal `SpinNoIrq` state protects all shared access, making
   `Send`/`Sync` safe under the constructor and handle-lifetime contracts.
+- vsock: The adapter protects `VirtIOSocket` with `SpinNoIrq` and its TX
+  free/in-flight tables with `SpinNoPreempt`. Buffer slices come from a
+  per-device fixed pool whose slots are exclusively owned by one `VsockTxBuf`.
 
-### 9. VirtIO Queue Publication And Detach Contracts (`vendor/kvirtiodrivers/src/queue.rs`, `queue/owning.rs`, `device/socket/vsock.rs`)
+### 10. VirtIO Queue Publication And Detach Contracts (`vendor/kvirtiodrivers/src/queue.rs`, `queue/owning.rs`, `device/socket/vsock.rs`)
 
 ```rust
 pub unsafe fn add_notify_wait_pop_checked<'a>(
@@ -449,7 +490,7 @@ allocation, and `fill` only leaks a `Box` after `add` succeeded.
 | Type | `Send` condition | `Sync` condition |
 | --- | --- | --- |
 | `VirtIoBlkDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
-| `VirtIoGpuDev<H, T>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
+| `VirtIoGpuDev<H, T, W>` | Derived from the shared GPU state (`T: Transport + Send`, `W: GpuHost`) | Derived from the operation mutex and IRQ-safe register lock |
 | `VirtIoInputDev<H, T>` | `Arc<VirtIoInputState<H, T>>`; state manually implements `Send` | `Arc<VirtIoInputState<H, T>>`; state manually implements `Sync` |
 | `VirtIoNetDev<H, T, QS>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
 | `VirtIoVsockDev<H, T, RX_BUF_SIZE>` | `H: Hal, T: Transport` (manual impl) | `H: Hal, T: Transport` (manual impl) |
@@ -462,6 +503,10 @@ All manual `Send` and `Sync` implementations rely on these guarantees:
   probing.
 - Network devices protect the shared `InnerDev` with `SpinNoIrq`, making the
   IRQ callback mutually exclusive with normal paths.
+- The vsock adapter protects `VirtIOSocket` with `SpinNoIrq` and its TX packet
+  free/in-flight tables with `SpinNoPreempt`. Packet slices come from a
+  per-device fixed pool whose slots are exclusively owned by one `VsockTxBuf`
+  handle at a time; the pool storage is never resized after construction.
 
 ## Threat Analysis
 
@@ -473,7 +518,7 @@ All manual `Send` and `Sync` implementations rely on these guarantees:
 | T-04 | Scanout-resource backing dangles | High | Backing is released before `destroy_scanout_resource` | DRM/fbdev retain the backing through `PageRef` from attachment through destruction; destruction failures are logged. |
 | T-05 | IRQ context and normal paths concurrently access a network device | Medium | An IRQ callback runs concurrently with `send` or `recv` | `InnerDev` is protected by `SpinNoIrq`; every access is mutually exclusive. |
 | T-06 | The device is used after IRQ registration fails | Medium | `register_virtio_net_irq` returns `ResourceBusy` | `try_new()` propagates the error and does not create the device. |
-| T-07 | `free_tx_bufs` is exhausted and transmission fails | Low | All TX buffers are in flight | `alloc_tx_buf` returns `DriverError::NoMemory`; the upper layer waits for `recycle_tx` and retries. |
+| T-07 | `free_tx_bufs` is exhausted and transmission fails | Low | All TX buffers are in flight | `alloc_tx_buf` returns `DriverError::WouldBlock`; the upper layer waits for `recycle_tx` and retries. |
 | T-08 | A rejected MMIO candidate is reset or otherwise modified during identification | Medium | Every enabled MMIO driver probes each `virtio,mmio` slot, including slots owned by another driver | `identify_mmio_device` uses `read_mmio_header`, which performs no write and constructs no transport; `open_mmio_transport` (whose `Drop` resets the device) runs only after an exact id match. |
 | T-09 | A malicious VMM returns an oversized `pkt_len` through a VirtIO device | High | `receive_complete` returns a packet length larger than the buffer capacity | `recv()` checks `hdr_len + pkt_len <= capacity` before writing `NetBuf` metadata and returns `DriverError::InvalidInput` on overflow; `NetBuf::set_payload_len` has a development-time `debug_assert`. |
 | T-10 | A malicious VMM returns a forged 9p response | Medium | Data returned by `request()` violates the 9p protocol | The upper 9p filesystem validates response format; this module does not parse response content. |
@@ -499,6 +544,7 @@ All manual `Send` and `Sync` implementations rely on these guarantees:
 | F-10 | Network RX event is lost | Both IRQ and task context call `ack_interrupt()`, and task context clears a newly arrived event | VirtIO RX stalls and the unhandled IRQ retriggers | TCP receive window drops to zero and host-to-guest traffic times out | 2 | When an IRQ is registered, only the handler calls `ack_interrupt()`; `recv()` consumes completed queue entries. Polling mode acknowledges from `recv()`. |
 | F-11 | A write is issued to an inherently read-only block device | An upper layer bypasses or has not yet established the block-device view | The write is rejected | The filesystem remains read-only and media is unmodified | 3 | Both polling and IRQ `write_block()` paths return `DriverError::ReadOnly` before submission. |
 | F-12 | Input IRQ registration fails | IRQ is absent or invalid, or the shared-action limit is reached | The input device cannot wake readers | Keyboard or mouse events are not published | 3 | Host activation propagates registration failure; VirtIO input provides no polling fallback. |
+| F-13 | Vsock TX packet pool exhausted | More data packets are in flight than the fixed pool can hold | `alloc_tx_buf()` returns `WouldBlock` until completion reclamation frees a slot; control packets are enqueued in `pending_controls` instead of being dropped | The socket layer applies backpressure or waits; control operations never lose their response | 3 | One slot and descriptor are reserved for control packets; `recycle_tx()` flushes pending controls and returns completed slots to the free list, waking TX waiters. |
 
 ## Failure Management
 

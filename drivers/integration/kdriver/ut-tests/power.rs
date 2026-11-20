@@ -5,7 +5,10 @@
 use alloc::vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kdevice::{BusTypeId, DeviceId, DeviceKind, DeviceMatcher, NeverMatcher};
+use kdevice::{
+    BoxedDriver, BusTypeId, DeviceDriver, DeviceId, DeviceKind, DeviceMatcher, DriverId,
+    NeverMatcher,
+};
 use kspin::SpinNoIrq;
 use unittest::def_test;
 
@@ -18,6 +21,7 @@ struct TestDriver {
 }
 
 impl DeviceDriver for TestDriver {
+    type Data = ();
     fn name(&self) -> &'static str {
         "pm-owned-fixture"
     }
@@ -34,7 +38,7 @@ impl DeviceDriver for TestDriver {
         &NeverMatcher
     }
 
-    fn probe_device(&self, _: Arc<DeviceObject>) -> DriverResult<()> {
+    fn probe_device(&self, _: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
         Ok(())
     }
 
@@ -42,7 +46,7 @@ impl DeviceDriver for TestDriver {
         true
     }
 
-    fn suspend(&self, _: Arc<DeviceObject>) -> DriverResult<()> {
+    fn suspend(&self, _: &kdevice::PmContext<'_>, _: Option<&mut ()>) -> DriverResult<()> {
         self.visits.lock().push(self.number);
         if self.number == 2 && self.must_fail.load(Ordering::Relaxed) {
             Err(DriverError::ResourceBusy)
@@ -51,7 +55,7 @@ impl DeviceDriver for TestDriver {
         }
     }
 
-    fn resume(&self, _: Arc<DeviceObject>) -> DriverResult<()> {
+    fn resume(&self, _: &kdevice::PmContext<'_>, _: Option<&mut ()>) -> DriverResult<()> {
         self.visits.lock().push(self.number + 10);
         Ok(())
     }
@@ -62,17 +66,24 @@ fn failed_device_prefix_recovers_before_a_complete_retry() {
     let visits = Arc::new(SpinNoIrq::new(Vec::with_capacity(12)));
     let must_fail = Arc::new(AtomicBool::new(true));
     let devices = (1..=3)
-        .map(|number| Participant {
-            device: Arc::new(DeviceObject::new_bound_for_test(
+        .map(|number| {
+            let device = Arc::new(DeviceObject::new_bound_for_test(
                 DeviceId::new(number as u64),
                 DeviceKind::Char,
-            )),
-            driver: Arc::new(TestDriver {
-                number,
-                must_fail: must_fail.clone(),
-                visits: visits.clone(),
-            }),
-            depth: 0,
+            ));
+            Participant {
+                binding: device.binding_ref().unwrap(),
+                device,
+                driver: Arc::new(DriverObject::new(
+                    DriverId::new(0),
+                    BoxedDriver::new(TestDriver {
+                        number,
+                        must_fail: must_fail.clone(),
+                        visits: visits.clone(),
+                    }),
+                )),
+                depth: 0,
+            }
         })
         .collect();
     let mut power = PowerDevices {

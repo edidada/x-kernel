@@ -94,10 +94,12 @@ impl kiface_task_api::TaskIrqExitCheckpointIf {
 /// Refreshes and returns the current task's execution time in nanoseconds.
 ///
 /// Uses the scheduler's accounting clock, independent of user/system time and
-/// scheduling weight. Takes the local RQ lock, advances scheduler accounting,
-/// and may request preemption of the current task. IRQs and preemption are
-/// disabled across task selection, refresh and read. Call after scheduler
-/// initialization, without an RQ lock.
+/// scheduling weight. Requires only the current kernel task's shared execution
+/// path (a user thread is not needed; no process state is read). Takes the
+/// local RQ lock, advances scheduler accounting, and may request preemption of
+/// the current task. IRQs and preemption are disabled across task selection,
+/// refresh and read, so this never sleeps and is valid from task and interrupt
+/// contexts. Call after scheduler initialization, without an RQ lock.
 /// For another task's committed value, use `KtaskRef::sum_exec_runtime_ns()`.
 ///
 /// # Panics
@@ -273,13 +275,18 @@ pub fn init_scheduler_secondary() {
     crate::run_queue::init_secondary();
 }
 
-/// Activate this CPU's Stop (`migration/%u`) helper.
+/// Starts this CPU's periodic tick and Stop (`migration/%u`) helper.
 ///
 /// Call after the timer IRQ handler is registered and before local IRQs are
 /// enabled on a CPU that has not yet run this helper. Stop is the highest
 /// class, so activating it can immediately preempt the bring-up task and
 /// enable IRQs in `task_entry`.
 pub fn init_percpu_helpers() {
+    {
+        let _guard = NoPreemptIrqSave::new();
+        refresh_periodic_tick(!current().is_idle(), khal::time::monotonic_time_nanos());
+        rearm_local_timer();
+    }
     crate::stop_machine::init_current_cpu();
 }
 
@@ -287,6 +294,11 @@ cpu_slot_cell! {
     /// Absolute monotonic ns of the next schedule-evaluation deadline, or
     /// `0` if none.
     static NEXT_SCHED_DEADLINE_NS: u64 = 0;
+}
+
+cpu_slot_cell! {
+    /// Absolute monotonic ns of the next periodic tick, or zero while stopped.
+    static NEXT_PERIODIC_TICK_NS: u64 = 0;
 }
 
 cpu_slot_cell! {
@@ -303,6 +315,32 @@ cpu_slot_cell! {
 /// when `next_preemption_ns` returns 0 (arm interval 0 → immediate re-entry
 /// before `check_preempt_pending` runs). Owned timer deadlines are unaffected.
 const MIN_SCHED_TIMER_NS: u64 = 10_000;
+
+/// Starts or stops the local periodic tick for the selected runner.
+///
+/// Caller pins the CPU with IRQs disabled. Switching between busy tasks keeps
+/// the pending tick: restarting it on each switch could postpone it forever.
+pub(crate) fn refresh_periodic_tick(is_busy: bool, now_ns: u64) {
+    let deadline_ns = NEXT_PERIODIC_TICK_NS.load_current();
+    if is_busy && deadline_ns == 0 {
+        NEXT_PERIODIC_TICK_NS.store_current(ktime::next_tick_ns(now_ns).unwrap_or(0));
+    } else if !is_busy && deadline_ns != 0 {
+        NEXT_PERIODIC_TICK_NS.store_current(0);
+    }
+}
+
+/// Consumes at most one periodic tick and forwards it past the current time.
+///
+/// Like Linux's high-resolution tick, delayed periods are not all assigned to
+/// whichever task happens to be running when the interrupt is finally handled.
+fn consume_periodic_tick(now_ns: u64) -> bool {
+    let deadline_ns = NEXT_PERIODIC_TICK_NS.load_current();
+    if deadline_ns == 0 || now_ns < deadline_ns {
+        return false;
+    }
+    NEXT_PERIODIC_TICK_NS.store_current(ktime::next_tick_ns(now_ns).unwrap_or(0));
+    true
+}
 
 /// Picks the earliest absolute deadline across all local timer sources.
 ///
@@ -327,8 +365,8 @@ fn schedule_deadline_request(now_ns: u64, rel_ns: Option<u64>) -> (Option<u64>, 
     }
 }
 
-/// Re-arms the local CPU hardware timer to the earliest schedule or prepared
-/// deadline. Disarms when neither source remains.
+/// Re-arms the local CPU hardware timer to the earliest schedule, periodic tick,
+/// or prepared deadline. Disarms when no source remains.
 ///
 /// This is a pure hardware arbitration helper for scheduler deadlines: a due
 /// scheduler slot is consumed only by timer IRQ / switch paths that have already
@@ -343,6 +381,8 @@ pub(crate) fn rearm_local_timer() {
     let guard = NoPreemptIrqSave::new();
     let sched_ns = NEXT_SCHED_DEADLINE_NS.read(&guard);
     let sched = (sched_ns != 0).then_some(sched_ns);
+    let tick_ns = NEXT_PERIODIC_TICK_NS.read(&guard);
+    let tick = (tick_ns != 0).then_some(tick_ns);
     if DEFER_LOCAL_TIMER_REARM.read(&guard) || crate::timer_suspend::is_suspended(&guard) {
         return;
     }
@@ -352,7 +392,10 @@ pub(crate) fn rearm_local_timer() {
     unsafe {
         crate::timers::PREPARED_TIMERS.reprogram_local_timer(
             khal::percpu::this_cpu_id(),
-            |prepared| match select_local_timer_deadline(sched, prepared) {
+            |prepared| match select_local_timer_deadline(
+                select_local_timer_deadline(sched, tick),
+                prepared,
+            ) {
                 Some(d) => {
                     khal::time::arm_timer(ktime_types::MonotonicInstant::from_span_since_origin(
                         ktime_types::TimeSpan::from_nanos(d),
@@ -423,6 +466,9 @@ pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
 
 /// Hardware-timer IRQ entry for scheduling and owned timers:
 ///
+/// - On a due periodic tick, charges one `TICK_NSEC` to the current user task's
+///   raw user/system counter, classified by the interrupted frame. Other timer
+///   IRQs do not settle CPU time.
 /// - Accounts real runtime for the current task first (so wake handling is not
 ///   charged to the wrong task). A due schedule slot runs Linux `entity_tick`
 ///   (`check_preempt_tick`); other timer IRQs only account.
@@ -449,6 +495,7 @@ pub fn on_timer_fire() {
         }
     }
     let now_ns = khal::time::monotonic_time_nanos();
+    crate::run_queue::bandwidth::poll_trackers(now_ns);
     let cpu_id = khal::percpu::this_cpu_id();
     // Any local timer IRQ means this CPU is still taking interrupts. Watchdog
     // hardlockup must not wait for the 4s sample callback: a busy lone task
@@ -456,12 +503,16 @@ pub fn on_timer_fire() {
     // even though schedule/soft/knet IRQs are arriving.
     crate::timers::run_timer_irq_note();
 
-    // Sample the interrupted user task's CPU time here instead of at each
-    // user/kernel boundary: the mode published by the trap path tells whether
-    // this tick should charge user or kernel time.
-    let current_task = current_may_uninit();
-    if let Some(runtime) = current_task.as_ref().and_then(|task| task.user_runtime()) {
-        runtime.on_cpu_time_tick(now_ns);
+    let periodic_due = consume_periodic_tick(now_ns);
+    if periodic_due
+        && let Some(current_task) = current_may_uninit()
+        && let Some(runtime) = current_task.user_runtime()
+    {
+        // Classify by the interrupted frame, not the mode this CPU is in while
+        // handling the IRQ. No active frame means kernel context, charged as
+        // system time.
+        let user_tick = khal::context::active_exception_user_mode().unwrap_or(false);
+        runtime.on_periodic_tick(user_tick, ktime::TICK_NS);
     }
 
     let sched_due = {
@@ -475,6 +526,10 @@ pub fn on_timer_fire() {
         current_run_queue::<NoOp>().account_sched_tick(now_ns);
     } else {
         current_run_queue::<NoOp>().account_current_runtime(now_ns);
+    }
+    #[cfg(feature = "smp")]
+    if periodic_due {
+        crate::run_queue::fair_balance::on_periodic_tick(now_ns);
     }
     // Timer callbacks and their wakeups may register/cancel timers or
     // refresh scheduler slots. Defer their hardware writes until the final
@@ -493,8 +548,7 @@ pub fn on_timer_fire() {
 
     #[cfg(feature = "sched_stat")]
     {
-        // Keep the diagnostic field layout; the removed periodic source is zero.
-        crate::run_queue::note_timer_irq(sched_due, prepared_due, false);
+        crate::run_queue::note_timer_irq(sched_due, prepared_due, periodic_due);
     }
     end_defer_local_timer_rearm();
 
@@ -507,10 +561,14 @@ pub fn on_timer_fire() {
 
 /// Called from a remote reschedule IPI: request preemption.
 ///
-/// Only set `need_resched`. The IRQ-tail probe arms the hrtick.
+/// Set `need_resched` and forward any balance request to Sched softirq.
+///
+/// Runs in the fixed reschedule IPI with IRQs disabled and no RQ lock held.
+/// No accounting or RQ operation belongs here; the IRQ-tail probe arms hrtick.
 #[cfg(feature = "smp")]
 pub(crate) fn on_remote_resched_ipi() {
     current().set_preempt_pending(true);
+    crate::run_queue::fair_balance::on_reschedule_ipi();
 }
 
 #[cfg(feature = "ipi")]
@@ -698,12 +756,50 @@ pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
     crate::run_queue::set_task_nice(task, prio)
 }
 
+/// Applies a cgroup v2 `cpu.weight` value (1..=10000) to `task`.
+///
+/// The weight is translated to the Linux nice value whose scheduler load
+/// weight is closest (the same relationship Linux's own weight tables encode),
+/// so the existing fair-scheduler arbitration enforces the relative share
+/// without a second weight domain.
+pub fn set_task_weight(task: &KtaskRef, weight: u32) -> bool {
+    // cgroup cpu.weight is normalized to 100 for the default Linux share;
+    // convert it to the scheduler's 1024-scale weight before the nice lookup.
+    let scheduler_weight = (u64::from(weight) * 1024 / 100).clamp(1, 88_761) as u32;
+    crate::run_queue::set_task_nice(task, weight_to_nice(scheduler_weight) as isize)
+}
+
+/// Linux `prio_to_weight` for nice 0 inverted: returns the nice value whose
+/// load weight is nearest to `weight`. The table matches `kernel/sched/core.c`.
+pub(crate) fn weight_to_nice(weight: u32) -> i8 {
+    /// `prio_to_weight[nice + 20]` from the Linux scheduler.
+    const WEIGHTS: [u32; 40] = [
+        88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916, 9548, 7620, 6100,
+        4904, 3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172,
+        137, 110, 87, 70, 56, 45, 36, 29, 23, 18, 15,
+    ];
+    let weight = weight.clamp(1, 10_000);
+    let mut best: (u32, i8) = (u32::MAX, 0);
+    for (index, candidate) in WEIGHTS.iter().enumerate() {
+        let distance = candidate.abs_diff(weight);
+        if distance < best.0 {
+            best = (distance, index as i8 - 20);
+        }
+    }
+    best.1
+}
+
 /// Read `task`'s user-visible scheduling attributes.
 ///
 /// Takes the run-queue lock that owns `task`. Call from task context, not
 /// while that lock is already held.
 pub fn sched_getattr(task: &KtaskRef) -> SchedAttr {
     crate::run_queue::sched_getattr(task)
+}
+
+/// Drops a task's pending `cpu.max` throttle record at exit.
+pub fn forget_bandwidth_member(task: &KtaskRef) {
+    crate::run_queue::bandwidth::forget_member(task);
 }
 
 /// `SCHED_RR` quantum for `sched_rr_get_interval(2)`.
@@ -790,6 +886,62 @@ pub fn set_task_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
     {
         true
     }
+}
+
+/// Applies a userspace `sched_setaffinity` request without overwriting the
+/// cgroup `cpuset` bound.
+///
+/// The requested mask is intersected with the task's existing bound. Returns
+/// `false` for an empty request or an empty intersection; the task's masks are
+/// unchanged on failure. Kernel-internal pinning uses [`set_task_affinity`].
+pub fn set_task_requested_affinity(task: &KtaskRef, cpumask: KCpuMask) -> bool {
+    if cpumask.is_empty() {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    let old_mask = task.cpumask();
+    if !task.set_requested_cpus(cpumask) {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    {
+        crate::run_queue::enforce_affinity_placement(task, old_mask)
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        true
+    }
+}
+
+/// Applies the cgroup `cpuset` bound to a task and recomputes its effective
+/// affinity.
+///
+/// The requested mask is preserved, so lifting a cgroup restriction restores
+/// the CPUs userspace originally asked for. Returns `false` and leaves every
+/// mask unchanged when the intersection would be empty; cgroup writes turn
+/// that into `ENOSPC` instead of silently starving the task.
+pub fn set_task_cgroup_cpus(task: &KtaskRef, cpumask: KCpuMask) -> bool {
+    if cpumask.is_empty() {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    let old_mask = task.cpumask();
+    if !task.set_cgroup_cpus(cpumask) {
+        return false;
+    }
+    #[cfg(feature = "smp")]
+    {
+        crate::run_queue::enforce_affinity_placement(task, old_mask)
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        true
+    }
+}
+
+/// Applies the cgroup `cpuset` memory-node mask to a task.
+pub fn set_task_mems(task: &KtaskRef, mems: KCpuMask) {
+    task.set_mems(mems);
 }
 
 /// Set the affinity for the current task.
@@ -1092,4 +1244,9 @@ pub fn check_mutex_deadlock() -> bool {
         }
     });
     ok
+}
+
+/// Releases scheduler state for a cpu controller's bandwidth tracker.
+pub fn release_bandwidth_tracker(tracker: &alloc::sync::Arc<kbandwidth::Bandwidth>) {
+    crate::run_queue::bandwidth::release_tracker(tracker);
 }

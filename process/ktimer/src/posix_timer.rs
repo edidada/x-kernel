@@ -12,7 +12,6 @@ use ktime_types::{BoottimeInstant, MonotonicInstant, ProcessCpuInstant, SystemTi
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME,
 };
-use posix_types::k_sigval;
 
 use crate::{
     Pid, Tid,
@@ -152,17 +151,9 @@ pub struct TimerSigValue {
 }
 
 impl TimerSigValue {
-    /// Captures the raw bits of a user-provided `sigval`.
-    ///
-    /// The pointer view is read only to preserve the bit pattern; it is
-    /// never dereferenced (see the `SAFETY` note at the read).
-    pub fn from_raw(value: k_sigval) -> Self {
-        Self {
-            // SAFETY: `k_sigval` is an ABI carrier union. Reading the pointer
-            // view preserves the raw user-provided bits regardless of which
-            // union field userspace conceptually initialized.
-            raw_bits: unsafe { value.sival_ptr as usize },
-        }
+    /// Wraps the complete pointer-sized bits of a user-provided `sigval`.
+    pub fn from_raw_bits(raw_bits: usize) -> Self {
+        Self { raw_bits }
     }
 
     pub(crate) fn from_timer_id(timer_id: i32) -> Self {
@@ -171,14 +162,12 @@ impl TimerSigValue {
         }
     }
 
-    pub(crate) fn into_raw(self) -> k_sigval {
-        k_sigval {
-            sival_ptr: self.raw_bits as *mut _,
-        }
+    pub(crate) fn raw_bits(self) -> usize {
+        self.raw_bits
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum PosixTimerClock {
     Realtime,
     Monotonic,
@@ -197,16 +186,14 @@ impl PosixTimerClock {
         }
     }
 
-    fn now(self, process_utime: TimeSpan, process_stime: TimeSpan) -> TimerInstant {
+    fn now(self, process_sched_runtime: TimeSpan) -> TimerInstant {
         match self {
             Self::Realtime => TimerInstant::Realtime(ktime::realtime()),
             Self::Monotonic => TimerInstant::Monotonic(khal::time::monotonic_time()),
             Self::Boottime => TimerInstant::Boottime(ktime::boottime()),
-            Self::ProcessCpu => {
-                TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(
-                    process_utime.saturating_add(process_stime),
-                ))
-            }
+            Self::ProcessCpu => TimerInstant::ProcessCpu(
+                ProcessCpuInstant::from_span_since_origin(process_sched_runtime),
+            ),
         }
     }
 
@@ -311,13 +298,9 @@ impl PosixTimer {
         }
     }
 
-    pub(crate) fn snapshot(
-        &self,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
-    ) -> (TimeSpan, TimeSpan) {
+    pub(crate) fn snapshot(&self, process_sched_runtime: TimeSpan) -> (TimeSpan, TimeSpan) {
         self.spec
-            .snapshot(self.armed_clock.now(process_utime, process_stime))
+            .snapshot(self.armed_clock.now(process_sched_runtime))
     }
 
     pub(crate) fn settime(
@@ -325,15 +308,14 @@ impl PosixTimer {
         absolute: bool,
         interval: TimeSpan,
         value: TimeSpan,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
+        process_sched_runtime: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
         let armed_clock = if !absolute && self.clock == PosixTimerClock::Realtime {
             PosixTimerClock::Monotonic
         } else {
             self.clock
         };
-        let now = armed_clock.now(process_utime, process_stime);
+        let now = armed_clock.now(process_sched_runtime);
         let deadline = if value.is_zero() {
             None
         } else {
@@ -346,7 +328,7 @@ impl PosixTimer {
                 .ok_or(KError::InvalidInput)?,
             )
         };
-        let old = self.snapshot(process_utime, process_stime);
+        let old = self.snapshot(process_sched_runtime);
         // Snapshot in the old domain before replacing the armed clock.
         self.spec.replace(interval, deadline);
         self.armed_clock = armed_clock;
@@ -357,9 +339,9 @@ impl PosixTimer {
         Ok(old)
     }
 
-    pub(crate) fn update(&mut self, process_utime: TimeSpan, process_stime: TimeSpan) -> usize {
+    pub(crate) fn update(&mut self, process_sched_runtime: TimeSpan) -> usize {
         self.spec
-            .update(self.armed_clock.now(process_utime, process_stime))
+            .update(self.armed_clock.now(process_sched_runtime))
     }
 
     pub(crate) fn needs_alarm_task(&self) -> bool {
@@ -433,15 +415,11 @@ impl PosixTimer {
     /// `true` when the interval schedule advanced, i.e. the caller must re-arm
     /// the alarm for the new deadline: a redundant re-arm re-enqueues an
     /// identical entry in the global alarm heap, which is not de-duplicated.
-    pub(crate) fn catch_up_queued_overrun(
-        &mut self,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
-    ) -> bool {
+    pub(crate) fn catch_up_queued_overrun(&mut self, process_sched_runtime: TimeSpan) -> bool {
         if !self.pending_signal {
             return false;
         }
-        let expirations = self.update(process_utime, process_stime);
+        let expirations = self.update(process_sched_runtime);
         if expirations == 0 {
             return false;
         }
@@ -506,7 +484,7 @@ impl PosixTimer {
             signo,
             timer_id,
             overrun.min(i32::MAX as u32) as i32,
-            value.into_raw(),
+            value.raw_bits(),
             self.signal_seq,
             self.spec.is_periodic(),
         )?;

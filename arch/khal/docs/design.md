@@ -29,9 +29,8 @@ This module now owns only trap-entry responsibilities:
 ```text
 arch/khal/src/
 ├── irq/
-│   ├── mod.rs       # adapter helper exports only
-│   ├── manager.rs   # trap handlers
-│   └── nmi.rs       # khal::irq::configure_nmi (per-CPU interrupt line promotion, delegated to the platform NmiMechanismIf)
+│   ├── mod.rs       # trap adapter module
+│   └── manager.rs   # trap handlers
 └── lib.rs           # khal::nmi / khal::pmu mechanism-neutral facade (re-export kplat)
 ```
 
@@ -39,6 +38,13 @@ Generic IRQ state, descriptors, dispatch, Line-owned NMI actions, lifecycle
 hooks and `IntrManagerIf` belong to `arch/kirq`. `khal::nmi` is a
 mechanism-neutral facade; mechanism details belong to `kplat::nm_irq` and its
 platform implementations.
+
+`khal::cpu_hwcap()` is the CPU-capability interface this crate provides to the
+rest of the kernel: `kexec` calls it while building a new process's auxiliary
+vector and publishes the result as `AT_HWCAP`. The calling direction is
+kexec → khal → kcpu; khal does not detect capabilities itself, it asks `kcpu`
+for the intersection the online CPUs advertise and restates it in the
+architecture's own encoding.
 
 ## Architecture
 
@@ -63,8 +69,8 @@ watchdog / perf consumers
             |-- early_init / late_init   # mechanism probing + per-CPU enablement
             |-- mode / info              # runtime mechanism query (Pseudo / Hardware / None)
             |-- enable_periodic_nmi      # periodic NMI source (currently PMU)
-            |-- quiesce_nmi               # park the local periodic source on the terminating path
-            `-- khal::irq::configure_nmi # per-CPU interrupt line promotion
+            `-- quiesce_nmi              # park the local periodic source on the terminating path
+                    Source backends own local delivery preparation.
 ```
 
 ## Firmware and device-tree transport (`khal::firmware`)
@@ -137,11 +143,10 @@ exists. Early console and PMU discovery use allocation-free
 - `khal::quiesce_nmi()`: to be called only from the terminal halt path; it pins the current CPU with `NoPreempt`,
   and stops the armed local periodic source while keeping the callback and the IRQ configuration. It is a no-op when there is no `nmi_pmu` source or the local
   source is uninitialized, and must not re-arm after the call.
-- `khal::irq::configure_nmi(hwirq)` delegates CPU-local preparation through the
-  platform to KIRQ. Initial preparation requires a registered disabled source;
-  repeated preparation rechecks admission without rewriting live attributes.
-  Shared sources are unsupported. False means rejected/failed preparation,
-  including an unavailable mechanism or a closing Line; it does not enable IRQs.
+- Local delivery preparation belongs to the periodic source backend. AArch64
+  PMU calls `kirq::prepare_percpu_nmi` with its GIC descriptor; native sources
+  need not promote an ordinary IRQ. Mechanism initialization/query and the
+  mandatory periodic source remain separate contracts.
 - `khal::nmi::mode()`: returns `NmiMode::{Pseudo, Hardware, None}`, for consumers
   (such as the watchdog) to decide whether to enable NMI-dependent features.
 
@@ -324,8 +329,9 @@ The provider bridges the existing raw `PageRef` protocol:
 |----------------------------------------|----------|
 | `mapping_reference_into_raw(reference)` | Consume `PageRef::into_raw()` and convert its base-page count into the exact selected byte length, returning `(PA, bytes)`. |
 | `unsafe mapping_reference_from_raw(PA, bytes)` | Convert the validated leaf byte length back to base-page count and restore exactly one outstanding transfer with `PageRef::from_raw(PA, pages)`. |
+| `unsafe mapping_reference_try_clone_from_raw(PA, bytes)` | Borrow a live managed leaf's exact transfer with `ManuallyDrop<PageRef>` and acquire a distinct hold with `try_clone_ref()`; leave the source transfer untouched. |
 
-Neither conversion acquires or releases a reference count. Recovery requires
+The transfer and recovery conversions do not change reference counts. Recovery requires
 exclusive ownership of the same unconsumed exact transfer; an arbitrary PA,
 metadata lookup or raw mapping is insufficient. No new `kalloc` dependency is
 introduced in generic `page_table`.
@@ -357,9 +363,11 @@ leaves in owned subtrees before any destructive overwrite. Sources must outlive
 borrowers, and destination managed leaves must first be unmapped and retired.
 
 PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and
-`replace_if_same_raw`; backing allocation/field/destructor migration in
-anon/pagecache/filemap/memspace is deferred. These raw installs transfer no
-mapping hold. Raw replacement cannot change a managed leaf's normalized PA;
+`replace_if_same_raw` for externally owned backing. File Folios now own PageRef,
+file PTEs acquire independent managed holds, and mremap clones managed source
+holds with map_existing. Anonymous COW targets retain their existing external
+raw ownership; anonymous, VMM and device migration remain separate work. A raw
+install still transfers no mapping hold. Raw replacement cannot change a managed leaf's normalized PA;
 same-PA updates preserve category, and permission clearing retires its old hold.
 Existing raw release paths using `finish()` can still release backing after an
 unconfirmed shootdown. The adapter does not make those paths safe: they need a
@@ -374,7 +382,8 @@ shootdown or prove an architecture's private category-bit selection.
 
 ## Reset-aware system sleep interface
 
-On x86, `power::SystemSleepIf` separates platform resource preparation, saved
+On x86, `power::SystemSleepIf` re-exports the `kiface-power-api` contract via
+`kplat::sys`. The interface separates platform resource preparation, saved
 remote CPU context, BSP firmware entry, AP reconstruction and final release.
 The kpm coordinator supplies boot-discovered S3 types and independently owns
 task/work, device/DMA, IRQ, clock/event and RTC ordering. The bare legacy

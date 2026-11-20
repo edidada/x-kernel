@@ -7,10 +7,9 @@
 mod channel;
 mod listener;
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{any::TypeId, sync::atomic::Ordering};
 
-use async_trait::async_trait;
 use kerrno::{KError, KResult, LinuxError};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
@@ -23,8 +22,8 @@ use self::{
     listener::{ConnRequest, ListenerQueue},
 };
 use crate::{
-    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendOptions,
-    Shutdown,
+    AncillaryData, ConnectOptions, KernelAncillaryData, QueueLengths, RecvFlags, RecvOptions,
+    SendOptions, Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -46,6 +45,25 @@ impl Default for StreamTransport {
 }
 
 impl StreamTransport {
+    /// Accepts a connection using an inline, lazily polled future.
+    pub async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
+        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
+        let request = listener.accept(nonblocking).await?;
+        let ConnRequest {
+            channel,
+            addr: peer_addr,
+        } = request;
+        let accepted = StreamTransport::new_channel(Some(channel));
+        // Linux `unix_accept` does not re-read the listener's SCM flags: the
+        // queued peer sock already captured them in `unix_stream_connect`.
+        // Clear only the pre-accept capture gate.
+        accepted
+            .endpoint
+            .awaiting_accept
+            .store(false, Ordering::Release);
+        Ok((UnixTransport::Stream(accepted), peer_addr))
+    }
+
     pub fn new() -> Self {
         StreamTransport::new_channel(None)
     }
@@ -111,6 +129,22 @@ impl Configurable for StreamTransport {
             **error = self.endpoint.socket_error.swap(0, Ordering::AcqRel);
             return Ok(OptionHandled::Yes);
         }
+        if let O::AcceptConn(listening) = opt {
+            // Linux reports SO_ACCEPTCONN from `sk_state == TCP_LISTEN`
+            // (`sk_getsockopt`, net/core/sock.c), and only `unix_listen` moves
+            // a unix stream socket into TCP_LISTEN. `bind()` already installs
+            // the `ListenerQueue` here, so a bound-but-unlistened socket must
+            // still report false: every sd-bus AF_UNIX client binds an abstract
+            // description address before connecting (`bind_description`,
+            // bus-socket.c) and `bus_socket_start_auth` gates fd-passing
+            // negotiation on `sd_is_socket(..., listening=0)`.
+            **listening = self
+                .listener
+                .lock()
+                .as_ref()
+                .is_some_and(|listener| listener.is_listening());
+            return Ok(OptionHandled::Yes);
+        }
         if self.options.get_option_inner(opt)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
@@ -154,7 +188,6 @@ impl Configurable for StreamTransport {
         Ok(OptionHandled::No)
     }
 }
-#[async_trait]
 impl UnixTransportOps for StreamTransport {
     fn bind(&self, entry: &super::BindEntry, _local_addr: &UnixAddr) -> KResult<()> {
         let channel = self.channel.lock();
@@ -260,24 +293,6 @@ impl UnixTransportOps for StreamTransport {
         bind.listener.notify_request_available();
         self.endpoint.polls.wake_state_change();
         Ok(())
-    }
-
-    async fn accept(&self, nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
-        let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
-        let request = listener.accept(nonblocking).await?;
-        let ConnRequest {
-            channel,
-            addr: peer_addr,
-        } = request;
-        let accepted = StreamTransport::new_channel(Some(channel));
-        // Linux `unix_accept` does not re-read the listener's SCM flags: the
-        // queued peer sock already captured them in `unix_stream_connect`.
-        // Clear only the pre-accept capture gate.
-        accepted
-            .endpoint
-            .awaiting_accept
-            .store(false, Ordering::Release);
-        Ok((UnixTransport::Stream(accepted), peer_addr))
     }
 
     fn send(&self, mut src: impl Read + IoBuf, mut options: SendOptions) -> KResult<usize> {
@@ -578,6 +593,35 @@ impl UnixTransportOps for StreamTransport {
             }
         }
         Ok(())
+    }
+
+    fn is_listening(&self) -> bool {
+        self.listener
+            .lock()
+            .as_ref()
+            .is_some_and(|listener| listener.is_listening())
+    }
+
+    fn queue_lengths(&self) -> Option<QueueLengths> {
+        // Linux `unix_inq_len` counts the bytes queued on the receive side and
+        // `unix_outq_len` the sender's `sk_wmem_alloc`, which for this channel
+        // is the tx bytes the peer has not consumed yet. Each count is read
+        // under its producer's ordering lock, sequentially so the two guards
+        // never nest; an unconnected socket reports zeros like Linux does for
+        // an empty `sk_receive_queue`.
+        let channel = self.channel.lock();
+        let Some(chan) = channel.as_ref() else {
+            return Some(QueueLengths::default());
+        };
+        let inq = {
+            let _tx_order = chan.peer_endpoint.tx_order.lock();
+            chan.rx.occupied_len()
+        };
+        let outq = {
+            let _tx_order = self.endpoint.tx_order.lock();
+            chan.tx.occupied_len()
+        };
+        Some(QueueLengths::from_bytes(outq, inq))
     }
 }
 

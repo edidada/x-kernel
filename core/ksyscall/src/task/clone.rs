@@ -24,7 +24,6 @@ use kprocess::{
 use ksignal::Signo;
 use ktask::current;
 use linux_raw_sys::general::*;
-use osvm::VirtMutPtr;
 use posix_process::new_user_task;
 
 bitflags! {
@@ -94,6 +93,12 @@ bitflags! {
         const NEWTIME = CLONE_NEWTIME as u64;
         /// The new process shares an I/O context with the calling process.
         const IO = CLONE_IO as u64;
+        /// Reset every signal handler not set to ignore to its default
+        /// disposition in the child. Only valid without [`Self::SIGHAND`].
+        const CLEAR_SIGHAND = CLONE_CLEAR_SIGHAND;
+        /// Place the child in the cgroup named by the clone3 `cgroup`
+        /// descriptor instead of the caller's cgroup.
+        const INTO_CGROUP = CLONE_INTO_CGROUP;
     }
 }
 
@@ -110,6 +115,9 @@ pub(crate) struct CloneRequest {
     tls: usize,
     pidfd: usize,
     reject_exit_signal_with_shared_parent: bool,
+    /// Resolved `clone3(CLONE_INTO_CGROUP)` target; `None` inherits the
+    /// caller's cgroup. Only the clone3 adapter sets this.
+    cgroup_target: Option<Arc<kcgroup::Cgroup>>,
 }
 
 impl CloneRequest {
@@ -124,6 +132,7 @@ impl CloneRequest {
             tls: 0,
             pidfd: 0,
             reject_exit_signal_with_shared_parent: false,
+            cgroup_target: None,
         }
     }
 
@@ -170,6 +179,12 @@ impl CloneRequest {
 
     pub(crate) fn set_pidfd(&mut self, ptr: usize) -> &mut Self {
         self.pidfd = ptr;
+        self
+    }
+
+    /// Sets the resolved `CLONE_INTO_CGROUP` target cgroup.
+    pub(crate) fn set_cgroup_target(&mut self, target: Arc<kcgroup::Cgroup>) -> &mut Self {
+        self.cgroup_target = Some(target);
         self
     }
 
@@ -229,11 +244,22 @@ impl CloneRequest {
             self.pidfd,
         );
 
-        self.validate_exit_signal_policy()?;
-        if self.flags.contains(CloneFlags::THREAD)
-            && !self.flags.contains(CloneFlags::VM | CloneFlags::SIGHAND)
+        self.validate_pre_cgroup_flags()?;
+        // Threads share the process's cgroup membership. This kernel has no
+        // threaded cgroup domains, so a thread cannot be placed into another
+        // cgroup. Checked after the THREAD-needs-SIGHAND EINVAL above and after
+        // the clone3 entry resolved the cgroup fd, matching Linux
+        // cgroup_attach_permissions (EOPNOTSUPP after the fd fetch).
+        if self
+            .flags
+            .contains(CloneFlags::INTO_CGROUP | CloneFlags::THREAD)
         {
-            return Err(KError::InvalidInput);
+            return Err(KError::from(LinuxError::EOPNOTSUPP));
+        }
+        // CLONE_INTO_CGROUP needs a resolved target; only the clone3 adapter
+        // supplies one, so a bare flag without a target is a bad request.
+        if self.flags.contains(CloneFlags::INTO_CGROUP) && self.cgroup_target.is_none() {
+            return Err(KError::from(LinuxError::EINVAL));
         }
 
         // Namespace flag validation
@@ -332,6 +358,8 @@ impl CloneRequest {
                 },
                 signal_actions: if self.flags.contains(CloneFlags::SIGHAND) {
                     ForkSignalActions::Shared
+                } else if self.flags.contains(CloneFlags::CLEAR_SIGHAND) {
+                    ForkSignalActions::Cleared
                 } else {
                     ForkSignalActions::Private
                 },
@@ -342,6 +370,7 @@ impl CloneRequest {
                 },
                 namespace_flags,
                 exit_signal,
+                cgroup_target: self.cgroup_target.take(),
             })?
         };
         let tid = prepared.tid();
@@ -368,32 +397,76 @@ impl CloneRequest {
             thr.set_clear_child_tid(self.child_tid);
         }
 
+        // A thread pidfd (CLONE_THREAD | CLONE_PIDFD) reports the thread's own
+        // tid, resolved dynamically in fdinfo; capture the id and stable
+        // identity before task_number/thr move into the new task. A process
+        // pidfd reports the stable leader pid via PidFd::new_file instead.
+        let pidfd_task_identity = if self.flags.contains(CloneFlags::THREAD) {
+            Some((task_number.clone(), thr.identity_token()))
+        } else {
+            None
+        };
+        let child_cgroup = thr.cgroup();
         let mut new_task = new_user_task(&curr.name(), entry, task_number, thr);
-        // Linux copies the creator's CPU affinity into the child. schbench
-        // relies on this: the message thread pins itself to the worker CPU set
-        // before pthread_create, then re-pins itself to the message CPU.
-        new_task.set_cpumask(curr.cpumask());
+        // Linux copies the creator's requested CPU affinity into the child,
+        // but the cgroup cpuset bound is owned by the child's cgroup. Do not
+        // copy `curr.cpumask()` wholesale: that would copy the parent's
+        // effective bound and can pin a child to the boot CPU forever.
+        let _ = new_task.set_requested_cpus(curr.requested_cpus());
+        if let Some(cgroup) = child_cgroup
+            && let Ok(cpus) = cgroup.cpuset_effective_cpus()
+        {
+            let mut bound = ktask::KCpuMask::new();
+            for cpu in cpus.iter() {
+                bound.set(cpu, true);
+            }
+            let _ = new_task.set_cgroup_cpus(bound);
+        }
         new_task.ctx_mut().set_page_table_root(page_table_root);
 
-        let pidfd_install = if self.flags.contains(CloneFlags::PIDFD) {
-            let pidfd_file = PidFd::new_file(&child_process, O_RDWR, kprocess::current_cred())?;
-            let resources = kprocess::current_files();
-            let fd = resources.add_file(pidfd_file, true)?;
-            Some((resources, fd))
+        // Create the pidfd before publishing, but install it into the caller's
+        // (possibly shared) fd table only after the child is published, so a
+        // concurrent /proc/self/fdinfo reader never sees a pidfd whose task is
+        // not yet lookup-visible (Linux attaches the pid before the pidfd).
+        let pidfd_file = if self.flags.contains(CloneFlags::PIDFD) {
+            Some(match pidfd_task_identity {
+                Some((task_number, token)) => PidFd::new_file_for_task(
+                    &child_process,
+                    task_number,
+                    token,
+                    O_RDWR,
+                    kprocess::current_cred(),
+                )?,
+                None => PidFd::new_file(&child_process, O_RDWR, kprocess::current_cred())?,
+            })
         } else {
             None
         };
 
-        publish_user_task_with(new_task, |task| {
+        let published = publish_user_task_with(new_task, |task| {
             ktask::init_task_sched_attr(task, child_attr).map_err(super::sched::sched_errno)?;
             if let Some(thread) = task.try_as_thread() {
                 thread.set_nice(kprocess::NiceValue::new_clamped(child_attr.nice.as_i32()));
             }
             Ok(())
-        })?
-        .commit(|_task| {
+        })?;
+
+        let pidfd_install = if let Some(file) = pidfd_file {
+            let resources = kprocess::current_files();
+            match resources.add_file(file, true) {
+                Ok(fd) => Some((resources, fd)),
+                Err(err) => {
+                    published.abort();
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+
+        published.commit(|_task| {
             if self.flags.contains(CloneFlags::PARENT_SETTID)
-                && let Err(err) = (self.parent_tid as *mut Pid).write_vm(tid)
+                && let Err(err) = posix_types::UserPtr::<Pid>::from(self.parent_tid).write_vm(tid)
             {
                 if let Some((resources, fd)) = pidfd_install.as_ref() {
                     // Rollback is best effort; preserve the original user-memory error.
@@ -402,7 +475,7 @@ impl CloneRequest {
                 return Err(err.into());
             }
             if let Some((resources, fd)) = pidfd_install.as_ref()
-                && let Err(err) = (self.pidfd as *mut i32).write_vm(*fd)
+                && let Err(err) = posix_types::UserPtr::<i32>::from(self.pidfd).write_vm(*fd)
             {
                 // Rollback is best effort; preserve the original user-memory error.
                 let _ = resources.close_file(*fd);
@@ -431,6 +504,39 @@ impl CloneRequest {
                 .intersects(CloneFlags::THREAD | CloneFlags::PARENT)
         {
             return Err(KError::InvalidInput);
+        }
+        Ok(())
+    }
+
+    /// Validates the flag combinations Linux checks before the
+    /// `CLONE_INTO_CGROUP` descriptor is resolved: `clone3_args_valid`
+    /// (exit-signal policy, `CLONE_CLEAR_SIGHAND | CLONE_SIGHAND`) and the
+    /// `copy_process` thread/signal-sharing check that precedes
+    /// `cgroup_can_fork`. Running them before the fd lookup keeps their
+    /// `EINVAL` precedence over a bad descriptor's `EBADF`.
+    ///
+    /// The `CLONE_INTO_CGROUP | CLONE_THREAD` rejection is deliberately not
+    /// here: Linux raises it in `cgroup_attach_permissions`, after the fd
+    /// fetch, so it stays in [`Self::do_clone_with_preparation`].
+    pub(crate) fn validate_pre_cgroup_flags(&self) -> KResult<()> {
+        self.validate_exit_signal_policy()?;
+        // Linux copy_process: CLONE_THREAD requires CLONE_SIGHAND (and VM).
+        if self.flags.contains(CloneFlags::THREAD)
+            && !self.flags.contains(CloneFlags::VM | CloneFlags::SIGHAND)
+        {
+            return Err(KError::InvalidInput);
+        }
+        self.validate_clear_sighand_flag()
+    }
+
+    /// Rejects `CLONE_CLEAR_SIGHAND` combined with `CLONE_SIGHAND`: a shared
+    /// action table cannot be cleared without affecting the parent.
+    fn validate_clear_sighand_flag(&self) -> KResult<()> {
+        if self
+            .flags
+            .contains(CloneFlags::CLEAR_SIGHAND | CloneFlags::SIGHAND)
+        {
+            return Err(KError::from(LinuxError::EINVAL));
         }
         Ok(())
     }

@@ -25,10 +25,10 @@ use smoltcp::{
 
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
-    buf::PacketBuf,
     device::{
         LINK_FLAG_UP, LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
         NeighborSnapshot, NeighborState, NeighborUpdate, NetDeviceId, RxDeviceSelection,
+        net_rx::RxPacket,
     },
     ip::{self, IpAddress, Ipv4Address},
     network::{
@@ -40,18 +40,17 @@ use crate::{
     router::{Ipv4OutputRoute, NeighborUpdatePolicy, Router},
     stack::{
         device::StackDevice,
-        ingress::{IngressProcessor, prepare_smoltcp_ingress},
+        ingress::{IngressBatch, IngressProcessor, prepare_smoltcp_ingress},
         socket_set::SocketSetState,
         time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
     },
 };
 
-const IPV4_HEADER_LEN: usize = 20;
 const RX_INGRESS_BATCH_PACKETS: usize = 64;
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
-const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
+const WORK_ITEMS_PER_POLL_TIME_CHECK: usize = 32;
 const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
-const IPV4_REASSEMBLY_DEADLINE_OFFSET: u64 = 2;
+const IPV4_REASSEMBLY_DEADLINE_OFFSET_US: u64 = 2;
 
 #[derive(Default)]
 struct SmoltcpIngressProgress {
@@ -89,7 +88,7 @@ fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
     }
     u64::try_from(next.span_since_origin().as_micros())
         .unwrap_or(u64::MAX)
-        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
+        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET_US)
 }
 
 struct NetworkTimer;
@@ -122,9 +121,8 @@ pub(crate) struct Service {
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
     ingress: Mutex<IngressProcessor>,
-    rx_batch: Mutex<Vec<PacketBuf>>,
-    accepted_batch: Mutex<Vec<PacketBuf>>,
-    control_batch: Mutex<Vec<Vec<u8>>>,
+    rx_batch: Mutex<Vec<RxPacket>>,
+    ingress_batch: Mutex<IngressBatch>,
     timeout_deadline_micros: AtomicU64,
     ipv4_reassembly_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
@@ -133,6 +131,14 @@ pub(crate) struct Service {
 }
 
 impl Service {
+    pub(crate) fn ipv4_forwarding(&self) -> i32 {
+        self.router.lock().ipv4_forwarding()
+    }
+
+    pub(crate) fn set_ipv4_forwarding(&self, value: i32) {
+        self.router.lock().set_ipv4_forwarding(value);
+    }
+
     pub(crate) fn new(mut router: Router) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(
@@ -147,8 +153,7 @@ impl Service {
             router: Mutex::new(router),
             ingress: Mutex::new(IngressProcessor::new()),
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
-            accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
-            control_batch: Mutex::new(Vec::new()),
+            ingress_batch: Mutex::new(IngressBatch::new(RX_INGRESS_BATCH_PACKETS)),
             timeout_deadline_micros: AtomicU64::new(0),
             ipv4_reassembly_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
@@ -190,17 +195,16 @@ impl Service {
     pub(crate) fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
-        let mut control_packets = self.control_batch.lock();
         let mut rx_batch = self.rx_batch.lock();
-        let mut accepted_packets = self.accepted_batch.lock();
+        let mut batch = self.ingress_batch.lock();
 
         let ipv4_expiration = self.try_expire_ipv4_fragments(
             device_timestamp,
             budget.timer_events,
-            &mut control_packets,
+            &mut batch.control,
         );
         let mut timer_events = ipv4_expiration.timer_events;
-        if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
+        if !self.try_flush_ingress_batches(&mut batch) {
             return deferred_poll_progress(0, 0, timer_events);
         }
 
@@ -240,8 +244,7 @@ impl Service {
                 budget.rx_packets
             },
             &mut rx_batch,
-            &mut accepted_packets,
-            &mut control_packets,
+            &mut batch,
         );
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
@@ -290,7 +293,7 @@ impl Service {
             if stack_tx_passes >= stack_tx_pass_limit || has_reached_time_limit {
                 break;
             }
-            if stack_tx_passes.is_multiple_of(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+            if stack_tx_passes.is_multiple_of(WORK_ITEMS_PER_POLL_TIME_CHECK)
                 && has_reached_poll_round_time_limit(round_started_at, monotonic_time())
             {
                 has_reached_time_limit = true;
@@ -349,8 +352,7 @@ impl Service {
                 round_started_at,
                 rx_remaining,
                 &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
+                &mut batch,
             );
             rx_packets += tail_progress.packets;
             if tail_progress.has_lock_contention {
@@ -416,26 +418,21 @@ impl Service {
         device_timestamp: MonotonicInstant,
         round_started_at: MonotonicInstant,
         budget: usize,
-        rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        rx_batch: &mut Vec<RxPacket>,
+        batch: &mut IngressBatch,
     ) -> DeviceRxProgress {
         let mut progress = DeviceRxProgress::default();
         let mut packets_since_time_check = 0;
 
-        if !self.try_process_rx_batch(
-            device_timestamp,
-            rx_batch,
-            accepted_packets,
-            control_packets,
-        ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+        if !self.try_process_rx_batch(device_timestamp, rx_batch, batch)
+            || !self.try_flush_ingress_batches(batch)
         {
             progress.has_lock_contention = true;
             return progress;
         }
 
         while progress.packets < budget {
-            if packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
+            if packets_since_time_check >= WORK_ITEMS_PER_POLL_TIME_CHECK {
                 packets_since_time_check = 0;
                 if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
                     progress.has_reached_time_limit = true;
@@ -460,7 +457,7 @@ impl Service {
             let batch_budget = budget
                 .saturating_sub(progress.packets)
                 .min(RX_INGRESS_BATCH_PACKETS)
-                .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+                .min(WORK_ITEMS_PER_POLL_TIME_CHECK)
                 .min(router.ingress_capacity());
             if batch_budget == 0 {
                 let neighbor_events = router.take_neighbor_events();
@@ -478,12 +475,8 @@ impl Service {
             progress.packets += drain.work_done;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
-            if !self.try_process_rx_batch(
-                device_timestamp,
-                rx_batch,
-                accepted_packets,
-                control_packets,
-            ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+            if !self.try_process_rx_batch(device_timestamp, rx_batch, batch)
+                || !self.try_flush_ingress_batches(batch)
             {
                 progress.has_lock_contention = true;
                 break;
@@ -535,9 +528,8 @@ impl Service {
     fn try_process_rx_batch(
         &self,
         device_timestamp: MonotonicInstant,
-        rx_batch: &mut Vec<PacketBuf>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        rx_batch: &mut Vec<RxPacket>,
+        batch: &mut IngressBatch,
     ) -> bool {
         if rx_batch.is_empty() {
             return true;
@@ -548,9 +540,9 @@ impl Service {
         };
         ingress.handle_rx_packets(
             device_timestamp,
+            crate::netfilter::global(),
             rx_batch,
-            accepted_packets,
-            control_packets,
+            batch,
         );
         let next_deadline = ingress.ipv4_reassembly_deadline();
         self.update_ipv4_reassembly_timeout(next_deadline);
@@ -558,16 +550,12 @@ impl Service {
         true
     }
 
-    fn try_flush_ingress_batches(
-        &self,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
-    ) -> bool {
-        if accepted_packets.is_empty() && control_packets.is_empty() {
+    fn try_flush_ingress_batches(&self, batch: &mut IngressBatch) -> bool {
+        if batch.is_empty() {
             return true;
         }
 
-        let mut sockets = if accepted_packets.is_empty() {
+        let mut sockets = if batch.local.is_empty() {
             None
         } else {
             let Some(sockets) = SOCKET_SET.inner.try_lock() else {
@@ -582,10 +570,11 @@ impl Service {
             // Acquire both destinations before listener preparation mutates the
             // socket set. A failed nonblocking acquisition leaves the complete
             // batch available for an identical retry in a later poll round.
-            prepare_smoltcp_ingress(accepted_packets, sockets);
-            router.enqueue_ingress_packets(accepted_packets);
+            prepare_smoltcp_ingress(&batch.local, sockets);
+            router.enqueue_ingress_packets(&mut batch.local);
         }
-        for packet in control_packets.drain(..) {
+        router.enqueue_forward_packets(&mut batch.forward);
+        for packet in batch.control.drain(..) {
             if let Err(err) = router.queue_control_ipv4_packet(packet) {
                 warn!("Dropping network control packet: {}", err);
             }
@@ -690,19 +679,11 @@ impl Service {
         if router.ipv4_dest_requires_broadcast(dst_addr) && !allow_broadcast {
             return Err(KError::from(LinuxError::EACCES));
         }
-        let packet_len = packet.as_ref().ok_or(KError::InvalidInput)?.len();
         let source_addr = IpAddress::Ipv4(route.source.ok_or(LinuxError::ENETUNREACH)?);
         let is_loopback = router.is_loopback_destination(dst_addr);
 
-        if !is_loopback {
-            if !router.can_enqueue_tx_packet() {
-                return Err(KError::WouldBlock);
-            }
-
-            let packet_count = output_ipv4_packet_count(&router, dst_addr, packet_len)?;
-            if !router.can_enqueue_tx_packets(packet_count) {
-                return Err(KError::WouldBlock);
-            }
+        if !is_loopback && !router.can_enqueue_tx_packet() {
+            return Err(KError::WouldBlock);
         }
 
         let route_mtu = router.route_mtu(dst_addr);
@@ -783,11 +764,11 @@ impl Service {
             return;
         }
 
-        let deadline = u64::try_from(next.total_micros())
+        let deadline_us = u64::try_from(next.total_micros())
             .unwrap_or(u64::MAX)
             .saturating_add(1);
         self.timeout_deadline_micros
-            .store(deadline, Ordering::Release);
+            .store(deadline_us, Ordering::Release);
     }
 
     fn update_ipv4_reassembly_timeout(&self, next: Option<MonotonicInstant>) {
@@ -828,22 +809,22 @@ impl Service {
 
     pub(crate) fn handle_timer_tick(&self) {
         let current_micros = u64::try_from(now().total_micros()).unwrap_or(0);
-        let protocol_deadline = self.timeout_deadline_micros.load(Ordering::Acquire);
-        let has_protocol_expired = protocol_deadline != 0
-            && current_micros.saturating_add(1) >= protocol_deadline
+        let protocol_deadline_us = self.timeout_deadline_micros.load(Ordering::Acquire);
+        let has_protocol_expired = protocol_deadline_us != 0
+            && current_micros.saturating_add(1) >= protocol_deadline_us
             && self
                 .timeout_deadline_micros
-                .compare_exchange(protocol_deadline, 0, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(protocol_deadline_us, 0, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok();
 
-        let reassembly_deadline = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
-        let has_reassembly_expired = reassembly_deadline > IPV4_REASSEMBLY_TIMER_PENDING
-            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
-                >= reassembly_deadline
+        let reassembly_deadline_us = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
+        let has_reassembly_expired = reassembly_deadline_us > IPV4_REASSEMBLY_TIMER_PENDING
+            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET_US)
+                >= reassembly_deadline_us
             && self
                 .ipv4_reassembly_deadline_micros
                 .compare_exchange(
-                    reassembly_deadline,
+                    reassembly_deadline_us,
                     IPV4_REASSEMBLY_TIMER_PENDING,
                     Ordering::AcqRel,
                     Ordering::Acquire,
@@ -861,8 +842,20 @@ impl Service {
     }
 
     fn sync_local_ipv4_views(&self) {
-        let local_ipv4_addrs = self.router.lock().local_ipv4_addrs();
+        let router = self.router.lock();
+        self.sync_ingress_device_names(&router);
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        drop(router);
         self.replace_local_ipv4_views(&local_ipv4_addrs);
+    }
+
+    fn sync_ingress_device_names(&self, router: &Router) {
+        self.ingress.lock().update_device_names(
+            router
+                .devices
+                .iter_with_ids()
+                .map(|(id, device)| (id.ifindex(), device.name())),
+        );
     }
 
     fn replace_local_ipv4_views(&self, addrs: &[crate::ip::Ipv4Cidr]) {
@@ -1156,6 +1149,7 @@ impl Service {
         let before = router.devices.link_snapshot_for_ifindex(ifindex);
         let routes_before = router.table.snapshot();
         let is_effective_mtu_changed = router.devices.update_device_link(ifindex, update)?;
+        self.sync_ingress_device_names(&router);
         if is_effective_mtu_changed {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
@@ -1237,13 +1231,15 @@ impl Service {
     ///
     /// Callers must hold [`crate::control::network_config_lock`] so device
     /// removal cannot interleave with other control-plane mutations.
-    pub(crate) fn remove_device_by_model_id(
+    #[cfg(unittest)]
+    pub(crate) fn remove_device_by_model_id_for_test(
         &self,
         id: kdevice::DeviceId,
     ) -> Option<Vec<NetworkEvent>> {
         let mut router = self.router.lock();
         let effective_mtu = router.devices.effective_mtu();
         let removed = router.remove_device_by_model_id(id)?;
+        self.sync_ingress_device_names(&router);
         if router.devices.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
@@ -1253,6 +1249,24 @@ impl Service {
         Some(removed)
     }
 
+    pub(crate) fn remove_device_by_publication(
+        &self,
+        publication: kdevice::PublicationId,
+    ) -> Option<Vec<NetworkEvent>> {
+        let mut router = self.router.lock();
+        let effective_mtu = router.devices.effective_mtu();
+        let removed = router.remove_device_by_publication(publication)?;
+        self.sync_ingress_device_names(&router);
+        if router.devices.effective_mtu() != effective_mtu {
+            let mut iface = self.iface.lock();
+            self.rebuild_interface(&mut router, &mut iface);
+        }
+        let local_ipv4_addrs = router.local_ipv4_addrs();
+        self.replace_local_ipv4_views(&local_ipv4_addrs);
+        Some(removed)
+    }
+
+    #[cfg(unittest)]
     pub(crate) fn apply_neighbor_update(
         &self,
         update: NeighborUpdate,
@@ -1344,7 +1358,7 @@ fn poll_smoltcp_ingress_budgeted(
     while progress.packets < budget_packets {
         if progress
             .packets
-            .is_multiple_of(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+            .is_multiple_of(WORK_ITEMS_PER_POLL_TIME_CHECK)
             && progress.packets > 0
             && has_reached_poll_round_time_limit(round_started_at, monotonic_time())
         {
@@ -1413,7 +1427,7 @@ fn dispatch_tx_budgeted(
     let mut has_reached_time_limit = false;
 
     while remaining > 0 {
-        let chunk = remaining.min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS);
+        let chunk = remaining.min(WORK_ITEMS_PER_POLL_TIME_CHECK);
         let (dispatched, _) = router.dispatch_budgeted(timestamp, chunk);
         work_done += dispatched;
         remaining = remaining.saturating_sub(dispatched);
@@ -1441,36 +1455,6 @@ fn wake_tx_capacity_waiters(capacity_poll: Option<PollSet>) {
     }
 }
 
-fn output_ipv4_packet_count(
-    router: &Router,
-    dst_addr: &IpAddress,
-    packet_len: usize,
-) -> KResult<usize> {
-    if packet_len > u16::MAX as usize {
-        return Err(LinuxError::EMSGSIZE.into());
-    }
-
-    let Some(mtu) = router.route_mtu(dst_addr) else {
-        return Ok(1);
-    };
-    if packet_len <= mtu {
-        return Ok(1);
-    }
-
-    let payload_len = packet_len
-        .checked_sub(IPV4_HEADER_LEN)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
-    let max_fragment_payload_len = mtu
-        .checked_sub(IPV4_HEADER_LEN)
-        .map(|len| len / 8 * 8)
-        .filter(|len| *len > 0)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?;
-    Ok(payload_len
-        .checked_add(max_fragment_payload_len - 1)
-        .ok_or_else(|| KError::from(LinuxError::EMSGSIZE))?
-        / max_fragment_payload_len)
-}
-
 fn ipv4_snapshots_for_device(router: &Router, dev: NetDeviceId) -> Vec<Ipv4AddrSnapshot> {
     router
         .ipv4_addr_snapshots()
@@ -1492,18 +1476,27 @@ fn ipv4_transition_events(
     routes_before: Vec<Rule>,
     routes_after: &[Rule],
 ) -> Vec<NetworkEvent> {
-    let mut added_routes = routes_after.to_vec();
+    // Each surviving route consumes the first still-unmatched equal entry, so
+    // duplicates cancel one-for-one and the remaining order is preserved.
+    let mut is_unchanged = vec![false; routes_after.len()];
     let mut removed_routes = Vec::new();
     for route in routes_before {
-        if let Some(index) = added_routes
+        if let Some(index) = routes_after
             .iter()
-            .position(|candidate| *candidate == route)
+            .zip(&is_unchanged)
+            .position(|(candidate, &is_matched)| !is_matched && *candidate == route)
         {
-            added_routes.remove(index);
+            is_unchanged[index] = true;
         } else {
             removed_routes.push(route);
         }
     }
+    let mut added_routes: Vec<Rule> = routes_after
+        .iter()
+        .zip(&is_unchanged)
+        .filter(|&(_, &is_matched)| !is_matched)
+        .map(|(route, _)| *route)
+        .collect();
 
     // Preserve the cascade order reported by the address set: explicitly
     // removed sources first, in their removal order, followed by any other
@@ -1530,15 +1523,11 @@ fn ipv4_transition_events(
     }
 
     let take_routes = |routes: &mut Vec<Rule>, snapshot: &Ipv4AddrSnapshot, deleting: bool| {
-        let mut owned = Vec::new();
-        let mut index = 0;
-        while index < routes.len() {
-            if routes[index].is_derived_from_address(snapshot.dev, snapshot.entry) {
-                owned.push(routes.remove(index));
-            } else {
-                index += 1;
-            }
-        }
+        let mut owned: Vec<Rule> = routes
+            .extract_if(.., |route| {
+                route.is_derived_from_address(snapshot.dev, snapshot.entry)
+            })
+            .collect();
         // The snapshot's storage order is a lookup concern, not an
         // announcement order.  Linux installs and removes the same set of
         // derived routes in different sequences; apply the matching one.

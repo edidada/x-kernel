@@ -4,11 +4,12 @@
 
 //! Controlled task and interrupt consumers; the boot RCU service persists.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use kalloc_types::KBox;
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use kerrno::KError;
@@ -198,12 +199,12 @@ fn replace_in_task(
 ) -> ktask::KtaskRef {
     let value = value.clone();
     let probe = probe.clone();
-    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(move || {
             let old = value.replace_sync(payload(next, &probe)).unwrap();
             probe.returned[next - 2].store(old.version, Ordering::Release);
             drop(old);
-        },
+        }).unwrap(),
         "rcu-replace".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -220,8 +221,8 @@ fn overlapping_replacements_keep_old_readers_and_return_distinct_owners() {
     let value = Arc::new(Rcu::new(payload(1, &probe)));
     let reader_value = value.clone();
     let reader_probe = probe.clone();
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|token| {
                 // Keep the first version across preemption without blocking.
                 let old = reader_value.read(token);
@@ -236,7 +237,7 @@ fn overlapping_replacements_keep_old_readers_and_return_distinct_owners() {
                     Ordering::Release,
                 );
             });
-        },
+        }).unwrap(),
         "rcu-old-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -257,8 +258,8 @@ fn overlapping_replacements_keep_old_readers_and_return_distinct_owners() {
     // Joining a real same-CPU competitor establishes a scheduler boundary
     // before the enrollment check. The reader cannot exit its scope until we
     // release it below, so registration cannot disappear before that check.
-    let competitor = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        || {},
+    let competitor = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(|| {}).unwrap(),
         "rcu-reader-competitor".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -412,12 +413,12 @@ struct SoftirqReader {
 const _: () = core::assert!(core::mem::offset_of!(SoftirqReader, node) == 0);
 
 /// # Safety
-/// The node is the zero-offset projection of a Box transferred once to the
+/// The node is the zero-offset projection of a KBox transferred once to the
 /// boot callback service. This invocation consumes that unique allocation.
 unsafe fn read_from_softirq(node: *mut krcu_core::CallbackNode) {
-    // SAFETY: the checked field offset preserves the submitted Box provenance;
+    // SAFETY: the checked field offset preserves the submitted KBox provenance;
     // the service detached this callback and invokes it exactly once.
-    let reader = unsafe { Box::from_raw(node.cast::<SoftirqReader>()) };
+    let reader = unsafe { KBox::from_raw(node.cast::<SoftirqReader>()) };
     let reads = reader.reads.clone();
     if kirq::context::interrupt_context_level() != kirq::context::InterruptContextLevel::Softirq
         || !krcu_core::RcuContextIf::current_cpu_watching().is_watching()
@@ -445,12 +446,12 @@ unsafe fn read_from_softirq(node: *mut krcu_core::CallbackNode) {
 }
 
 /// # Safety
-/// The node projects from the unique unpublished SoftirqReader Box adopted by
+/// The node projects from the unique unpublished SoftirqReader KBox adopted by
 /// PreparedCallback. Cancellation must release it without running a read.
 unsafe fn cancel_softirq_reader(node: *mut krcu_core::CallbackNode) {
-    // SAFETY: repr(C) and the zero-offset assertion recover the unique Box;
+    // SAFETY: repr(C) and the zero-offset assertion recover the unique KBox;
     // the test retains another container owner until every submission ends.
-    drop(unsafe { Box::from_raw(node.cast::<SoftirqReader>()) });
+    drop(unsafe { KBox::from_raw(node.cast::<SoftirqReader>()) });
 }
 
 fn submit_softirq_reader(value: &Arc<Rcu<Payload>>, reads: &Arc<SoftirqReads>, cpu: usize) -> bool {
@@ -460,17 +461,20 @@ fn submit_softirq_reader(value: &Arc<Rcu<Payload>>, reads: &Arc<SoftirqReads>, c
     let task_accepted = accepted.clone();
     // Public submission selects current CPU. A pinned producer preserves the
     // original per-CPU executor coverage without exposing callback queues.
-    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
-            let reader = Box::into_raw(Box::new(SoftirqReader {
-                node: krcu_core::CallbackNode::new(read_from_softirq),
-                value,
-                reads: task_reads,
-                cpu,
-            }));
+    let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new_nowait(move || {
+            let reader = KBox::into_raw(
+                KBox::new_nowait(SoftirqReader {
+                    node: krcu_core::CallbackNode::new(read_from_softirq),
+                    value,
+                    reads: task_reads,
+                    cpu,
+                })
+                .unwrap(),
+            );
             // SAFETY: field projection retains the containing allocation's provenance.
             let node = unsafe { &raw mut (*reader).node };
-            // SAFETY: this initialized field belongs to a live Box and cannot be null.
+            // SAFETY: this initialized field belongs to a live KBox and cannot be null.
             let node = unsafe { NonNull::new_unchecked(node) };
             // SAFETY: unique stable unpublished storage, transferable Arc resources;
             // cancellation releases only this record and its retained container share.
@@ -481,7 +485,7 @@ fn submit_softirq_reader(value: &Arc<Rcu<Payload>>, reads: &Arc<SoftirqReads>, c
                 Ok(()) => task_accepted.store(true, Ordering::Release),
                 Err((_, prepared)) => drop(prepared),
             }
-        },
+        }).unwrap(),
         "rcu-softirq-producer".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
@@ -653,8 +657,8 @@ fn migrated_reader_keeps_old_owner_until_scope_exit() {
     let reader_probe = probe.clone();
     let source = LogicalCpuId::new(0);
     let destination = LogicalCpuId::new(1);
-    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-        move || {
+    let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+        ktask::PreparedTaskEntry::new(move || {
             krcu::with_read(|token| {
                 // Keep the borrowed version through involuntary migration.
                 let old = reader_value.read(token);
@@ -672,7 +676,7 @@ fn migrated_reader_keeps_old_owner_until_scope_exit() {
                     Ordering::Release,
                 );
             });
-        },
+        }).unwrap(),
         "rcu-migrating-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));

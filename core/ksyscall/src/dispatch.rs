@@ -269,6 +269,8 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
         // fd ops
         #[cfg(target_arch = "x86_64")]
+        Sysno::creat => sys_creat(uctx.arg0().into(), uctx.arg1() as _),
+        #[cfg(target_arch = "x86_64")]
         Sysno::open => sys_open(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::openat2 => sys_openat2(
             uctx.arg0() as _,
@@ -446,6 +448,32 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::umount2 => sys_umount2(uctx.arg0().into(), uctx.arg1() as _) as _,
         Sysno::pivot_root => sys_pivot_root(uctx.arg0().into(), uctx.arg1().into()),
 
+        // new mount API
+        Sysno::fsopen => sys_fsopen(uctx.arg0().into(), uctx.arg1() as _),
+        Sysno::fsconfig => sys_fsconfig(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2().into(),
+            uctx.arg3().into(),
+            uctx.arg4() as _,
+        ),
+        Sysno::fsmount => sys_fsmount(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::move_mount => sys_move_mount(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+            uctx.arg4() as _,
+        ),
+        Sysno::open_tree => sys_open_tree(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::mount_setattr => sys_mount_setattr(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+            uctx.arg4() as _,
+        ),
+
         // pipe
         Sysno::pipe2 => sys_pipe2(uctx.arg0().into(), uctx.arg1() as _),
         #[cfg(target_arch = "x86_64")]
@@ -551,6 +579,8 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::msync => sys_msync(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::mlock => sys_mlock(uctx.arg0(), uctx.arg1() as _),
         Sysno::mlock2 => sys_mlock2(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::mlockall => sys_mlockall(uctx.arg0() as _),
+        Sysno::munlockall => sys_munlockall(),
 
         // task info
         Sysno::getpid => sys_getpid(),
@@ -911,9 +941,7 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         | Sysno::userfaultfd
         | Sysno::perf_event_open
         | Sysno::io_uring_setup
-        | Sysno::fsopen
         | Sysno::fspick
-        | Sysno::open_tree
         | Sysno::memfd_secret => sys_dummy_fd(sysno),
 
         Sysno::timer_create => {
@@ -931,6 +959,13 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
         // sync_file_range: return success (no-op, same as fsync for directories)
         Sysno::sync_file_range => Ok(0),
+
+        // I/O priority scheduling is not modeled. Accept ioprio_set as a no-op
+        // and report the default (class NONE, data 0) for ioprio_get so services
+        // that request an I/O priority (systemd IOSchedulingClass=) do not fail
+        // at the IOPRIO exec step.
+        Sysno::ioprio_set => Ok(0),
+        Sysno::ioprio_get => Ok(0),
 
         // Known benign unimplemented syscalls (glibc handles ENOSYS gracefully)
         Sysno::rseq => {

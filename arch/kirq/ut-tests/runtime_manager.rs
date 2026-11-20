@@ -51,8 +51,53 @@ impl SyntheticLine {
         Self { virq, line }
     }
 
+    /// Installs a synthetic immediate affinity callback for procfs fixtures.
+    pub fn with_affinity_chip(&self, chip: &'static crate::IrqAffinityChip) {
+        self.line.lock().test_affinity_chip = Some(chip);
+    }
+
+    /// Installs a synthetic deferred affinity callback for procfs fixtures.
+    pub fn with_deferred_affinity_chip(
+        &self,
+        chip: &'static crate::IrqDeferredAffinityChip,
+    ) {
+        self.line.lock().test_deferred_affinity = Some(chip);
+    }
+
     pub fn virq(&self) -> usize {
         self.virq
+    }
+
+    /// Establishes a requested policy without publishing an action.
+    pub fn set_requested_policy_for_tests(&self, mask: kcpu_id_map::KCpuMask) {
+        self.line.lock().affinity.requested = Some(mask);
+    }
+
+    pub fn clear_action_history_for_tests(&self) {
+        self.line.lock().clear_action_history_for_tests();
+    }
+
+    /// Runs the same retired-list handoff used by a real Line retirement.
+    pub fn retire_for_tests(&self) {
+        let retirements = {
+            let mut line = self.line.lock();
+            line.set_retired_for_tests();
+            line.take_retirements()
+        };
+        crate::runtime::retirement::notify_retirements(self.virq, retirements);
+        let removed = {
+            let mut registry = IRQ_STATE.lock();
+            if registry
+                .descs
+                .get(&self.virq)
+                .is_some_and(|line| Arc::ptr_eq(&line, &self.line))
+            {
+                registry.remove_test_line(self.virq)
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 
     /// The caller exclusively owns this vacant numeric slot for the scope.
@@ -64,6 +109,7 @@ impl SyntheticLine {
             assert!(!registry.descs.contains_key(&virq));
             registry.descs.insert(virq, line.clone());
         }
+        line.lock().set_action_history_for_tests();
         Self { virq, line }
     }
 }
@@ -1955,6 +2001,32 @@ fn configuration_failure_leaves_regular_and_disabled_registration_unowned() {
         drop(irq_guard);
         assert_eq!(karch::local_irq_enabled(), irq_before);
     }
+}
+
+#[def_test]
+fn restricted_configuration_failure_publishes_no_policy() {
+    let virq = 0x3173;
+    let line = IrqLine::new(IrqStateDesc::test_new(IrqDesc::from_virq(virq)));
+    let handler: crate::Handler = Arc::new(test_handler);
+    let result = super::register_locked(
+        virq,
+        &mut line.lock(),
+        &handler,
+        super::IrqRegisterOptions::disabled().restrict_user_affinity(),
+        |plan| {
+            Err(IrqDescError::ConfigurationFailed {
+                hwirq: plan.desc.hwirq,
+            })
+        },
+    );
+    assert_eq!(
+        result,
+        Err(IrqDescError::ConfigurationFailed { hwirq: virq })
+    );
+    let entry = line.lock();
+    assert_eq!(entry.action_count(), 0);
+    assert!(!entry.has_user_affinity_restriction());
+    assert_eq!(Arc::strong_count(&handler), 1);
 }
 
 #[def_test]

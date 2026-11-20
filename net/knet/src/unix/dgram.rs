@@ -3,10 +3,9 @@
 // See LICENSES for license details.
 
 //! Unix datagram socket transport.
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 
 use async_channel::TryRecvError;
-use async_trait::async_trait;
 use kerrno::{KError, KResult};
 use kio::{IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -64,6 +63,11 @@ impl Default for DgramTransport {
 }
 
 impl DgramTransport {
+    /// Returns InvalidInput when polled: datagram sockets cannot accept.
+    pub async fn accept(&self, _nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
+        Err(KError::InvalidInput)
+    }
+
     pub fn new() -> Self {
         DgramTransport {
             rx: Mutex::new(None),
@@ -150,8 +154,15 @@ impl Configurable for DgramTransport {
         Ok(OptionHandled::Yes)
     }
 }
-#[async_trait]
 impl UnixTransportOps for DgramTransport {
+    // No `queue_lengths`: `unix_inq_len` reports the head datagram's length for
+    // SOCK_DGRAM, but this transport keeps its messages in an
+    // `async_channel::Receiver`, which has no peek, so the length is not
+    // readable without consuming the message the caller has not asked for. The
+    // ioctl answers ENOTTY instead of a zero that a caller would read as an
+    // empty queue; reaching the head length needs a peekable queue, which is a
+    // separate change (see `docs/design.md`).
+
     fn bind(&self, slot: &super::BindEntry, local_addr: &UnixAddr) -> KResult {
         let bind_slot_handle = slot.dgram.clone();
         let mut slot = slot.dgram.lock();
@@ -196,10 +207,6 @@ impl UnixTransportOps for DgramTransport {
         );
         self.poll_state.wake();
         Ok(())
-    }
-
-    async fn accept(&self, _nonblocking: bool) -> KResult<(UnixTransport, UnixAddr)> {
-        Err(KError::InvalidInput)
     }
 
     fn send(&self, mut src: impl Read, options: SendOptions) -> KResult<usize> {

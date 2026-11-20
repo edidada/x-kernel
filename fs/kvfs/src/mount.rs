@@ -16,6 +16,7 @@ use core::{
 
 use hashbrown::HashMap;
 use kcred::{Cred, NamespaceId, UserNamespace, initial_user_namespace};
+use kerrno::LinuxError;
 use klazy::Once;
 use ktime_types::TimeSpan;
 
@@ -28,7 +29,7 @@ use crate::{
     GetattrRequestMask, InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags,
     NodePermission, NodeType, OpenFlags, Permission, RemovedEntry, RenameFlags, RenameOutcome,
     SetattrTime, StatFs, SuperBlock, SuperBlockFlags, Umode, VfsError, VfsFile, VfsFileBuilder,
-    VfsInode, VfsResult, nullfs, path::PathBuf,
+    VfsInode, VfsResult, XattrName, nullfs, path::PathBuf,
 };
 
 bitflags::bitflags! {
@@ -292,6 +293,75 @@ impl MntNamespace {
         }
     }
 
+    /// Creates a detached mount for the new mount API (`fsmount`).
+    ///
+    /// The mount is not attached to any mountpoint yet;
+    /// [`attach_detached_mount`](Self::attach_detached_mount) (`move_mount`)
+    /// installs it later. Mirrors Linux `vfs_create_mount()`. The returned
+    /// `Arc<Mount>` lets callers open the mount root (via `root_path`) before
+    /// attachment, as `fsmount` fds require.
+    pub fn create_detached_mount(
+        &self,
+        fs: &Arc<SuperBlock>,
+        flags: MountFlags,
+        devname: Option<&str>,
+        requested_superblock_flags: Option<SuperBlockFlags>,
+    ) -> VfsResult<Arc<Mount>> {
+        let mount = Mount::try_new_detached(fs, flags, devname, requested_superblock_flags)?
+            .ok_or(VfsError::ResourceBusy)?;
+        Ok(mount.into_arc_at(None))
+    }
+
+    /// Attaches a detached mount at `mountpoint` for the new mount API
+    /// (`move_mount`). The caller must hold mount privilege.
+    pub fn move_detached_mount(
+        &self,
+        mount: Arc<Mount>,
+        source: &Path,
+        mountpoint: &Path,
+    ) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        Self::registered_mount_at(&mounts, source)?;
+        // `do_move_mount` compares `d_is_dir()` of both ends before it walks the
+        // destination's ancestors, and answers EINVAL (not ENOTDIR) when they
+        // disagree; the ELOOP ancestry walk comes later. Keeping that order means
+        // a mismatched target that also lies in the moved mount's subtree reports
+        // EINVAL, as Linux does, rather than ELOOP.
+        if mount.root_path().dentry().as_dir().is_ok() != mountpoint.dentry().as_dir().is_ok() {
+            return Err(VfsError::InvalidInput);
+        }
+        // Moving a mount under itself would make the parent chain a cycle, and
+        // every walk from the root would then never terminate.
+        if mountpoint.mount().is_in_subtree_of(&mount) {
+            return Err(VfsError::FilesystemLoop);
+        }
+        // Re-validate the source edge under the lock before touching it: the
+        // stack may have changed since the caller resolved the path.
+        source.detach_only()?;
+        let mount = mountpoint.graft_tree_arc(mount)?;
+        for m in mount.collect_subtree() {
+            mounts.insert(m.mount_id(), m.clone());
+        }
+        Ok(mount)
+    }
+
+    pub fn attach_detached_mount(
+        &self,
+        mount: Arc<Mount>,
+        mountpoint: &Path,
+    ) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        let mount = mountpoint.graft_tree_arc(mount)?;
+        // Register the whole subtree: a single fsmount mount, or an open_tree
+        // clone whose children must gain strong namespace references here.
+        for m in mount.collect_subtree() {
+            mounts.insert(m.mount_id(), m.clone());
+        }
+        Ok(mount)
+    }
+
     /// Creates a non-recursive bind mount of `source` at `mountpoint`.
     ///
     /// The new mount shares the source dentry and superblock and inherits the
@@ -303,6 +373,112 @@ impl MntNamespace {
         let mount = mountpoint.mount_bind(source)?;
         mounts.insert(mount.mount_id(), mount.clone());
         Ok(mount)
+    }
+
+    /// Recursive bind mount (`MS_BIND | MS_REC`): clones the whole source
+    /// mount subtree, not just the top mount.
+    ///
+    /// Each cloned child is re-grafted at the same mountpoint dentry but under
+    /// its cloned parent, so the new tree mirrors the source's submounts.
+    /// `collect_subtree` yields parents before children, which lets the clone
+    /// map resolve a child's parent as it is processed.
+    pub fn attach_bind_recursive(&self, source: &Path, mountpoint: &Path) -> VfsResult<Arc<Mount>> {
+        let mut mounts = self.mounts.lock();
+        Self::require_mount(&mounts, source.mount())?;
+        Self::require_mount(&mounts, mountpoint.mount())?;
+        let new_root = mountpoint.mount_bind(source)?;
+        mounts.insert(new_root.mount_id(), new_root.clone());
+
+        let subtree = source.mount().collect_subtree_under(&source.dentry)?;
+        let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
+        clone_map.insert(source.mount().mount_id(), new_root.clone());
+        for child in subtree.iter().skip(1) {
+            let location = child.location().ok_or(VfsError::InvalidInput)?;
+            // Only clone submounts at or below the bind source. `collect_subtree`
+            // walks the whole host mount, so a subdirectory bind would otherwise
+            // clone sibling submounts located elsewhere in that mount; those land
+            // outside the new root, are unreachable, and make unmount permanently
+            // EBUSY. Linux copy_tree clones only the subtree under the source.
+            if !Self::is_reachable_from(&location, source) {
+                continue;
+            }
+            let new_parent = clone_map
+                .get(&location.mount().mount_id())
+                .ok_or(VfsError::InvalidInput)?;
+            let new_location = Path::new(new_parent.clone(), location.dentry.clone());
+            let new_child = new_location.mount_bind(&child.root_path())?;
+            mounts.insert(new_child.mount_id(), new_child.clone());
+            clone_map.insert(child.mount_id(), new_child);
+        }
+        Ok(new_root)
+    }
+
+    /// Moves a mount (and its subtree) from `source` to `target` (`MS_MOVE`).
+    ///
+    /// The source must be the root of a registered mount. The mount is
+    /// detached from its old parent (restoring whatever it covered) and
+    /// re-grafted at the target, keeping its identity and submounts.
+    ///
+    /// The whole detach + re-graft runs under the namespace registry lock and
+    /// the touched inodes' namespace-exclusive locks (CG-015), so a concurrent
+    /// mount/umount can never observe a detached-but-not-reattached mount, and a
+    /// failing move leaves the tree unchanged.
+    pub fn move_mount_to(&self, source: &Path, target: &Path) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let mnt = Self::registered_mount_at(&mounts, source)?.clone();
+        let parent_path = mnt.location().ok_or(VfsError::InvalidInput)?;
+
+        // Linux `do_move_mount()` checks the directory/non-directory match
+        // (EINVAL) before the ancestry test, so do the same: validate the type
+        // before detaching, so a failing move never leaves the source unmounted.
+        if mnt.mnt.mnt_root.as_dir().is_ok() != target.is_dir() {
+            return Err(VfsError::InvalidInput);
+        }
+        // Linux `do_move_mount()` then rejects a target inside the moved subtree
+        // (`mount_is_ancestor`) with ELOOP: grafting there would make the mount
+        // its own ancestor and loop path rendering forever. Check before any
+        // tree surgery.
+        if Self::is_reachable_from(target, source) {
+            return Err(VfsError::FilesystemLoop);
+        }
+
+        // Serialize the surgery on every touched inode in the same total order
+        // as pivot_root/rename (ancestor before descendant, then a stable
+        // pointer tiebreak), holding the locks across both detach and graft.
+        let mut targets: Vec<(Arc<VfsInode>, Vec<usize>)> = Vec::new();
+        let mut push_target = |path: &Path| {
+            let inode = path.inode();
+            if !targets.iter().any(|(held, _)| Arc::ptr_eq(held, &inode)) {
+                targets.push((inode, path.dentry.namespace_lock_key()));
+            }
+        };
+        push_target(&parent_path);
+        push_target(target);
+        targets.sort_by(|left, right| left.1.cmp(&right.1));
+        let _guards: Vec<_> = targets
+            .iter()
+            .map(|(inode, _)| inode.lock_namespace_exclusive())
+            .collect();
+
+        // Re-validate the source edge under the locks: the mount stack may have
+        // changed between resolving the paths and acquiring these locks.
+        if !parent_path
+            .mnt
+            .child_mount_at(&parent_path.dentry)
+            .is_some_and(|mounted| Arc::ptr_eq(&mounted, &mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+
+        // Detach from the old parent (restoring whatever it covered), then graft
+        // at the target. This mirrors `graft_tree_arc` without re-acquiring the
+        // target inode lock already held above.
+        mount_edge_detach(&parent_path.mnt, &parent_path.dentry, &mnt);
+        *mnt.mnt_location.lock() = Some(target.clone());
+        if let Some(old) = target.mnt.install_child_mount(&target.dentry, &mnt) {
+            *mnt.covers.lock() = Some(old);
+        }
+        Ok(())
     }
 
     /// Remounts `target` with independent superblock and per-mount flags.
@@ -328,6 +504,131 @@ impl MntNamespace {
         let mount = Self::registered_mount_at(&mounts, target)?;
         mount.set_flags(flags);
         Ok(())
+    }
+
+    /// Applies `mount_setattr(2)` attribute changes to the mount at `target`.
+    ///
+    /// `attr_set`/`attr_clr` are already translated to per-mount [`MountFlags`].
+    /// With `recursive`, the change is applied to every mount in the subtree.
+    pub fn set_mount_attributes(
+        &self,
+        target: &Path,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let mount = Self::registered_mount_at(&mounts, target)?.clone();
+        Self::apply_mount_attributes(&mount, attr_set, attr_clr, recursive);
+        Ok(())
+    }
+
+    /// Applies attribute changes to a specific mount (e.g. one referenced by an
+    /// `open_tree` fd via `mount_setattr` `AT_EMPTY_PATH`), not by path. The
+    /// mount may still be detached (an `fsmount` result not yet attached), so no
+    /// namespace-registration check is performed.
+    pub fn set_mount_attributes_on(
+        &self,
+        mount: &Arc<Mount>,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) -> VfsResult<()> {
+        Self::apply_mount_attributes(mount, attr_set, attr_clr, recursive);
+        Ok(())
+    }
+
+    fn apply_mount_attributes(
+        mount: &Arc<Mount>,
+        attr_set: MountFlags,
+        attr_clr: MountFlags,
+        recursive: bool,
+    ) {
+        let apply = |m: &Mount| m.set_flags((m.flags() & !attr_clr) | attr_set);
+        apply(mount);
+        if recursive {
+            for sub in mount.collect_subtree().iter().skip(1) {
+                apply(sub);
+            }
+        }
+    }
+
+    /// Clones the mount subtree at `source` into a detached tree (`open_tree`
+    /// with `OPEN_TREE_CLONE`).
+    ///
+    /// The returned root is not attached to the namespace; the caller keeps the
+    /// whole subtree alive (e.g. in an `open_tree` fd) until `move_mount`
+    /// installs it. Children are re-grafted under their cloned parents.
+    pub fn clone_mount_tree(&self, source: &Path) -> VfsResult<(Arc<Mount>, Vec<Arc<Mount>>)> {
+        self.clone_mount_tree_recursive(source, true)
+    }
+
+    /// Clones the mount at `source`, optionally with its subtree.
+    ///
+    /// `open_tree` without `AT_RECURSIVE` clones only the named mount
+    /// (`__do_loopback` uses `clone_mnt`), and with it the whole tree
+    /// (`copy_tree`). Cloning the subtree unconditionally made a non-recursive
+    /// request bring along mounts the caller did not ask for.
+    pub fn clone_mount_tree_recursive(
+        &self,
+        source: &Path,
+        recursive: bool,
+    ) -> VfsResult<(Arc<Mount>, Vec<Arc<Mount>>)> {
+        let mounts = self.mounts.lock();
+        Self::require_mount(&mounts, source.mount())?;
+        let new_root = Arc::new(Mount::clone_mnt(source));
+        if !recursive {
+            return Ok((new_root, Vec::new()));
+        }
+        let mut kept = vec![new_root.clone()];
+        let mut clone_map: HashMap<u64, Arc<Mount>> = HashMap::new();
+        clone_map.insert(source.mount().mount_id(), new_root.clone());
+        let subtree = source.mount().collect_subtree_under(&source.dentry)?;
+        // Clone every collected mount first, so a child can find the clone of its
+        // parent regardless of the order `collect_subtree_under` produced them.
+        let mut ordered: Vec<(Arc<Mount>, Path)> = Vec::new();
+        for child in subtree.iter().skip(1) {
+            let location = child.location().ok_or(VfsError::InvalidInput)?;
+            let new_parent = clone_map
+                .get(&location.mount().mount_id())
+                .ok_or(VfsError::InvalidInput)?;
+            let new_location = Path::new(new_parent.clone(), location.dentry.clone());
+            let new_child = Arc::new(Mount::clone_mnt(&child.root_path()));
+            *new_child.mnt_location.lock() = Some(new_location.clone());
+            clone_map.insert(child.mount_id(), new_child.clone());
+            ordered.push((new_child.clone(), new_location));
+            kept.push(new_child);
+        }
+        // Install bottom-up. `collect_subtree_under` yields a mountpoint's stack
+        // top first and each covered layer after it, while `install_child_mount`
+        // replaces whatever already sits at the mountpoint and returns it. In
+        // collection order the bottom layer would end up on top, so walk
+        // backwards: the deepest layer installs first and every higher layer
+        // records the clone it now covers, reproducing the stack.
+        for (new_child, new_location) in ordered.into_iter().rev() {
+            if let Some(covered) = new_location
+                .mnt
+                .install_child_mount(&new_location.dentry, &new_child)
+            {
+                *new_child.covers.lock() = Some(covered);
+            }
+        }
+        Ok((new_root, kept))
+    }
+
+    /// Requires `mount` to be registered in this namespace (`check_mnt`).
+    ///
+    /// `mount_setattr` can be handed a mount through a descriptor, so the mount
+    /// is not necessarily one this namespace knows; Linux's `check_mnt` refuses
+    /// to change a mount that belongs to another namespace. A detached mount
+    /// (an `fsmount` result) is not registered yet and is not checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] when the mount is unknown here.
+    pub fn require_registered_mount(&self, mount: &Arc<Mount>) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::require_mount(&mounts, mount)
     }
 
     /// Makes the mount rooted at `target` private.
@@ -357,9 +658,57 @@ impl MntNamespace {
     /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
     /// mount registered in this namespace.
     pub fn make_mount_slave(&self, target: &Path) -> VfsResult<()> {
-        let mounts = self.mounts.lock();
-        Self::registered_mount_at(&mounts, target)?;
+        self.make_mount_private(target)
+    }
+
+    /// Makes the mount rooted at `target` shared.
+    ///
+    /// KVFS does not yet model shared propagation groups, so a shared mount
+    /// would propagate no mount events and is behaviorally identical to a
+    /// private mount. This operation only validates the target and is
+    /// idempotent. It exists so callers such as systemd, which remount the
+    /// namespace root `MS_SHARED` after `pivot_root`, are not rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_shared(&self, target: &Path) -> VfsResult<()> {
+        self.make_mount_private(target)
+    }
+
+    /// Applies a propagation request to a mount that need not be registered.
+    ///
+    /// `mount_setattr` accepts `AT_EMPTY_PATH` on a mount fd, which names a
+    /// detached mount (`fsmount`/`open_tree` clone). Linux's `do_mount_setattr`
+    /// changes propagation on such a mount too, and it becomes observable once
+    /// `move_mount` attaches it, so requiring namespace registration here would
+    /// reject a legal request. KVFS models no shared propagation groups, so
+    /// every one of the four policies is a validated idempotent operation; this
+    /// entry point only checks that `target` is a mount root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is a mount root.
+    pub fn set_mount_propagation(&self, target: &Path) -> VfsResult<()> {
+        if !target.is_mount_root() {
+            return Err(VfsError::InvalidInput);
+        }
         Ok(())
+    }
+
+    /// Makes the mount rooted at `target` unbindable.
+    ///
+    /// KVFS does not yet model shared propagation groups, so an unbindable
+    /// mount is behaviorally identical to a private mount. This operation only
+    /// validates the target and is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_unbindable(&self, target: &Path) -> VfsResult<()> {
+        self.make_mount_private(target)
     }
 
     fn registered_mount_at<'a>(
@@ -730,6 +1079,10 @@ impl Mount {
         let path = Path::new(self.clone(), dentry);
         let mut file = VfsFileBuilder::from_path_state(path, flags, open_flags, f_op, cred);
         file.mark_opened()?;
+        // Linux file_init_path accounting for opens built outside do_dentry_open.
+        if flags.contains(FMode::READ) && !flags.contains(FMode::WRITE) {
+            file.inode()?.acquire_read_access();
+        }
         file.finish()
     }
 
@@ -790,6 +1143,22 @@ impl Mount {
         self.covers.lock().clone()
     }
 
+    /// Whether `self` is `root` or lies anywhere in its subtree.
+    ///
+    /// Walks parent links upward, so a mount that covers `root` or sits under
+    /// it answers true; a cycle in the parent chain cannot exist here because
+    /// this check is what prevents one from being created.
+    pub fn is_in_subtree_of(self: &Arc<Self>, root: &Arc<Self>) -> bool {
+        let mut current = Some(self.clone());
+        while let Some(mount) = current {
+            if Arc::ptr_eq(&mount, root) {
+                return true;
+            }
+            current = mount.location().map(|location| location.mount().clone());
+        }
+        false
+    }
+
     fn collect_subtree(self: &Arc<Self>) -> Vec<Arc<Self>> {
         let mut mounts = vec![self.clone()];
         let mut index = 0;
@@ -805,6 +1174,39 @@ impl Mount {
             index += 1;
         }
         mounts
+    }
+
+    /// Collects this mount plus the submounts at or under `dentry`, parents
+    /// before children.
+    ///
+    /// A recursive bind or `open_tree` clone of a subdirectory must clone only
+    /// the mounts beneath that directory, not the whole containing mount: the
+    /// latter re-clones unrelated subtrees and, when the destination lives
+    /// under the source, the clone's own previously-grafted tree, growing the
+    /// namespace without bound. Linux `copy_tree` roots the clone at the source
+    /// path for the same reason. Only the top mount's direct children need the
+    /// ancestry test; deeper descendants lie under `dentry` by construction.
+    fn collect_subtree_under(self: &Arc<Self>, dentry: &Dentry) -> VfsResult<Vec<Arc<Self>>> {
+        let mut mounts = vec![self.clone()];
+        let mut index = 0;
+        while index < mounts.len() {
+            let mount = mounts[index].clone();
+            for child in mount.children() {
+                if index == 0 {
+                    let location = child.location().ok_or(VfsError::InvalidInput)?;
+                    if !dentry.is_ancestor_of(&location.dentry)? {
+                        continue;
+                    }
+                }
+                let mut layer = Some(child);
+                while let Some(mount) = layer {
+                    layer = mount.covered_mount();
+                    mounts.push(mount);
+                }
+            }
+            index += 1;
+        }
+        Ok(mounts)
     }
 
     fn child_mount_at(&self, dentry: &Dentry) -> Option<Arc<Self>> {
@@ -851,7 +1253,7 @@ pub struct CreatedEntry {
 }
 
 /// A resolved location within a mountpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Path {
     mnt: Arc<Mount>,
     dentry: Dentry,
@@ -881,8 +1283,25 @@ impl Path {
         &self.mnt
     }
 
-    fn is_mount_root(&self) -> bool {
-        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
+    /// Returns `true` if this path's dentry is its mount's root dentry.
+    ///
+    /// This is the Linux `path_mounted` / `STATX_ATTR_MOUNT_ROOT` condition
+    /// (`dentry == mnt_root`), independent of whether the mount is currently
+    /// the topmost one at its mountpoint: a mount root captured through an
+    /// fd/cwd before an overmount still reports `true`.
+    pub fn dentry_is_mount_root(&self) -> bool {
+        self.dentry.ptr_eq(&self.mnt.mnt.mnt_root)
+    }
+
+    /// Returns `true` if this path is the root of the mount currently
+    /// attached at its mountpoint.
+    ///
+    /// Unlike [`Self::dentry_is_mount_root`], this also requires the mount to
+    /// be the parent's topmost child mount, so a covered (overmounted) mount
+    /// root reports `false`. Mount/umount and mount-stacking validation need
+    /// this "currently attached" semantics, not the statx attribute.
+    pub fn is_mount_root(&self) -> bool {
+        if !self.dentry_is_mount_root() {
             return false;
         }
 
@@ -927,6 +1346,9 @@ impl Path {
 
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
+        // Immutability is an exec-security input; serialize the flag change
+        // with sampling and with privilege revocation.
+        let _privilege_guard = inode.lock_privileges();
         if cred.fsuid() != inode.metadata().uid && !cred.has_cap_fowner() {
             return Err(VfsError::OperationNotPermitted);
         }
@@ -1258,6 +1680,13 @@ impl Path {
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
     pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
+        let inode = self.inode();
+        // Linux `chown_common()` samples, authorizes and commits under the
+        // inode lock. Taking the privilege lock before the snapshot keeps a
+        // concurrent chown from losing the other's fields or authorizing
+        // against an owner/mode that is already stale.
+        let _privilege_guard = inode.lock_privileges();
+        inode.check_mutable()?;
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
         let can_chown = cred.has_cap_chown();
@@ -1285,6 +1714,13 @@ impl Path {
         {
             return Err(VfsError::OperationNotPermitted);
         }
+        // Linux `setattr_prepare()` handles `ATTR_KILL_PRIV` before the
+        // metadata commit, so a failed capability removal leaves the owner and
+        // mode untouched. The reverse failure is not transactional and leaves
+        // the capability removed with the old metadata, as Linux does.
+        if metadata.mode.node_type() != NodeType::Directory {
+            self.kill_file_caps_locked()?;
+        }
         self.dentry.update_metadata(MetadataUpdate {
             owner: Some((uid.unwrap_or(metadata.uid), new_gid)),
             mode: Some(mode),
@@ -1295,6 +1731,10 @@ impl Path {
     /// Changes this inode's permission bits after applying Linux chmod authorization.
     pub fn chmod(&self, mut mode: NodePermission, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
+        let inode = self.inode();
+        // Mode and owner are part of the exec security sample; a concurrent
+        // chmod must not interleave with it or with a revocation.
+        let _privilege_guard = inode.lock_privileges();
         let metadata = self.metadata();
         if cred.fsuid() != metadata.uid && !cred.has_cap_fowner() {
             return Err(VfsError::OperationNotPermitted);
@@ -1311,7 +1751,158 @@ impl Path {
         })
     }
 
+    /// Removes privileges a content write would otherwise carry over.
+    ///
+    /// Mirrors Linux `should_remove_suid()` and `setattr_should_drop_sgid()`:
+    /// set-UID is always killed, and set-GID is killed when group-execute marks
+    /// it as a privilege or when the writer is outside the file's group. A
+    /// caller holding effective `CAP_FSETID` keeps both. The
+    /// `security.capability` attribute is then dropped unconditionally, so
+    /// changing a file's content cannot leave it with a file capability set
+    /// that its new content never earned (Linux
+    /// `security_inode_killpriv()`).
+    ///
+    /// The caller must hold the writable-mount lock.
+    pub fn file_remove_privs(&self, cred: &Cred) -> VfsResult<()> {
+        let inode = self.inode();
+        let _privilege_guard = inode.lock_privileges();
+        self.file_remove_privs_locked(cred)
+    }
+
+    /// Revokes a content write's inherited privileges while the caller holds
+    /// [`VfsInode::lock_privileges`] and the writable-mount lock.
+    pub(crate) fn file_remove_privs_locked(&self, cred: &Cred) -> VfsResult<()> {
+        // Linux rejects an immutable target before `notify_change()`; doing it
+        // here keeps a doomed write, truncate or copy from stripping
+        // `security.capability` first.
+        self.inode().check_mutable()?;
+        let metadata = self.metadata();
+        if metadata.mode.node_type() != NodeType::RegularFile {
+            return Ok(());
+        }
+        let permission = metadata.mode.permission();
+        let strips_uid = permission.contains(NodePermission::SET_UID);
+        // `strip_write_privileges()` drops set-GID for a group-execute mark
+        // and for a writer outside the file's group, so both must keep the
+        // fast path from skipping the metadata update.
+        let strips_gid = permission.contains(NodePermission::SET_GID)
+            && (permission.contains(NodePermission::GROUP_EXEC) || !cred.in_group(metadata.gid));
+        let has_attributes = self.inode().has_extended_attributes();
+        // Linux `S_NOSEC` fast path: with no set-ID bit to clear and no
+        // attribute store to consult, a content write must not touch
+        // filesystem metadata at all.
+        if !strips_uid && !strips_gid && !has_attributes {
+            return Ok(());
+        }
+        let mode = Self::strip_write_privileges(permission, metadata.gid, cred);
+        if mode.bits() != permission.bits() {
+            self.dentry.update_metadata(MetadataUpdate {
+                mode: Some(mode),
+                ..Default::default()
+            })?;
+        }
+        if has_attributes {
+            self.kill_file_caps_locked()?;
+        }
+        Ok(())
+    }
+
+    /// Returns the permission bits a content write must leave behind.
+    ///
+    /// Linux `should_remove_suid()`: set-UID is always killed; set-GID only
+    /// when group-execute is set, because without it the bit is the
+    /// mandatory-locking mark. Effective `CAP_FSETID` preserves both.
+    fn strip_write_privileges(mode: NodePermission, gid: u32, cred: &Cred) -> NodePermission {
+        let mut mode = mode;
+        if !cred.has_cap(kcred::CAP_FSETID) {
+            mode.remove(NodePermission::SET_UID);
+            // Linux drops set-GID when group-execute marks it as a privilege,
+            // or when the writer is not a member of the file's group
+            // (`setattr_should_drop_sgid`).
+            if mode.contains(NodePermission::GROUP_EXEC) || !cred.in_group(gid) {
+                mode.remove(NodePermission::SET_GID);
+            }
+        }
+        mode
+    }
+
+    /// Drops the file-capability attribute, ignoring one that is absent.
+    ///
+    /// A filesystem without extended-attribute support has no attribute to
+    /// drop, which Linux's `security_inode_killpriv()` also reports as success.
+    ///
+    /// The caller must hold the writable-mount lock.
+    fn kill_file_caps_locked(&self) -> VfsResult<()> {
+        use crate::FileCapabilityState;
+
+        let name = XattrName::new(kcred::SECURITY_CAPABILITY_XATTR.as_bytes().to_vec())?;
+        let inode = self.inode();
+        // Lookup, removal and cache updates form a small protocol: a cached
+        // absence is only published while no other capability operation
+        // intervened, so a concurrent `setxattr` can never be masked by a
+        // stale `Absent`.
+        for _ in 0..4 {
+            let observed = inode.file_capability_snapshot();
+            if inode.file_capability_state_of(observed) == FileCapabilityState::Absent {
+                return Ok(());
+            }
+            if !inode.has_extended_attributes() {
+                if inode.try_mark_file_capability(observed, FileCapabilityState::Absent) {
+                    return Ok(());
+                }
+                continue;
+            }
+            match self.get_xattr_unchecked(&name) {
+                // `remove_xattr_unchecked` bumps the generation and caches
+                // absence itself. A concurrent remover may have won the race;
+                // an already-absent attribute is success, not an error.
+                Ok(_) => match self.remove_xattr_unchecked(&name) {
+                    Err(error)
+                        if error == VfsError::from(LinuxError::ENODATA)
+                            || error == VfsError::OperationNotSupported =>
+                    {
+                        return Ok(());
+                    }
+                    // `remove_xattr_unchecked()` publishes the absence through
+                    // the snapshot CAS taken before the backend removal.
+                    result => return result,
+                },
+                Err(error)
+                    if error == VfsError::from(LinuxError::ENODATA)
+                        || error == VfsError::OperationNotSupported =>
+                {
+                    if inode.try_mark_file_capability(observed, FileCapabilityState::Absent) {
+                        return Ok(());
+                    }
+                    // Overtaken by a concurrent capability operation; re-read
+                    // instead of caching an absence that is no longer true.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // The generation kept changing: take the conservative slow path and
+        // remove the attribute without trusting the cache. An absent or
+        // unsupported attribute is still success, as in the fast paths above.
+        match self.remove_xattr_unchecked(&name) {
+            Err(error)
+                if error == VfsError::from(LinuxError::ENODATA)
+                    || error == VfsError::OperationNotSupported =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
     /// Changes this inode's timestamps after applying Linux utimens authorization.
+    ///
+    /// One wall-clock sample resolves every `Current` request and the derived
+    /// ctime, so a "set to now" update publishes identical mtime and ctime.
+    /// The inode data lock is held across the update, matching the order used
+    /// by `fallocate` and buffered writes, so a concurrent buffered write
+    /// cannot interleave its timestamp publication with this update.
+    ///
+    /// Locking: acquires mount write admission, then the inode data lock.
     pub fn set_times(
         &self,
         atime: Option<SetattrTime>,
@@ -1323,11 +1914,13 @@ impl Path {
         }
 
         let _write_guard = self.lock_writable_mount()?;
+        let inode = self.inode();
+        let _data_guard = inode.lock_data();
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
         let is_touch = matches!(
             (atime, mtime),
-            (Some(SetattrTime::Current(_)), Some(SetattrTime::Current(_)))
+            (Some(SetattrTime::Current), Some(SetattrTime::Current))
         );
         if !is_touch {
             if !is_owner && !cred.has_cap_fowner() {
@@ -1337,9 +1930,11 @@ impl Path {
             self.permission(Permission::MAY_WRITE, cred)?;
         }
 
+        let now = inode.current_time();
         self.dentry.update_metadata(MetadataUpdate {
-            atime: atime.map(SetattrTime::value),
-            mtime: mtime.map(SetattrTime::value),
+            atime: atime.map(|time| time.resolve(now)),
+            mtime: mtime.map(|time| time.resolve(now)),
+            ctime: Some(now),
             ..Default::default()
         })
     }
@@ -1813,6 +2408,24 @@ impl Path {
         Ok(result)
     }
 
+    /// Attaches an already-shared detached mount (new mount API `move_mount`).
+    ///
+    /// Unlike [`graft_tree`](Self::graft_tree), the mount is already an
+    /// `Arc<Mount>` (it was exposed through an `fsmount` fd), so only its
+    /// location is recorded rather than re-wrapping it.
+    fn graft_tree_arc(&self, mount: Arc<Mount>) -> VfsResult<Arc<Mount>> {
+        let inode = self.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        if mount.mnt.mnt_root.as_dir().is_ok() != self.is_dir() {
+            return Err(VfsError::NotADirectory);
+        }
+        *mount.mnt_location.lock() = Some(self.clone());
+        if let Some(old) = self.mnt.install_child_mount(&self.dentry, &mount) {
+            *mount.covers.lock() = Some(old);
+        }
+        Ok(mount)
+    }
+
     /// Unmount the filesystem rooted at this path.
     fn unmount(&self) -> VfsResult<()> {
         if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
@@ -1852,6 +2465,42 @@ impl Path {
     fn unmount_tree(&self) -> VfsResult<()> {
         let mounts = self.mnt.collect_subtree();
         self.detach_mount_subtree(&mounts)
+    }
+
+    /// Detaches one mount from its parent, keeping its own subtree attached.
+    ///
+    /// `move_mount` moves the whole subtree with the mount, so the children must
+    /// stay linked to their parent through `mnt_mounts`; only the edge to the
+    /// old parent is removed. `unmount` cannot serve here because it refuses a
+    /// mount that still has children (`ResourceBusy`), and `detach_mount_subtree`
+    /// takes the children down instead of moving them.
+    fn detach_only(&self) -> VfsResult<()> {
+        if !self.dentry.ptr_eq(&self.mnt.mnt.mnt_root) {
+            return Err(VfsError::InvalidInput);
+        }
+        let parent_path = self.mnt.location().ok_or(VfsError::InvalidInput)?;
+        let inode = parent_path.inode();
+        let _namespace_guard = inode.lock_namespace_exclusive();
+        if !parent_path
+            .mnt
+            .child_mount_at(&parent_path.dentry)
+            .is_some_and(|mount| Arc::ptr_eq(&mount, &self.mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+        let covered = self.mnt.covers.lock().take();
+        match covered {
+            Some(ref mount) => {
+                parent_path
+                    .mnt
+                    .install_child_mount(&parent_path.dentry, mount);
+            }
+            None => {
+                parent_path.mnt.remove_child_mount(&parent_path.dentry);
+            }
+        }
+        self.mnt.detach();
+        Ok(())
     }
 
     fn detach_mount_subtree(&self, mounts: &[Arc<Mount>]) -> VfsResult<()> {
@@ -1901,10 +2550,27 @@ impl Path {
     /// Changes a regular file length through the VFS truncate path.
     pub fn truncate(&self, len: u64, cred: &Cred) -> VfsResult<()> {
         self.permission(Permission::MAY_WRITE, cred)?;
-        self.truncate_opened(len)
+        // Linux do_truncate for a path-based truncate: take write access and
+        // break leases before changing the size. The open path publishes its
+        // write count before breaking leases under the same inode lock state
+        // mutex, so a lease either sees this truncate or breaks for it.
+        let inode = self.inode();
+        inode.acquire_write_access();
+        let result = inode
+            .break_leases(true, false)
+            .and_then(|()| self.truncate_opened(len, cred));
+        inode.release_write_access();
+        result
     }
 
-    pub(crate) fn truncate_opened(&self, len: u64) -> VfsResult<()> {
+    /// Changes a regular file length, revoking privileges a content change
+    /// would otherwise leave behind.
+    ///
+    /// Linux `do_truncate()` reaches `notify_change()` with
+    /// `ATTR_KILL_SUID`/`ATTR_KILL_SGID`/`ATTR_KILL_PRIV`, so truncation drops
+    /// set-ID bits and the file capability attribute exactly like a write. The
+    /// caller must hold the writable-mount lock.
+    pub(crate) fn truncate_opened(&self, len: u64, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         if self.is_dir() {
             return Err(VfsError::IsADirectory);
@@ -1921,6 +2587,13 @@ impl Path {
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
+        let _privilege_guard = inode.lock_privileges();
+        // Linux `setattr_prepare()` removes inherited privileges before the
+        // filesystem commits `ATTR_SIZE`, so a failed capability removal must
+        // leave the old length in place. The reverse failure (privileges gone,
+        // length unchanged) is the safe direction and is not rolled back.
+        inode.check_mutable()?;
+        self.file_remove_privs_locked(cred)?;
         if !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
             inode.set_len(len)?;
         } else {
@@ -1929,6 +2602,7 @@ impl Path {
                 ..Default::default()
             })?;
         }
+        inode.bump_content_generation();
         Ok(())
     }
 
