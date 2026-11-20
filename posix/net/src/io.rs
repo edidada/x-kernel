@@ -259,10 +259,10 @@ fn push_socket_cmsg(
             let receiver_ns = kprocess::current_cred().user_ns_arc().clone();
             let uid = receiver_ns
                 .map_uid_from_initial(credentials.uid)
-                .unwrap_or(u16::MAX as u32);
+                .unwrap_or(65_534);
             let gid = receiver_ns
                 .map_gid_from_initial(credentials.gid)
-                .unwrap_or(u16::MAX as u32);
+                .unwrap_or(65_534);
             push_credentials_cmsg(builder, &knet::options::UnixCredentials { pid, uid, gid })
         }
     }
