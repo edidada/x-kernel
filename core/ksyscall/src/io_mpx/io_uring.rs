@@ -21,6 +21,14 @@ use posix_types::{UserConstPtr, UserPtr, k_sigset};
 /// `entries` is rounded up by the caller to a power of two. The out-fields of
 /// `params` are filled with the granted depths, feature bits, and ring offsets
 /// before the descriptor is installed.
+///
+/// # Execution context
+///
+/// Requires a current process user thread: it charges the caller's credentials
+/// and installs the descriptor in the caller's fd table. It may sleep while
+/// allocating ring pages and copying the user parameter block, so it must not
+/// run in interrupt context or while holding a spinlock or an IRQ/preemption
+/// disabled guard.
 pub(crate) fn sys_io_uring_setup(entries: u32, params: UserPtr<IoUringParams>) -> KResult<isize> {
     let params = params.check_non_null().ok_or(KError::BadAddress)?;
     let mut value = params.read_vm()?;
@@ -56,6 +64,13 @@ pub(crate) fn sys_io_uring_setup(entries: u32, params: UserPtr<IoUringParams>) -
 /// `flags` accepts only `IORING_ENTER_GETEVENTS`. A signal mask is rejected
 /// only when `GETEVENTS` requests the wait this subset cannot service; Linux
 /// ignores the mask otherwise.
+///
+/// # Execution context
+///
+/// Requires a current process user thread: the ring descriptor is resolved in
+/// the caller's fd table. It may sleep while worker spawn or a `GETEVENTS`
+/// wait blocks, so it must not run in interrupt context or while holding a
+/// spinlock or an IRQ/preemption disabled guard.
 pub(crate) fn sys_io_uring_enter(
     fd: i32,
     to_submit: u32,

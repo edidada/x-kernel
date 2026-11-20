@@ -146,6 +146,95 @@ fn setup_and_enter_reject_invalid_input() {
 }
 
 #[def_test(user, serial)]
+fn out_of_range_array_index_is_dropped_without_a_cqe() {
+    let (fd, params, ring_va, sqe_va, ring_len) = setup_ring(8);
+
+    // An array entry pointing past the SQE array is dropped, like Linux's
+    // `io_get_sqe`: no CQE and SQ_DROPPED advances.
+    UserPtr::<u32>::from(ring_va + params.sq_off.array as usize)
+        .write_vm(8)
+        .expect("invalid SQ array index");
+    UserPtr::<u32>::from(ring_va + params.sq_off.tail as usize)
+        .write_vm(1)
+        .expect("publish tail");
+    assert_eq!(
+        sys_io_uring_enter(fd, 1, 0, 0, UserConstPtr::default(), 0).expect("enter drops"),
+        0
+    );
+    let dropped: u32 = UserPtr::from(ring_va + params.sq_off.dropped as usize)
+        .read_vm()
+        .expect("SQ dropped");
+    assert_eq!(dropped, 1);
+    let cq_tail: u32 = UserPtr::from(ring_va + params.cq_off.tail as usize)
+        .read_vm()
+        .expect("CQ tail");
+    assert_eq!(cq_tail, 0, "a dropped entry must not produce a CQE");
+
+    // The following entry is still consumable.
+    UserPtr::<u32>::from(ring_va + params.sq_off.array as usize + 4)
+        .write_vm(0)
+        .expect("SQ array index");
+    UserPtr::from(sqe_va)
+        .write_vm(IoUringSqe {
+            opcode: IORING_OP_NOP,
+            user_data: 0x4444,
+            ..IoUringSqe::default()
+        })
+        .expect("SQE");
+    UserPtr::<u32>::from(ring_va + params.sq_off.tail as usize)
+        .write_vm(2)
+        .expect("publish tail");
+    assert_eq!(
+        sys_io_uring_enter(fd, 1, 1, IORING_ENTER_GETEVENTS, UserConstPtr::default(), 0)
+            .expect("enter after drop"),
+        1
+    );
+    let cqe: IoUringCqe = UserPtr::from(ring_va + params.cq_off.cqes as usize)
+        .read_vm()
+        .expect("read CQE");
+    assert_eq!(cqe.user_data, 0x4444);
+
+    sys_munmap(sqe_va, 8 * 64).expect("munmap SQEs");
+    sys_munmap(ring_va, ring_len).expect("munmap ring");
+    posix_fs::sys_close(fd).expect("close");
+}
+
+#[def_test(user, serial)]
+fn short_submission_clamps_to_the_published_entries() {
+    let (fd, params, ring_va, sqe_va, ring_len) = setup_ring(8);
+
+    UserPtr::<u32>::from(ring_va + params.sq_off.array as usize)
+        .write_vm(0)
+        .expect("SQ array index");
+    UserPtr::from(sqe_va)
+        .write_vm(IoUringSqe {
+            opcode: IORING_OP_NOP,
+            user_data: 0x5555,
+            ..IoUringSqe::default()
+        })
+        .expect("SQE");
+    UserPtr::<u32>::from(ring_va + params.sq_off.tail as usize)
+        .write_vm(1)
+        .expect("publish one entry");
+
+    // Linux truncates to the published tail; it must not fail the call.
+    assert_eq!(
+        sys_io_uring_enter(fd, 64, 1, IORING_ENTER_GETEVENTS, UserConstPtr::default(), 0)
+            .expect("short submission"),
+        1
+    );
+    let cqe: IoUringCqe = UserPtr::from(ring_va + params.cq_off.cqes as usize)
+        .read_vm()
+        .expect("read CQE");
+    assert_eq!(cqe.user_data, 0x5555);
+    assert_eq!(cqe.res, 0);
+
+    sys_munmap(sqe_va, 8 * 64).expect("munmap SQEs");
+    sys_munmap(ring_va, ring_len).expect("munmap ring");
+    posix_fs::sys_close(fd).expect("close");
+}
+
+#[def_test(user, serial)]
 fn unsupported_opcode_completes_with_einval_and_does_not_wedge_the_ring() {
     let (fd, params, ring_va, sqe_va, ring_len) = setup_ring(8);
     let array = ring_va + params.sq_off.array as usize;
