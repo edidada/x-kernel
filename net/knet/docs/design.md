@@ -1355,7 +1355,12 @@ accepted up to the table's chain-count limit.
 `init_network` initializes the static `NetworkPoller` before installing NIC
 notification sources. Its embedded Work is reused for the kernel lifetime.
 After network state initialization, `start` binds a private `NormalQueue` to
-the boot CPU set with `CurrentCpu` routing and a per-CPU active limit of one.
+the boot CPU set with a per-CPU active limit of one. Background work normally
+follows the submitting CPU. A foreground send requests the next background
+submission on the next allowed CPU after its submitter, wrapping at the end of
+the set. On SMP this allows background polling to proceed off the submitting
+CPU. The preference is consumed once, including when a pending occurrence
+coalesces it. Unfinished work keeps its existing queue partition.
 The poller state lock additionally serializes actual network polling across
 CPUs and foreground assistance. No state lock is held during queue submission
 or network processing. Notifications arriving before queue readiness retain

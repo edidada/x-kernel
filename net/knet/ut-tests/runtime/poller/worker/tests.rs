@@ -18,6 +18,7 @@ fn foreground_notification_before_start_preserves_demand() {
     let state = poller.state.lock();
     assert!(state.queue.is_none());
     assert!(state.has_pending);
+    assert!(state.has_foreground_request);
     assert!(!state.is_running);
 }
 
@@ -42,7 +43,10 @@ fn foreground_notification_preserves_running_owner() {
         let mut state = poller.state.lock();
         assert!(state.is_running);
         assert!(state.has_pending);
+        assert!(state.take_background_request().is_none());
         assert!(state.finish(false));
+        assert!(state.take_background_request().unwrap().1);
+        assert!(!state.take_background_request().unwrap().1);
     }
     assert!(poller.try_claim(false));
     {
@@ -95,6 +99,7 @@ fn notifications_during_poll_require_another_round() {
         queue: None,
         is_running: false,
         has_pending: true,
+        has_foreground_request: false,
     };
     assert!(state.claim());
     state.has_pending = true;
@@ -115,6 +120,7 @@ fn budget_exhaustion_preserves_pending_demand() {
         queue: None,
         is_running: false,
         has_pending: true,
+        has_foreground_request: false,
     };
     assert!(state.claim());
     assert!(state.finish(true));

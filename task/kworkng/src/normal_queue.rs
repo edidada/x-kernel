@@ -41,6 +41,11 @@ impl NormalQueue {
         crate::create_queue(name, config, ExecutionKind::Normal).map(Self)
     }
 
+    /// Returns the queue's fixed, nonempty set of allowed logical CPUs in ascending order.
+    pub fn cpus(&self) -> &[LogicalCpuId] {
+        self.0.config().cpus()
+    }
+
     /// Submits kernel-lifetime Work for asynchronous execution in a worker task.
     ///
     /// The static lifetime guarantees valid storage and captures; callers need

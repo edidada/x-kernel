@@ -20,9 +20,18 @@ struct PollState {
     queue: Option<NormalQueue>,
     is_running: bool,
     has_pending: bool,
+    has_foreground_request: bool,
 }
 
 impl PollState {
+    fn take_background_request(&mut self) -> Option<(NormalQueue, bool)> {
+        if self.is_running || !self.has_pending {
+            return None;
+        }
+        let queue = self.queue.clone()?;
+        Some((queue, core::mem::take(&mut self.has_foreground_request)))
+    }
+
     fn claim(&mut self) -> bool {
         if self.is_running || !self.has_pending {
             return false;
@@ -47,6 +56,7 @@ impl NetworkPoller {
                 queue: None,
                 is_running: false,
                 has_pending: false,
+                has_foreground_request: false,
             }),
         }
     }
@@ -106,15 +116,23 @@ impl NetworkPoller {
     }
 
     fn kick(&'static self) {
-        let queue = {
-            let state = self.state.lock();
-            if state.is_running || !state.has_pending {
-                return;
-            }
-            state.queue.clone()
+        let Some((queue, prefer_peer)) = self.state.lock().take_background_request() else {
+            return;
         };
-        let Some(queue) = queue else { return };
-        match queue.queue_static_work(&self.work, None) {
+        let target = prefer_peer.then(|| {
+            let cpu = khal::percpu::this_cpu_id();
+            let cpus = queue.cpus();
+            let next = cpus.partition_point(|id| *id <= cpu);
+            cpus.get(next).copied().unwrap_or(cpus[0])
+        });
+        let result = match queue.queue_static_work(&self.work, target) {
+            // A running occurrence keeps its CPU through the next round.
+            Err(SubmitError::OwnerConflict) if target.is_some() => {
+                queue.queue_static_work(&self.work, None)
+            }
+            result => result,
+        };
+        match result {
             Ok(_) | Err(SubmitError::AlreadyQueued) => {}
             Err(error) => warn!("NG network polling admission failed: {error:?}"),
         }
@@ -129,6 +147,8 @@ impl NetworkPoller {
     fn try_claim(&self, has_new_demand: bool) -> bool {
         let mut state = self.state.lock();
         state.has_pending |= has_new_demand;
+        // Let the next background submission share the load with the foreground sender.
+        state.has_foreground_request |= has_new_demand;
         state.queue.is_some() && state.claim()
     }
 
