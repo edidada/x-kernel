@@ -1090,6 +1090,12 @@ to their callers.
   the listener so a notification between the first check and registration cannot
   postpone progress until the timeout. `ut-tests/wait_queue.rs` exercises this
   ordering as well as an already-satisfied predicate and a genuine timeout.
+  Notifications defer preemption checks while `event_listener` holds its
+  internal mutex and invokes wakers. `resched=true` yields after that mutex is
+  released; `resched=false` skips the explicit yield while preserving all pending
+  scheduling requests for IRQ exit or another scheduling checkpoint. The tests
+  also inject a request from a wake callback to verify its preservation and the
+  callback's preemption protection.
 - `TaskInner::join()` uses `kcompletion::Completion` as the per-task exit wait
   source. Exit publishes `exit_code`, then moves state to `Exited` and
   `complete_all()`. The joiner's real completion condition remains

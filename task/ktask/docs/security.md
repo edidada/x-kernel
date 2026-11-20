@@ -208,6 +208,12 @@ IRQ-exit checkpoint. `ktask` enables `kspin/preempt` independently of scheduler
 preemption; generic deferred-check scopes must balance that count without
 running a check from their own guard release.
 
+`WaitQueue` notification uses this deferred-check scope so a waker cannot
+preempt while `event_listener` holds its internal mutex. The scope ends before
+any explicit yield. `resched=false` suppresses only that explicit yield; it
+must not clear `need_resched`, which can also carry requests from timer IRQs,
+IPIs, or other wakes received during notification.
+
 Idle drains finished membership before entering quiescence. The same IRQ and
 preemption guard spans the wait and restoration; no reader or protected borrow
 may span it. Watching resumes before scheduling or timer bookkeeping, and the
