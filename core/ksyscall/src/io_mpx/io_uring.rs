@@ -27,6 +27,10 @@ pub(crate) fn sys_io_uring_setup(entries: u32, params: UserPtr<IoUringParams>) -
     if value.flags & !IORING_SETUP_FLAGS_SUPPORTED != 0 {
         return Err(KError::InvalidInput);
     }
+    // Linux rejects nonzero reserved words before allocating anything.
+    if value.resv != [0; 3] {
+        return Err(KError::InvalidInput);
+    }
     // Fail an unwritable parameter block before allocating ring pages.
     params.write_vm(value)?;
 
@@ -38,7 +42,8 @@ pub(crate) fn sys_io_uring_setup(entries: u32, params: UserPtr<IoUringParams>) -
     value.sq_off = created.sq_off;
     value.cq_off = created.cq_off;
 
-    let fd = kprocess::current_files().add_file(created.file, false)?;
+    // Linux installs the io_uring fd with O_CLOEXEC unconditionally.
+    let fd = kprocess::current_files().add_file(created.file, true)?;
     if let Err(error) = params.write_vm(value) {
         let _ = kprocess::current_files().close_file(fd);
         return Err(error.into());
@@ -48,8 +53,9 @@ pub(crate) fn sys_io_uring_setup(entries: u32, params: UserPtr<IoUringParams>) -
 
 /// Submits SQEs and optionally waits for completions.
 ///
-/// `flags` accepts only `IORING_ENTER_GETEVENTS`; a supplied signal mask is
-/// rejected because this subset does not implement interruptible enter.
+/// `flags` accepts only `IORING_ENTER_GETEVENTS`. A signal mask is rejected
+/// only when `GETEVENTS` requests the wait this subset cannot service; Linux
+/// ignores the mask otherwise.
 pub(crate) fn sys_io_uring_enter(
     fd: i32,
     to_submit: u32,
@@ -61,13 +67,13 @@ pub(crate) fn sys_io_uring_enter(
     if flags & !IORING_ENTER_GETEVENTS != 0 {
         return Err(KError::InvalidInput);
     }
-    if !sig.is_null() {
+    let wait = flags & IORING_ENTER_GETEVENTS != 0;
+    if wait && !sig.is_null() {
         return Err(KError::InvalidInput);
     }
 
     let file = kprocess::current_files().get_file(fd)?;
-    let ring = AsyncioFile::from_file(&file)?;
-    let wait = flags & IORING_ENTER_GETEVENTS != 0;
+    let ring = AsyncioFile::from_file(&file).map_err(|_| KError::OperationNotSupported)?;
     let submitted = ring.enter(to_submit, if wait { min_complete } else { 0 }, None)?;
     Ok(submitted as isize)
 }

@@ -4,9 +4,9 @@
 
 use kasyncio::abi::{
     IORING_ENTER_GETEVENTS, IORING_FEAT_SINGLE_MMAP, IORING_OFF_SQES, IORING_OFF_SQ_RING,
-    IORING_OP_NOP, IoUringCqe, IoUringParams, IoUringSqe,
+    IORING_OP_NOP, IORING_OP_READ, IoUringCqe, IoUringParams, IoUringSqe,
 };
-use kerrno::KError;
+use kerrno::{KError, LinuxError};
 use linux_raw_sys::general::{MAP_SHARED, PROT_READ, PROT_WRITE};
 use posix_mm::{sys_mmap, sys_munmap};
 use posix_types::{UserConstPtr, UserPtr};
@@ -122,12 +122,159 @@ fn setup_and_enter_reject_invalid_input() {
     bad_flags.flags = 0;
     params.write(bad_flags);
 
+    let reserved = IoUringParams {
+        resv: [1, 0, 0],
+        ..IoUringParams::default()
+    };
+    params.write(reserved);
+    assert_eq!(
+        sys_io_uring_setup(8, ptr),
+        Err(KError::InvalidInput),
+        "nonzero reserved params are rejected"
+    );
+    params.write(IoUringParams::default());
+
     let (fd, _params, ring_va, sqe_va, ring_len) = setup_ring(8);
     assert_eq!(
         sys_io_uring_enter(fd, 0, 0, 1 << 7, UserConstPtr::default(), 0),
         Err(KError::InvalidInput),
         "unknown enter flags are rejected"
     );
+    sys_munmap(sqe_va, 8 * 64).expect("munmap SQEs");
+    sys_munmap(ring_va, ring_len).expect("munmap ring");
+    posix_fs::sys_close(fd).expect("close");
+}
+
+#[def_test(user, serial)]
+fn unsupported_opcode_completes_with_einval_and_does_not_wedge_the_ring() {
+    let (fd, params, ring_va, sqe_va, ring_len) = setup_ring(8);
+    let array = ring_va + params.sq_off.array as usize;
+
+    // SQE 0: READ is not executable in phase 1; it must complete with EINVAL
+    // instead of a fake success.
+    UserPtr::<u32>::from(array).write_vm(0).expect("array[0]");
+    UserPtr::from(sqe_va)
+        .write_vm(IoUringSqe {
+            opcode: IORING_OP_READ,
+            user_data: 0x1111,
+            ..IoUringSqe::default()
+        })
+        .expect("sqe 0");
+    UserPtr::<u32>::from(ring_va + params.sq_off.tail as usize)
+        .write_vm(1)
+        .expect("publish tail");
+    assert_eq!(
+        sys_io_uring_enter(fd, 1, 0, 0, UserConstPtr::default(), 0).expect("enter"),
+        1
+    );
+    let cqe: IoUringCqe = UserPtr::from(ring_va + params.cq_off.cqes as usize)
+        .read_vm()
+        .expect("read rejection CQE");
+    assert_eq!(cqe.user_data, 0x1111);
+    assert_eq!(cqe.res, -LinuxError::EINVAL.into_raw());
+
+    // The next SQE must still run: the rejection advanced the SQ head.
+    UserPtr::<u32>::from(ring_va + params.cq_off.head as usize)
+        .write_vm(1)
+        .expect("consume CQE");
+    UserPtr::<u32>::from(array + 4).write_vm(1).expect("array[1]");
+    UserPtr::from(sqe_va + 64)
+        .write_vm(IoUringSqe {
+            opcode: IORING_OP_NOP,
+            user_data: 0x2222,
+            ..IoUringSqe::default()
+        })
+        .expect("sqe 1");
+    UserPtr::<u32>::from(ring_va + params.sq_off.tail as usize)
+        .write_vm(2)
+        .expect("publish tail");
+    assert_eq!(
+        sys_io_uring_enter(fd, 1, 1, IORING_ENTER_GETEVENTS, UserConstPtr::default(), 0)
+            .expect("enter after rejection"),
+        1
+    );
+    let cqe: IoUringCqe = UserPtr::from(ring_va + params.cq_off.cqes as usize + 16)
+        .read_vm()
+        .expect("read NOP CQE");
+    assert_eq!(cqe.user_data, 0x2222);
+    assert_eq!(cqe.res, 0);
+
+    sys_munmap(sqe_va, 8 * 64).expect("munmap SQEs");
+    sys_munmap(ring_va, ring_len).expect("munmap ring");
+    posix_fs::sys_close(fd).expect("close");
+}
+
+#[def_test(user, serial)]
+fn enter_clamps_min_complete_to_the_cq_depth() {
+    let (fd, params, ring_va, sqe_va, ring_len) = setup_ring(8);
+    let array = ring_va + params.sq_off.array as usize;
+
+    for index in 0..8u32 {
+        UserPtr::<u32>::from(array + index as usize * 4)
+            .write_vm(index)
+            .expect("SQ array index");
+        UserPtr::from(sqe_va + index as usize * 64)
+            .write_vm(IoUringSqe {
+                opcode: IORING_OP_NOP,
+                user_data: index as u64,
+                ..IoUringSqe::default()
+            })
+            .expect("SQE");
+    }
+    UserPtr::<u32>::from(ring_va + params.sq_off.tail as usize)
+        .write_vm(8)
+        .expect("publish tail");
+
+    // Linux clamps a wait target above the CQ depth instead of failing.
+    assert_eq!(
+        sys_io_uring_enter(fd, 8, 9, IORING_ENTER_GETEVENTS, UserConstPtr::default(), 0)
+            .expect("clamped enter"),
+        8
+    );
+    let cq_tail: u32 = UserPtr::from(ring_va + params.cq_off.tail as usize)
+        .read_vm()
+        .expect("CQ tail");
+    assert_eq!(cq_tail, 8, "every accepted NOP must complete");
+
+    sys_munmap(sqe_va, 8 * 64).expect("munmap SQEs");
+    sys_munmap(ring_va, ring_len).expect("munmap ring");
+    posix_fs::sys_close(fd).expect("close");
+}
+
+#[def_test(user, serial)]
+fn enter_counts_cqes_already_visible_in_the_ring() {
+    let (fd, params, ring_va, sqe_va, ring_len) = setup_ring(8);
+
+    UserPtr::<u32>::from(ring_va + params.sq_off.array as usize)
+        .write_vm(0)
+        .expect("SQ array index");
+    UserPtr::from(sqe_va)
+        .write_vm(IoUringSqe {
+            opcode: IORING_OP_NOP,
+            user_data: 0x3333,
+            ..IoUringSqe::default()
+        })
+        .expect("SQE");
+    UserPtr::<u32>::from(ring_va + params.sq_off.tail as usize)
+        .write_vm(1)
+        .expect("publish tail");
+    assert_eq!(
+        sys_io_uring_enter(fd, 1, 0, 0, UserConstPtr::default(), 0).expect("submit"),
+        1
+    );
+
+    // Leave the CQE in the shared ring and wait for it again: an already
+    // visible completion satisfies min_complete without blocking.
+    assert_eq!(
+        sys_io_uring_enter(fd, 0, 1, IORING_ENTER_GETEVENTS, UserConstPtr::default(), 0)
+            .expect("wait sees the visible CQE"),
+        0
+    );
+    let cqe: IoUringCqe = UserPtr::from(ring_va + params.cq_off.cqes as usize)
+        .read_vm()
+        .expect("read CQE");
+    assert_eq!(cqe.user_data, 0x3333);
+
     sys_munmap(sqe_va, 8 * 64).expect("munmap SQEs");
     sys_munmap(ring_va, ring_len).expect("munmap ring");
     posix_fs::sys_close(fd).expect("close");
