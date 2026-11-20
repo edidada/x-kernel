@@ -152,7 +152,27 @@ struct Pl011SerialDriver;
 
 #[cfg(feature = "serial-pl011")]
 impl DeviceDriver for Pl011SerialDriver {
-    type Data = ();
+    type Data = Arc<SerialPort>;
+
+    fn supports_suspend(&self) -> bool {
+        true
+    }
+
+    fn suspend(
+        &self,
+        _: &kdevice::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        data.ok_or(DriverError::BadState)?.set_mmio_suspended(true)
+    }
+
+    fn resume(
+        &self,
+        _: &kdevice::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        data.ok_or(DriverError::BadState)?.set_mmio_suspended(false)
+    }
 
     fn name(&self) -> &'static str {
         "serial-pl011"
@@ -170,9 +190,10 @@ impl DeviceDriver for Pl011SerialDriver {
         &PL011
     }
 
-    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<Self::Data> {
         let port = resolve_port(ctx, SerialKind::Pl011)?;
-        publish(ctx, port)
+        publish(ctx, port.clone())?;
+        Ok(port)
     }
 }
 
@@ -195,7 +216,27 @@ struct Ns16550MmioSerialDriver;
 
 #[cfg(feature = "serial-ns16550-mmio")]
 impl DeviceDriver for Ns16550MmioSerialDriver {
-    type Data = ();
+    type Data = Arc<SerialPort>;
+
+    fn supports_suspend(&self) -> bool {
+        true
+    }
+
+    fn suspend(
+        &self,
+        _: &kdevice::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        data.ok_or(DriverError::BadState)?.set_mmio_suspended(true)
+    }
+
+    fn resume(
+        &self,
+        _: &kdevice::PmContext<'_>,
+        data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        data.ok_or(DriverError::BadState)?.set_mmio_suspended(false)
+    }
 
     fn name(&self) -> &'static str {
         "serial-ns16550-mmio"
@@ -213,9 +254,10 @@ impl DeviceDriver for Ns16550MmioSerialDriver {
         &NS16550_MMIO
     }
 
-    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<()> {
+    fn probe_device(&self, ctx: &kdevice::ProbeContext<'_>) -> DriverResult<Self::Data> {
         let port = resolve_port(ctx, SerialKind::Ns16550Mmio)?;
-        publish(ctx, port)
+        publish(ctx, port.clone())?;
+        Ok(port)
     }
 }
 

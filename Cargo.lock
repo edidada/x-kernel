@@ -3122,7 +3122,9 @@ dependencies = [
 name = "kpm"
 version = "0.3.0-dev"
 dependencies = [
+ "driver_base",
  "kcpu_id_map",
+ "kdriver",
  "kerrno",
  "khal",
  "kiface-time-api",
@@ -3131,6 +3133,7 @@ dependencies = [
  "ktime",
  "ktime_types",
  "kworkng",
+ "log",
  "unittest",
 ]
 
@@ -3446,6 +3449,7 @@ dependencies = [
  "klogger",
  "knet",
  "kns",
+ "kpm",
  "kpoll",
  "kprocess",
  "krlimit",
@@ -3565,6 +3569,7 @@ dependencies = [
  "ktime",
  "ktime_types",
  "linux-raw-sys",
+ "log",
  "posix-types",
  "unittest",
 ]

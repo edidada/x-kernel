@@ -4,8 +4,9 @@
 
 //! System power-management coordination, independent of runtime bring-up.
 //!
-//! Currently provides a single-present-CPU PM time transaction, not a userspace
-//! suspend entry. See `docs/design.md` and `docs/security.md` for its boundaries.
+//! Provides a reset-aware x86 guest S3 entry and retained single-present-CPU
+//! integration APIs. See `docs/design.md` and `docs/security.md` for hardware
+//! support, lifecycle and validation boundaries.
 //!
 //! The coordinator freezes all admitted tasks, deferring new scheduler activation;
 //! a platform provider supplies device/NMI exclusion and firmware entry.
@@ -13,7 +14,8 @@
 //! local clock events, optional private queue freezes and ordered device callbacks,
 //! and unwinds completed
 //! preparation on ordinary errors.
-//! SMP rendezvous and concrete platform implementations are separate work.
+//! The x86 guest entry combines a reset-aware SMP rendezvous with the QEMU S3
+//! backend; the generic integration APIs below retain their single-CPU contract.
 
 #![no_std]
 
@@ -549,3 +551,16 @@ impl<P: PlatformSuspendOps> SuspendOps for SystemOps<'_, P> {
 
 #[cfg(unittest)]
 unittest::path_mod_test!(tests, "../ut-tests/suspend.rs");
+
+#[cfg(target_arch = "x86_64")]
+mod runtime;
+#[cfg(target_arch = "x86_64")]
+pub use runtime::suspend_guest;
+
+/// Guest suspend is not yet connected to a reset-aware platform on this target.
+/// # Errors
+/// Returns OperationNotSupported without changing system state.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn suspend_guest() -> KResult<()> {
+    Err(KError::OperationNotSupported)
+}

@@ -631,7 +631,15 @@ pub fn rust_main(arg: usize) -> ! {
     // The boot task is PID 0 and remains outside the ordinary PID namespace.
     // Once the late-init thread is runnable it has no further initialization
     // role.
-    ktask::future::block_on(core::future::pending::<()>());
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: the boot task parks after scheduler \
+                  startup with IRQs enabled and no retained locks"
+    )]
+    // SAFETY: this permanent boot frame owns no initialization resources and
+    // its pending future never retains a lock or accesses devices.
+    unsafe { ktask::future::block_on_freezable(core::future::pending::<()>()) }
+        .expect("boot task freezer wait context");
     unreachable!("PID 0 boot task must remain parked");
 }
 

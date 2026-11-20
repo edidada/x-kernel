@@ -195,7 +195,12 @@ impl Services {
         budget: NonZeroUsize,
     ) -> Result<Self, InitError> {
         let bottom_half = BottomHalfServices::prepare(budget).map_err(InitError::BottomHalf)?;
-        let normal = NormalServices::start(limit, idle_for).map_err(InitError::Normal)?;
+        let normal = NormalServices::start_with_policy(
+            limit,
+            idle_for,
+            kworkerpool_ng::NormalFreezePolicy::Cooperative,
+        )
+        .map_err(InitError::Normal)?;
         #[cfg(feature = "stall-check")]
         let diagnostics = kworkqueue_ng::service::Directory::new();
         let create = |prepared, name, kind| {

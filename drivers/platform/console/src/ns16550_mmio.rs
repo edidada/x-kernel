@@ -149,10 +149,10 @@ impl Port {
         unsafe { self.write_reg(Self::MCR, 0x0B) };
     }
 
-    pub(crate) fn enable_receive_interrupt(&mut self) {
+    pub(crate) fn set_receive_interrupt(&mut self, enabled: bool) {
         // SAFETY: initialization cleared DLAB and this backend never changes
         // it afterward. The SerialPort owner serializes access to the live map.
-        unsafe { self.write_reg(Self::IER, 0x01) };
+        unsafe { self.write_reg(Self::IER, u8::from(enabled)) };
     }
 
     pub(crate) fn send(&mut self, data: u8) {

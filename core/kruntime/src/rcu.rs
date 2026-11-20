@@ -13,11 +13,15 @@ use krcu::host::{
 #[kiface::provide]
 impl RcuGpTaskLaunchIf {
     fn start_gp_task(entry: PreparedGpTask) {
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
+        let task = ktask::TaskInner::new_pidless_kthread(
             move || entry.run(),
             "rcu_gp".into(),
             kbuild_config::TASK_STACK_SIZE,
-        ));
+        );
+        // SAFETY: the GP coordinator remains runnable during preparation and
+        // is excluded by the CPU rendezvous during hardware loss. PM hardware
+        // restoration must not wait for an RCU grace period or its private locks.
+        let task = ktask::prepare_task(unsafe { task.with_pm_infrastructure() });
         ktask::activate_task(&task);
     }
 }

@@ -94,7 +94,7 @@ impl Backend {
             #[cfg(feature = "pl011")]
             Backend::Pl011(uart) => uart.set_receive_interrupt(true),
             #[cfg(feature = "ns16550-mmio")]
-            Backend::Ns16550Mmio(uart) => uart.enable_receive_interrupt(),
+            Backend::Ns16550Mmio(uart) => uart.set_receive_interrupt(true),
             #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
             Backend::Ns16550IoPort(uart) => uart.set_receive_interrupt(true),
         }
@@ -187,12 +187,29 @@ pub struct SerialPort {
 
 struct SerialIo {
     backend: Backend,
+    rx_enabled: bool,
     input: Option<SerialInput>,
     #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
     saved_receive_interrupt: Option<bool>,
 }
 
 impl SerialPort {
+    /// Mask or restore the interrupt source on a retained platform UART.
+    #[cfg(any(feature = "ns16550-mmio", feature = "pl011"))]
+    pub fn set_mmio_suspended(&self, suspended: bool) -> Result<(), DriverError> {
+        let mut io = self.io.lock();
+        let enable = !suspended && io.rx_enabled;
+        match &mut io.backend {
+            #[cfg(feature = "pl011")]
+            Backend::Pl011(port) => port.set_receive_interrupt(enable),
+            #[cfg(feature = "ns16550-mmio")]
+            Backend::Ns16550Mmio(port) => port.set_receive_interrupt(enable),
+            #[cfg(any(unittest, all(feature = "ns16550-ioport", target_arch = "x86_64")))]
+            _ => return Err(DriverError::Unsupported),
+        }
+        Ok(())
+    }
+
     /// Masks receive delivery on the retained x86 ISA console for system sleep.
     /// Polled transmit remains available to the PM owner until platform entry.
     /// # Errors
@@ -339,6 +356,7 @@ impl SerialPort {
         Self {
             io: SpinNoIrq::new(SerialIo {
                 backend,
+                rx_enabled: false,
                 input: None,
                 #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
                 saved_receive_interrupt: None,
@@ -433,7 +451,9 @@ impl SerialPort {
     /// Unmask RX only after storage and the port's IRQ action are installed.
     /// The console setup owner serializes this call; it does not flush input.
     pub(crate) fn enable_receive_interrupt(&self) {
-        self.io.lock().backend.enable_receive_interrupt();
+        let mut io = self.io.lock();
+        io.backend.enable_receive_interrupt();
+        io.rx_enabled = true;
     }
 
     /// Collects a bounded hardware batch without allocating or waking tasks.

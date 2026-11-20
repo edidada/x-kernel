@@ -315,12 +315,12 @@ pub(crate) fn sys_reboot(
             khal::power::power_off()
         }
         LINUX_REBOOT_CMD_SW_SUSPEND => {
-            // TODO: flush/sync filesystems and quiesce devices before
-            // suspending; the orderly-shutdown supervisor owns that
-            // cleanup. A successful return means the platform slept and
-            // was resumed.
+            // The PM coordinator freezes producers, quiesces supported
+            // devices and restores CPU/time/device state before thawing.
+            // A successful return means the guest entered platform sleep
+            // and resumed through that complete recovery sequence.
             warn!("reboot: suspending to RAM (command {command:#x})");
-            khal::power::suspend_to_ram()?;
+            kpm::suspend_guest()?;
             Ok(0)
         }
         _ => Err(KError::InvalidInput),

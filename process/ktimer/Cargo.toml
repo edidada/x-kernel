@@ -20,6 +20,7 @@ ksignal.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 klazy.workspace = true
+log.workspace = true
 linux-raw-sys = { workspace = true, default-features = false, features = ["general", "no_std"] }
 posix-types.workspace = true
 unittest.workspace = true
