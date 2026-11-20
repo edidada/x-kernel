@@ -165,10 +165,11 @@ fn validation_rejects_self_duplicates_and_pre_cancelled_attempt() {
     assert!(task.freeze_request.lock().is_none());
     crate::activate_task(&task);
     assert_eq!(task.try_join().unwrap(), 0);
+    // Joining observes exit before the outgoing CPU necessarily finishes switching away.
     drop(
         freeze_tasks(
             core::slice::from_ref(&task),
-            TimeSpan::ZERO,
+            TimeSpan::from_secs(5),
             &FreezeCancellation::new(),
         )
         .unwrap(),

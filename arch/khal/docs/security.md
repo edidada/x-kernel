@@ -373,15 +373,20 @@ production backing lifetime correctness.
 
 ## Reset-aware sleep obligations
 
-The HAL re-exports the contract defined in [kiface-power-api](../../../util/kiface/crates/power-api/docs/security.md) as
-`power::SystemSleepIf`. Its reset-aware operations are unsafe because the provider cannot establish
-scheduler, device and saved-stack ownership. Callers must serialize PM, pin the
-boot CPU, exclude hotplug, retain all contexts through AP callback join and
-recover shared hardware before releasing software barriers. Firmware entry and
-AP restart run IRQ-off with logical time frozen; delays cannot depend on paused
-local events. `persistent_time` is sampled with MONOTONIC advancing.
+On x86_64, `khal::power::SystemSleepIf` exposes the trait declared by
+[kiface-power-api](../../../util/kiface/crates/power-api/src/lib.rs) through
+`kplat::sys`. The HAL forwards the name. The [platform implementation](../../../platforms/kplat-x86_64/src/suspend.rs)
+performs the hardware operations. The [provider and caller contract](../../../util/kiface/crates/power-api/docs/security.md)
+applies to each unsafe call made through this export.
 
-For `park_cpu`, local IRQs and migration must be disabled on the target CPU,
-and device access must remain usable through context capture. Before `enter`,
-all NMI sources must also be quiesced. CPU affinity alone does not replace
-IRQ/migration exclusion.
+| Unsafe operation | Caller obligation |
+| --- | --- |
+| `prepare` | Serialize PM on the boot CPU and exclude CPU hotplug through `finish`. |
+| `park_cpu` | Disable local IRQs and migration on the target CPU. Keep device access available during capture and keep the callback and its argument valid until it returns after resume or rollback. |
+| `enter` | Hold the remote CPUs, quiesce devices and NMI sources, mask IRQs and suspend clocks before firmware entry. |
+| `restore_cpus` | Keep boot CPU IRQs disabled and shared resources excluded while rebuilding remote contexts. Keep software barriers held. |
+| `finish` | Join all remote callbacks before releasing wake resources and saved stacks. |
+
+`persistent_time` is safe and is sampled while MONOTONIC advances. Firmware
+entry and AP restart run with logical time frozen, so delays cannot depend on
+paused local events.

@@ -382,9 +382,13 @@ shootdown or prove an architecture's private category-bit selection.
 
 ## Reset-aware system sleep interface
 
-On x86, `power::SystemSleepIf` re-exports the `kiface-power-api` contract via
-`kplat::sys`. The interface separates platform resource preparation, saved
-remote CPU context, BSP firmware entry, AP reconstruction and final release.
+On `target_arch = "x86_64"`, callers import `khal::power::SystemSleepIf`.
+The trait is declared in [kiface-power-api](../../../util/kiface/crates/power-api/src/lib.rs).
+[kplat::sys](../../../platforms/kplat/src/sys.rs) re-exports the trait and
+[khal::power](../src/power.rs) forwards that export. The
+[x86 platform implementation](../../../platforms/kplat-x86_64/src/suspend.rs)
+owns wake resources, saves remote CPU contexts, enters firmware on the boot
+CPU and reconstructs remote CPU state on resume.
 The kpm coordinator supplies boot-discovered S3 types and independently owns
 task/work, device/DMA, IRQ, clock/event and RTC ordering. The bare legacy
 `suspend_to_ram` endpoint remains separate; it does not establish this system
