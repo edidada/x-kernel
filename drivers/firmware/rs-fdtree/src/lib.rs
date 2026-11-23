@@ -28,9 +28,13 @@ mod fwnode_backend;
 pub use fwnode_backend::DtBackend;
 
 mod cpu;
+#[cfg(feature = "alloc")]
+mod iommu;
 mod property;
 
 pub use cpu::{CpuNode, CpuNodeError};
+#[cfg(feature = "alloc")]
+pub use iommu::{DeviceIommuSpec, IommuSpecError};
 pub use property::{Cells, PropertyError};
 
 mod error;

@@ -1,0 +1,21 @@
+[package]
+name = "io-pgtable"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+kspin.workspace = true
+log.workspace = true
+unittest = { workspace = true }
+
+[package.metadata.cargo-shear]
+# kspin is used only by the cfg(unittest) tests under ut-tests/, which
+# cargo-shear does not analyze.
+ignored = ["kspin", "log"]
+
+[lints]
+workspace = true

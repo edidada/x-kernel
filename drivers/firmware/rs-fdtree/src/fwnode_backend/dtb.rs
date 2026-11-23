@@ -12,15 +12,15 @@
 //! remains with the controller driver.
 
 use ::fwnode::{
-    FW_IRQ_SPEC_MAX_PARAMS, FwDmaError, FwDmaRange, FwDmaRanges, FwDmaWindow, FwError, FwIrqSpec,
-    FwMmioResource, FwNode, FwNodeId, FwNodeOps, FwParams, FwProperty, FwPropertyValue,
+    FW_IRQ_SPEC_MAX_PARAMS, FwDmaError, FwDmaRange, FwDmaRanges, FwDmaWindow, FwError, FwIommuSpec,
+    FwIrqSpec, FwMmioResource, FwNode, FwNodeId, FwNodeOps, FwParams, FwProperty, FwPropertyValue,
     FwReference, FwSource,
 };
 use lazyinit::LazyInit;
 
 use crate::{
     AddressError, AddressErrorReason, Cells, DeviceDmaError, DmaRangeError, DmaRanges, FdtNode,
-    LinuxFdt, NodeIndex, PropertyError, ReferenceError, cpu::CpuNode,
+    IommuSpecError, LinuxFdt, NodeIndex, PropertyError, ReferenceError, cpu::CpuNode,
 };
 
 /// A borrowed device tree implementing [`FwNodeOps`].
@@ -236,6 +236,24 @@ impl<'s, 'a: 's> FwNodeOps<'s> for DtBackend<'a> {
         }))
     }
 
+    fn iommu_spec(
+        &'s self,
+        id: FwNodeId,
+        index: usize,
+    ) -> Result<Option<FwIommuSpec<'s>>, FwError> {
+        let node = self.node(id).ok_or(FwError::InvalidNode)?;
+        let Some(specs) = node.iommu_specs_with(self.index()).map_err(iommu_error)? else {
+            return Ok(None);
+        };
+        let Some(spec) = specs.get(index) else {
+            return Ok(None);
+        };
+        Ok(Some(FwIommuSpec {
+            controller: self.fwnode(spec.controller),
+            params: params(spec.params)?,
+        }))
+    }
+
     fn reference(
         &'s self,
         id: FwNodeId,
@@ -272,6 +290,16 @@ fn reference_error(error: ReferenceError) -> FwError {
     match error {
         ReferenceError::Property(PropertyError::BufferTooSmall { .. }) => FwError::BufferTooSmall,
         _ => FwError::InvalidValue,
+    }
+}
+
+fn iommu_error(error: IommuSpecError) -> FwError {
+    match error {
+        IommuSpecError::Property(PropertyError::BufferTooSmall { .. }) => FwError::BufferTooSmall,
+        IommuSpecError::Property(_) | IommuSpecError::InvalidCellCount => FwError::InvalidValue,
+        IommuSpecError::UnresolvedPhandle(_) | IommuSpecError::MissingIommuCells => {
+            FwError::InvalidValue
+        }
     }
 }
 

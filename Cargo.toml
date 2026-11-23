@@ -263,6 +263,10 @@ display = { path = "drivers/contracts/display" }
 driver_base = { path = "drivers/contracts/driver_base" }
 fwnode = { path = "drivers/firmware/fwnode" }
 driver_os_api = { path = "drivers/base/os-api", package = "driver-os-api" }
+io_pgtable = { path = "drivers/base/io-pgtable", package = "io-pgtable" }
+kiommu = { path = "drivers/base/kiommu" }
+rk_iommu = { path = "drivers/platform/rk-iommu", package = "rk-iommu-v2" }
+arm_smmu = { path = "drivers/platform/arm-smmu", package = "arm-smmu-v2" }
 irq_types = { path = "arch/irq-types", package = "irq-types" }
 kclass = { path = "drivers/base/kclass" }
 kdevice = { path = "drivers/base/kdevice" }

@@ -167,6 +167,12 @@ pub fn init_drivers() {
 
     let _registry = discover_unified();
 
+    // IOMMU consumer attachment must run after all probes: instances and
+    // their masters enumerate in the same pass, so only now can every
+    // `iommus` phandle resolve to a live instance.
+    #[cfg(feature = "iommu")]
+    driver_registry::iommu::attach_consumers();
+
     log_class_summary();
     log_device_core_summary();
     log_device_ownership_summary();

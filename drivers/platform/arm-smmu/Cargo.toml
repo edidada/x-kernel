@@ -1,0 +1,22 @@
+[package]
+name = "arm-smmu-v2"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+driver_base.workspace = true
+driver_os_api.workspace = true
+driver_os_api_xkernel.workspace = true
+io_pgtable.workspace = true
+kdma.workspace = true
+kiommu.workspace = true
+kdevice.workspace = true
+kspin.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

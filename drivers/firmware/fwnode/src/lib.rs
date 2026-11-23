@@ -297,8 +297,7 @@ pub trait FwNodeOps<'a>: Sync + 'a {
     ///
     /// # Errors
     ///
-    /// Returns [`FwError::InvalidNode`] for an unknown handle,
-    /// [`FwError::InvalidValue`] for a malformed specifier,
+    /// Returns [`FwError::InvalidNode`] for an unknown handle,[`FwError::InvalidValue`] for a malformed specifier,
     /// [`FwError::BufferTooSmall`] when the specifier does not fit
     /// [`FW_IRQ_SPEC_MAX_PARAMS`], or [`FwError::Unsupported`] when this
     /// backend cannot resolve it yet.
@@ -327,6 +326,29 @@ pub trait FwNodeOps<'a>: Sync + 'a {
         index: usize,
         arg_cells: usize,
     ) -> Result<Option<FwReference<'a>>, FwError>;
+
+    /// Returns IOMMU binding `index` from the node's `iommus` property.
+    ///
+    /// Each entry names one IOMMU controller plus this device's specifier
+    /// cells (Stream ID / port), interpreted by the controller's driver
+    /// exactly like interrupt cells. The per-entry cell count comes from the
+    /// target's `#iommu-cells`, so lists mixing zero-cell and one-cell
+    /// entries resolve correctly. An out-of-range index is `Ok(None)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FwError::InvalidNode`] for an unknown handle,
+    /// [`FwError::InvalidValue`] for a malformed or unresolvable property, or
+    /// [`FwError::Unsupported`] when this backend does not describe IOMMU
+    /// bindings.
+    fn iommu_spec(
+        &'a self,
+        id: FwNodeId,
+        index: usize,
+    ) -> Result<Option<FwIommuSpec<'a>>, FwError> {
+        let _ = (id, index);
+        Err(FwError::Unsupported)
+    }
 }
 
 /// A copyable handle to one firmware node.
@@ -534,6 +556,15 @@ impl<'a> FwNode<'a> {
     /// See [`FwNodeOps::irq_spec`].
     pub fn irq_spec(self, index: usize) -> Result<Option<FwIrqSpec<'a>>, FwError> {
         self.ops.irq_spec(self.id, index)
+    }
+
+    /// Returns IOMMU binding `index` from this node's `iommus` property.
+    ///
+    /// # Errors
+    ///
+    /// See [`FwNodeOps::iommu_spec`].
+    pub fn iommu_spec(self, index: usize) -> Result<Option<FwIommuSpec<'a>>, FwError> {
+        self.ops.iommu_spec(self.id, index)
     }
 
     /// Resolves reference `index` of `property`.
@@ -799,6 +830,19 @@ pub struct FwIrqSpec<'a> {
     /// Interrupt controller node that owns the specifier.
     pub controller: FwNode<'a>,
     /// Raw binding cells, in firmware order.
+    pub params: FwParams,
+}
+
+/// One IOMMU binding from a device's `iommus` property.
+///
+/// The controller node identifies the IOMMU instance; the params are the
+/// device's specifier cells (empty for `#iommu-cells = 0`, one Stream ID for
+/// `#iommu-cells = 1`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FwIommuSpec<'a> {
+    /// IOMMU controller node.
+    pub controller: FwNode<'a>,
+    /// Specifier cells after the reference, in firmware order.
     pub params: FwParams,
 }
 

@@ -63,7 +63,7 @@ pub(crate) enum Phandles<'r, 'a> {
 }
 
 impl<'r, 'a> Phandles<'r, 'a> {
-    fn resolve(self, phandle: u32) -> Option<FdtNode<'r, 'a>> {
+    pub(crate) fn resolve(self, phandle: u32) -> Option<FdtNode<'r, 'a>> {
         match self {
             Self::Linear(tree) => tree.node_by_phandle(phandle),
             #[cfg(feature = "alloc")]
