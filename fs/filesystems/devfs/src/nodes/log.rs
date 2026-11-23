@@ -54,10 +54,10 @@ pub fn bind_dev_log() -> LinuxResult<()> {
                         result => Poll::Ready(result),
                     }
                 });
-                // SAFETY: nonblocking receive releases its socket/queue guards
+                // Nonblocking receive releases its socket/queue guards
                 // on each poll. Pending retains only the stable message buffer
                 // and readiness registrations, neither needed by PM recovery.
-                let received = match unsafe { ktask::future::block_on_freezable(receive) } {
+                let received = match ktask::future::block_on_freezable(receive) {
                     Ok(received) => received,
                     Err(error) => {
                         warn!("syslog freezer wait rejected: {error:?}");

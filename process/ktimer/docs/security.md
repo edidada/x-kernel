@@ -98,7 +98,7 @@ No user pointers, MMIO, DMA, FFI, or device input reach this crate; the
 
 ## Unsafe inventory
 
-The alarm worker has one unsafe freezer integration call, described below. The syscall boundary
+The alarm worker uses a safe freezer-aware wait, described below. The syscall boundary
 reads the complete user-copied `sigval` as opaque pointer-sized bits;
 `TimerSigValue` and `TimerSignal` carry those bits without accessing the union.
 Architecture time reads come through `khal`/`ktime`.

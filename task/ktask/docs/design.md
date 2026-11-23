@@ -1847,8 +1847,7 @@ platform context-save hook before acknowledging, and retains a second software
 barrier after wake until shared device/time recovery is complete.
 
 `future::block_on_freezable` uses the existing prepared wait protocol and
-cooperative checkpoint. Its unsafe caller contract excludes recovery-needed
-resources held across Pending. Runtime, alarm and syslog loops require separate
+cooperative checkpoint. Holding recovery-needed resources across Pending can deadlock resume. Runtime, alarm and syslog loops require separate
 audits before adopting it. `with_pm_infrastructure` is an immutable, unsafe builder property
 for infrastructure whose resources remain valid until CPU park; the system
 freezer snapshots these explicitly tagged tasks, never their names.

@@ -636,9 +636,9 @@ pub fn rust_main(arg: usize) -> ! {
         reason = "CG-021-no-panic-on-reachable-failure: the boot task parks after scheduler \
                   startup with IRQs enabled and no retained locks"
     )]
-    // SAFETY: this permanent boot frame owns no initialization resources and
+    // This permanent boot frame owns no initialization resources and
     // its pending future never retains a lock or accesses devices.
-    unsafe { ktask::future::block_on_freezable(core::future::pending::<()>()) }
+    ktask::future::block_on_freezable(core::future::pending::<()>())
         .expect("boot task freezer wait context");
     unreachable!("PID 0 boot task must remain parked");
 }

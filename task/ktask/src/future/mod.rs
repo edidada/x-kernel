@@ -185,7 +185,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 
 /// Runs an audited kernel-service future with freezer-aware pending waits.
 ///
-/// # Safety
+/// # Deadlock avoidance
 /// Every Pending return must retain no lock or resource needed by PM recovery.
 /// Polling must release hardware/queue guards before returning Pending; owned
 /// notification registrations and stable buffers may remain retained.
@@ -193,9 +193,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 /// # Errors
 /// Returns InvalidContext before polling if no sleepable task exists, or the
 /// freezer's context rejection if a pending safe point cannot be entered.
-pub unsafe fn block_on_freezable<F: IntoFuture>(
-    f: F,
-) -> Result<F::Output, crate::freezer::FreezeError> {
+pub fn block_on_freezable<F: IntoFuture>(f: F) -> Result<F::Output, crate::freezer::FreezeError> {
     let mut wait =
         PreparedTaskWait::prepare().map_err(|_| crate::freezer::FreezeError::InvalidContext)?;
     let waker = wait.waker();

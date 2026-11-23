@@ -238,10 +238,11 @@ pub fn spawn_alarm_task() {
         ksignal::register_timer_record_waker(|| ALARM_WAKE.notify());
         ktask::spawn_raw(
             || {
-                // SAFETY: alarm_task releases ALARM_LIST before Pending. Its
+                // Let the freezer wake the alarm worker even when no timer expires.
+                // alarm_task releases ALARM_LIST before Pending. Its
                 // retained listeners/timer wait own no device or recovery lock;
                 // thaw rescans persistent original clock-domain deadlines.
-                if let Err(error) = unsafe { ktask::future::block_on_freezable(alarm_task()) } {
+                if let Err(error) = ktask::future::block_on_freezable(alarm_task()) {
                     log::error!("alarm task freezer wait rejected: {error:?}");
                 }
             },
