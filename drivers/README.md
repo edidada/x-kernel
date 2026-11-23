@@ -56,6 +56,12 @@ other driver crates and small shared utility crates, but not on host-kernel
 implementation crates such as `khal`, `kirq`, `memspace`, `kdma`, `kruntime`,
 `ktask`, or `kwork`.
 
+Shared-buffer (dma-buf) objects are not a portable driver contract: the object
+behind the descriptor, its userspace ABI and the descriptor itself live in
+`io/dmabuf`, not here, because they own a device-node ABI and depend on the VFS
+and DMA memory. A portable exporter would justify extracting the object trait
+into `drivers/contracts/dmabuf`; until then there is no contract here.
+
 ## X-Kernel Adapters
 
 These crates or modules adapt the portable driver contracts to X-Kernel:

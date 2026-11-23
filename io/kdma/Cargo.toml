@@ -1,5 +1,6 @@
 [package]
 name = "kdma"
+description = "DMA memory capability: contiguous allocations, bus addresses, cache attributes, bounce mappings"
 edition.workspace = true
 version.workspace = true
 authors.workspace = true

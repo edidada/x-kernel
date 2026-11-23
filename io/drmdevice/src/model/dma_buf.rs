@@ -2,7 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! dma-buf: buffer sharing across drivers and devices (`drivers/dma-buf/`).
+//! dma-buf: this card's exporter for the kernel-wide sharing object
+//! (`io/dmabuf`).
 //!
 //! The card's buffers are guest memory, so they are shared by *importing the
 //! memory*, not by exporting a device-private object: the exporter receives
@@ -16,24 +17,38 @@
 //! * no host visibility of any kind — a resource the host cannot read from the
 //!   guest is not exported at all.
 //!
+//! The descriptor, the ioctl numbers and the importer entry point belong to
+//! `io/dmabuf`; this module only implements its [`dmabuf::DmaBuf`] contract
+//! and adds the piece DRM has that a fence-less buffer does not: a reservation
+//! that orders CPU access against the card's fences.
+//!
 //! An attachment records who holds the buffer and with which access. It stays
-//! alive as long as the importer's GEM object does, and it is what the exporter
-//! reports through `DMA_BUF_IOCTL_SYNC` bookkeeping.
+//! alive as long as the importer's GEM object does.
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc};
 
+use dmabuf::{
+    CpuAccess, DmaBuf as SharedDmaBuf, ExportId, MappedWindow,
+    uapi::{
+        DMA_BUF_IOCTL_EXPORT_SYNC_FILE, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, DMA_BUF_SYNC_RW,
+        DMA_BUF_SYNC_WRITE, DmaBufExportSyncFile, DmaBufImportSyncFile,
+    },
+};
+use kerrno::{KError, KResult};
+use kpoll::{IoEvents, PollContext, PollRegisterError};
 use kspin::SpinNoIrq;
+use memaddr::PhysAddr;
+use posix_types::UserPtr;
 
-use super::error::{DrmError, DrmResult};
+use super::error::DrmError;
 use crate::{
-    abi::*,
     prelude::*,
     sync::{
-        dma_fence::DmaFence,
+        dma_fence::{DmaFence, FenceCallback},
         dma_resv::{DmaResv, ResvUsage},
         fence_access::{fence_from_fd, install},
-        fence_list::FenceList,
-        sync_file::c_string,
+        fence_list::{FenceList, is_signaled},
+        wakeable::Wakeable,
     },
 };
 
@@ -92,10 +107,14 @@ pub(crate) struct DmaBuf {
     pub(crate) width: u32,
     /// The caller-set name (`dma_buf.name`).
     user_name: Mutex<String>,
-    /// The readiness source every descriptor of this buffer shares: Linux
-    /// keeps one wait queue per `dma_buf`, because the object is what fences
-    /// complete on.
-    poll: kpoll::PollSet,
+    /// Readiness source for `EPOLLIN`: the exclusive work is done.
+    ///
+    /// This is `dma_buf`'s wait queue, which lives on the buffer rather than on
+    /// each descriptor: fences complete on the object, so every descriptor of
+    /// one buffer waits on the same source.
+    read: Arc<Wakeable>,
+    /// Readiness source for `EPOLLOUT`: every user of the buffer is done.
+    write: Arc<Wakeable>,
     /// Importers that already attached to this buffer, by card identity.
     ///
     /// One importer has one attachment: a second import of the same buffer
@@ -125,7 +144,8 @@ impl DmaBuf {
             width,
             exporter,
             user_name: Mutex::new(String::new()),
-            poll: kpoll::PollSet::new(),
+            read: Arc::new(Wakeable::new()),
+            write: Arc::new(Wakeable::new()),
             attachments: Mutex::new(BTreeMap::new()),
         })
     }
@@ -223,29 +243,6 @@ impl core::fmt::Debug for Attachment {
     }
 }
 
-impl DmaBuf {
-    /// Exported name.
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// This buffer's identity, as every importer sees it.
-    ///
-    /// The slot and every attachment hold an `Arc` to the buffer, so the
-    /// address is stable while any descriptor or import of it can be resolved.
-    pub(crate) fn identity(&self) -> usize {
-        self as *const Self as usize
-    }
-
-    /// Renames the buffer (`dma_buf_set_name`).
-    ///
-    /// The name is what `sync_file_info`, `/proc` diagnostics and the anon
-    /// inode publish; it has no effect on the memory.
-    pub(crate) fn set_name(&self, name: String) {
-        *self.user_name.lock() = name;
-    }
-}
-
 /// The fences a consumer with `write` in mind must wait for
 /// (`dma_resv_usage_rw`).
 ///
@@ -260,54 +257,13 @@ pub(crate) fn usage_fences(buf: &DmaBuf, write: bool) -> Arc<FenceList> {
     })
 }
 
-/// `DMA_BUF_IOCTL_SYNC`: begin or end CPU access.
-///
-/// The flags are validated exactly as `dma_buf_ioctl` does (any bit outside
-/// `DMA_BUF_SYNC_VALID_FLAGS_MASK` is `EINVAL`, a direction of zero is
-/// `EINVAL`, and `DMA_BUF_SYNC_RW` is a valid bidirectional access). `START`
-/// is `dma_buf_begin_cpu_access`: it waits interruptibly for the reservation
-/// in the direction the access names. `END` is `dma_buf_end_cpu_access`,
-/// which this driver leaves as a no-op: its producers record their work on
-/// the reservation themselves, so there is nothing to publish on end.
-pub(crate) fn sync_fd(buf: &Arc<DmaBuf>, request: &DmaBufSync) -> DrmResult<()> {
-    let flags = request.flags;
-    if flags & !DMA_BUF_SYNC_VALID_FLAGS_MASK != 0 {
-        return Err(DrmError::InvalidInput);
-    }
-    let direction = flags & DMA_BUF_SYNC_RW;
-    if direction == 0 {
-        return Err(DrmError::InvalidInput);
-    }
-    if flags & DMA_BUF_SYNC_END != 0 {
-        return Ok(());
-    }
-    let fences = usage_fences(buf, direction & DMA_BUF_SYNC_WRITE != 0);
-    crate::sync::wait::wait_for_fences(&fences)
-}
-
-/// `DMA_BUF_SET_NAME`: rename the buffer for tracking.
-///
-/// The name is copied with `strndup_user`'s `DMA_BUF_NAME_LEN` cap; an
-/// over-long name is `EINVAL`, as a failure to copy it is there.
-pub(crate) fn set_name_fd(buf: &Arc<DmaBuf>, name: posix_types::UserConstPtr<u8>) -> DrmResult<()> {
-    let name = name
-        .cast::<core::ffi::c_char>()
-        .load_bytes_with_max_len(DMA_BUF_NAME_LEN)
-        .map_err(|_| DrmError::InvalidInput)?;
-    buf.set_name(c_string(&name));
-    Ok(())
-}
-
 /// `DMA_BUF_IOCTL_EXPORT_SYNC_FILE`: export the buffer's current fences.
 ///
 /// The exported fence is `dma_resv_get_singleton` of the reservation with the
 /// usage the flags name (a write access waits for everything, a read access
 /// for the writers), or a stub when nothing is outstanding. The flags describe
 /// the *waiting* direction, so they are not `DMA_BUF_SYNC_END`/`NOWAIT`.
-pub(crate) fn export_sync_file(
-    buf: &Arc<DmaBuf>,
-    request: &mut DmaBufExportSyncFile,
-) -> DrmResult<()> {
+fn export_sync_file(buf: &DmaBuf, request: &mut DmaBufExportSyncFile) -> KResult<()> {
     validate_sync_file_rw(request.flags as u64)?;
     let fences = usage_fences(buf, request.flags as u64 & DMA_BUF_SYNC_WRITE != 0);
     let fence = if fences.fences().is_empty() {
@@ -326,11 +282,11 @@ pub(crate) fn export_sync_file(
 /// fence is unwrapped into its members, and every member is recorded with the
 /// usage the flags name (a write access is exclusive work, a read access shared
 /// work).
-pub(crate) fn import_sync_file(buf: &Arc<DmaBuf>, request: &DmaBufImportSyncFile) -> DrmResult<()> {
+fn import_sync_file(buf: &DmaBuf, request: &DmaBufImportSyncFile) -> KResult<()> {
     validate_sync_file_rw(request.flags as u64)?;
     // Resolve the fence before touching the reservation, so a bad fd leaves
     // the buffer's ordering unchanged.
-    let fence = fence_from_fd(request.fd)?;
+    let fence = fence_from_fd(request.fd).map_err(DrmError::to_vfs)?;
     let write = request.flags as u64 & DMA_BUF_SYNC_WRITE != 0;
     for member in crate::sync::fence_access::flatten(&fence) {
         if write {
@@ -346,9 +302,9 @@ pub(crate) fn import_sync_file(buf: &Arc<DmaBuf>, request: &DmaBufImportSyncFile
 ///
 /// Linux accepts only the direction bits here: any other bit is `EINVAL` and a
 /// direction of zero is `EINVAL`, while `DMA_BUF_SYNC_RW` means "as a writer".
-fn validate_sync_file_rw(flags: u64) -> DrmResult<()> {
+fn validate_sync_file_rw(flags: u64) -> KResult<()> {
     if flags & !DMA_BUF_SYNC_RW != 0 || flags & DMA_BUF_SYNC_RW == 0 {
-        return Err(DrmError::InvalidInput);
+        return Err(KError::InvalidInput);
     }
     Ok(())
 }
@@ -369,77 +325,138 @@ pub(crate) fn export_name(driver: &str) -> String {
     alloc::format!("drm_{driver}")
 }
 
-impl display::ExportedDmaBuf for DmaBuf {
-    fn identity(&self) -> usize {
-        Self::identity(self)
+impl SharedDmaBuf for DmaBuf {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 
-    fn exporter(&self) -> &str {
+    fn export_id(&self) -> ExportId {
+        // The slot, every descriptor and every attachment hold an `Arc` to the
+        // buffer, so its address is stable while the buffer can be resolved.
+        ExportId::new(self as *const Self as u64)
+    }
+
+    fn exporter_name(&self) -> &str {
         &self.name
     }
 
-    fn size(&self) -> u64 {
+    fn size_bytes(&self) -> u64 {
         self.size
     }
 
-    fn attach(&self, _importer: u64) -> Result<display::DmaBufAttachment, display::DriverError> {
-        // The generic importer takes its own attachment; this card's import
-        // goes through `attach_to`, which reuses the one a repeated import of
-        // the same buffer already holds.
-        Ok(display::DmaBufAttachment {
-            export: Self::identity(self),
-        })
-    }
-
-    fn detach(&self, _attachment: &display::DmaBufAttachment) {
-        // A generic attachment carries no importer identity, so there is
-        // nothing per-importer to release; the card's own attachment detaches
-        // through its `Attachment` guard.
-    }
-
-    fn map(
-        &self,
-        attachment: &display::DmaBufAttachment,
-    ) -> Result<display::MappedMemory, display::DriverError> {
-        if attachment.export != Self::identity(self) {
-            return Err(display::DriverError::InvalidInput);
-        }
+    fn window(&self) -> MappedWindow {
         // This driver exports guest memory only, so the window an importer
         // maps is the exporter's own pages: an importer that can address the
         // guest scans exactly the memory the producer filled.
-        Ok(display::MappedMemory {
-            start: self.backing.start,
-            len: self.backing.length as u64,
-        })
+        MappedWindow::new(
+            PhysAddr::from(self.backing.start as usize),
+            self.backing.length,
+        )
     }
 
-    fn fences(&self, write: bool) -> Vec<Arc<dyn core::any::Any + Send + Sync>> {
-        usage_fences(self, write)
-            .fences()
-            .iter()
-            .map(|fence| fence.clone() as Arc<dyn core::any::Any + Send + Sync>)
-            .collect()
+    /// `START` is `dma_buf_begin_cpu_access`: it waits for the reservation in
+    /// the direction the access names, so the CPU never reads what the card is
+    /// still writing.
+    fn begin_cpu_access(&self, access: CpuAccess) -> KResult<()> {
+        let fences = usage_fences(self, access.writes_memory());
+        crate::sync::wait::wait_for_fences(&fences).map_err(DrmError::to_vfs)
     }
 
-    fn poll(&self) -> &kpoll::PollSet {
-        &self.poll
+    /// `END` is `dma_buf_end_cpu_access`, which this driver leaves as a no-op:
+    /// its producers record their work on the reservation themselves, so there
+    /// is nothing to publish on end.
+    fn end_cpu_access(&self, _access: CpuAccess) -> KResult<()> {
+        Ok(())
     }
 
-    fn fence_or_signaled(&self) -> Arc<dyn core::any::Any + Send + Sync> {
-        // `dma_resv_get_singleton` over this export's write list: the work a
-        // consumer must finish before the buffer is stable, or a fence that is
-        // already done when nothing is outstanding.
+    /// `dma_resv_get_singleton` over this export's write list: the work a
+    /// consumer must finish before the buffer is stable, or a fence that is
+    /// already done when nothing is outstanding.
+    fn access_fence(&self) -> Option<dmabuf::FenceRef> {
         let fences = self.resv.write_list();
         match fences.fences().last() {
-            Some(fence) => fence.clone() as Arc<dyn core::any::Any + Send + Sync>,
-            None => crate::sync::dma_fence::new_signaled_fence()
-                as Arc<dyn core::any::Any + Send + Sync>,
+            Some(fence) => Some(fence.clone() as dmabuf::FenceRef),
+            None => Some(crate::sync::dma_fence::new_signaled_fence() as dmabuf::FenceRef),
+        }
+    }
+
+    /// Renames the buffer (`dma_buf_set_name`).
+    fn set_name(&self, name: &str) {
+        *self.user_name.lock() = name.into();
+    }
+
+    /// Readable once the exclusive work completed, writable once every user is
+    /// done — `dma_buf_poll` over the reservation.
+    fn poll_state(&self) -> IoEvents {
+        let mut events = IoEvents::empty();
+        events.set(IoEvents::IN, is_signaled(&usage_fences(self, false)));
+        events.set(IoEvents::OUT, is_signaled(&usage_fences(self, true)));
+        events
+    }
+
+    fn register_poll(
+        &self,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        if events.contains(IoEvents::IN) {
+            self.read.register(context, IoEvents::IN)?;
+            self.arm(false);
+        }
+        if events.contains(IoEvents::OUT) {
+            self.write.register(context, IoEvents::OUT)?;
+            self.arm(true);
+        }
+        Ok(())
+    }
+
+    /// The two reservation commands (`dma_buf_export_sync_file`,
+    /// `dma_buf_import_sync_file`).
+    ///
+    /// They are the exporter's because a buffer without a reservation has
+    /// nothing to export or import; the descriptor's default answers
+    /// `OperationNotSupported` for exactly that case.
+    fn sync_file_ioctl(&self, cmd: u32, arg: usize) -> KResult<usize> {
+        match cmd {
+            DMA_BUF_IOCTL_EXPORT_SYNC_FILE => {
+                let mut request: DmaBufExportSyncFile = UserPtr::from(arg)
+                    .read_vm()
+                    .map_err(|_| KError::BadAddress)?;
+                export_sync_file(self, &mut request)?;
+                UserPtr::from(arg)
+                    .write_vm(request)
+                    .map_err(|_| KError::BadAddress)?;
+                Ok(0)
+            }
+            DMA_BUF_IOCTL_IMPORT_SYNC_FILE => {
+                let request: DmaBufImportSyncFile = UserPtr::from(arg)
+                    .read_vm()
+                    .map_err(|_| KError::BadAddress)?;
+                import_sync_file(self, &request)?;
+                Ok(0)
+            }
+            _ => Err(KError::OperationNotSupported),
         }
     }
 }
 
-impl display::DmaBufObject for DmaBuf {
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
+impl DmaBuf {
+    /// Arms one direction's poll callback (`dma_buf_poll_add_cb`).
+    fn arm(&self, write: bool) {
+        let source = if write { &self.write } else { &self.read };
+        if !source.arm() {
+            return;
+        }
+        let fences = usage_fences(self, write);
+        // `dma_buf_poll_add_cb` arms the first fence that accepts a callback;
+        // that fence's completion wakes the queue and clears the arm bit.
+        let pending = fences.fences().iter().find(|fence| !fence.is_signaled());
+        match pending {
+            Some(fence) => fence.add_callback(FenceCallback::dma_buf_wakeable(
+                &Arc::downgrade(source),
+                write,
+            )),
+            None => source.wake_direction(write),
+        }
     }
 }

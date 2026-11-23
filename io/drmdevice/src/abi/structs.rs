@@ -677,41 +677,9 @@ pub(crate) struct DrmSyncMergeData {
 }
 
 const _: [(); 48] = [(); core::mem::size_of::<DrmSyncMergeData>()];
-
-/// `struct dma_buf_export_sync_file`.
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub(crate) struct DmaBufExportSyncFile {
-    pub flags: u32,
-    pub fd: i32,
-}
-
-/// `struct dma_buf_import_sync_file`.
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub(crate) struct DmaBufImportSyncFile {
-    pub flags: u32,
-    pub fd: i32,
-}
-
-const _: [(); 8] = [(); core::mem::size_of::<DmaBufExportSyncFile>()];
-const _: [(); 8] = [(); core::mem::size_of::<DmaBufImportSyncFile>()];
 const _: [(); 48] = [(); core::mem::offset_of!(DrmSyncFileInfo, sync_fence_info)];
 const _: [(); 56] = [(); core::mem::size_of::<DrmSyncFileInfo>()];
 const _: [(); 80] = [(); core::mem::size_of::<DrmSyncFenceInfo>()];
-
-/// `struct dma_buf_sync`.
-///
-/// Exactly one `__u64`; the ioctl number encodes that size
-/// (`_IOW('b', 0, struct dma_buf_sync)` is `0x4008_6200`), so any padding here
-/// would make the command unrecognisable to a Linux-built client.
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub(crate) struct DmaBufSync {
-    pub flags: u64,
-}
-
-const _: [(); 8] = [(); core::mem::size_of::<DmaBufSync>()];
 
 /// `DRM_IOCTL_SYNCOBJ_SIGNAL`: signal a set of binary syncobjs.
 #[repr(transparent)]

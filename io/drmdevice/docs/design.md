@@ -12,6 +12,12 @@ needs (G2 of the graphics alignment plan): dma-fences, dma-resv
 implicit ordering, `sync_file`, the `SYNCOBJ_*` family and a real dma-buf
 export/import path. They are described in *Synchronization* below.
 
+The dma-buf *descriptor* is delegated: the fd, its `llseek`/`mmap`/`poll`
+behaviour and the `DMA_BUF_IOCTL_*` surface are owned by `io/dmabuf`. This
+crate keeps the exporter object that implements `dmabuf::DmaBuf` over a GEM
+buffer, plus the reservation that orders CPU access, and it is the caller of
+`io/dmabuf`'s descriptor constructors. See *Dependencies* below.
+
 ## Layering
 
 ```text
@@ -51,6 +57,19 @@ cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 `DrmDevice::minor(Primary)` on `/dev/dri/cardN` and
 `DrmDevice::minor(Render)` on `/dev/dri/renderD{128+N}`, and calls
 `DrmDevice::notify_removed` when the device goes away.
+
+## Dependencies
+
+| Direction | Interface | Where |
+|---|---|---|
+| provided by this crate | `dmabuf::DmaBuf` for the export view of a GEM object | `model::dma_buf` |
+| called by `io/dmabuf` | `DmaBuf::{attach, detach, map, begin_cpu_access, end_cpu_access, access_fence, poll_state, register_poll, sync_file_ioctl}` | `model::dma_buf` |
+| called by this crate | `dmabuf::new_file` (PRIME export) and `dmabuf::lookup` (PRIME import) | `gem.rs` |
+| provided by this crate | `DmaBuf::sync_file_ioctl` implements the two `*_SYNC_FILE` commands, because the reservation lives here | `model::dma_buf` |
+
+The split keeps the shared-buffer ABI in one place while the ordering model a
+DRM client needs (fences, reservations, `sync_file`) stays with the card that
+produces it.
 
 ## The four single sources of truth
 
@@ -360,10 +379,13 @@ foreign `fd2` as `ENOENT`. The file has no `read` operation, as in Linux, and
 
 ### Descriptor commands
 
-`SYNC_IOC_*` and `DMA_BUF_IOCTL_*` are issued on a descriptor, not on the card,
-so they never reach the DRM ioctl table: `sync_file.rs` and `dma_buf_file.rs`
-dispatch them to `model/sync_ioctl.rs`, which validates the arguments and copies
-them with the same user-memory helpers the DRM ioctls use.
+`SYNC_IOC_*` are issued on a sync_file descriptor, not on the card, so they
+never reach the DRM ioctl table: `sync_file.rs` dispatches them to
+`model/sync_file_ioctl.rs`, which validates the arguments and copies them with
+the same user-memory helpers the DRM ioctls use. `DMA_BUF_IOCTL_*` belong to
+the descriptor in `io/dmabuf`; the two commands that touch this card's
+reservation (`*_SYNC_FILE`) arrive through
+`DmaBuf::sync_file_ioctl`.
 
 ### Capabilities
 
@@ -442,7 +464,9 @@ or workqueue of its own is created by this crate.
 Handlers and the object model return `DrmError`; `device/minor.rs` maps it to the
 errno the syscall layer expects (`EINVAL`, `EOPNOTSUPP`, `ENODEV`, `EBUSY`,
 `EACCES`, `EPERM`, `ENOENT`, `ENOMEM`, `EIO`, `EFAULT`, `EAGAIN`). Unknown
-command numbers are `EOPNOTSUPP`.
+command numbers of the card's ioctl table are `EOPNOTSUPP`; the dma-buf
+descriptor, which is `io/dmabuf`'s, answers `ENOTTY` for a command it does not
+implement, as Linux does.
 
 ## Known limitations
 
@@ -486,7 +510,7 @@ command numbers are `EOPNOTSUPP`.
 ## The dma-buf object
 
 A dma-buf descriptor carries its export in the open file's framework slot
-(`kvfs::DMA_BUF_SLOT`), typed by `display::DmaBufSlot`. Every importer —
+(`kvfs::DMA_BUF_SLOT`), published and read by `io/dmabuf`. Every importer —
 `PRIME_FD_TO_HANDLE` here, a second display engine, a media device — reads it
 the same way, instead of asking this driver whether the descriptor happens to
 have been created by it. That is the kernel-wide equivalent of Linux's

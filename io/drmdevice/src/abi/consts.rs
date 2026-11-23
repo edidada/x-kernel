@@ -146,48 +146,6 @@ pub(crate) const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE: u32 = 1 << 3;
 /// arrays were copied.
 pub(crate) const DRM_SYNCOBJ_MAX_HANDLES: u32 = 1024;
 
-// ======== dma-buf ioctl numbers (DMA_BUF_BASE 'b') ========
-
-/// `_IOW('b', 0, struct dma_buf_sync)`.
-pub(crate) const DMA_BUF_IOCTL_SYNC_CMD: u8 = 0x0;
-/// `_IOW('b', 2, struct dma_buf_export_sync_file)`.
-pub(crate) const DMA_BUF_IOCTL_EXPORT_SYNC_FILE_CMD: u8 = 0x2;
-/// `_IOW('b', 3, struct dma_buf_import_sync_file)`.
-pub(crate) const DMA_BUF_IOCTL_IMPORT_SYNC_FILE_CMD: u8 = 0x3;
-
-pub(crate) const DMA_BUF_BASE: u8 = b'b';
-
-/// `DMA_BUF_SYNC_VALID_FLAGS_MASK`: `DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END`.
-pub(crate) const DMA_BUF_SYNC_VALID_FLAGS_MASK: u64 = 3 | (1 << 2);
-/// `DMA_BUF_NAME_LEN`: the longest name `DMA_BUF_SET_NAME` accepts.
-pub(crate) const DMA_BUF_NAME_LEN: usize = 32;
-
-/// Sequence number of `DMA_BUF_SET_NAME`, which Linux spells once per
-/// user-pointer width (`_IOW('b', 1, const char *)` and the `__u32`/`__u64`
-/// variants). There is no size-query command: a client reads the size from
-/// `fstat`'s `st_size`, which the descriptor reports.
-pub(crate) const DMA_BUF_BASE_SEQ_1: u8 = 0x1;
-
-/// `DMA_BUF_IOCTL_SYNC_END`: publish completed CPU access. The start direction is
-/// the absence of this bit, because `DMA_BUF_SYNC_START` is zero.
-pub(crate) const DMA_BUF_SYNC_END: u64 = 1 << 2;
-/// `DMA_BUF_SYNC_RW`.
-pub(crate) const DMA_BUF_SYNC_RW: u64 = 3;
-/// `DMA_BUF_SYNC_READ`.
-pub(crate) const DMA_BUF_SYNC_READ: u64 = 1;
-const _: () = assert!(DMA_BUF_SYNC_READ == 1);
-/// `DMA_BUF_SYNC_WRITE`.
-pub(crate) const DMA_BUF_SYNC_WRITE: u64 = 2;
-/// `DMA_BUF_SYNC_WAIT`. It is part of `DMA_BUF_SYNC_VALID_FLAGS_MASK` only in
-/// the sense that a wait is the default; Linux defines it as a zero bit.
-pub(crate) const DMA_BUF_SYNC_WAIT: u64 = 0;
-const _: () = assert!(DMA_BUF_SYNC_WAIT == 0);
-const _: () = assert!(DMA_BUF_SYNC_VALID_FLAGS_MASK == 0x7);
-/// `DMA_BUF_SYNC_NOWAIT`: a legacy DMA-BUF API bit outside the validation
-/// mask, so Linux rejects it; it is kept for completeness of the ABI table.
-pub(crate) const DMA_BUF_SYNC_NOWAIT: u64 = 1 << 4;
-const _: () = assert!(DMA_BUF_SYNC_NOWAIT & DMA_BUF_SYNC_VALID_FLAGS_MASK == 0);
-
 // ======== sync_file ioctl numbers (SYNC_IOC_MAGIC '>') ========
 
 // ======== MODE_DIRTYFB flags ========

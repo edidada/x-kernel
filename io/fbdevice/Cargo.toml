@@ -1,5 +1,6 @@
 [package]
 name = "fbdevice"
+description = "Framebuffer subsystem (/dev/fbN)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

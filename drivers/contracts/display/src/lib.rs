@@ -10,13 +10,8 @@ extern crate alloc;
 
 pub use memaddr::{PhysAddr, PhysAddrRange};
 
-mod dmabuf;
 mod vblank;
 
-pub use dmabuf::{
-    DmaBufAttachment, DmaBufObject, DmaBufSlot, ExportedDmaBuf, FileSlotWriter, MappedMemory, find,
-    publish,
-};
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 pub use vblank::{VblankOrigin, VblankSource, VblankTick};

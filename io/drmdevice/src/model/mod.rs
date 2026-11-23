@@ -12,14 +12,13 @@
 pub(crate) mod backend;
 pub(crate) mod device;
 pub(crate) mod dma_buf;
-pub(crate) mod dma_buf_file;
 pub(crate) mod error;
 pub(crate) mod event;
 pub(crate) mod file;
 pub(crate) mod flip;
 pub(crate) mod ids;
 pub(crate) mod scanout;
-pub(crate) mod sync_ioctl;
+pub(crate) mod sync_file_ioctl;
 pub(crate) mod syncobj;
 pub(crate) mod syncobj_signal;
 pub(crate) mod vblank;

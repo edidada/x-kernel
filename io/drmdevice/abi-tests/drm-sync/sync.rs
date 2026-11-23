@@ -108,8 +108,8 @@ mod tests {
     }
     /// `_IOW('b', 0x00, struct dma_buf_sync)`.
     const DMA_BUF_IOCTL_SYNC: c_ulong = 0x4008_6200;
-    /// `_IOW('b', 0x02, struct dma_buf_export_sync_file)`.
-    const DMA_BUF_IOCTL_EXPORT_SYNC_FILE: c_ulong = 0x4008_6202;
+    /// `_IOWR('b', 0x02, struct dma_buf_export_sync_file)`.
+    const DMA_BUF_IOCTL_EXPORT_SYNC_FILE: c_ulong = 0xc008_6202;
     /// `_IOW('b', 0x03, struct dma_buf_import_sync_file)`.
     const DMA_BUF_IOCTL_IMPORT_SYNC_FILE: c_ulong = 0x4008_6203;
     /// `_IOWR('d', 0xBC, struct drm_mode_atomic)`.

@@ -725,61 +725,51 @@ struct ForeignExport {
     len: usize,
     /// Attachments taken and not yet detached, so the test can check pairing.
     attachments: core::sync::atomic::AtomicUsize,
-    poll: kpoll::PollSet,
 }
 
-impl display::ExportedDmaBuf for ForeignExport {
-    fn identity(&self) -> usize {
-        self as *const Self as usize
+impl dmabuf::DmaBuf for ForeignExport {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 
-    fn exporter(&self) -> &str {
+    fn export_id(&self) -> dmabuf::ExportId {
+        dmabuf::ExportId::new(self as *const Self as u64)
+    }
+
+    fn exporter_name(&self) -> &str {
         "foreign-exporter"
     }
 
-    fn size(&self) -> u64 {
+    fn size_bytes(&self) -> u64 {
         self.len as u64
     }
 
-    fn attach(&self, _importer: u64) -> Result<display::DmaBufAttachment, display::DriverError> {
+    fn window(&self) -> dmabuf::MappedWindow {
+        dmabuf::MappedWindow::new(
+            memaddr::PhysAddr::from(self.start),
+            self.len,
+        )
+    }
+
+    fn attach(
+        &self,
+        importer: dmabuf::ImporterId,
+    ) -> kerrno::KResult<dmabuf::DmaBufAttachment> {
         self.attachments
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        Ok(display::DmaBufAttachment {
-            export: self.identity(),
+        Ok(dmabuf::DmaBufAttachment {
+            export: self.export_id(),
+            importer,
         })
     }
 
-    fn detach(&self, _attachment: &display::DmaBufAttachment) {
+    fn detach(&self, _attachment: &dmabuf::DmaBufAttachment) {
         self.attachments
             .fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
     }
 
-    fn map(
-        &self,
-        _attachment: &display::DmaBufAttachment,
-    ) -> Result<display::MappedMemory, display::DriverError> {
-        Ok(display::MappedMemory {
-            start: self.start as u64,
-            len: self.len as u64,
-        })
-    }
-
-    fn fences(&self, _write: bool) -> Vec<Arc<dyn core::any::Any + Send + Sync>> {
-        Vec::new()
-    }
-
-    fn poll(&self) -> &kpoll::PollSet {
-        &self.poll
-    }
-
-    fn fence_or_signaled(&self) -> Arc<dyn core::any::Any + Send + Sync> {
-        crate::sync::dma_fence::new_signaled_fence() as Arc<dyn core::any::Any + Send + Sync>
-    }
-}
-
-impl display::DmaBufObject for ForeignExport {
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
+    fn access_fence(&self) -> Option<dmabuf::FenceRef> {
+        Some(crate::sync::dma_fence::new_signaled_fence() as dmabuf::FenceRef)
     }
 }
 
@@ -793,14 +783,15 @@ fn a_foreign_dmabuf_is_imported_through_the_kernel_contract() {
         start: pages.phys_addr().as_usize(),
         len: PAGE_SIZE_4K,
         attachments: core::sync::atomic::AtomicUsize::new(0),
-        poll: kpoll::PollSet::new(),
     });
 
     // The importer sees only the exported object, as a second driver would.
-    let as_object: Arc<dyn display::DmaBufObject> = export.clone();
-    let attachment = as_object.attach(dev.card_id()).expect("attach");
+    let as_object: dmabuf::SharedDmaBuf = export.clone();
+    let attachment = as_object
+        .attach(dmabuf::ImporterId::new(dev.card_id()))
+        .expect("attach");
     let window = as_object.map(&attachment).expect("map");
-    assert_eq!(window.len as usize, PAGE_SIZE_4K);
+    assert_eq!(window.len_bytes, PAGE_SIZE_4K);
 
     // The import never attached: it is handed an attachment the importer
     // already took, exactly like `drm_gem_prime_import_dev` after
@@ -2681,7 +2672,8 @@ fn a_dma_buf_descriptor_answers_seek_end_with_its_size() {
         1,
         None,
     );
-    let file = crate::model::dma_buf_file::new_dma_buf_file(&buf, &kcred::initial_cred())
+    let object: dmabuf::SharedDmaBuf = buf;
+    let file = dmabuf::new_file(object, kcred::initial_cred())
         .expect("a dma-buf descriptor must be created");
     assert!(
         file.mode().contains(kvfs::FMode::LSEEK),

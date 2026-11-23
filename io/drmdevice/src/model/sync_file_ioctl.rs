@@ -2,36 +2,25 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! The `sync_file` and dma-buf descriptor commands (`sync_file.c`,
-//! `dma-buf.c`).
+//! The `sync_file` descriptor commands (`sync_file.c`).
 //!
-//! These commands are issued on a descriptor, not on a DRM card, so they never
-//! reach the DRM ioctl table: the descriptor's own file operations dispatch
-//! them here. Both families take the same arguments as their Linux
-//! counterparts and report the same errors.
+//! These commands are issued on a sync_file descriptor, not on a DRM card, so
+//! they never reach the DRM ioctl table: the descriptor's own file operations
+//! dispatch them here. The dma-buf descriptor commands live with the descriptor
+//! in `io/dmabuf`; the two `*_SYNC_FILE` commands that touch this card's
+//! reservation reach it through `DmaBuf::sync_file_ioctl`.
 //!
 //! | command | meaning |
 //! |---|---|
 //! | `SYNC_IOC_MERGE` | merge two sync_files into a new one |
 //! | `SYNC_IOC_FILE_INFO` | report the fences of a sync_file |
-//! | `DMA_BUF_IOCTL_SYNC` | wait for (or publish) CPU access |
-//! | `DMA_BUF_IOCTL_INFO` | buffer size and flags |
-//! | `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` | export the buffer's fence |
-//! | `DMA_BUF_IOCTL_IMPORT_SYNC_FILE` | record a fence on the buffer |
+//! | `SYNC_IOC_SET_DEADLINE` | publish a deadline on the file's fence |
 
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 use crate::{
-    abi::{
-        DMA_BUF_BASE, DMA_BUF_BASE_SEQ_1, DMA_BUF_IOCTL_EXPORT_SYNC_FILE_CMD,
-        DMA_BUF_IOCTL_IMPORT_SYNC_FILE_CMD, DMA_BUF_IOCTL_SYNC_CMD, DmaBufExportSyncFile,
-        DmaBufImportSyncFile, DmaBufSync, DrmSyncFenceInfo, DrmSyncFileInfo, DrmSyncMergeData,
-        DrmSyncSetDeadline, iow,
-    },
-    model::{
-        dma_buf,
-        error::{DrmError, DrmResult},
-    },
+    abi::{DrmSyncFenceInfo, DrmSyncFileInfo, DrmSyncMergeData, DrmSyncSetDeadline},
+    model::error::{DrmError, DrmResult},
     prelude::*,
     sync::{
         fence_access::{sync_file_of_fd, unwrap_merge},
@@ -163,61 +152,9 @@ fn set_deadline(file: &SyncFile, arg: usize) -> DrmResult<usize> {
     Ok(0)
 }
 
-/// Handles one command issued on a dma-buf descriptor `file`.
-pub(crate) fn dma_buf_ioctl(file: &VfsFile, cmd: u32, arg: usize) -> DrmResult<usize> {
-    let state = super::dma_buf_file::state_of(file)?;
-    match cmd {
-        sync if sync == iow::<DmaBufSync>(DMA_BUF_BASE, DMA_BUF_IOCTL_SYNC_CMD) => {
-            let request: DmaBufSync = read_arg(arg)?;
-            dma_buf::sync_fd(&state.buf, &request)?;
-            Ok(0)
-        }
-        // Linux spells the name command once for each user-pointer width; the
-        // kernel reads a string from the pointer, so both sizes are accepted
-        // and only the copied cap matters.
-        set_name
-            if set_name == iow::<u64>(DMA_BUF_BASE, DMA_BUF_BASE_SEQ_1)
-                || set_name == iow::<u32>(DMA_BUF_BASE, DMA_BUF_BASE_SEQ_1) =>
-        {
-            dma_buf::set_name_fd(&state.buf, posix_types::UserConstPtr::from(arg))?;
-            Ok(0)
-        }
-        export
-            if export
-                == iow::<DmaBufExportSyncFile>(
-                    DMA_BUF_BASE,
-                    DMA_BUF_IOCTL_EXPORT_SYNC_FILE_CMD,
-                ) =>
-        {
-            let mut request: DmaBufExportSyncFile = read_arg(arg)?;
-            dma_buf::export_sync_file(&state.buf, &mut request)?;
-            write_arg(arg, &request)?;
-            Ok(0)
-        }
-        import
-            if import
-                == iow::<DmaBufImportSyncFile>(
-                    DMA_BUF_BASE,
-                    DMA_BUF_IOCTL_IMPORT_SYNC_FILE_CMD,
-                ) =>
-        {
-            let request: DmaBufImportSyncFile = read_arg(arg)?;
-            dma_buf::import_sync_file(&state.buf, &request)?;
-            Ok(0)
-        }
-        _ => Err(DrmError::OpNotSupported),
-    }
-}
-
 fn read_arg<T: UserRead>(arg: usize) -> DrmResult<T> {
     UserPtr::<T>::from(arg)
         .read_vm()
-        .map_err(|_| DrmError::BadAddress)
-}
-
-fn write_arg<T: UserWrite + Copy>(arg: usize, value: &T) -> DrmResult<()> {
-    UserPtr::<T>::from(arg)
-        .write_vm(*value)
         .map_err(|_| DrmError::BadAddress)
 }
 

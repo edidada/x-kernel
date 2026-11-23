@@ -14,7 +14,7 @@
 //! * `read()`: `sync_file.c` has no read operation, so this driver's file has
 //!   none either; `SYNC_IOC_FILE_INFO` is the way to describe the fence;
 //! * `SYNC_IOC_MERGE`, `SYNC_IOC_FILE_INFO` and `SYNC_IOC_SET_DEADLINE` live
-//!   in [`super::fence_access`'s sibling](crate::model::sync_ioctl).
+//!   in [`super::fence_access`'s sibling](crate::model::sync_file_ioctl).
 //!
 //! The file is an anonymous-inode file, so it has no path and is created in one
 //! step by [`new_sync_file`]. Its lifetime is the descriptor's lifetime: the
@@ -290,7 +290,7 @@ struct SyncFileFops;
 
 impl FileOperations for SyncFileFops {
     fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
-        crate::model::sync_ioctl::sync_file_ioctl(file, cmd, arg)
+        crate::model::sync_file_ioctl::sync_file_ioctl(file, cmd, arg)
             .map_err(crate::model::error::DrmError::to_vfs)
     }
 

@@ -24,6 +24,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use display::{ScanoutBacking, ScanoutWindow};
+use dmabuf::{DmaBuf as _, FenceRef, ImporterId, MappedWindow, SharedDmaBuf};
 
 use crate::{
     model::dma_buf::{Attachment, DmaBuf, DmaBufBacking},
@@ -412,22 +413,23 @@ impl GemObject {
     /// account for.
     pub(crate) fn import_window(
         dev: &DrmDevice,
-        window: display::MappedMemory,
+        window: MappedWindow,
         spec: ResourceSpec,
         resv: Arc<DmaResv>,
         attachment: ForeignAttachment,
     ) -> DrmResult<Arc<Self>> {
-        if window.start == 0 || window.len == 0 {
+        if window.phys_start.as_usize() == 0 || window.len_bytes == 0 {
             return Err(DrmError::InvalidInput);
         }
-        let length_bytes = usize::try_from(window.len).map_err(|_| DrmError::NoMemory)?;
-        if length_bytes > DUMB_BUFFER_MAX_SIZE || !window.start.is_multiple_of(PAGE_SIZE_4K as u64)
+        let length_bytes = window.len_bytes;
+        if length_bytes > DUMB_BUFFER_MAX_SIZE
+            || !window.phys_start.as_usize().is_multiple_of(PAGE_SIZE_4K)
         {
             return Err(DrmError::InvalidInput);
         }
         let memory = GemMemory::Window {
-            start: window.start,
-            len: window.len,
+            start: window.phys_start.as_usize() as u64,
+            len: window.len_bytes as u64,
         };
         let paddr = usize::try_from(memory.base()).map_err(|_| DrmError::InvalidInput)?;
         let resource = dev.next_resource_id();
@@ -807,8 +809,8 @@ impl Ioctl for DrmPrimeHandle {
             return Err(DrmError::OpNotSupported);
         };
         let cred = kprocess::current_cred();
-        let file = crate::model::dma_buf_file::new_dma_buf_file(&buf, &cred)
-            .map_err(|_| DrmError::NoMemory)?;
+        let object: SharedDmaBuf = buf;
+        let file = dmabuf::new_file(object, cred).map_err(|_| DrmError::NoMemory)?;
         let is_cloexec = prime.flags & DRM_CLOEXEC != 0;
         prime.fd = kprocess::current_files()
             .add_file(file, is_cloexec)
@@ -833,12 +835,11 @@ impl Ioctl for DrmPrimeFdToHandle {
         let exported = kprocess::current_files()
             .get_file(prime.0.fd)
             .map_err(|_| DrmError::NotFound)?;
-        let export =
-            crate::model::dma_buf_file::exported_object(&exported).ok_or(DrmError::NotFound)?;
+        let export = dmabuf::lookup(&exported).ok_or(DrmError::NotFound)?;
         // This card's own buffer takes the fast path
         // (`drm_gem_prime_import_dev`'s own-dma_buf branch).
         if let Some(own) = export.as_any().downcast_ref::<DmaBuf>() {
-            let identity = own.identity();
+            let identity = own.export_id();
             return import_own_buffer(dev, file, prime, &export, identity);
         }
         import_foreign_buffer(dev, file, prime, &export)
@@ -855,8 +856,8 @@ fn import_own_buffer(
     dev: &DrmDevice,
     file: &Arc<DrmFile>,
     prime: &mut DrmPrimeFdToHandle,
-    export: &Arc<dyn display::DmaBufObject>,
-    identity: usize,
+    export: &SharedDmaBuf,
+    identity: dmabuf::ExportId,
 ) -> DrmResult<usize> {
     // The slot keeps the exporter's buffer alive for as long as the descriptor
     // exists, which is this whole call and every later user of the import.
@@ -873,7 +874,7 @@ fn import_own_buffer(
         handles.iter().find_map(|(handle, known)| {
             known
                 .export_view()
-                .is_some_and(|known| known.identity() == identity)
+                .is_some_and(|known| known.export_id() == identity)
                 .then_some(*handle)
         })
     };
@@ -900,10 +901,10 @@ fn import_foreign_buffer(
     dev: &DrmDevice,
     file: &Arc<DrmFile>,
     prime: &mut DrmPrimeFdToHandle,
-    export: &Arc<dyn display::DmaBufObject>,
+    export: &SharedDmaBuf,
 ) -> DrmResult<usize> {
     let attachment = export
-        .attach(dev.card_id())
+        .attach(ImporterId::new(dev.card_id()))
         .map_err(|_| DrmError::OpNotSupported)?;
     let window = match export.map(&attachment) {
         Ok(window) => window,
@@ -915,14 +916,14 @@ fn import_foreign_buffer(
     // A window is described as one long row: this card has no multi-plane
     // support, and a client lifts the geometry with ADDFB2, which now accepts
     // any framebuffer that fits its object.
-    if window.len == 0 || window.len > DUMB_BUFFER_MAX_SIZE as u64 {
+    if window.len_bytes == 0 || window.len_bytes > DUMB_BUFFER_MAX_SIZE {
         export.detach(&attachment);
         return Err(DrmError::NoMemory);
     }
     let spec = ResourceSpec {
-        width: u32::try_from(window.len / 4).map_err(|_| DrmError::InvalidInput)?,
+        width: u32::try_from(window.len_bytes / 4).map_err(|_| DrmError::InvalidInput)?,
         height: 1,
-        pitch: u32::try_from(window.len / 4)
+        pitch: u32::try_from(window.len_bytes / 4)
             .ok()
             .and_then(|width| width.checked_mul(4))
             .ok_or(DrmError::InvalidInput)?,
@@ -950,16 +951,13 @@ fn import_foreign_buffer(
 /// `drm_prime_gem_destroy` releases `obj->import_attach`: the object's own
 /// lifetime decides when the exporter stops seeing this importer.
 pub(crate) struct ForeignAttachment {
-    export: Arc<dyn display::DmaBufObject>,
-    attachment: display::DmaBufAttachment,
+    export: SharedDmaBuf,
+    attachment: dmabuf::DmaBufAttachment,
 }
 
 impl ForeignAttachment {
     /// Records one attachment of this card to `export`.
-    pub(crate) fn new(
-        export: &Arc<dyn display::DmaBufObject>,
-        attachment: display::DmaBufAttachment,
-    ) -> Self {
+    pub(crate) fn new(export: &SharedDmaBuf, attachment: dmabuf::DmaBufAttachment) -> Self {
         Self {
             export: export.clone(),
             attachment,
@@ -974,13 +972,14 @@ impl ForeignAttachment {
     /// importer cannot represent would silently drop that ordering, so the
     /// import is refused instead.
     fn reservation(&self) -> DrmResult<Arc<DmaResv>> {
-        let fence = self
-            .export
-            .fence_or_signaled()
-            .downcast::<crate::sync::dma_fence::DmaFence>()
-            .map_err(|_| DrmError::OpNotSupported)?;
         let resv = DmaResv::new();
-        let _ = resv.set_write_fence(fence);
+        if let Some(fence) = self.export.access_fence() {
+            let fence: FenceRef = fence;
+            let fence = fence
+                .downcast::<crate::sync::dma_fence::DmaFence>()
+                .map_err(|_| DrmError::OpNotSupported)?;
+            let _ = resv.set_write_fence(fence);
+        }
         Ok(resv)
     }
 }

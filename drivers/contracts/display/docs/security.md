@@ -26,11 +26,9 @@ implementers, recorded below for driver audits.
   it is owned by callers and drivers, not by this crate.
 - No user-space input reaches this crate.
 
-- A dma-buf's `map` hands an importer a physical window owned by the
-  exporter. The exporter must only report memory that stays valid while an
-  attachment exists; the importer must not take ownership of it. The object
-  reaches other processes through a file descriptor, so the window is as
-  public as the descriptor is.
+- dma-buf sharing is not part of this crate: the object, its descriptor and
+  the physical window an importer maps are owned by `io/dmabuf`, which carries
+  the lifetime and trust-boundary analysis for them.
 
 ## Unsafe Code
 

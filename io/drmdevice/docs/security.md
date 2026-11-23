@@ -12,6 +12,14 @@ backend contract remain the responsibility of their provider crates:
 contract, and `model::device::minor::DrmMinor` is the only code that implements
 `DeviceFileOps` for devfs.
 
+The dma-buf descriptor is no longer part of this crate: `io/dmabuf` owns the fd,
+`llseek`/`mmap`/`poll` and the `DMA_BUF_IOCTL_*` surface, including the
+`SYNC`/`SET_NAME` argument validation. This crate implements `dmabuf::DmaBuf`
+for its export; the two commands that touch the reservation
+(`DMA_BUF_IOCTL_EXPORT_SYNC_FILE`, `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`) reach it
+through `DmaBuf::sync_file_ioctl`, and `DMA_BUF_IOCTL_SYNC` becomes
+`begin_cpu_access`/`end_cpu_access`, whose wait is analysed below.
+
 ## Trust model and external boundaries
 
 Every DRM ioctl payload and mmap offset is untrusted user input. User structs
@@ -110,8 +118,10 @@ short, non-blocking and free of sleepable locks.
   commit and an unmapped address (`EFAULT`) never leak a descriptor number.
 - A fence records an error only when it is completed; a pending fence that was
   released while carrying an error cannot make a waiter report success.
-- `DMA_BUF_IOCTL_SYNC` validates its direction bits before touching the
-  reservation, and the wait it performs is interruptible.
+- The wait a `DMA_BUF_IOCTL_SYNC` start performs (`begin_cpu_access`) is
+  interruptible, and it snapshots the reservation rather than holding a lock
+  across the wait. The direction bits are validated by `io/dmabuf` before the
+  call, so only a classified access reaches the reservation.
 - A dma-buf has one import per card and one export per object; a repeated
   import resolves to the existing object or the file's existing handle, so a
   client cannot make one backing hold two mapping offsets or leave an import

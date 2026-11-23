@@ -1,5 +1,6 @@
 [package]
 name = "inputdev"
+description = "Input subsystem (/dev/input/eventN)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

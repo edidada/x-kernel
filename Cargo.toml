@@ -246,6 +246,7 @@ kext4 = { path = "fs/filesystems/kext4", default-features = false }
 # Internal: IO and network subsystem
 fbdevice = { path = "io/fbdevice" }
 drmdevice = { path = "io/drmdevice" }
+dmabuf = { path = "io/dmabuf" }
 inputdev = { path = "io/inputdev" }
 kdma = { path = "io/kdma" }
 kio = { path = "io/kio" }

@@ -14,6 +14,7 @@ kcred.workspace = true
 bytemuck.workspace = true
 anon_inodefs.workspace = true
 display.workspace = true
+dmabuf.workspace = true
 kalloc.workspace = true
 kclass = { workspace = true, features = ["display"] }
 khal.workspace = true
@@ -24,6 +25,7 @@ kpoll.workspace = true
 kspin.workspace = true
 ksync.workspace = true
 ktask.workspace = true
+kerrno.workspace = true
 kvfs.workspace = true
 log.workspace = true
 memaddr.workspace = true

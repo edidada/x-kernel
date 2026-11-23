@@ -1254,10 +1254,23 @@ name = "display"
 version = "0.3.0-dev"
 dependencies = [
  "driver_base",
- "kpoll",
  "ktime_types",
+ "memaddr",
+ "unittest",
+]
+
+[[package]]
+name = "dmabuf"
+version = "0.3.0-dev"
+dependencies = [
+ "anon_inodefs",
+ "bytemuck",
+ "kcred",
+ "kerrno",
+ "kpoll",
  "kvfs",
  "memaddr",
+ "posix-types",
  "unittest",
 ]
 
@@ -1308,9 +1321,11 @@ dependencies = [
  "anon_inodefs",
  "bytemuck",
  "display",
+ "dmabuf",
  "kalloc",
  "kclass",
  "kcred",
+ "kerrno",
  "kfd_objects",
  "khal",
  "kpoll",
