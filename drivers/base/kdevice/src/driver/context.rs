@@ -188,13 +188,13 @@ impl<'a> RemoveContext<'a> {
     }
 }
 
-/// Context reserved for a future PM callback. It is not invoked by kpm yet.
+/// Context for the driver-core PM callbacks ([`suspend`](crate::DeviceDriver::suspend),
+/// [`resume`](crate::DeviceDriver::resume) and
+/// [`shutdown`](crate::DeviceDriver::shutdown)).
 ///
-/// ```compile_fail
-/// fn cannot_cleanup(ctx: &kdevice::PmContext<'_>) {
-///     let _ = ctx.add_cleanup(|| {});
-/// }
-/// ```
+/// The shutdown traversal invokes it on the system terminal path; suspend and
+/// resume are driven by the system sleep coordinator through
+/// `DeviceObject::power_transition`.
 pub struct PmContext<'a> {
     device: Arc<DeviceObject>,
     binding: BindingRef,

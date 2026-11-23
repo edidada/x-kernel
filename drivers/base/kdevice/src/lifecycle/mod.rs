@@ -260,11 +260,23 @@ pub fn register_driver_object<B: Into<BoxedDriver>>(ops: B) -> Arc<DriverObject>
             }
         };
 
+        // System shutdown refuses new binding attempts outright: leave the
+        // descriptor Pending for a post-shutdown scan instead of claiming it.
+        if !crate::shutdown::try_begin_probe() {
+            log::warn!(
+                "driver {} probe of descriptor {:?} refused: system shutdown in progress",
+                driver.name(),
+                desc_ref.id,
+            );
+            continue;
+        }
+
         let attempt = deferred::begin_limited(desc_ref.id);
         if device_registry()
             .mark_device_desc_probing(desc_ref.id)
             .is_none()
         {
+            crate::shutdown::finish_probe();
             log::warn!(
                 "driver {} descriptor {:?} could not be claimed for probe",
                 driver.name(),
@@ -281,6 +293,7 @@ pub fn register_driver_object<B: Into<BoxedDriver>>(ops: B) -> Arc<DriverObject>
             &permit,
             attempt,
         );
+        crate::shutdown::finish_probe();
         drop(guard);
         if outcome.as_ref().is_ok_and(|outcome| outcome.activated()) {
             activated_from_desc += 1;
@@ -688,11 +701,20 @@ pub fn probe_device_desc(id: DeviceDescId) -> Result<ProbeOutcome, DriverError> 
         match inspect_locked_desc(id)? {
             None => Ok(ProbeOutcome::Skipped),
             Some(desc) => {
-                let attempt = deferred::begin_explicit(id);
-                if device_registry().mark_device_desc_probing(id).is_none() {
-                    return Err(DriverError::BadState);
+                // System shutdown refuses new binding attempts outright: a probe
+                // that armed DMA or IRQs could never be quiesced by a traversal
+                // that already passed this device.
+                if !crate::shutdown::try_begin_probe() {
+                    return Err(DriverError::ResourceBusy);
                 }
-                probe_desc_round(desc, ProbeCandidates::BusType, &permit, attempt)
+                let attempt = deferred::begin_explicit(id);
+                let outcome = if device_registry().mark_device_desc_probing(id).is_none() {
+                    Err(DriverError::BadState)
+                } else {
+                    probe_desc_round(desc, ProbeCandidates::BusType, &permit, attempt)
+                };
+                crate::shutdown::finish_probe();
+                outcome
             }
         }
     };

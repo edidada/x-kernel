@@ -40,6 +40,7 @@ kcred.workspace = true
 kerrno.workspace = true
 kio.workspace = true
 khal.workspace = true
+kdriver.workspace = true
 ktime_types.workspace = true
 ktime.workspace = true
 klogger.workspace = true

@@ -301,6 +301,11 @@ pub(crate) fn sys_reboot(
         // CAD-state variable yet, so these are accepted as an intentional stub.
         LINUX_REBOOT_CMD_CAD_ON | LINUX_REBOOT_CMD_CAD_OFF => Ok(0),
         LINUX_REBOOT_CMD_HALT => {
+            // Quiesce every bound device before the terminal: drivers get one
+            // serialized shutdown pass so DMA/IRQ plumbing stops while the
+            // interconnect is still up. Best-effort by contract; the terminal
+            // never returns.
+            kdriver::shutdown_devices();
             // TODO: flush/sync filesystems before the terminal; the final
             // orderly-shutdown supervisor owns that cleanup, and
             // `khal::power::halt()` never returns.
@@ -308,6 +313,7 @@ pub(crate) fn sys_reboot(
             khal::power::halt()
         }
         LINUX_REBOOT_CMD_POWER_OFF => {
+            kdriver::shutdown_devices();
             // TODO: flush/sync filesystems before the terminal; the final
             // orderly-shutdown supervisor owns that cleanup, and
             // `khal::power::power_off()` never returns.

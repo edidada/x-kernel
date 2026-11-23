@@ -397,14 +397,6 @@ impl DriverObject {
         self.ops.erased().resume(ctx, data)
     }
 
-    #[cfg_attr(
-        all(not(unittest), not(doc)),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
-                      builds"
-        )
-    )]
     pub(crate) fn shutdown_erased(
         &self,
         ctx: &PmContext<'_>,

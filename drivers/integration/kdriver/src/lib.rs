@@ -182,6 +182,21 @@ pub fn current_device_ownership() -> kdevice::DeviceTopology {
     kdevice::device_topology()
 }
 
+/// Shuts every bound device down in preparation for reboot or power-off.
+///
+/// This is the reboot-side counterpart of [`init_drivers`]: it refuses new
+/// probe attempts, then walks all bound devices in reverse registration order
+/// invoking each driver's `shutdown` hook, so DMA and IRQ plumbing is
+/// quiesced before the platform terminal cuts power. Failures are logged and
+/// never abort the walk; the caller proceeds to the terminal regardless.
+///
+/// Must run in sleepable task context. After it returns, the driver core is
+/// still alive (state is untouched), but new probes are refused until the
+/// terminal completes because the shutdown walk re-arms nothing.
+pub fn shutdown_devices() {
+    kdevice::shutdown_all_devices();
+}
+
 /// Summarize the current long-lived ownership graph through the `kdriver` facade.
 ///
 /// Returns an [`OwnershipSummary`] with counts of buses, drivers, and devices

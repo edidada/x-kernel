@@ -94,6 +94,7 @@ mod device_node;
 pub mod driver;
 mod lifecycle;
 mod registry;
+pub mod shutdown;
 pub mod system;
 pub mod topology;
 
@@ -164,6 +165,7 @@ pub use registry::{
 };
 #[cfg(unittest)]
 pub use registry::{reset_and_setup_platform_bus_for_tests, reset_device_registry_for_tests};
+pub use shutdown::{active_probe_count, probes_are_blocked, shutdown_all_devices};
 #[cfg(unittest)]
 pub use system::reset_system_devices_for_tests;
 pub use system::{

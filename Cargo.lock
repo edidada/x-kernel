@@ -3504,6 +3504,7 @@ dependencies = [
  "kcpu",
  "kcpu_id_map",
  "kcred",
+ "kdriver",
  "kerrno",
  "kexec",
  "kfd_objects",
