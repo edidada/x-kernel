@@ -107,11 +107,10 @@ pub fn suspend_guest() -> KResult<()> {
     // boot, and the backend claims its wake page before publishing any work.
     unsafe { SystemSleepIf::prepare(sleep_types) }?;
     let platform = Platform;
-    // SAFETY: ordinary task/worker producers are frozen; recovery is synchronous
+    // Ordinary task/worker producers are frozen; recovery is synchronous
     // and does not depend on pending work in the kernel normal service.
-    let queues =
-        unsafe { kworkng::freeze_system_normal_queue(TimeSpan::from_secs(5), &queue_cancel) }
-            .map_err(|_| KError::ResourceBusy)?;
+    let queues = kworkng::freeze_system_normal_queue(TimeSpan::from_secs(5), &queue_cancel)
+        .map_err(|_| KError::ResourceBusy)?;
     log::info!("guest suspend: tasks and normal queue frozen");
     if let Err(error) = devices.suspend() {
         assert!(

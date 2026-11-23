@@ -282,14 +282,14 @@ pub use kworkqueue_ng::{
 
 /// Pauses the kernel-owned normal queue for the system PM coordinator.
 ///
-/// # Safety
+/// # Suspend ordering
 /// First freeze ordinary producers and cooperative workers. Recovery must not
 /// depend on pending work in this queue; retain the guard until resources are
 /// usable. This does not stop IRQ/BH producers or privately owned queues.
 ///
 /// # Errors
 /// Returns Closed before boot services are ready, otherwise the queue's error.
-pub unsafe fn freeze_system_normal_queue(
+pub fn freeze_system_normal_queue(
     timeout: ktime_types::TimeSpan,
     cancellation: &QueueFreezeCancellation,
 ) -> Result<FrozenQueue, QueueFreezeError> {
