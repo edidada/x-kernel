@@ -56,6 +56,18 @@ pub(super) fn init() {
     assert_eq!(gdt.append(Descriptor::kernel_data_segment()), KDATA);
     assert_eq!(gdt.append(Descriptor::user_data_segment()), UDATA);
     assert_eq!(gdt.append(Descriptor::user_code_segment()), UCODE64);
+    let nmi_top = super::nmi::prepare_stack();
+    let tss_base = x86_64::registers::model_specific::GsBase::read().as_u64() as usize
+        + kcpu_slot::__cpu_slot_symbol_offset!(__KCPU_SLOT_TSS);
+    let ist_offset = core::mem::offset_of!(
+        x86_64::structures::tss::TaskStateSegment,
+        interrupt_stack_table
+    ) + usize::from(super::nmi::IST_INDEX)
+        * core::mem::size_of::<x86_64::VirtAddr>();
+    // SAFETY: boot owns this CPU's permanent TSS before installing its GDT
+    // descriptor or the IDT. The layout-derived offset selects the packed IST
+    // element whose stack and metadata were prepared above.
+    unsafe { ((tss_base + ist_offset) as *mut x86_64::VirtAddr).write_unaligned(nmi_top) };
     // The TSS template is permanent and `TaskStateSegment: Sync`, so the
     // guard-free shared accessor yields the `&'static` descriptor needs.
     let tss = gdt.append(Descriptor::tss_segment(TSS.current_shared()));

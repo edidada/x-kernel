@@ -705,6 +705,11 @@ these fit both APIC modes. The provider checks this invariant at submission
 instead of discarding a scheduler/TLB notification on an impossible encoding
 failure. Self/all-but-self use destination-free shorthand.
 
+The x86 vector 2 entry reaches `IntrManagerIf::dispatch_nmi` inside KIRQ's
+effective NMI scope. The x86 provider currently returns without claiming a
+source or issuing an EOI. The guest test observes this boundary during a
+hardware self-NMI with local IRQs masked and the alternate GS base active.
+
 ## GIC Source Admission
 
 GICv2 and GICv3 initialization cache the exclusive standard INTID limit from

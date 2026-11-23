@@ -549,3 +549,23 @@ arbitrary safe Rust to call it and pose as an interrupt. The kernel-mode and use
 Ordinary deferred work may briefly enable IRQs after interrupt claim completes, but must restore the masked state before returning;
 the ordinary adapter is responsible for the scheduling tail after the interrupt completes, while a dedicated NMI callback must
 return without queuing. The page-fault callback keeps its own safe signature.
+## x86-64 native NMI entry
+
+Each CPU prepares a 64 KiB interrupt stack in its permanent CPU area before
+loading the IDT. Vector 2 selects TSS IST slot 0. The aligned IST top holds the
+trusted kernel GS base, which the entry can read immediately above the saved
+`ExceptionContext`. This layout works when the interrupted instruction lies
+in a `SWAPGS` transition. Entry saves the active `IA32_GS_BASE`, installs the
+CPU-area base, and restores the interrupted value on the way to `IRETQ`.
+
+`x86_nmi_handler` publishes the interrupted frame through
+`ExceptionContextGuard` and invokes the existing `NMI` callback, which reaches
+KIRQ's effective NMI scope through the HAL adapter. The guard restores the
+outer exception marker before assembly returns. The path retains the interrupt
+gate's ordinary IRQ exclusion and has no IRQ completion or scheduling tail.
+The x86 source dispatcher is a no-op in production pending source integration.
+
+The dedicated stack relies on hardware NMI blocking through a successful
+`IRETQ`. The architecture stops the current CPU on exceptions in the callback
+or entry/return glue, and on unexpected reentry. An assembly RIP check handles
+faults in the glue where GS can still hold the interrupted value.

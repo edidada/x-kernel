@@ -6,6 +6,82 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 static VERIFIED_CPUS: AtomicUsize = AtomicUsize::new(0);
 
+/// Sends a hardware self-NMI while a distinct alternate GS is installed.
+/// Returns whether the handler ran and the alternate GS survived NMI return.
+///
+/// # Safety
+/// The serial fixture must retain CPU/IRQ exclusion, own local ICR access,
+/// and install an NMI observer that increments `deliveries` on this CPU.
+/// Both GS bases must remain available through the assembly sequence.
+pub unsafe fn self_nmi_with_swapped_gs(deliveries: &AtomicUsize) -> bool {
+    use x86_64::{
+        VirtAddr,
+        registers::model_specific::{GsBase, KernelGsBase},
+    };
+
+    // SAFETY: the fixture owns the live local APIC and excludes normal IRQs.
+    if super::with_local_apic(|lapic| unsafe { lapic.delivery_pending() }) {
+        return false;
+    }
+    let previous_alt = KernelGsBase::read();
+    let kernel_gs = GsBase::read();
+    let test_alt = VirtAddr::new(0x1000);
+    KernelGsBase::write(test_alt);
+    let before = deliveries.load(Ordering::Acquire);
+    let uses_x2apic = usize::from(super::IS_X2APIC.load(Ordering::Relaxed));
+    let xapic_icr = super::XAPIC_BASE.load(Ordering::Relaxed) + 0x300;
+    let observed_low: u32;
+    let observed_high: u32;
+    // SAFETY: self shorthand never accesses ICR2. The selected access is
+    // either the live xAPIC ICR-low mapping or the x2APIC ICR MSR. The sole
+    // observer and the atomic counter stay live. This interval uses only
+    // ordinary addresses and reinstalls kernel GS before Rust resumes.
+    unsafe {
+        core::arch::asm!(
+            "swapgs",
+            "test {uses_x2apic}, {uses_x2apic}",
+            "jz 2f",
+            "mov ecx, 0x830",
+            "mov eax, 0x44400",
+            "xor edx, edx",
+            "mfence",
+            "lfence",
+            "wrmsr",
+            "jmp 3f",
+            "2:",
+            "mov dword ptr [{xapic_icr}], 0x44400",
+            "3:",
+            "mov ecx, 10000000",
+            "4:",
+            "cmp qword ptr [{deliveries}], {before}",
+            "jne 5f",
+            "pause",
+            "dec ecx",
+            "jnz 4b",
+            "5:",
+            "mov ecx, 0xc0000101",
+            "rdmsr",
+            "swapgs",
+            uses_x2apic = in(reg) uses_x2apic,
+            xapic_icr = in(reg) xapic_icr,
+            deliveries = in(reg) deliveries.as_ptr(),
+            before = in(reg) before,
+            out("ecx") _,
+            out("eax") observed_low,
+            out("edx") observed_high,
+            options(nostack),
+        );
+    }
+    let observed_gs = u64::from(observed_high) << 32 | u64::from(observed_low);
+    let restored_kernel_gs = GsBase::read();
+    // Restore the fixture's entry state even when it detected a GS mismatch.
+    GsBase::write(kernel_gs);
+    KernelGsBase::write(previous_alt);
+    observed_gs == test_alt.as_u64()
+        && restored_kernel_gs == kernel_gs
+        && deliveries.load(Ordering::Acquire) != before
+}
+
 fn read_register(msr: u32, offset: usize) -> u32 {
     if super::IS_X2APIC.load(Ordering::Relaxed) {
         // SAFETY: Boot selected x2APIC; callers supply only readable LAPIC MSRs.

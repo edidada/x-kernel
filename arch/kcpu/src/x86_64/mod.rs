@@ -23,6 +23,7 @@ pub(crate) mod boot;
 pub use boot::init_trap;
 
 mod excp;
+mod nmi;
 
 pub mod userspace;
 

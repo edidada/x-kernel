@@ -195,6 +195,11 @@ claims are constructed. Spurious delivery must not acknowledge any ISR entry;
 error delivery captures controller status and acknowledges once in x86-apic.
 Neither path may fall through to generic completion or Action dispatch.
 
+The x86 `dispatch_nmi` callback inherits CPU pinning, IRQ exclusion and an
+active NMI scope from the architecture and the HAL bridge. In production
+it returns without claim, EOI, locks or logging. The guest fixture observes
+only pre-armed atomic state on its selected CPU.
+
 Ordinary x86 IO-APIC/MSI claims transfer a single EOI cookie into KIRQ. Edge flow
 consumes it before handlers under the Line lock; level Fasteoi consumes it after
 handlers. Local timer/IPI vectors keep early EOI and a no-op cookie. A failed

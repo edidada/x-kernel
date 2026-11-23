@@ -2,10 +2,45 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::cell::Cell;
+use core::{
+    cell::Cell,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use kirq::{IrqPolarity, IrqTrigger};
 use unittest::{assert, assert_eq, def_test};
+
+const DISARMED_CPU: usize = usize::MAX;
+static NMI_PROBE_CPU: AtomicUsize = AtomicUsize::new(DISARMED_CPU);
+static NMI_DELIVERIES: AtomicUsize = AtomicUsize::new(0);
+static NMI_BAD_CONTEXT: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn observe_native_nmi(vector: usize) {
+    if NMI_PROBE_CPU.load(Ordering::Acquire) != kplat::cpu::id().as_usize() {
+        return;
+    }
+    if vector != 2 || !kirq::context::is_in_nmi() || karch::local_irq_enabled() {
+        NMI_BAD_CONTEXT.store(true, Ordering::Relaxed);
+    }
+    NMI_DELIVERIES.fetch_add(1, Ordering::Release);
+}
+
+#[def_test(serial)]
+fn native_nmi_enters_with_irqs_masked_and_preserves_swapped_gs() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    NMI_DELIVERIES.store(0, Ordering::Relaxed);
+    NMI_BAD_CONTEXT.store(false, Ordering::Relaxed);
+    NMI_PROBE_CPU.store(kplat::cpu::id().as_usize(), Ordering::Release);
+    // SAFETY: this serial fixture pins the initialized CPU, masks IRQs,
+    // owns its self-NMI producer, and retains the static probe until return.
+    let observed = unsafe { x86_apic::self_nmi_with_swapped_gs(&NMI_DELIVERIES) };
+    NMI_PROBE_CPU.store(DISARMED_CPU, Ordering::Release);
+    assert!(observed);
+    assert_eq!(NMI_DELIVERIES.load(Ordering::Acquire), 1);
+    assert!(!NMI_BAD_CONTEXT.load(Ordering::Relaxed));
+    assert!(!kirq::context::is_in_interrupt_context());
+    assert!(!karch::local_irq_enabled());
+}
 
 fn io_desc(pin: usize) -> kirq::IrqDesc {
     kirq::IrqDesc::new(pin, IrqTrigger::EdgeRising)

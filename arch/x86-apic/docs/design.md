@@ -448,7 +448,8 @@ without writing ICR. No helper equates local completion with remote execution.
 `try_send_nmi_raw` rejects xAPIC directed sends from effective NMI context with
 OperationNotSupported before touching registers. Directed x2APIC and shorthand
 broadcast remain available in NMI. Every destination must have a ready NMI
-entry; these helpers do not install one or establish a PMU backend.
+entry, installed by `kcpu` during trap initialization. Source activation
+owns the readiness check for its targets.
 LVTPC configuration writes a complete NMI-mode value. The future periodic
 source must own it, validate hardware support and coordinate counter stop,
 callback publication, quiescence and reload; an immutable handle is not a

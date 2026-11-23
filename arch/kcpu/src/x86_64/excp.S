@@ -18,7 +18,9 @@
 
 .macro DEF_HANDLER, i
 .Ltrap_handler_\i:
-.if \i == 8 || (\i >= 10 && \i <= 14) || \i == 17 || \i == 21 || \i == 29 || \i == 30
+.if \i == {nmi_vector}
+    jmp     .Lx86_nmi_entry
+.elseif \i == 8 || (\i >= 10 && \i <= 14) || \i == 17 || \i == 21 || \i == 29 || \i == 30
     # error code pushed by CPU
     push    \i          # interrupt vector
     jmp     .Ltrap_common
@@ -76,6 +78,19 @@ trap_handler_table:
     POP2    rbx, rbp
 .endm
 
+# Available both to the ordinary exception path and to vector 2 itself.
+# An IRET fault can reopen NMI delivery before normal trap handling begins.
+.macro NMI_CHECK_GLUE_RIP
+    mov     rcx, [rsp + {rip_offset}]
+    lea     rax, [rip + .Lx86_nmi_entry]
+    cmp     rcx, rax
+    jb      .Lnmi_rip_outside_\@
+    lea     rax, [rip + .Lx86_nmi_end]
+    cmp     rcx, rax
+    jb      .Lx86_nmi_halt
+.Lnmi_rip_outside_\@:
+.endm
+
 .section .text
 .set i, 0
 .rept NUM_INT
@@ -97,12 +112,60 @@ trap_handler_table:
     push    -1                          # orig_rax: not a syscall
     PUSH_GENERAL_REGS
 
+    # An exception in NMI glue may arrive with the interrupted GS base
+    # installed. Terminate before entering Rust or returning with IRET.
+    cmp     qword ptr [rsp + {vector_offset}], 32
+    jae     .Ldispatch_kernel_trap
+    NMI_CHECK_GLUE_RIP
+.Ldispatch_kernel_trap:
     mov     rdi, rsp
     call    x86_trap_handler
 
     POP_GENERAL_REGS
     add     rsp, 24                     # pop orig_rax, vector, error_code
     iretq
+
+.Lx86_nmi_entry:
+    cld
+    push    0                           # no hardware error code
+    push    {nmi_vector}
+    push    -1                          # orig_rax: not a syscall
+    PUSH_GENERAL_REGS
+    NMI_CHECK_GLUE_RIP
+    mov     r12, rsp
+
+    # The IST points to aligned metadata in the permanent CPU area. CS
+    # alone cannot identify which GS is active in a SWAPGS transition.
+    mov     ecx, 0xc0000101              # IA32_GS_BASE
+    rdmsr
+    shl     rdx, 32
+    or      rax, rdx
+    mov     r13, rax
+    mov     rax, [r12 + {trapframe_size}]
+    mov     rdx, rax
+    shr     rdx, 32
+    wrmsr
+
+    mov     rdi, r12
+    and     rsp, -16
+    call    x86_nmi_handler
+    mov     rsp, r12
+
+    mov     ecx, 0xc0000101
+    mov     rax, r13
+    mov     rdx, rax
+    shr     rdx, 32
+    wrmsr
+    POP_GENERAL_REGS
+    add     rsp, 24
+    iretq
+.Lx86_nmi_end:
+
+.Lx86_nmi_halt:
+    cli
+.Lx86_nmi_halt_loop:
+    hlt
+    jmp     .Lx86_nmi_halt_loop
 
 .global syscall_entry
 syscall_entry:

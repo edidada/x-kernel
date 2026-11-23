@@ -540,3 +540,27 @@ saved CPU state; user-return callbacks must retain the existing IRQ-off contract
 The captured stack remains valid across the ordinary HAL scheduling checkpoint.
 NMI entry retains ordinary IRQ/migration exclusion until return and does not
 authorize scheduling. Page-fault callbacks do not inherit this unsafe signature.
+
+## x86-64 NMI stack and return boundary
+
+During pinned CPU bring-up, `nmi::prepare_stack` writes the kernel GS base at
+the aligned top of a permanent local stack. `gdt::init` writes the corresponding
+packed TSS IST element before publishing the descriptor. `idt::init` installs
+the vector 2 gate with the same IST index. Stack memory and metadata remain
+kernel-owned and mapped, including across the platform's reset recovery.
+Source owners must wait until every target CPU has loaded its NMI gate.
+
+The vector 2 assembly uses stack metadata before any GS-relative access. It
+preserves the exact interrupted GS base and the frame supplied by hardware.
+The callback borrows the captured state for the duration of that entry and
+must keep IRQs masked, avoid scheduling and stay within the dedicated stack.
+It must avoid faulting instructions and paths that execute `IRET` internally.
+
+An exception raised by the NMI callback stops the local CPU before fault
+recovery. An exception or another NMI that interrupts the entry/return glue
+can arrive with the interrupted GS base active. The assembly RIP check stops
+the CPU before any Rust call in that case. An unexpected nested delivery
+from the callback also stops the CPU, since a repeated IST entry may have
+overwritten the outer frame. These terminal paths use no ordinary logging or
+panic handler. Stack overflow and machine faults are outside this recovery
+model.

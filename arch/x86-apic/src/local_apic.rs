@@ -240,7 +240,7 @@ fn enable_error_delivery() {
     });
 }
 
-unittest::path_mod_test!(tests_preparation, "../ut-tests/preparation.rs");
+unittest::path_mod_test!(pub(crate) mod tests_preparation, "../ut-tests/preparation.rs");
 
 // Startup and NMI sends have a bounded hardware polling budget. Ordinary fixed
 // IPIs wait for idle like Linux; no sender waits for a software ICR owner.

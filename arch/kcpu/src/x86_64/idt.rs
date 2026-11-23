@@ -31,6 +31,11 @@ pub(super) fn init() {
         for i in 0..NUM_INT {
             // SAFETY: `ENTRIES[i]` are addresses from the assembly-defined `trap_handler_table`, each pointing to a valid trap entry stub.
             let opt = unsafe { entries[i].set_handler_addr(ENTRIES[i]) };
+            if i == usize::from(super::nmi::VECTOR) {
+                // SAFETY: every CPU installs the dedicated stack in this TSS
+                // slot during GDT setup, before it loads this interrupt gate.
+                unsafe { opt.set_stack_index(super::nmi::IST_INDEX) };
+            }
             if i == 0x3 || i == 0x80 {
                 // enable user space breakpoints and legacy int 0x80 syscall
                 opt.set_privilege_level(x86_64::PrivilegeLevel::Ring3);

@@ -93,7 +93,12 @@ impl kirq::IntrManagerIf {
 
     /// # Safety
     /// The caller must uphold [`kirq::IntrManagerIf::dispatch_nmi`]'s contract.
-    unsafe fn dispatch_nmi(_irq: usize) {}
+    unsafe fn dispatch_nmi(vector: usize) {
+        #[cfg(not(unittest))]
+        let _ = vector;
+        #[cfg(unittest)]
+        tests::observe_native_nmi(vector);
+    }
 
     /// # Safety
     /// The caller must uphold [`kirq::IntrManagerIf::complete_irq`]'s contract.

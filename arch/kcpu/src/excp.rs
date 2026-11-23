@@ -26,14 +26,14 @@ pub static IRQ: [unsafe fn(usize) -> bool];
 
 /// A slice of NMI handler functions.
 ///
-/// These fire when the taken IRQ exception is an NMI: either a hardware NMI
-/// (GICv3.3 NMI attribute + FEAT_NMI) or a pseudo‑NMI (IRQ taken while
-/// normal IRQs are masked by PMR).  Handlers must use the lock‑free
-/// [`NMI`] dispatch path.
+/// These fire for an architecture-classified NMI, including x86 vector 2,
+/// ARM hardware NMI, and ARM interrupts classified as pseudo-NMI by PMR.
 ///
 /// # Safety
 /// Invoke only for an architecture-classified NMI on an initialized CPU with
 /// ordinary IRQs and migration excluded until return. No scheduling is allowed.
+/// On x86, the callback must also avoid operations that can enter an exception
+/// and return with IRET while the dedicated IST frame is live.
 #[def_trap_handler]
 pub static NMI: [unsafe fn(usize) -> bool];
 

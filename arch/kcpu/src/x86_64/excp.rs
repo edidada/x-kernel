@@ -7,7 +7,7 @@
 use x86::{controlregs::cr2, irq::*};
 use x86_64::structures::idt::PageFaultErrorCode;
 
-use super::{ExceptionContext, gdt, userspace};
+use super::{ExceptionContext, gdt, nmi, userspace};
 use crate::excp::PageFaultFlags;
 
 core::arch::global_asm!(
@@ -17,7 +17,12 @@ core::arch::global_asm!(
     UDATA = const gdt::UDATA.0,
     UCODE64 = const gdt::UCODE64.0,
     SYSCALL_VECTOR = const LEGACY_SYSCALL_VECTOR,
+    nmi_vector = const nmi::VECTOR,
+    vector_offset = const core::mem::offset_of!(ExceptionContext, vector),
+    rip_offset = const core::mem::offset_of!(ExceptionContext, rip),
 );
+
+const _: () = assert!(core::mem::size_of::<ExceptionContext>() == 23 * 8);
 
 pub(super) const LEGACY_SYSCALL_VECTOR: u8 = 0x80;
 pub(super) const IRQ_VECTOR_START: u8 = 0x20;
@@ -54,6 +59,11 @@ fn handle_page_fault(tf: &mut ExceptionContext) {
 /// Architecture-specific trap entry point.
 #[unsafe(no_mangle)]
 fn x86_trap_handler(tf: &mut ExceptionContext) {
+    if tf.vector < u64::from(IRQ_VECTOR_START) && nmi::is_active() {
+        // Returning through an exception would unblock NMI while its IST
+        // frame is live. Stop before fault fixups, logging or panic handlers.
+        karch::stop_cpu();
+    }
     let _tf_guard = crate::ExceptionContextGuard::new(tf);
     match tf.vector as u8 {
         PAGE_FAULT_VECTOR => handle_page_fault(tf),
@@ -84,6 +94,29 @@ fn x86_trap_handler(tf: &mut ExceptionContext) {
             );
         }
     }
+}
+
+/// Dispatches the architectural NMI with its interrupted context published.
+// SAFETY: the dedicated assembly entry calls this symbol with a complete
+// ExceptionContext on the local IST stack and the trusted GS base installed.
+#[unsafe(no_mangle)]
+extern "C" fn x86_nmi_handler(tf: &ExceptionContext) {
+    if nmi::is_active() {
+        // A nested delivery has reused the IST. The interrupted entry can
+        // no longer resume. Leave NMI blocked and avoid all shared locks.
+        karch::stop_cpu();
+    }
+    nmi::set_active(true);
+    {
+        let _tf_guard = crate::ExceptionContextGuard::new(tf);
+        if let Some(handler) = crate::excp::NMI.first() {
+            // SAFETY: vector 2 entered the dedicated interrupt gate with IF
+            // clear and hardware NMI blocking. GS selects the initialized
+            // CPU area. The callback has no scheduling or IRQ-enable tail.
+            unsafe { handler(usize::from(nmi::VECTOR)) };
+        }
+    }
+    nmi::set_active(false);
 }
 
 /// Returns a mnemonic string for an exception vector.
