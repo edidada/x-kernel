@@ -26,6 +26,26 @@ impl PlatformDmaIf {
 #[cfg(not(feature = "kvm-guest-mem-share"))]
 kplat::default_dma_if_impl!();
 
+/// Real cache maintenance for non-coherent DMA on AArch64.
+///
+/// Coherent platforms keep the mm-api default no-ops; here the SoC may run
+/// non-coherent masters, so `dma_map_sg`/`dma_map_page` get actual `dc cvac`
+/// and `dc civac` sequences over the kernel linear map.
+#[kiface::provide]
+impl kiface_mm_api::DmaCacheIf {
+    fn clean_range(vaddr: memaddr::VirtAddr, len: usize) {
+        karch::dma_clean_range(vaddr, len);
+    }
+
+    fn clean_inval_range(vaddr: memaddr::VirtAddr, len: usize) {
+        // Clean first, then drop the lines: a dirty line must not write back
+        // over device-written data after the invalidation (the upstream
+        // `dma_invalidate_range` caller contract).
+        karch::dma_clean_range(vaddr, len);
+        karch::dma_invalidate_range(vaddr, len);
+    }
+}
+
 #[cfg(feature = "kvm-guest-mem-share")]
 fn dma_unshare_pages(paddr: usize, size: usize) {
     let pages = size / PAGE_SIZE_4K;

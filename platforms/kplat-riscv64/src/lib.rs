@@ -13,4 +13,5 @@ mod init;
 mod power;
 
 kplat::default_dma_if_impl!();
+kplat::default_dma_cache_if_impl!();
 kplat::default_mmio_if_impl!();

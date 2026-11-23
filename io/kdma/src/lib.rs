@@ -48,6 +48,7 @@ extern crate alloc;
 
 mod bounce_pool;
 mod dma;
+pub mod sg;
 
 use core::{alloc::Layout, ptr::NonNull};
 
@@ -97,6 +98,73 @@ fn run_allocator<R>(operation: impl FnOnce(&mut DmaAllocator) -> R) -> R {
 #[inline]
 pub const fn p2b(paddr: PhysAddr) -> DmaBusAddress {
     DmaBusAddress::new((paddr.as_usize() + kbuild_config::PHYS_BUS_OFFSET) as u64)
+}
+
+/// Maps a scatter-gather table for one device and direction.
+///
+/// See [`sg`] for the mapping and fallback policy.
+///
+/// # Safety
+///
+/// See [`sg::dma_map_sg`].
+pub unsafe fn dma_map_sg(
+    table: &mut sg::SgTable,
+    constraints: &sg::DmaConstraints,
+    direction: DmaDirection,
+) -> AllocResult<usize> {
+    // SAFETY: forwards the caller's extent-ownership contract.
+    unsafe { sg::dma_map_sg(table, constraints, direction) }
+}
+
+/// Unmaps a previously mapped scatter-gather table.
+///
+/// # Safety
+///
+/// See [`sg::dma_unmap_sg`].
+pub unsafe fn dma_unmap_sg(table: &mut sg::SgTable, direction: DmaDirection) {
+    // SAFETY: forwards the caller's mapped-table contract.
+    unsafe { sg::dma_unmap_sg(table, direction) }
+}
+
+/// Synchronizes a mapped scatter-gather table for CPU or device access.
+///
+/// # Safety
+///
+/// See [`sg::dma_sync_sg`].
+pub unsafe fn dma_sync_sg(table: &sg::SgTable, direction: DmaDirection, for_cpu: bool) {
+    // SAFETY: forwards the caller's mapped-table contract.
+    unsafe { sg::dma_sync_sg(table, direction, for_cpu) }
+}
+
+/// Maps one single extent for streaming DMA.
+///
+/// # Safety
+///
+/// See [`sg::dma_map_page`].
+pub unsafe fn dma_map_page(
+    paddr: PhysAddr,
+    len: usize,
+    constraints: &sg::DmaConstraints,
+    direction: DmaDirection,
+) -> AllocResult<DmaBusAddress> {
+    // SAFETY: forwards the single-extent mapping contract.
+    unsafe { sg::dma_map_page(paddr, len, constraints, direction) }
+}
+
+/// Unmaps one extent mapped by [`dma_map_page`].
+///
+/// # Safety
+///
+/// See [`sg::dma_unmap_page`].
+pub unsafe fn dma_unmap_page(
+    paddr: PhysAddr,
+    len: usize,
+    bus_addr: DmaBusAddress,
+    constraints: &sg::DmaConstraints,
+    direction: DmaDirection,
+) {
+    // SAFETY: forwards the single-extent unmap contract.
+    unsafe { sg::dma_unmap_page(paddr, len, bus_addr, constraints, direction) }
 }
 
 /// Converts a bus address back to a physical address.
@@ -273,6 +341,9 @@ pub unsafe fn cancel_dma_mapping(dma_addr: DmaBusAddress, len: usize) {
     // SAFETY: forwards the caller's never-published mapping contract.
     unsafe { run_allocator(|allocator| allocator.cancel_dma_mapping(dma_addr, len)) }
 }
+
+/// Scatter-gather descriptor types and device constraints.
+pub use sg::{DmaConstraints, SgEntry, SgSegment, SgTable};
 
 /// A bus memory address.
 ///

@@ -19,6 +19,8 @@ boot_info = { workspace = true }
 kcpu_id_map = { workspace = true }
 kcpu_slot = { workspace = true }
 kerrno = { workspace = true }
+kiface-mm-api = { workspace = true }
+memaddr = { workspace = true }
 kiface.workspace = true
 const-str = "0.6.2"
 kplat-macros = { path = "../kplat-macros" }

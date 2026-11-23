@@ -20,7 +20,7 @@ pub mod perf;
 pub mod sys;
 
 pub use kerrno;
-pub use kplat_macros::{default_dma_if_impl, default_mmio_if_impl};
+pub use kplat_macros::{default_dma_cache_if_impl, default_dma_if_impl, default_mmio_if_impl};
 
 #[doc(hidden)]
 pub mod __priv {
