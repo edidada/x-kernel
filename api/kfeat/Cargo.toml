@@ -162,6 +162,10 @@ entropy_smccc_trng = ["dep:entropy", "entropy/entropy_smccc_trng"]
 entropy_jitter = ["dep:entropy", "entropy/entropy_jitter"]
 driver_ramdisk = ["kdriver/ramdisk"]
 driver_ramdisk_static = ["kdriver/ramdisk-static"]
+# IOMMU drivers. Enabling either pulls the core framework (kdriver `iommu`)
+# plus the concrete hardware driver.
+driver_rk_iommu = ["kdriver/rk-iommu"]
+driver_arm_smmu = ["kdriver/arm-smmu"]
 driver_ixgbe = ["kdriver/ixgbe"]
 driver_fxmac = ["kdriver/fxmac"]
 driver_ahci = ["kdriver/ahci"]

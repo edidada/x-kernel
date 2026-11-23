@@ -96,6 +96,12 @@ ahci = ["any_firmware_driver", "block"]
 bcm2835-sdhci = ["any_firmware_driver", "block"]
 sdmmc = ["any_firmware_driver", "block"]
 
+# IOMMU subsystem: the core framework wires the late device-attach pass into
+# init_drivers; each hardware driver feature registers its descriptor.
+iommu = ["dep:kiommu", "any_firmware_driver"]
+rk-iommu = ["iommu", "dep:rk_iommu"]
+arm-smmu = ["iommu", "dep:arm_smmu"]
+
 default = []
 
 [dependencies]
@@ -126,6 +132,9 @@ net = { workspace = true, optional = true }
 pci = { workspace = true }
 vsock = { workspace = true, optional = true }
 virtio = { workspace = true, optional = true }
+kiommu = { workspace = true, optional = true }
+rk_iommu = { workspace = true, optional = true }
+arm_smmu = { workspace = true, optional = true }
 khal = { workspace = true }
 rs_fdtree = { workspace = true, features = ["fwnode"] }
 ktime_types = { workspace = true }

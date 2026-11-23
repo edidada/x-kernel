@@ -363,4 +363,24 @@ config KFEAT_DRIVER_VIRTIO_INPUT
     help
       Enable the virtio-input input device driver.
 
+comment "IOMMU drivers"
+
+config KFEAT_DRIVER_RK_IOMMU
+    bool "Rockchip IOMMU (v1/v2)"
+    depends on ARCH_AARCH64
+    help
+      Enable the Rockchip media-IOMMU driver (rk3288/rk3568/rk3588 register
+      file). Builds the IOMMU core framework and registers one instance per
+      `rockchip,*-iommu` node; media devices declaring `iommus` attach to its
+      DMA domain.
+
+config KFEAT_DRIVER_ARM_SMMU
+    bool "ARM SMMUv2 (mmu-500)"
+    depends on ARCH_AARCH64
+    help
+      Enable the ARM SMMUv2 driver for `arm,mmu-500` class hardware. Builds
+      the IOMMU core framework, allocates SMR/S2CR stream matches and
+      programs one context bank per domain from the ARM LPAE page-table
+      backend.
+
 endmenu # Device Drivers
