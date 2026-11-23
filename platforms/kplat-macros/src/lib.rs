@@ -82,6 +82,27 @@ pub fn default_dma_if_impl(item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// Generates a default empty implementation for `kplat::dma::DmaCacheIf`
+/// (coherent platforms: DMA cache maintenance is a no-op).
+#[proc_macro]
+pub fn default_dma_cache_if_impl(item: TokenStream) -> TokenStream {
+    if !item.is_empty() {
+        return err_ts(Error::new(
+            Span::call_site(),
+            "default_dma_cache_if_impl takes no arguments",
+        ));
+    }
+    quote! {
+        #[kplat::__priv::provide]
+        impl kplat::dma::DmaCacheIf {
+            fn clean_range(_vaddr: kplat::dma::VirtAddr, _len: usize) {}
+
+            fn clean_inval_range(_vaddr: kplat::dma::VirtAddr, _len: usize) {}
+        }
+    }
+    .into()
+}
+
 /// Generates a default empty implementation for `kplat::mmio::PlatformMmioIf`.
 #[proc_macro]
 pub fn default_mmio_if_impl(item: TokenStream) -> TokenStream {

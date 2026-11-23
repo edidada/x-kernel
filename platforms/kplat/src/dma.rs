@@ -4,7 +4,9 @@
 
 //! Platform DMA lifecycle hooks.
 
+pub use kiface_mm_api::DmaCacheIf;
 use kplat_macros::device_interface;
+pub use memaddr::VirtAddr;
 
 #[device_interface]
 pub trait PlatformDmaIf {

@@ -55,6 +55,7 @@ unittest = { workspace = true }
 lazyinit = "0.2"
 heapless = "0.9"
 karch = { workspace = true }
+kiface-mm-api = { workspace = true }
 aarch64-pmuv3 = { workspace = true, optional = true }
 kcpu_slot = { workspace = true }
 kspin = { workspace = true }

@@ -86,3 +86,32 @@ pub trait DmaMappingIf {
         mode: DmaMappingMode,
     ) -> kerrno::KResult<Option<DmaMappingCompletion>>;
 }
+
+/// Architectural cache maintenance for non-coherent DMA buffers.
+///
+/// The provider implements the CPU-side half of the streaming DMA contract:
+/// pushing CPU-written data to the Point of Coherency before a device reads
+/// it, and dropping cached lines before the CPU reads device-written data.
+/// Coherent platforms (x86_64, RISC-V) keep the default no-ops; their devices
+/// snoop the CPU caches and no maintenance is required or permitted.
+#[kiface::interface]
+pub trait DmaCacheIf {
+    /// Pushes dirty cache lines covering `[vaddr, vaddr + len)` to the Point
+    /// of Coherency without discarding them (clean, DC CVAC on AArch64).
+    ///
+    /// Call it for `DMA_TO_DEVICE` mappings and `sync_for_device` before the
+    /// device reads. The range must name live kernel memory on the kernel's
+    /// linear map; partial cache lines at either end pull neighbouring bytes
+    /// into the maintenance window, so callers must not share those bytes
+    /// with unrelated data unless the platform is coherent.
+    fn clean_range(vaddr: VirtAddr, len: usize);
+
+    /// Pushes and then discards cache lines covering `[vaddr, vaddr + len)`
+    /// (clean + invalidate, DC CIVAC on AArch64).
+    ///
+    /// Call it for `DMA_FROM_DEVICE` mappings and `sync_for_cpu` after the
+    /// device wrote: clean-before-invalidate guarantees a dirty line cannot
+    /// write stale CPU data back over the device's fresh results after the
+    /// invalidation.
+    fn clean_inval_range(vaddr: VirtAddr, len: usize);
+}
