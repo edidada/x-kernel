@@ -253,3 +253,15 @@ For x2APIC, the ICR WRMSR is non-serializing. The runtime performs MFENCE/LFENCE
 before submission so a destination cannot observe notification before the
 sender's preceding request stores are published. This ordering is independent
 of CPU-local context exclusion and does not acknowledge remote processing.
+
+## Self-NMI Test Fixtures
+
+The unittest-only `self_nmi_with_swapped_gs` fixture keeps ordinary IRQs masked
+while GS holds an alternate base. `self_nmi_with_irqs_enabled` instead retains
+kernel GS, enables IRQs around the self-NMI and masks them before returning.
+Both require a serial fixture on an initialized, pinned CPU, exclusive local
+ICR producer access and a live observer counter. The enabled-IRQ fixture must
+also exclude preemption while ordinary IRQs can run and have a valid kernel
+stack. Its assembly reads RFLAGS before sending and after NMI return to verify
+that IF was set at both points. The KIRQ observer independently checks that
+IF is clear inside the NMI callback.

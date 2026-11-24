@@ -572,3 +572,10 @@ faults in the glue where GS can still hold the interrupted value. A second NMI
 can also arrive in an exception stub after a faulting `IRETQ`. Its entry checks
 whether the interrupted kernel RSP still points into the local NMI stack
 before using GS or dispatching the callback.
+
+`x86_nmi_entry_must_stop` performs the pre-GS reentry classification in assembly
+and returns its decision to the vector 2 entry. The unit tests in
+`ut-tests/x86_nmi.rs` execute that same routine with saved frames naming the
+exception stub, both stack bounds and the user-stack transition windows.
+The helper is kept inside the protected NMI glue range so an exception in it
+cannot reach Rust with an interrupted GS base.

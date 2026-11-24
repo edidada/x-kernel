@@ -710,6 +710,12 @@ effective NMI scope. The x86 provider currently returns without claiming a
 source or issuing an EOI. The guest test observes this boundary during a
 hardware self-NMI with local IRQs masked and the alternate GS base active.
 
+The native x86 NMI tests exercise separate entry conditions. The swapped-GS
+fixture starts with IRQs masked to verify that NMI can still enter. The
+`native_nmi_masks_enabled_irqs_and_restores_if_on_return` fixture sends its
+self-NMI with IF set, checks IF is clear in the callback, and checks that NMI
+return restores IF. Preemption stays disabled throughout that serial fixture.
+
 ## GIC Source Admission
 
 GICv2 and GICv3 initialization cache the exclusive standard INTID limit from

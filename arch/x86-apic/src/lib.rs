@@ -76,7 +76,7 @@ pub use io_apic::{
     probe_io_apic, retarget_edge, retarget_supported, retrigger_pin, set_pin_enabled,
 };
 #[cfg(unittest)]
-pub use local_apic::tests_preparation::self_nmi_with_swapped_gs;
+pub use local_apic::tests_preparation::{self_nmi_with_irqs_enabled, self_nmi_with_swapped_gs};
 pub use local_apic::{
     end_of_interrupt, handle_error_interrupt, init_local_primary, init_secondary,
     prepare_local_timer, raw_apic_id, restore_local_after_reset, send_init_ipi_all_but_self,

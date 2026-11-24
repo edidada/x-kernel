@@ -131,36 +131,15 @@ trap_handler_table:
     push    {nmi_vector}
     push    -1                          # orig_rax: not a syscall
     PUSH_GENERAL_REGS
-    # User RIP and RSP are not evidence that kernel NMI glue is active.
-    test    byte ptr [rsp + {cs_offset}], 3
-    jnz     .Lnmi_install_gs
-    NMI_CHECK_GLUE_RIP
-
-    # A faulting IRETQ unblocks NMI before the exception stub runs. Its RIP
-    # is outside the NMI glue, but it is still running on this CPU's IST.
-    # Check the saved RSP before touching GS or dispatching another callback.
-    mov     rcx, [rsp + {rsp_offset}]
-    lea     rax, [rsp + {trapframe_size}]
-    cmp     rcx, rax
-    jae     .Lnmi_install_gs
-    sub     rax, {nmi_stack_bytes}
-    cmp     rcx, rax
-    jb      .Lnmi_install_gs
-
-    # CPL alone does not make RSP trustworthy in the SYSCALL/SYSRET windows.
-    mov     rcx, [rsp + {rip_offset}]
-    lea     rax, [rip + syscall_entry]
-    cmp     rcx, rax
-    jb      .Lx86_nmi_halt
-    lea     rax, [rip + .Lsyscall_kernel_rsp]
-    cmp     rcx, rax
-    jb      .Lnmi_install_gs
-    lea     rax, [rip + .Lsysret_user_rsp]
-    cmp     rcx, rax
-    jne     .Lx86_nmi_halt
-
-.Lnmi_install_gs:
     mov     r12, rsp
+    mov     rdi, r12
+    lea     rsi, [r12 + {trapframe_size}]
+    and     rsp, -16
+    call    x86_nmi_entry_must_stop
+    mov     rsp, r12
+    test    eax, eax
+    jnz     .Lx86_nmi_halt
+
     # The IST points to aligned metadata in the permanent CPU area. CS
     # alone cannot identify which GS is active in a SWAPGS transition.
     mov     ecx, 0xc0000101              # IA32_GS_BASE
@@ -186,6 +165,46 @@ trap_handler_table:
     POP_GENERAL_REGS
     add     rsp, 24
     iretq
+# SysV ABI: RDI borrows the saved frame, RSI is the current IST top.
+# This classifier only reads the frame and labels. It needs no installed GS.
+.global x86_nmi_entry_must_stop
+.type x86_nmi_entry_must_stop, @function
+x86_nmi_entry_must_stop:
+    xor     eax, eax
+    # User RIP and RSP are not evidence that kernel NMI glue is active.
+    test    byte ptr [rdi + {cs_offset}], 3
+    jnz     .Lnmi_screen_done
+    mov     rcx, [rdi + {rip_offset}]
+    lea     rdx, [rip + .Lx86_nmi_entry]
+    cmp     rcx, rdx
+    jb      .Lnmi_screen_stack
+    lea     rdx, [rip + .Lx86_nmi_end]
+    cmp     rcx, rdx
+    jb      .Lnmi_screen_stop
+.Lnmi_screen_stack:
+    # A faulting IRETQ can unblock NMI in an exception stub outside the glue.
+    # Its interrupted kernel RSP still identifies the live NMI stack.
+    mov     rdx, [rdi + {rsp_offset}]
+    cmp     rdx, rsi
+    jae     .Lnmi_screen_done
+    sub     rsi, {nmi_stack_bytes}
+    cmp     rdx, rsi
+    jb      .Lnmi_screen_done
+    # SYSCALL/SYSRET windows can still carry an arbitrary user RSP at CPL 0.
+    lea     rdx, [rip + syscall_entry]
+    cmp     rcx, rdx
+    jb      .Lnmi_screen_stop
+    lea     rdx, [rip + .Lsyscall_kernel_rsp]
+    cmp     rcx, rdx
+    jb      .Lnmi_screen_done
+    lea     rdx, [rip + .Lsysret_user_rsp]
+    cmp     rcx, rdx
+    je      .Lnmi_screen_done
+.Lnmi_screen_stop:
+    mov     eax, 1
+.Lnmi_screen_done:
+    ret
+.size x86_nmi_entry_must_stop, . - x86_nmi_entry_must_stop
 .Lx86_nmi_end:
 
 .Lx86_nmi_halt:
@@ -264,3 +283,15 @@ enter_user:
     mov rsp, [rsp + 24]                 # load user rsp
 .Lsysret_user_rsp:
     sysretq
+
+.if {unittest}
+.section .rodata
+.balign 8
+.global x86_nmi_test_code_windows
+.type x86_nmi_test_code_windows, @object
+x86_nmi_test_code_windows:
+    .quad .Lx86_nmi_entry, .Lx86_nmi_end
+    .quad syscall_entry, .Lsyscall_kernel_rsp, .Lsysret_user_rsp
+    .quad .Ltrap_handler_13
+.size x86_nmi_test_code_windows, . - x86_nmi_test_code_windows
+.endif

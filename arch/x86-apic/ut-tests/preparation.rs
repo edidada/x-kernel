@@ -82,6 +82,71 @@ pub unsafe fn self_nmi_with_swapped_gs(deliveries: &AtomicUsize) -> bool {
         && deliveries.load(Ordering::Acquire) != before
 }
 
+/// Sends a hardware self-NMI with IF set and reports whether IF survived return.
+/// Returns with IRQs masked, including when delivery was not observed.
+///
+/// # Safety
+/// The serial fixture must pin this initialized CPU with preemption disabled,
+/// enter with IRQs masked, own local ICR access and retain the NMI observer.
+/// Kernel GS and the current stack must remain valid with ordinary IRQs enabled.
+pub unsafe fn self_nmi_with_irqs_enabled(deliveries: &AtomicUsize) -> bool {
+    // SAFETY: the fixture owns the local APIC and enters with IRQs masked.
+    if super::with_local_apic(|lapic| unsafe { lapic.delivery_pending() }) {
+        return false;
+    }
+    let before = deliveries.load(Ordering::Acquire);
+    let uses_x2apic = usize::from(super::IS_X2APIC.load(Ordering::Relaxed));
+    let xapic_icr = super::XAPIC_BASE.load(Ordering::Relaxed) + 0x300;
+    let entry_flags: u64;
+    let return_flags: u64;
+    // SAFETY: the fixture pins this CPU and keeps kernel GS installed while
+    // normal IRQs can run. Self shorthand only writes ICR-low (or its MSR).
+    // The stack and observer stay live; CLI restores masked IRQs before Rust.
+    unsafe {
+        core::arch::asm!(
+            "sti",
+            "nop",
+            "pushfq",
+            "pop {entry_flags}",
+            "test {uses_x2apic}, {uses_x2apic}",
+            "jz 2f",
+            "mov ecx, 0x830",
+            "mov eax, 0x44400",
+            "xor edx, edx",
+            "mfence",
+            "lfence",
+            "wrmsr",
+            "jmp 3f",
+            "2:",
+            "mov dword ptr [{xapic_icr}], 0x44400",
+            "3:",
+            "mov ecx, 10000000",
+            "4:",
+            "cmp qword ptr [{deliveries}], {before}",
+            "jne 5f",
+            "pause",
+            "dec ecx",
+            "jnz 4b",
+            "5:",
+            "pushfq",
+            "pop {return_flags}",
+            "cli",
+            uses_x2apic = in(reg) uses_x2apic,
+            xapic_icr = in(reg) xapic_icr,
+            deliveries = in(reg) deliveries.as_ptr(),
+            before = in(reg) before,
+            entry_flags = out(reg) entry_flags,
+            return_flags = out(reg) return_flags,
+            out("ecx") _,
+            out("eax") _,
+            out("edx") _,
+        );
+    }
+    let interrupt_flag = x86_64::registers::rflags::RFlags::INTERRUPT_FLAG.bits();
+    entry_flags & return_flags & interrupt_flag != 0
+        && deliveries.load(Ordering::Acquire) != before
+}
+
 fn read_register(msr: u32, offset: usize) -> u32 {
     if super::IS_X2APIC.load(Ordering::Relaxed) {
         // SAFETY: Boot selected x2APIC; callers supply only readable LAPIC MSRs.

@@ -12,6 +12,7 @@ use crate::excp::PageFaultFlags;
 
 core::arch::global_asm!(
     include_str!("excp.S"),
+    unittest = const cfg!(unittest) as usize,
     trapframe_size = const core::mem::size_of::<ExceptionContext>(),
     kernel_rsp_to_trapframe_offset = const userspace::KERNEL_RSP_TO_TRAPFRAME_OFFSET,
     UDATA = const gdt::UDATA.0,

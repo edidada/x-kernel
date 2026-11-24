@@ -42,6 +42,26 @@ fn native_nmi_enters_with_irqs_masked_and_preserves_swapped_gs() {
     assert!(!karch::local_irq_enabled());
 }
 
+#[def_test(serial)]
+fn native_nmi_masks_enabled_irqs_and_restores_if_on_return() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    NMI_DELIVERIES.store(0, Ordering::Relaxed);
+    NMI_BAD_CONTEXT.store(false, Ordering::Relaxed);
+    NMI_PROBE_CPU.store(kplat::cpu::id().as_usize(), Ordering::Release);
+    // SAFETY: this serial fixture pins the CPU with preemption disabled,
+    // owns the self-NMI producer and retains the observer. The helper enables
+    // IRQs only with kernel GS installed and masks them before returning.
+    let restored_if = unsafe { x86_apic::self_nmi_with_irqs_enabled(&NMI_DELIVERIES) };
+    NMI_PROBE_CPU.store(DISARMED_CPU, Ordering::Release);
+    assert_eq!(NMI_DELIVERIES.load(Ordering::Acquire), 1);
+    // Unlike the swapped-GS fixture, this probe enters with IF=1. A trap
+    // gate leaves IF set inside the observer and makes this assertion fail.
+    assert!(!NMI_BAD_CONTEXT.load(Ordering::Relaxed));
+    assert!(restored_if);
+    assert!(!kirq::context::is_in_interrupt_context());
+    assert!(!karch::local_irq_enabled());
+}
+
 fn io_desc(pin: usize) -> kirq::IrqDesc {
     kirq::IrqDesc::new(pin, IrqTrigger::EdgeRising)
         .with_source(kirq::IrqSource::PlatformStatic)

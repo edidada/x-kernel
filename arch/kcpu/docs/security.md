@@ -573,3 +573,13 @@ can coexist with a user-controlled RSP. Unexpected reentry is terminal since
 the new IST frame may have overwritten the outer frame. These paths use no
 ordinary logging or panic handler. Stack overflow and machine faults are
 outside this recovery model.
+
+`x86_nmi_entry_must_stop` uses the SysV ABI, borrows a complete
+`ExceptionContext` in RDI and receives the hardware-selected IST top in RSI.
+It only reads the frame and compares addresses, returns 0 or 1 in EAX, and
+neither accesses GS nor enables IRQs. The entry branches to the terminal path
+on a nonzero decision. `ut-tests/x86_nmi.rs` calls this same assembly routine
+with synthetic saved addresses; these values are never dereferenced. The
+unittest-only `x86_nmi_test_code_windows` object contains six immutable code
+addresses used by those tests. The tests cover stack bounds, exception-stub
+RIP, the glue interval, ring 3 and the SYSCALL/SYSRET user-RSP exclusions.
