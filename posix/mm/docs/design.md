@@ -102,6 +102,17 @@ This boundary carries the Linux-visible ABI policy:
   `SYSCALL_DEFINE1(mlockall)`. The call still does no work because the kernel has no swap, so every page is
   already resident; only the input contract is enforced.
 
+### Best-effort mmap population
+
+`MAP_POPULATE` runs only after mapping admission and VMA/runtime installation
+succeed. The syscall installs the mapping without mandatory population, then
+attempts `MmSpace::populate_area()` and deliberately ignores its errors,
+matching Linux v7.0 `mm_populate()` in `include/linux/mm.h`. A retryable backing
+transition or an EOF encountered during prefault must not turn the already
+installed mapping into a failed `mmap` result. Ordinary later accesses retain
+normal fault, permission and SIGBUS behavior. Mapping admission failures still
+propagate; strict population APIs used by other MM callers are unchanged.
+
 ### file-backed mapping handoff
 
 `posix-mm` does not construct file-backed `VmArea` internals directly. The file-backed VMA
@@ -289,7 +300,9 @@ The migration preserves module visibility, feature gates and execution modes.
 
 - `ut-tests/lib.rs`: mounted by `src/lib.rs` as `tests`.
 - `ut-tests/memfd.rs`: mounted by `src/memfd.rs` as `tests`.
-- `ut-tests/mmap.rs`: mounted by `src/mmap.rs` as `tests`.
+- `ut-tests/mmap.rs`: mounted by `src/mmap.rs` as `tests`. The `MAP_POPULATE`
+  regression exercises `sys_mmap` with shared and private file mappings and
+  checks that prefaulting past EOF preserves access to the backed page.
 
 Shared file mapping creation and permission changes run under MM serialization.
 Write faults may return a retry outcome to leave that critical section before a

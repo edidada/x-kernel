@@ -147,6 +147,13 @@ This crate contains no direct `unsafe` code blocks.
 `brk` does not ignore errors from re-establishing/shrinking the mapping; on failure it does not publish the requested new heap top,
 so that the user never observes an incomplete address-space change.
 
+`MAP_POPULATE` is a best-effort operation after successful VMA installation.
+Only prefault errors are ignored; address, access, commitment and mapping
+admission failures still propagate. An unpopulated page remains subject to the
+ordinary fault path, including backing admission waits, allocation failure and
+SIGBUS beyond EOF. The syscall never reports a prefault failure while leaving
+an undisclosed live mapping behind.
+
 Shared file mapping creation and permission changes run under MM serialization.
 Write faults may return a retry outcome to leave that critical section before a
 lifecycle transition needs to revoke the mapping's PTEs.

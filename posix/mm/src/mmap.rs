@@ -566,6 +566,10 @@ fn checked_align_up_4k(value: usize) -> KResult<usize> {
         .ok_or(KError::NoMemory)
 }
 
+/// Installs a Linux mapping, treating `MAP_POPULATE` as best-effort prefaulting.
+///
+/// Mapping admission errors propagate. Once installed, the mapping remains valid
+/// if prefaulting fails; later accesses use ordinary fault and SIGBUS semantics.
 pub fn sys_mmap(
     addr: usize,
     length: usize,
@@ -646,7 +650,7 @@ pub fn sys_mmap(
         if let Some((vma, runtime)) = file_vma {
             mapping.aspace_mut().map_runtime_vma(
                 vma.with_noreserve(request.flags.contains(MmapFlags::NORESERVE)),
-                request.flags.is_populate(),
+                false,
                 runtime,
             )?;
         } else {
@@ -664,9 +668,15 @@ pub fn sys_mmap(
                 None,
             )
             .with_noreserve(request.flags.contains(MmapFlags::NORESERVE));
-            mapping
+            mapping.aspace_mut().map_runtime_vma(vma, false, runtime)?;
+        }
+
+        if request.flags.is_populate() {
+            // Linux mm_populate() ignores prefault errors after VMA admission.
+            // Retry or EOF leaves a valid mapping for ordinary faults to finish.
+            let _ = mapping
                 .aspace_mut()
-                .map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
+                .populate_area(start, length, request.permissions.current);
         }
 
         Ok(start.as_usize() as _)

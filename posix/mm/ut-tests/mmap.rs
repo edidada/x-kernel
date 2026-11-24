@@ -2,12 +2,18 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use linux_raw_sys::general::{MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE};
+use linux_raw_sys::general::{
+    MAP_POPULATE, MAP_PRIVATE, MAP_SHARED, MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE,
+    PROT_READ,
+};
+use memaddr::PAGE_SIZE_4K;
+use memfs::shmem::create_memfd_file;
+use posix_types::UserConstPtr;
 use unittest::def_test;
 
 use super::{
     MADV_DONTNEED, MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL, MADV_WILLNEED, MadviseRequest,
-    MremapFlags,
+    MremapFlags, sys_mmap, sys_munmap,
 };
 
 #[def_test]
@@ -66,4 +72,30 @@ fn madvise_validates_the_range_before_the_advice() {
         MadviseRequest::from_raw(0x2000, 0x1000, MADV_DONTNEED as i32),
         Ok(Some(_))
     ));
+}
+
+#[def_test(user)]
+fn mmap_populate_succeeds_when_prefault_reaches_past_eof() {
+    let cred = kprocess::current_cred();
+    let file = create_memfd_file("mmap-populate-eof", false, cred.clone())
+        .expect("create memfd")
+        .into_file(cred)
+        .expect("open memfd");
+    file.truncate(PAGE_SIZE_4K as u64)
+        .expect("size memfd to one page");
+    let marker = 0x5a;
+    assert_eq!(file.write(&[marker]).expect("seed first file page"), 1);
+    let files = kprocess::current_files();
+    let fd = files.add_file(file, false).expect("install memfd");
+
+    // The second page lies beyond EOF, so prefaulting cannot finish.
+    let mapping_bytes = 2 * PAGE_SIZE_4K;
+    for map_type in [MAP_SHARED, MAP_PRIVATE] {
+        let address = sys_mmap(0, mapping_bytes, PROT_READ, map_type | MAP_POPULATE, fd, 0)
+            .expect("MAP_POPULATE must succeed despite EOF") as usize;
+        let first_byte = UserConstPtr::<u8>::from(address).read_vm();
+        sys_munmap(address, mapping_bytes).expect("unmap returned range");
+        assert_eq!(first_byte.expect("read backed page"), marker);
+    }
+    files.close_file(fd).expect("close memfd");
 }
