@@ -124,6 +124,15 @@ recursively acquire mount or quota state.
 For filesystem-owned quota files, enforcement can be enabled or disabled
 independently of usage accounting. Enabling several classes validates every
 selected class before publishing the state changes.
+
+`prepare_reconfigure` borrows live state and detached, freshly loaded classes.
+It validates duplicate activation, class bits and active-state requirements
+before returning `QuotaReconfigure`. Dropping this plan changes neither owner;
+`apply` moves prepared class ownership and adjusts resume/enforcement bits
+without allocation, I/O or failure. The provider holds its existing quota lock
+and places `apply` inside its accepted filesystem configuration commit. Detached
+backing-file owners stay outside provider guards so failed preparation cannot
+invoke final inode release while those guards are held.
 `invalidate` is the terminal no-I/O release after the provider has quiesced
 operations and either synchronized or irreversibly aborted its mutation domain.
 It removes class records and file information and returns the retained file;

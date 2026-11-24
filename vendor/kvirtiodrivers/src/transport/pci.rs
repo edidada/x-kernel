@@ -2,6 +2,20 @@
 
 pub mod bus;
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+use core::{
+    mem::{align_of, size_of},
+    ops::Deref,
+    ptr::NonNull,
+};
+
+use safe_mmio::{
+    UniqueMmioPointer, field, field_shared,
+    fields::{ReadOnly, ReadPure, ReadPureWrite, WriteOnly},
+};
+use zerocopy::{FromBytes, Immutable, IntoBytes};
+
 use self::bus::{
     ConfigurationAccess, DeviceFunction, DeviceFunctionInfo, PCI_CAP_ID_VNDR, PciError, PciRoot,
 };
@@ -11,16 +25,6 @@ use crate::{
     hal::{Hal, PhysAddr},
     transport::InterruptStatus,
 };
-use core::{
-    mem::{align_of, size_of},
-    ops::Deref,
-    ptr::NonNull,
-};
-use safe_mmio::{
-    UniqueMmioPointer, field, field_shared,
-    fields::{ReadOnly, ReadPure, ReadPureWrite, WriteOnly},
-};
-use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// The PCI vendor ID for VirtIO devices.
 pub const VIRTIO_VENDOR_ID: u16 = 0x1af4;
@@ -91,6 +95,9 @@ pub struct PciTransport {
     /// The start of the queue notification region within some BAR.
     notify_region: UniqueMmioPointer<'static, [WriteOnly<u16>]>,
     notify_off_multiplier: u32,
+    /// Queue setup caches register offsets so a kick needs no common-config MMIO.
+    #[cfg(feature = "alloc")]
+    queue_notify_indices: Vec<Option<usize>>,
     /// The ISR status register within some BAR.
     isr_status: UniqueMmioPointer<'static, ReadOnly<u8>>,
     /// The VirtIO device-specific configuration within some BAR.
@@ -98,6 +105,13 @@ pub struct PciTransport {
 }
 
 impl PciTransport {
+    // queue_select must already identify the queue whose configuration is read.
+    fn selected_queue_notify_index(&self) -> usize {
+        let queue_notify_off = field_shared!(self.common_cfg, queue_notify_off).read();
+        let offset_bytes = usize::from(queue_notify_off) * self.notify_off_multiplier as usize;
+        offset_bytes / size_of::<u16>()
+    }
+
     /// Construct a new PCI VirtIO device driver for the given device function on the given PCI
     /// root controller.
     ///
@@ -213,6 +227,8 @@ impl PciTransport {
             common_cfg,
             notify_region,
             notify_off_multiplier,
+            #[cfg(feature = "alloc")]
+            queue_notify_indices: Vec::new(),
             isr_status,
             config_space,
         })
@@ -246,12 +262,18 @@ impl Transport for PciTransport {
     }
 
     fn notify(&mut self, queue: u16) {
-        field!(self.common_cfg, queue_select).write(queue);
-        // TODO: Consider caching this somewhere (per queue).
-        let queue_notify_off = field_shared!(self.common_cfg, queue_notify_off).read();
-
-        let offset_bytes = usize::from(queue_notify_off) * self.notify_off_multiplier as usize;
-        let index = offset_bytes / size_of::<u16>();
+        #[cfg(feature = "alloc")]
+        let cached = self
+            .queue_notify_indices
+            .get(usize::from(queue))
+            .copied()
+            .flatten();
+        #[cfg(not(feature = "alloc"))]
+        let cached = None;
+        let index = cached.unwrap_or_else(|| {
+            field!(self.common_cfg, queue_select).write(queue);
+            self.selected_queue_notify_index()
+        });
         self.notify_region.get(index).unwrap().write(queue);
     }
 
@@ -261,6 +283,11 @@ impl Transport for PciTransport {
     }
 
     fn set_status(&mut self, status: DeviceStatus) {
+        #[cfg(feature = "alloc")]
+        if status.is_empty() {
+            // Queue configuration may change across a device reset.
+            self.queue_notify_indices.clear();
+        }
         field!(self.common_cfg, device_status).write(status.bits() as u8);
     }
 
@@ -293,6 +320,15 @@ impl Transport for PciTransport {
         field!(self.common_cfg, queue_desc).write(descriptors);
         field!(self.common_cfg, queue_driver).write(driver_area);
         field!(self.common_cfg, queue_device).write(device_area);
+        #[cfg(feature = "alloc")]
+        {
+            let index = self.selected_queue_notify_index();
+            let slot = usize::from(queue);
+            if self.queue_notify_indices.len() <= slot {
+                self.queue_notify_indices.resize(slot + 1, None);
+            }
+            self.queue_notify_indices[slot] = Some(index);
+        }
         field!(self.common_cfg, queue_enable).write(1);
     }
 
@@ -321,7 +357,8 @@ impl Transport for PciTransport {
     fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> Result<T, Error> {
         assert!(
             align_of::<T>() <= 4,
-            "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 byte alignment.",
+            "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 \
+             byte alignment.",
             align_of::<T>()
         );
         assert_eq!(offset % align_of::<T>(), 0);
@@ -353,7 +390,8 @@ impl Transport for PciTransport {
     ) -> Result<(), Error> {
         assert!(
             align_of::<T>() <= 4,
-            "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 byte alignment.",
+            "Driver expected config space alignment of {} bytes, but VirtIO only guarantees 4 \
+             byte alignment.",
             align_of::<T>()
         );
         assert_eq!(offset % align_of::<T>(), 0);
@@ -393,6 +431,7 @@ impl Drop for PciTransport {
 
 /// `virtio_pci_common_cfg`, see 4.1.4.3 "Common configuration structure layout".
 #[repr(C)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct CommonCfg {
     pub device_feature_select: ReadPureWrite<u32>,
     pub device_feature: ReadPure<u32>,
@@ -484,7 +523,8 @@ pub enum VirtioPciError {
     /// `VIRTIO_PCI_CAP_NOTIFY_CFG` capability has a `notify_off_multiplier` that is not a multiple
     /// of 2.
     #[error(
-        "`VIRTIO_PCI_CAP_NOTIFY_CFG` capability has a `notify_off_multiplier` that is not a multiple of 2: {0}"
+        "`VIRTIO_PCI_CAP_NOTIFY_CFG` capability has a `notify_off_multiplier` that is not a \
+         multiple of 2: {0}"
     )]
     InvalidNotifyOffMultiplier(u32),
     /// No valid `VIRTIO_PCI_CAP_ISR_CFG` capability was found.
@@ -521,6 +561,115 @@ impl From<PciError> for VirtioPciError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_notification_transport(test: impl FnOnce(&mut PciTransport)) {
+        let mut common = CommonCfg::default();
+        let mut notifications: [WriteOnly<u16>; 16] = core::array::from_fn(|_| WriteOnly(u16::MAX));
+        let mut isr = ReadOnly(0u8);
+        let mut transport = PciTransport {
+            device_type: DeviceType::Block,
+            device_function: DeviceFunction {
+                bus: 0,
+                device: 0,
+                function: 0,
+            },
+            // SAFETY: these disjoint, aligned typed regions outlive transport,
+            // including its reset on unwind. Only transport accesses them
+            // until it is dropped, before the backing locals leave this scope.
+            common_cfg: unsafe { UniqueMmioPointer::new(NonNull::from(&mut common)) },
+            // SAFETY: the same scoped ownership retains all notification slots.
+            notify_region: unsafe { UniqueMmioPointer::new(NonNull::from(&mut notifications[..])) },
+            notify_off_multiplier: 4,
+            #[cfg(feature = "alloc")]
+            queue_notify_indices: Vec::new(),
+            // SAFETY: isr is a separate live byte, exclusively lent to transport.
+            isr_status: unsafe { UniqueMmioPointer::new(NonNull::from(&mut isr)) },
+            config_space: None,
+        };
+        test(&mut transport);
+    }
+
+    fn notification_value(transport: &mut PciTransport, index: usize) -> u16 {
+        let register = transport.notify_region.get(index).unwrap();
+        // SAFETY: the test owns this initialized mock region, has checked the
+        // slot, and performs no concurrent device access. Reading this fake
+        // write-only register has no hardware side effects.
+        unsafe { register.ptr().cast::<u16>().read_volatile() }
+    }
+
+    #[test]
+    fn unconfigured_queue_notifications_use_register_lookup() {
+        with_notification_transport(|transport| {
+            field!(transport.common_cfg, queue_select).write(9);
+            field!(transport.common_cfg, queue_notify_off).write(3);
+            transport.notify(2);
+            assert_eq!(field_shared!(transport.common_cfg, queue_select).read(), 2);
+            assert_eq!(notification_value(transport, 6), 2);
+
+            field!(transport.common_cfg, queue_notify_off).write(5);
+            transport.notify(2);
+            assert_eq!(notification_value(transport, 10), 2);
+        });
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn configured_queue_notifications_do_not_reselect_common_configuration() {
+        with_notification_transport(|transport| {
+            field!(transport.common_cfg, queue_notify_off).write(3);
+            transport.queue_set(0, 16, 0, 0, 0);
+            field!(transport.common_cfg, queue_notify_off).write(5);
+            transport.queue_set(1, 16, 0, 0, 0);
+
+            // Simulate another queue being selected after both queues' setup.
+            field!(transport.common_cfg, queue_select).write(9);
+            field!(transport.common_cfg, queue_notify_off).write(7);
+            transport.notify(0);
+            transport.notify(1);
+            transport.notify(0);
+
+            assert_eq!(field_shared!(transport.common_cfg, queue_select).read(), 9);
+            assert_eq!(notification_value(transport, 6), 0);
+            assert_eq!(notification_value(transport, 10), 1);
+            assert_eq!(notification_value(transport, 14), u16::MAX);
+        });
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn reset_and_queue_setup_refresh_notification_offsets() {
+        with_notification_transport(|transport| {
+            field!(transport.common_cfg, queue_notify_off).write(3);
+            transport.queue_set(0, 16, 0, 0, 0);
+            transport.reset();
+            field!(transport.common_cfg, queue_notify_off).write(5);
+            // Reset makes the old queue unconfigured, including its cache entry.
+            transport.notify(0);
+            assert_eq!(notification_value(transport, 6), u16::MAX);
+            assert_eq!(notification_value(transport, 10), 0);
+
+            field!(transport.common_cfg, queue_notify_off).write(6);
+            transport.queue_set(0, 16, 0, 0, 0);
+            field!(transport.common_cfg, queue_select).write(9);
+            field!(transport.common_cfg, queue_notify_off).write(7);
+            transport.notify(0);
+
+            assert_eq!(field_shared!(transport.common_cfg, queue_select).read(), 9);
+            assert_eq!(notification_value(transport, 12), 0);
+            assert_eq!(notification_value(transport, 14), u16::MAX);
+        });
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic]
+    fn cached_notification_offset_still_checks_bar_bounds() {
+        with_notification_transport(|transport| {
+            field!(transport.common_cfg, queue_notify_off).write(8);
+            transport.queue_set(0, 16, 0, 0, 0);
+            transport.notify(0);
+        });
+    }
 
     #[test]
     fn transitional_device_ids() {

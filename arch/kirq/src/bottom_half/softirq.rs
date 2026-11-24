@@ -116,6 +116,12 @@ cpu_slot! {
         core::sync::atomic::AtomicUsize::new(0);
 }
 
+cpu_slot! {
+    // Placement hints are independent of the pending bits that own the work.
+    static SOFTIRQ_DEFERRED: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+}
+
 static_lock! {
     static SOFTIRQ_ACTIONS: SpinNoIrq<[Option<SoftirqAction>; SoftirqVec::COUNT]> =
         SpinNoIrq::new([None; SoftirqVec::COUNT]);
@@ -217,7 +223,7 @@ pub enum SoftirqRunResult {
     NoPending,
     /// At least one softirq action ran.
     Ran,
-    /// Pending work remains due to context, a scheduling request, or the restart limit.
+    /// Pending work remains due to context, daemon placement, rescheduling, or the restart limit.
     Deferred,
 }
 
@@ -282,6 +288,22 @@ pub fn raise_softirq(vec: SoftirqVec) {
     }
 }
 
+/// Raises work for the current CPU's softirq daemon instead of another inline pass.
+///
+/// An action can use this after exhausting its processing budget. IRQ-tail and
+/// BH-enable drains retain this vector for the daemon; other vectors can still
+/// run inline. Explicit task-context drains service it under the same non-sleeping
+/// softirq contract. This is placement control, not a latency guarantee.
+/// Valid in the contexts supported by [`raise_softirq`], excluding NMI.
+pub fn raise_softirq_deferred(vec: SoftirqVec) {
+    let guard = NoPreemptIrqSave::new();
+    SOFTIRQ_DEFERRED
+        .current(&guard)
+        .fetch_or(vec.bit(), Ordering::Release);
+    let _ = mark_softirq_pending(&guard, vec);
+    wake_softirqd_if_needed(&guard);
+}
+
 /// Raises a softirq on the current CPU when local IRQs are already disabled.
 ///
 /// The function still pins the current CPU before touching per-CPU state.
@@ -313,10 +335,14 @@ pub fn local_softirq_pending() -> usize {
         .with_current_irq_disabled(|pending| pending.load(Ordering::Acquire) & SOFTIRQ_VALID_MASK)
 }
 
-/// Runs pending softirqs on the current CPU when context permits it.
+/// Explicitly drains current-CPU softirqs from task context when permitted.
+///
+/// This services vectors requested for the daemon as well as ordinary vectors.
+/// IRQ-tail and BH-enable paths use the inline runner instead. Actions retain
+/// their non-sleeping execution contract and the existing restart/reschedule bounds.
 pub fn run_pending_softirqs() -> SoftirqRunResult {
     let _guard = NoPreemptIrqSave::new();
-    run_pending_softirqs_irqoff()
+    run_pending_softirqs_with_policy(kiface_task_api::TaskPreemptionIf::needs_resched, false)
 }
 
 /// Runs pending softirqs with local IRQs already disabled.
@@ -327,9 +353,18 @@ pub(crate) fn run_pending_softirqs_irqoff() -> SoftirqRunResult {
 }
 
 fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) -> SoftirqRunResult {
+    run_pending_softirqs_with_policy(needs_resched, true)
+}
+
+fn run_pending_softirqs_with_policy(
+    needs_resched: impl Fn() -> bool,
+    is_inline: bool,
+) -> SoftirqRunResult {
     let guard = NoPreempt::new();
     let pending_slot = SOFTIRQ_PENDING.current(&guard);
+    let deferred_slot = SOFTIRQ_DEFERRED.current(&guard);
     if pending_slot.load(Ordering::Acquire) & SOFTIRQ_VALID_MASK == 0 {
+        deferred_slot.store(0, Ordering::Release);
         return SoftirqRunResult::NoPending;
     }
     if !can_run_softirqs() {
@@ -341,8 +376,20 @@ fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) ->
     let mut ran_any = false;
 
     loop {
-        let pending = pending_slot.swap(0, Ordering::Acquire) & SOFTIRQ_VALID_MASK;
+        let deferred = if is_inline {
+            deferred_slot.load(Ordering::Acquire)
+        } else {
+            0
+        };
+        // Keep deferred bits published while atomically claiming eligible vectors.
+        let pending =
+            pending_slot.fetch_and(deferred, Ordering::AcqRel) & !deferred & SOFTIRQ_VALID_MASK;
         if pending == 0 {
+            if pending_slot.load(Ordering::Acquire) & SOFTIRQ_VALID_MASK != 0 {
+                wake_softirqd(&guard);
+                return SoftirqRunResult::Deferred;
+            }
+            deferred_slot.store(0, Ordering::Release);
             return if ran_any {
                 SoftirqRunResult::Ran
             } else {
@@ -355,6 +402,8 @@ fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) ->
 
         restarts_left -= 1;
         let remaining = pending_slot.load(Ordering::Acquire) & SOFTIRQ_VALID_MASK;
+        // IRQs are masked again; only still-pending vectors retain placement hints.
+        deferred_slot.fetch_and(remaining, Ordering::AcqRel);
         if remaining == 0 {
             return SoftirqRunResult::Ran;
         }
@@ -417,9 +466,13 @@ pub fn softirq_action_matches_for_tests(vec: SoftirqVec, action: SoftirqAction) 
 /// Clears a pending softirq bit on the current CPU.
 #[cfg(unittest)]
 pub fn clear_softirq_pending_for_tests(vec: SoftirqVec) {
-    SOFTIRQ_PENDING.with_current_irq_disabled(|pending| {
-        pending.fetch_and(!vec.bit(), Ordering::Release);
-    });
+    let guard = NoPreemptIrqSave::new();
+    SOFTIRQ_PENDING
+        .current(&guard)
+        .fetch_and(!vec.bit(), Ordering::Release);
+    SOFTIRQ_DEFERRED
+        .current(&guard)
+        .fetch_and(!vec.bit(), Ordering::Release);
 }
 
 unittest::path_mod_test!(pub mod test_support, "../../ut-tests/bottom_half_softirq_test_support.rs");

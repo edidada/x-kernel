@@ -34,7 +34,8 @@ pub type GetTreeFn =
 /// Installs context operations and initializes filesystem-private transaction state.
 pub type InitFsContextFn = for<'a> fn(&mut FsContext<'a>) -> VfsResult<()>;
 
-/// Applies one parsed reconfiguration transaction to an existing superblock.
+/// Prepares a transaction and finishes it with [`FsContext::commit_reconfigure`].
+/// The callback must not perform fallible work after a successful commit.
 pub type ReconfigureFn = for<'a> fn(&mut FsContext<'a>) -> VfsResult<()>;
 
 /// Shared filesystem-context operation table.
@@ -74,8 +75,10 @@ impl FsContextOperations {
     }
 
     pub(crate) fn reconfigure(&self, context: &mut FsContext<'_>) -> VfsResult<()> {
-        self.reconfigure
-            .map_or(Ok(()), |reconfigure| reconfigure(context))
+        match self.reconfigure {
+            Some(reconfigure) => reconfigure(context),
+            None => context.commit_reconfigure(|| Ok(())),
+        }
     }
 }
 

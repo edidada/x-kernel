@@ -37,7 +37,7 @@ fn bdev_readonly_mismatch(current: SuperBlockFlags, requested: SuperBlockFlags) 
     (current ^ requested).contains(SuperBlockFlags::RDONLY)
 }
 
-fn validate_block_device_flags(
+pub(crate) fn validate_block_device_flags(
     block_device: &block::BlockDevice,
     flags: SuperBlockFlags,
 ) -> VfsResult<()> {
@@ -376,26 +376,94 @@ bitflags::bitflags! {
 
 /// Atomic storage that preserves [`SuperBlockFlags`] as the semantic interface.
 ///
-/// Relaxed ordering is sufficient because the flags neither publish nor guard
-/// other superblock state.
+/// A private bit grants the active reconfiguration permission to accept changes.
+/// Read-only notification revokes it in the same atomic update as setting RDONLY.
+/// Relaxed ordering suffices: this word does not publish filesystem state.
 #[derive(Debug)]
 struct AtomicSuperBlockFlags(AtomicU32);
 
+const SUPERBLOCK_RECONFIGURE_ALLOWED: u32 = 1 << 31;
+const _: () = assert!(SuperBlockFlags::all().bits() & SUPERBLOCK_RECONFIGURE_ALLOWED == 0);
+
+/// The umount write lock permits exactly one flag reconfiguration at a time.
+pub(crate) struct SuperBlockFlagUpdate<'a> {
+    flags: &'a AtomicSuperBlockFlags,
+    initial: SuperBlockFlags,
+}
+
 impl AtomicSuperBlockFlags {
     fn new(flags: SuperBlockFlags) -> Self {
-        Self(AtomicU32::new(flags.bits()))
+        Self(AtomicU32::new(
+            flags.bits() & !SUPERBLOCK_RECONFIGURE_ALLOWED,
+        ))
     }
 
     fn load(&self) -> SuperBlockFlags {
         SuperBlockFlags::from_bits_truncate(self.0.load(Ordering::Relaxed))
     }
 
-    fn store(&self, flags: SuperBlockFlags) {
-        self.0.store(flags.bits(), Ordering::Relaxed);
+    fn mark_read_only(&self) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                // Revoke even if RDONLY was already set: a writable remount may
+                // have validated a healthy read-only filesystem before this event.
+                Some((current | SuperBlockFlags::RDONLY.bits()) & !SUPERBLOCK_RECONFIGURE_ALLOWED)
+            });
     }
 
-    fn insert(&self, flags: SuperBlockFlags) {
-        self.0.fetch_or(flags.bits(), Ordering::Relaxed);
+    fn begin_reconfigure(&self) -> SuperBlockFlagUpdate<'_> {
+        let previous = self
+            .0
+            .fetch_or(SUPERBLOCK_RECONFIGURE_ALLOWED, Ordering::Relaxed);
+        SuperBlockFlagUpdate {
+            flags: self,
+            initial: SuperBlockFlags::from_bits_truncate(previous),
+        }
+    }
+}
+
+impl SuperBlockFlagUpdate<'_> {
+    pub(crate) fn commit(
+        &self,
+        flags: SuperBlockFlags,
+        apply: impl FnOnce() -> VfsResult<()>,
+    ) -> VfsResult<()> {
+        // Acceptance precedes filesystem side effects. Notifications after
+        // this point remain effective, but cannot turn an applied remount into
+        // a failed syscall. No flags change if the filesystem application fails.
+        self.flags
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                if current & SUPERBLOCK_RECONFIGURE_ALLOWED == 0
+                    && !flags.contains(SuperBlockFlags::RDONLY)
+                {
+                    None
+                } else {
+                    Some(current)
+                }
+            })
+            .map_err(|_| VfsError::ReadOnlyFilesystem)?;
+        apply()?;
+        let _ = self
+            .flags
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let mut published = flags;
+                if current & SUPERBLOCK_RECONFIGURE_ALLOWED == 0 {
+                    published.insert(SuperBlockFlags::RDONLY);
+                }
+                Some(published.bits() & !SUPERBLOCK_RECONFIGURE_ALLOWED)
+            });
+        Ok(())
+    }
+}
+
+impl Drop for SuperBlockFlagUpdate<'_> {
+    fn drop(&mut self) {
+        self.flags
+            .0
+            .fetch_and(!SUPERBLOCK_RECONFIGURE_ALLOWED, Ordering::Relaxed);
     }
 }
 
@@ -708,7 +776,7 @@ impl SuperBlock {
     /// must prevent further internal writes, handle its failed transactions,
     /// and reject writable reconfiguration while the failure persists.
     pub fn mark_read_only(&self) {
-        self.flags.insert(SuperBlockFlags::RDONLY);
+        self.flags.mark_read_only();
     }
 
     /// Returns whether the superblock has finished initializing and has not
@@ -1297,6 +1365,9 @@ impl SuperBlock {
     /// transaction or targets another superblock. Filesystem-specific
     /// validation errors are returned without changing the superblock flags.
     /// A read-only transition returns EBUSY while writers or zero-link inodes remain.
+    /// A writable transition fails if a read-only notification precedes commit
+    /// acceptance. Later notifications preserve read-only state without turning
+    /// successfully applied configuration into a failed remount.
     pub fn reconfigure(&self, context: &mut FsContext<'_>) -> VfsResult<()> {
         let _umount_guard = self.umount_lock.write();
         if context.purpose() != FsContextPurpose::Reconfigure
@@ -1304,11 +1375,11 @@ impl SuperBlock {
         {
             return Err(VfsError::InvalidInput);
         }
-        // Two-phase validation. Phase one gates hook execution with the
-        // caller-proposed flags, so a remount the VFS would reject never
-        // reaches the filesystem callback (whose side effects — ext4's
-        // statfs mode, say — are not rolled back on rejection).
-        let caller_flags = (self.flags() & !context.sb_flags_mask())
+        // Reject invalid caller policy before filesystem preparation. The
+        // callback revalidates its final proposal at its own commit boundary.
+        let owner = context.super_block()?;
+        let flag_update = owner.flags.begin_reconfigure();
+        let caller_flags = (flag_update.initial & !context.sb_flags_mask())
             | (context.sb_flags() & context.sb_flags_mask());
         if let Some(block_device) = self.block_device() {
             validate_block_device_flags(block_device, caller_flags)?;
@@ -1319,17 +1390,9 @@ impl SuperBlock {
         } else {
             Vec::new()
         };
-        // The callback may adjust the proposal from its own mount data
-        // (`ro`/`rw`, Linux `vfs_parse_sb_flag`); phase two re-validates the
-        // adjusted values before anything is published.
-        context.reconfigure()?;
-        let mask = context.sb_flags_mask();
-        let flags = (self.flags() & !mask) | (context.sb_flags() & mask);
-        if let Some(block_device) = self.block_device() {
-            validate_block_device_flags(block_device, flags)?;
-        }
-        self.flags.store(flags);
-        Ok(())
+        // The callback commits while its own configuration locks are held.
+        // There must be no further fallible publication after it applies state.
+        context.reconfigure(flag_update)
     }
 
     /// Retains a hashed dentry until it is explicitly evicted from the dcache.

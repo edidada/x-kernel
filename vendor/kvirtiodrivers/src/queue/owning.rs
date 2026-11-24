@@ -1,9 +1,10 @@
+use alloc::boxed::Box;
+use core::{convert::TryInto, ptr::NonNull};
+
+use zerocopy::FromZeros;
+
 use super::VirtQueue;
 use crate::{Error, Hal, Result, transport::Transport};
-use alloc::boxed::Box;
-use core::convert::TryInto;
-use core::ptr::NonNull;
-use zerocopy::FromZeros;
 
 /// A wrapper around [`VirtQueue`] that owns all the buffers that are passed to the queue.
 ///
@@ -69,8 +70,10 @@ impl<H: Hal, const SIZE: usize, const BUFFER_SIZE: usize> OwningQueue<H, SIZE, B
     /// Returns whether the driver should notify the device after adding a new buffer to the
     /// virtqueue.
     ///
-    /// This will be false if the device has suppressed notifications.
-    pub fn should_notify(&self) -> bool {
+    /// This consumes additions since the preceding decision; a true result
+    /// requires a transport kick before another decision. See
+    /// [`VirtQueue::should_notify`] for EVENT_IDX and wraparound semantics.
+    pub fn should_notify(&mut self) -> bool {
         self.queue.should_notify()
     }
 

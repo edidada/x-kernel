@@ -201,6 +201,8 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     let flags = (super_block.flags() & !context.sb_flags_mask())
         | (context.sb_flags() & context.sb_flags_mask());
     let ext4 = super_block.private::<vfs::Ext4Mount>()?;
+    let is_writable = !flags.contains(kvfs::SuperBlockFlags::RDONLY);
+    let is_resuming = is_writable && super_block.is_readonly();
     if let Some(types) = options.quota_types {
         let state = ext4.read();
         if types & 4 != 0 && !state.superblock().features().has_project() {
@@ -215,33 +217,16 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
             }
         }
     }
-    if !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
+    let mut prepared = vfs::PreparedInternalQuotas::default();
+    if is_writable {
         ext4.read().ensure_writable().map_err(vfs::into_vfs_err)?;
-        if super_block.flags().contains(kvfs::SuperBlockFlags::RDONLY) {
-            let result = (|| -> kvfs::VfsResult<()> {
-                if ext4.read().has_quota_feature() {
-                    let owner = ext4
-                        .read()
-                        .vfs_superblock
-                        .upgrade()
-                        .ok_or(kvfs::VfsError::InvalidData)?;
-                    Ext4SuperOperations::activate_internal_quotas(&owner)?;
-                }
-                {
-                    let state = ext4.write(super_block);
-                    state.ensure_writable().map_err(vfs::into_vfs_err)?;
-                    state
-                        .resume_internal_quotas(super_block)
-                        .map_err(vfs::into_vfs_err)?;
-                }
-                Ok(())
-            })();
-            if result.is_err() {
-                ext4.read()
-                    .mark_quotas_suspended(super_block)
-                    .map_err(vfs::into_vfs_err)?;
-            }
-            result?;
+        if is_resuming && ext4.read().has_quota_feature() {
+            let owner = ext4
+                .read()
+                .vfs_superblock
+                .upgrade()
+                .ok_or(kvfs::VfsError::InvalidData)?;
+            prepared = Ext4SuperOperations::prepare_internal_quotas(&owner)?;
         }
     } else if !super_block.flags().contains(kvfs::SuperBlockFlags::RDONLY) {
         context.sync_filesystem()?;
@@ -252,24 +237,27 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
             .map_err(vfs::into_vfs_err)?;
     }
     let mut state = ext4.write(super_block);
-    if !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
+    if is_writable {
         state.ensure_writable().map_err(vfs::into_vfs_err)?;
     }
-    if let Some(statfs_mode) = options.statfs_mode {
-        state.set_statfs_mode(statfs_mode);
-    }
-    if let Some(types) = options.quota_types {
-        state.quota_mount_options = types;
-        if state.has_quota_feature() && !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
-            let mut quota = super_block.quota_info();
-            for kind in kquota::QuotaType::ALL {
-                if quota.info(kind).is_some() {
-                    quota.set_limits_enabled(kind, types & (1 << kind as u8) != 0)?;
-                }
-            }
+    let limit_types = options
+        .quota_types
+        .filter(|_| state.has_quota_feature() && is_writable);
+    let mut quota = super_block.quota_info();
+    let quota_update = quota.prepare_reconfigure(&mut prepared.quota, is_resuming, limit_types)?;
+    context.commit_reconfigure(|| {
+        quota_update.apply();
+        for inode in &prepared.inodes {
+            inode.set_noquota(true);
         }
-    }
-    Ok(())
+        if let Some(statfs_mode) = options.statfs_mode {
+            state.set_statfs_mode(statfs_mode);
+        }
+        if let Some(types) = options.quota_types {
+            state.quota_mount_options = types;
+        }
+        Ok(())
+    })
 }
 
 static FS_CONTEXT_OPERATIONS: kvfs::FsContextOperations =

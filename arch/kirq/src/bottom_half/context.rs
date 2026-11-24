@@ -392,7 +392,8 @@ impl Drop for LocalBhGuard {
         });
 
         if should_run_softirqs {
-            crate::softirq::run_pending_softirqs();
+            let _irq = kspin::IrqSave::new();
+            crate::softirq::run_pending_softirqs_irqoff();
         }
     }
 }

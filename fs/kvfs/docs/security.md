@@ -866,6 +866,20 @@ the unrecoverable internal error, and publish the read-only flag before releasin
 remount may modify ordinary mount flags; the filesystem must use its existing failure state to refuse re-enabling writes, and keep checking that state at the internal
 write boundaries, so that protection during error recovery does not rely solely on the `RDONLY` bit.
 
+The active remount's acceptance permission shares the atomic word with the
+flags. A read-only notification atomically sets `RDONLY` and revokes permission,
+including when already read-only. `FsContext::commit_reconfigure` checks this
+permission before applying configuration, under filesystem-owned exclusion.
+Revoked writable proposals return EROFS without invoking the application.
+After acceptance, a successful application cannot be rejected by a later
+notification: infallible flag publication preserves the write ban. Application
+errors retain old flags and concurrent notifications; filesystem applications
+must leave their configuration unchanged on error. The umount write lock
+serializes the transaction. Callbacks must finish with the commit result and
+perform no subsequent fallible work. Permission clears on exit, and user-visible
+flags exclude the internal bit. This mechanism does not grant internal write
+permission or make journal abort reversible.
+
 The submit-style `submit_cached_ranges` neither waits for I/O automatically nor stores deferred errors. The filesystem must drain the submitted batches before
 synchronous writepages returns, including on the scan/admission failure paths; it must not allow physical mappings that are not protected by some other mechanism to remain in use after the invalidate
 protection ends. Consuming and dropping a PageCache completion

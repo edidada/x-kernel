@@ -12,13 +12,69 @@ use crate::block_completion::prepare_block_wait;
 
 struct Action<F>(F);
 impl<F: Fn() + Send + Sync> BlockCompletionOperations for Action<F> {
-    fn process_completed_requests(&self) {
+    fn process_completed_requests(&self) -> BlockCompletionStatus {
         (self.0)();
+        BlockCompletionStatus::CaughtUp
     }
 }
 
 fn device(action: impl Fn() + Send + Sync + 'static) -> Arc<dyn BlockCompletionOperations> {
     Arc::new(Action(action))
+}
+
+struct BudgetAction(AtomicUsize);
+
+impl BlockCompletionOperations for BudgetAction {
+    fn process_completed_requests(&self) -> BlockCompletionStatus {
+        if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+            BlockCompletionStatus::MorePending
+        } else {
+            BlockCompletionStatus::CaughtUp
+        }
+    }
+}
+
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: prepare_block_wait returns the production \
+              Box<dyn BlockWaiter> contract; this test retains that owner through reclaimer \
+              shutdown"
+)]
+fn completion_budget_requeues_without_another_irq_and_visits_the_other_device() {
+    let _wake_gate = ScopedDaemonWakeGate::disabled();
+    let busy = Arc::new(BudgetAction(AtomicUsize::new(0)));
+    let operations: Arc<dyn BlockCompletionOperations> = busy.clone();
+    let busy_reclaimer = BlockIoReclaimer::new(Arc::downgrade(&operations));
+    let light_calls = Arc::new(AtomicUsize::new(0));
+    let light = device({
+        let calls = light_calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let light_reclaimer = BlockIoReclaimer::new(Arc::downgrade(&light));
+    {
+        let _bh = context::local_bh_disable();
+        busy_reclaimer.mark_pending();
+        light_reclaimer.mark_pending();
+        process_pending_devices();
+        assert_eq!(busy.0.load(Ordering::Relaxed), 1);
+        assert_eq!(light_calls.load(Ordering::Relaxed), 1);
+        process_pending_devices();
+        assert_eq!(busy.0.load(Ordering::Relaxed), 2);
+        assert_eq!(light_calls.load(Ordering::Relaxed), 1);
+        softirq::clear_softirq_pending_for_tests(SoftirqVec::Block);
+    }
+    for reclaimer in [busy_reclaimer, light_reclaimer] {
+        let mut waiter = prepare_block_wait().unwrap();
+        reclaimer.stop_and_wait(waiter.as_mut());
+    }
 }
 
 #[def_test(serial)]

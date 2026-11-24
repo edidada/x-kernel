@@ -253,3 +253,13 @@ production kdriver initializes it before discovery. Merges/discards are absent
 from the current operation model, and sysfs reports their counters as zero.
 The driver still owns truthful completion and eventual completion; statistics
 do not establish durability beyond that existing contract.
+
+### Completion Budget Progress
+
+A driver that leaves visible completed requests behind must return `MorePending`.
+The host retains and schedules that registration even if hardware sends no later
+IRQ. Neither status publishes a BIO result: only descriptor/DMA retirement and
+the request's terminal callback return its original memory. A false progress
+report can stall requests or repeatedly wake an executor; drivers are trusted
+to report it accurately. Host stop still follows admitted-request drain and IRQ
+synchronization, rather than treating `CaughtUp` as device quiescence.

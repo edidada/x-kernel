@@ -786,16 +786,15 @@ impl Ext4SbInfo {
 }
 
 impl Ext4SbInfo {
-    pub(crate) fn enable_internal_quota(
+    pub(crate) fn prepare_internal_quota(
         &mut self,
-        super_block: &SuperBlock,
+        quota: &mut QuotaInfo<Arc<VfsInode>>,
         kind: QuotaType,
         file: &Arc<VfsInode>,
     ) -> Ext4Result<()> {
         self.ensure_writable()?;
         // Loading the header is read-only and must not set recovery flags.
-        let result = super_block
-            .quota_info()
+        let result = quota
             .enable(
                 &mut Ext4QuotaIo {
                     filesystem: self,
@@ -895,6 +894,7 @@ impl Ext4SbInfo {
         self.mark_quotas_suspended(super_block)
     }
 
+    #[cfg(unittest)]
     pub(crate) fn resume_internal_quotas(&self, super_block: &SuperBlock) -> Ext4Result<()> {
         let mut quota = super_block.quota_info();
         for kind in QuotaType::ALL {

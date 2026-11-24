@@ -57,6 +57,14 @@ current filesystem transaction. It must not reenter the same quota state. The fi
 one lock order for quota administration, inode operations and direct quota I/O.
 The per-record mutex protects the shared record; it does not mirror a counter.
 
+`QuotaReconfigure` exclusively borrows both the live and detached state until
+application or abandonment. Duplicate classes, dirty/cached preparation and
+invalid enforcement proposals fail before mutation. The plan never performs
+I/O or releases backing files; successful application transfers only absent
+classes and changes validated policy bits. The filesystem owns commit acceptance
+and keeps detached backing-file owners outside its locks. No live class can be
+replaced and no usage or reservation snapshot is rolled back by this protocol.
+
 ## Threat analysis
 
 | ID | Threat and trigger | Impact | Implemented control and residual risk |

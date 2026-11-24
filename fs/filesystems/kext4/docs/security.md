@@ -839,8 +839,14 @@ used to activate, resume or initialize quota state.
 Read-only remount first excludes VFS mutations and writable opens and rejects
 remaining writers or unlinked live inodes. It drains writeback and cached
 records before setting the existing suspended state, retaining file ownership.
-A failed writable remount suspends loaded classes without further I/O; it does
-not leave accounting active on a read-only superblock. Lookup and read-only
+Writable remount stages missing quota headers without publishing them, and
+validates activation/resume/enforcement as one borrowed `QuotaReconfigure`.
+The mount and quota guards span commit acceptance and its infallible application.
+Rejected acceptance preserves prior class ownership, suspension, enforcement,
+inode `NO_QUOTA` policy, statfs mode and quota mount options. Prepared file owners
+are dropped after both guards. Notifications after acceptance still prohibit
+writes but do not turn an applied configuration into a failed syscall.
+Lookup and read-only
 open require no quota acquisition or writable journal, including after abort.
 Writable open and metadata/namespace mutations acquire their affected owners
 before changing allocation state; journal-abort checks still reject mutation.

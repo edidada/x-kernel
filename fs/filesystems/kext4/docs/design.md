@@ -1744,6 +1744,17 @@ References are released outside native mount protection. Read-only suspension
 retains files and resumes accounting on a writable remount. Final shutdown uses
 the same external-file cleanup, preserving protection after journal abort.
 
+Writable remount prepares missing internal quota headers in a detached
+`QuotaInfo`, retaining backing inodes without enabling accounting or changing
+their `NO_QUOTA` policy. It then holds native mount mutation protection and the
+superblock quota lock through writable validation, `QuotaReconfigure`
+preparation, and `FsContext::commit_reconfigure`. The accepted application
+installs prepared classes, resumes existing classes, changes limit enforcement,
+and publishes statfs/mount options without further fallible operations. Rejected
+acceptance leaves all those settings intact; detached file owners are released
+outside mount/quota protection. A later abort keeps the superblock read-only
+without retroactively rejecting an already applied remount.
+
 Record acquisition first loads the canonical cache without write authority.
 Existing records need no physical-growth admission; missing records retain the
 format's bounded tree-growth admission before activation. Administrative queries

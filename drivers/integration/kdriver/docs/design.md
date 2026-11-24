@@ -201,8 +201,12 @@ Idle/Queued(cpu)/Running(cpu)/RunningAgain(cpu) are the processing phases. Detac
 the pinned CPU a finite batch; detached nodes remain Queued and cannot relink.
 Only the Idle and RunningAgain transitions to Queued link a reclaimer, and it is
 unlinked then, so the intrusive-collections relink panic is unreachable.
-Callbacks and notifications run outside the global lock. RunningAgain requeues
-only into the next batch. Enqueue and raise stay pinned across daemon wake.
+Callbacks and notifications run outside the global lock. RunningAgain or a
+`MorePending` result requeues only into the next batch. Initial publication uses
+the ordinary Block softirq fast path; a retained next batch requests deferred
+Block-vector service through `kirq::softirq::raise_softirq_deferred`. The existing
+per-CPU `ksoftirqd` then advances it without consuming ordinary worker capacity.
+Enqueue and raise stay pinned across daemon wake.
 
 Concurrent stop callers serialize on stop_lock through the terminal wait:
 the single stop_notification cannot be overwritten. IRQ and softirq never take
@@ -220,8 +224,11 @@ temporary device Arc to retire. Do not call stop from the device callback.
 CPU unplug and forced callback cancellation remain out of scope.
 
 Each device allocates one reclaimer Arc with an embedded stop mutex;
-there is no per-mark allocation or data copy. Existing host scheduler wake costs
-are unchanged. Request-local waiting remains separately owned in block_completion.
+there is no per-mark allocation or data copy. The driver owns its processing
+budget, kdriver owns device registration and requeue policy, and kirq owns vector
+placement and daemon wakeup. This adds no completion thread pool and gives no
+priority or real-time guarantee. Request-local waiting remains separately owned
+in block_completion.
 
 ## Shared Block IRQ Lifecycle
 

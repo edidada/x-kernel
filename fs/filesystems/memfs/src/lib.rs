@@ -65,13 +65,15 @@ fn tmpfs_reconfigure(context: &mut FsContext<'_>) -> VfsResult<()> {
     let options = *context.private::<shmem::TmpfsContextOptions>()?;
     let super_block = context.super_block()?;
     let fs = super_block.private::<Arc<MemoryFs>>()?;
-    if let Some(accounting) = fs.accounting.as_ref() {
-        accounting.reconfigure(
-            options.reconfigure_page_limit(),
-            options.reconfigure_inode_limit(),
-        )?;
-    }
-    Ok(())
+    context.commit_reconfigure(|| {
+        if let Some(accounting) = fs.accounting.as_ref() {
+            accounting.reconfigure(
+                options.reconfigure_page_limit(),
+                options.reconfigure_inode_limit(),
+            )?;
+        }
+        Ok(())
+    })
 }
 
 static TMPFS_CONTEXT_OPERATIONS: FsContextOperations =

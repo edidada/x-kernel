@@ -289,6 +289,7 @@ pub fn sys_fsconfig(
             if !super_block.has_active_mounts() {
                 super_block.init_user_ns(cred.user_ns_arc().clone());
             }
+            drop(context);
             state.super_block = Some(super_block);
         }
         FSCONFIG_CMD_RECONFIGURE => {

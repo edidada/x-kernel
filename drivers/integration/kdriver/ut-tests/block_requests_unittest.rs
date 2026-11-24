@@ -89,3 +89,127 @@ fn virtio_requests_sleep_across_cpus_and_reclaim_through_block_softirq() {
     let mut waiter = prepare_block_wait().unwrap();
     reclaimer.stop_and_wait(waiter.as_mut());
 }
+
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and retains that owner until DMA retirement and terminal completion"
+)]
+fn hardware_bio_reads_complete_with_all_ordinary_worker_pools_occupied() {
+    let disks: Vec<_> = block::block_devices()
+        .into_iter()
+        .filter(|disk| disk.name().starts_with("vd"))
+        .collect();
+    if disks.is_empty() {
+        return unittest::TestResult::Ignored;
+    }
+
+    // Direct BlockDevice reads traverse BioWait, the driver's request queue,
+    // the actual virtio IRQ and terminal BIO publication, without a page cache.
+    let mut expected = Vec::new();
+    for disk in &disks {
+        let mut bytes = alloc::vec![0x5a; 512];
+        disk.read_sectors(0, &mut bytes).unwrap();
+        expected.push(bytes);
+    }
+    let release = Arc::new(kcompletion::Completion::new());
+    let entered = Arc::new(AtomicUsize::new(0));
+    let slots =
+        kbuild_config::WORKQUEUE_WORKERS_PER_POOL.min(kbuild_config::KWORKNG_NORMAL_MAX_ACTIVE);
+    let mut ordinary = Vec::new();
+    kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| {
+        for _ in 0..slots {
+            let entered = entered.clone();
+            let release = release.clone();
+            let work = kworkng::WorkHandle::new(move || {
+                let waiter = ktask::completion::CompletionWait::prepare().unwrap();
+                entered.fetch_add(1, Ordering::Release);
+                waiter.wait(&release);
+            })
+            .unwrap();
+            work.queue_default(Some(cpu)).unwrap();
+            ordinary.push(work);
+        }
+    });
+    while entered.load(Ordering::Acquire) != ordinary.len() {
+        ktask::yield_now();
+    }
+
+    for (disk, expected) in disks.iter().zip(&expected) {
+        let mut waits = Vec::new();
+        for _ in 0..32 {
+            let (bio, wait) = block::completion::BioWait::prepare(
+                disk.clone(),
+                0,
+                block::BioOperation::Read,
+                alloc::vec![block::BioVec::new(
+                    alloc::vec![0xa7; 512].into_boxed_slice()
+                )],
+            )
+            .unwrap_or_else(|(error, _)| panic!("BIO preparation failed: {error:?}"));
+            disk.submit_bio(bio);
+            waits.push(wait);
+        }
+        // Submit a real backlog before waiting, so both retained completion
+        // passes and terminal BIO wakeups must advance with ordinary pools full.
+        for wait in waits {
+            let (status, vectors) = wait.wait();
+            status.unwrap();
+            assert_eq!(vectors.len(), 1);
+            assert_eq!(vectors[0].bytes(), expected.as_slice());
+        }
+    }
+    release.complete_all();
+    for work in ordinary {
+        work.shutdown().unwrap();
+    }
+}
+
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and retains that owner until DMA retirement and terminal completion"
+)]
+fn hardware_large_bio_reads_validate_dma_before_completion() {
+    let disks: Vec<_> = block::block_devices()
+        .into_iter()
+        .filter(|disk| disk.name().starts_with("vd") && disk.num_sectors() >= 4096)
+        .collect();
+    if disks.is_empty() {
+        return unittest::TestResult::Ignored;
+    }
+    for disk in disks {
+        let mut expected = alloc::vec![0x5a; 1024 * 1024];
+        for (index, chunk) in expected.chunks_mut(4096).enumerate() {
+            disk.read_sectors(index as u64 * 8, chunk).unwrap();
+        }
+        for bytes in [4096, 64 * 1024, 1024 * 1024] {
+            for _ in 0..32 {
+                // One owned extent reaches the driver directly, avoiding the
+                // device-file frontend's page-sized splitting.
+                let (status, vectors) = disk.submit_bio_wait(
+                    0,
+                    block::BioOperation::Read,
+                    alloc::vec![block::BioVec::new(
+                        alloc::vec![0xa7; bytes].into_boxed_slice()
+                    )],
+                );
+                status.unwrap();
+                assert_eq!(vectors.len(), 1);
+                assert_eq!(vectors[0].bytes(), &expected[..bytes]);
+            }
+        }
+    }
+}

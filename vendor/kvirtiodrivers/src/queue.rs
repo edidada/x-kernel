@@ -8,23 +8,30 @@
 mod owning;
 
 #[cfg(feature = "alloc")]
-pub use self::owning::OwningQueue;
-use crate::hal::{BufferDirection, Dma, DmaBackend, Hal, PhysAddr, StaticHal};
-use crate::transport::Transport;
-use crate::{Error, PAGE_SIZE, Result, align_up, pages};
-#[cfg(feature = "alloc")]
 use alloc::boxed::Box;
-use bitflags::bitflags;
 #[cfg(test)]
 use core::cmp::min;
-use core::convert::TryInto;
-use core::hint::spin_loop;
-use core::mem::{size_of, take};
 #[cfg(test)]
 use core::ptr;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU16, Ordering, fence};
+use core::{
+    convert::TryInto,
+    hint::spin_loop,
+    mem::{size_of, take},
+    ptr::NonNull,
+    sync::atomic::{AtomicU16, Ordering, fence},
+};
+
+use bitflags::bitflags;
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
+
+#[cfg(feature = "alloc")]
+pub use self::owning::OwningQueue;
+use crate::{
+    Error, PAGE_SIZE, Result, align_up,
+    hal::{BufferDirection, Dma, DmaBackend, Hal, PhysAddr, StaticHal},
+    pages,
+    transport::Transport,
+};
 
 /// The outcome of [`VirtQueue::add_notify_wait_pop_checked`].
 ///
@@ -80,6 +87,8 @@ pub struct VirtQueue<H: Hal, const SIZE: usize, B: DmaBackend = StaticHal<H>> {
     desc_shadow: [Descriptor; SIZE],
     /// Our trusted copy of `avail.idx`.
     avail_idx: u16,
+    /// Successful additions since the last notification decision.
+    num_added: u32,
     last_used_idx: u16,
     /// Whether the `VIRTIO_F_EVENT_IDX` feature has been negotiated.
     event_idx: bool,
@@ -191,6 +200,7 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
             in_use: [false; SIZE],
             desc_shadow,
             avail_idx: 0,
+            num_added: 0,
             last_used_idx: 0,
             event_idx,
             access_platform,
@@ -311,6 +321,7 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
 
         // increase head of avail ring
         self.avail_idx = self.avail_idx.wrapping_add(1);
+        self.num_added = self.num_added.saturating_add(1);
         // SAFETY: `self.avail` is properly aligned, dereferenceable and initialised.
         unsafe {
             (*self.avail.as_ptr())
@@ -562,12 +573,27 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
     /// virtqueue.
     ///
     /// This will be false if the device has suppressed notifications.
-    pub fn should_notify(&self) -> bool {
+    ///
+    /// Consumes additions since the previous decision. Event indices describe
+    /// the newly published interval, including wraparound, rather than an
+    /// ordinary integer ordering against the current index.
+    pub fn should_notify(&mut self) -> bool {
+        let added = self.num_added;
+        self.num_added = 0;
         if self.event_idx {
+            if added == 0 {
+                return false;
+            }
+            // A complete index cycle cannot be represented by a u16 interval.
+            // Conservatively kick if a polling caller deferred decisions that long.
+            if added > u32::from(u16::MAX) {
+                return true;
+            }
             // SAFETY: `self.used` points to a valid, aligned, initialised, dereferenceable, readable
             // instance of `UsedRing`.
             let avail_event = unsafe { (*self.used.as_ptr()).avail_event.load(Ordering::Acquire) };
-            self.avail_idx >= avail_event.wrapping_add(1)
+            let added = added as u16;
+            self.avail_idx.wrapping_sub(avail_event).wrapping_sub(1) < added
         } else {
             // SAFETY: `self.used` points to a valid, aligned, initialised, dereferenceable, readable
             // instance of `UsedRing`.
@@ -1288,6 +1314,10 @@ pub(crate) fn fake_read_write_queue<const QUEUE_SIZE: usize>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use safe_mmio::UniqueMmioPointer;
+
     use super::*;
     use crate::{
         device::common::Feature,
@@ -1298,8 +1328,6 @@ mod tests {
             mmio::{MODERN_VERSION, MmioTransport, VirtIOHeader},
         },
     };
-    use safe_mmio::UniqueMmioPointer;
-    use std::sync::{Arc, Mutex};
 
     #[test]
     fn drained_queue_transfers_again_after_repeated_transport_reset() {
@@ -1614,5 +1642,78 @@ mod tests {
 
         // Check that the transport should be notified again now.
         assert_eq!(queue.should_notify(), true);
+    }
+    #[test]
+    fn event_idx_does_not_repeat_a_previous_kick() {
+        let state = Arc::new(Mutex::new(State::new(vec![QueueStatus::default()], ())));
+        let mut transport = FakeTransport {
+            device_type: DeviceType::Block,
+            max_queue_size: 4,
+            device_features: Feature::RING_EVENT_IDX.bits(),
+            state,
+        };
+        let mut queue =
+            VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, true, false).unwrap();
+        // SAFETY: the literals remain valid throughout the test; FakeHal retains no DMA alias.
+        unsafe { queue.add(&[&[42]], &mut []) }.unwrap();
+        assert!(queue.should_notify());
+        // The device has not advanced its event index since the first kick.
+        // SAFETY: the same retained literal is valid until queue destruction.
+        unsafe { queue.add(&[&[43]], &mut []) }.unwrap();
+        assert!(!queue.should_notify());
+    }
+
+    #[test]
+    fn event_idx_notifies_for_a_batch_crossing_index_wrap() {
+        let state = Arc::new(Mutex::new(State::new(vec![QueueStatus::default()], ())));
+        let mut transport = FakeTransport {
+            device_type: DeviceType::Block,
+            max_queue_size: 4,
+            device_features: Feature::RING_EVENT_IDX.bits(),
+            state,
+        };
+        let mut queue =
+            VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, true, false).unwrap();
+        queue.avail_idx = u16::MAX - 1;
+        // SAFETY: the test owns this valid fake ring, and no device concurrently reads it.
+        unsafe {
+            (*queue.used.as_ptr())
+                .avail_event
+                .store(u16::MAX - 1, Ordering::Release);
+        }
+        for _ in 0..3 {
+            // SAFETY: the literal is retained through destruction and fake device access is absent.
+            unsafe { queue.add(&[&[42]], &mut []) }.unwrap();
+        }
+        assert_eq!(queue.avail_idx, 1);
+        assert!(queue.should_notify());
+        assert!(!queue.should_notify());
+    }
+
+    #[test]
+    fn event_idx_respects_an_event_ahead_of_the_added_batch() {
+        let state = Arc::new(Mutex::new(State::new(vec![QueueStatus::default()], ())));
+        let mut transport = FakeTransport {
+            device_type: DeviceType::Block,
+            max_queue_size: 4,
+            device_features: Feature::RING_EVENT_IDX.bits(),
+            state,
+        };
+        let mut queue =
+            VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, true, false).unwrap();
+        // SAFETY: the test owns this valid fake ring with no concurrent device access.
+        unsafe {
+            (*queue.used.as_ptr())
+                .avail_event
+                .store(2, Ordering::Release);
+        }
+        for _ in 0..2 {
+            // SAFETY: retained literal and no concurrent device access.
+            unsafe { queue.add(&[&[42]], &mut []) }.unwrap();
+        }
+        assert!(!queue.should_notify());
+        // SAFETY: retained literal and no concurrent device access.
+        unsafe { queue.add(&[&[42]], &mut []) }.unwrap();
+        assert!(queue.should_notify());
     }
 }

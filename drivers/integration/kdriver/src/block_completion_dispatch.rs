@@ -18,7 +18,9 @@
 use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 
-use block::completion::{BlockCompletionOperations, BlockSignals, BlockWaiter};
+use block::completion::{
+    BlockCompletionOperations, BlockCompletionStatus, BlockSignals, BlockWaiter,
+};
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use kirq::softirq::{self, SoftirqVec};
 use kspin::{NoPreempt, SpinNoIrq, static_lock};
@@ -196,12 +198,17 @@ fn process_pending_devices() {
             let should_run = state.is_accepting;
             (reclaimer, should_run)
         };
-        if should_run && let Some(device) = reclaimer.device.upgrade() {
-            device.process_completed_requests();
-        }
+        let status = if should_run && let Some(device) = reclaimer.device.upgrade() {
+            device.process_completed_requests()
+        } else {
+            BlockCompletionStatus::CaughtUp
+        };
         // The callback Arc has dropped before Idle or stop can be published.
         let (should_raise, stop_notification) = update_state(&reclaimer, |state, pending| {
-            if state.is_accepting && state.phase == ProcessingPhase::RunningAgain(cpu) {
+            if state.is_accepting
+                && (state.phase == ProcessingPhase::RunningAgain(cpu)
+                    || status == BlockCompletionStatus::MorePending)
+            {
                 state.phase = ProcessingPhase::Queued(cpu);
                 pending[cpu].push_back(reclaimer.clone());
                 (true, None)
@@ -211,7 +218,7 @@ fn process_pending_devices() {
             }
         });
         if should_raise {
-            softirq::raise_softirq(SoftirqVec::Block);
+            softirq::raise_softirq_deferred(SoftirqVec::Block);
         }
         if let Some(signals) = stop_notification {
             signals.notify_completion();

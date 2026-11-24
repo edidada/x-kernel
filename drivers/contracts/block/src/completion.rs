@@ -11,6 +11,16 @@ use kspin::SpinNoIrq;
 
 use crate::DriverResult;
 
+/// Whether completed requests remain after one device processing pass.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockCompletionStatus {
+    /// No currently visible completion remains; future device IRQs request new passes.
+    CaughtUp,
+    /// Completed requests remain and the host must schedule another processing pass.
+    MorePending,
+}
+
 /// Driver operations for reclaiming a block device's completed I/O requests.
 ///
 /// Implemented by the device that owns the hardware request queue, not by a
@@ -29,7 +39,10 @@ pub trait BlockCompletionOperations: Send + Sync {
     /// queue bookkeeping here; DMA operations must support this execution context.
     /// The host serializes invocations for the same device through its single
     /// completion-processing state, including the notification part of a pass.
-    fn process_completed_requests(&self);
+    /// Return `MorePending` when a processing budget leaves completed requests
+    /// behind. The host must schedule a later pass even if no new IRQ arrives.
+    /// `CaughtUp` does not mean all admitted I/O has completed.
+    fn process_completed_requests(&self) -> BlockCompletionStatus;
 }
 
 /// Independently owned notification sources for one block transaction.

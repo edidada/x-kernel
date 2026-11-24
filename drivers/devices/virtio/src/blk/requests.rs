@@ -7,7 +7,10 @@
 use alloc::{boxed::Box, vec};
 use core::ptr::NonNull;
 
-use block::{BioOperation, completion::BlockCompletionOperations};
+use block::{
+    BioOperation,
+    completion::{BlockCompletionOperations, BlockCompletionStatus},
+};
 use driver_os_api::{IrqEvent, IrqHandler};
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use virtio_drivers::{
@@ -16,6 +19,10 @@ use virtio_drivers::{
 };
 
 use super::*;
+
+// Bound one softirq pass independently of the negotiated hardware queue size.
+// This counts retired transfers, not whole BIOs or a guaranteed time limit.
+const COMPLETION_BATCH_TRANSFERS: usize = 1;
 
 struct VirtioRequest {
     links: LinkedListAtomicLink,
@@ -305,9 +312,12 @@ impl BlockRequests {
         &mut self,
         device: &mut InnerDev<H, T>,
         completed: &mut RequestList,
+        budget: usize,
     ) {
-        // No replenishment until this finite used-ring batch has been reclaimed.
-        while let Some(token) = device.peek_used() {
+        for _ in 0..budget {
+            let Some(token) = device.peek_used() else {
+                break;
+            };
             let pointer = self.in_flight[usize::from(token)]
                 .take()
                 .expect("owned submitted token");
@@ -399,7 +409,7 @@ impl<H: Hal, T: Transport> block::BlkMqOperations for VirtIoBlkDev<H, T> {
                 // Early boot has no completion executor. Poll the same owned
                 // queue to retirement; no second request or waiting object.
                 while !requests.is_drained() {
-                    requests.reclaim(device, &mut completed);
+                    requests.reclaim(device, &mut completed, usize::MAX);
                     requests.dispatch(device, &mut completed);
                     core::hint::spin_loop();
                 }
@@ -426,22 +436,29 @@ impl<H: Hal, T: Transport> IrqHandler for VirtIoBlkDev<H, T> {
 }
 
 impl<H: Hal, T: Transport> BlockCompletionOperations for VirtIoBlkDev<H, T> {
-    fn process_completed_requests(&self) {
+    fn process_completed_requests(&self) -> BlockCompletionStatus {
         let mut completed = RequestList::new(RequestAdapter::NEW);
+        let status;
         {
             let mut state = self.state.lock();
             let BlockState {
                 device, requests, ..
             } = &mut *state;
             let Some(device) = device else {
-                return;
+                return BlockCompletionStatus::CaughtUp;
             };
-            requests.reclaim(device, &mut completed);
+            requests.reclaim(device, &mut completed, COMPLETION_BATCH_TRANSFERS);
             // Replenishment uses existing request nodes and nonblocking transport
             // operations. No submitting task has to wake just to advance the FIFO.
             requests.dispatch(device, &mut completed);
+            status = if device.peek_used().is_some() {
+                BlockCompletionStatus::MorePending
+            } else {
+                BlockCompletionStatus::CaughtUp
+            };
         }
         self.finish_requests(completed);
+        status
     }
 }
 

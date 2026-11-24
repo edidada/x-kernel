@@ -2838,3 +2838,20 @@ Name storage currently uses `Vec::try_reserve`. The global allocator may abort
 on OOM, so the current implementation does **not** guarantee that a real OOM is
 reported as `IrqStatsError::NoMemory`; this is a public fallible-collection gap,
 tracked separately. Capacity growth/retry semantics are tested independently.
+
+## Budgeted Vector Deferral
+
+`raise_softirq_deferred(vec)` publishes the ordinary current-CPU pending bit and
+an independent per-vector placement hint. IRQ-tail and BH-enable drains leave
+that vector pending for the existing per-CPU `ksoftirqd`, while still running
+eligible vectors in their normal order. The explicit task-context drain used by
+`ksoftirqd` services both ordinary and deferred vectors. Its existing ten-restart
+and reschedule bounds remain in force.
+
+An action can first serve a small batch inline and request deferred service for
+its remainder. Pending bits remain the work authority; the placement mask owns
+no callback, device or buffer. A fully drained vector loses its hint, so later
+ordinary publication can take the fast path again. CPU pinning and IRQ masking
+cover pending/mask updates. Actions still run with preemption disabled and must
+not sleep, including when the caller is `ksoftirqd`. No new thread, worker pool,
+timer, or real-time priority guarantee is introduced.

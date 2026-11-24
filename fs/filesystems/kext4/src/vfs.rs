@@ -47,6 +47,14 @@ pub(crate) struct Ext4MountOptions {
     pub(crate) quota_types: Option<u8>,
 }
 
+/// Detached quota headers and inode policy awaiting a successful remount.
+/// File references are released only after mount and quota guards have dropped.
+#[derive(Default)]
+pub(crate) struct PreparedInternalQuotas {
+    pub(crate) quota: kquota::QuotaInfo<Arc<VfsInode>>,
+    pub(crate) inodes: Vec<Arc<Ext4Inode>>,
+}
+
 impl Ext4MountOptions {
     pub(crate) fn parse(data: Option<&[u8]>) -> VfsResult<Self> {
         let mut options = Self::default();
@@ -433,12 +441,33 @@ impl Ext4SuperOperations {
     }
 
     pub(crate) fn activate_internal_quotas(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        let mut prepared = Self::prepare_internal_quotas(super_block)?;
+        if prepared.inodes.is_empty() {
+            return Ok(());
+        }
+        let ext4 = ext4_private(super_block)?;
+        let state = ext4.write(super_block);
+        state.ensure_writable().map_err(into_vfs_err)?;
+        let mut quota = super_block.quota_info();
+        quota
+            .prepare_reconfigure(&mut prepared.quota, false, None)?
+            .apply();
+        for inode in &prepared.inodes {
+            inode.set_noquota(true);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_internal_quotas(
+        super_block: &Arc<SuperBlock>,
+    ) -> VfsResult<PreparedInternalQuotas> {
         let ext4 = ext4_private(super_block)?;
         let mut files = Vec::new();
+        let mut prepared = PreparedInternalQuotas::default();
         {
             let state = ext4.read();
             if !state.has_quota_feature() || state.ensure_quota_feature_supported().is_err() {
-                return Ok(());
+                return Ok(prepared);
             }
             state
                 .validate_internal_quota_inodes()
@@ -473,32 +502,18 @@ impl Ext4SuperOperations {
                 files.push((kind, private));
             }
         }
-        let mut enabled = 0_u8;
         for (kind, private) in files {
             let number = private.number();
             let file = super_block.get_or_try_init_inode(u64::from(number.get()), || {
                 Self::new_vfs_inode(super_block, ext4, private)
             })?;
-            file.private::<Ext4Inode>()?.set_noquota(true);
-            let result = ext4
-                .write(super_block)
-                .enable_internal_quota(super_block, kind, &file)
-                .map_err(into_vfs_err);
-            if result.is_err() {
-                for loaded in kquota::QuotaType::ALL {
-                    if enabled & (1 << loaded as u8) == 0 {
-                        continue;
-                    }
-                    let release = ext4.disable_internal_quota(super_block, loaded);
-                    if let Err(error) = release {
-                        error!("KExt4 quota activation cleanup failed: {error:?}");
-                    }
-                }
-            }
-            result?;
-            enabled |= 1 << kind as u8;
+            let inode = file.downcast::<Ext4Inode>()?;
+            ext4.write(super_block)
+                .prepare_internal_quota(&mut prepared.quota, kind, &file)
+                .map_err(into_vfs_err)?;
+            prepared.inodes.push(inode);
         }
-        Ok(())
+        Ok(prepared)
     }
 
     fn iget(super_block: &Arc<SuperBlock>, number: InodeNumber) -> VfsResult<Arc<VfsInode>> {

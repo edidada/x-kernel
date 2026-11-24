@@ -79,7 +79,7 @@ fn mock_reconfigure(context: &mut FsContext<'_>) -> VfsResult<()> {
     {
         return Err(VfsError::ReadOnlyFilesystem);
     }
-    Ok(())
+    context.commit_reconfigure(|| Ok(()))
 }
 
 static MOCK_CONTEXT_OPERATIONS: crate::FsContextOperations =

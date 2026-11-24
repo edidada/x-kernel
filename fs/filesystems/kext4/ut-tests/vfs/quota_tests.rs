@@ -944,6 +944,99 @@ fn remount_quota_filesystem(super_block: &SuperBlock, is_read_only: bool) -> Vfs
     super_block.reconfigure(&mut context)
 }
 
+fn notify_before_ext4_remount(context: &mut kvfs::FsContext<'_>) -> VfsResult<()> {
+    context.super_block()?.mark_read_only();
+    crate::ext4_reconfigure(context)
+}
+
+fn notify_after_ext4_remount(context: &mut kvfs::FsContext<'_>) -> VfsResult<()> {
+    crate::ext4_reconfigure(context)?;
+    context.super_block()?.mark_read_only();
+    Ok(())
+}
+
+static NOTIFY_BEFORE_EXT4_REMOUNT: kvfs::FsContextOperations =
+    kvfs::FsContextOperations::with_reconfigure(crate::ext4_get_tree, notify_before_ext4_remount);
+static NOTIFY_AFTER_EXT4_REMOUNT: kvfs::FsContextOperations =
+    kvfs::FsContextOperations::with_reconfigure(crate::ext4_get_tree, notify_after_ext4_remount);
+
+#[def_test]
+fn rejected_writable_remount_preserves_statfs_options_and_quota_lifecycle() {
+    for (was_readonly, was_loaded) in [(false, true), (true, true), (true, false)] {
+        let (super_block, file, device) = internal_quota_fixture();
+        if was_readonly {
+            remount_quota_filesystem(&super_block, true).unwrap();
+        }
+        if !was_loaded {
+            let retained = super_block.quota_info().unload(QuotaType::User).unwrap();
+            drop(retained);
+        }
+        let (stats, mount_options) = {
+            let state = ext4_private(&super_block).unwrap().read();
+            (state.statfs().unwrap(), state.quota_mount_options)
+        };
+        let quota_state = super_block.quota_info().info(QuotaType::User).map(|info| info.state());
+        let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+        let was_noquota = inode.is_noquota();
+        let writes = device.write_count();
+        let cred = kcred::initial_cred();
+        let mut context = kvfs::FsContext::new_reconfigure(
+            &super_block,
+            None,
+            Some(b"minixdf,usrquota"),
+            SuperBlockFlags::empty(),
+            SuperBlockFlags::RDONLY,
+            &cred,
+        ).unwrap();
+        context.set_operations(&NOTIFY_BEFORE_EXT4_REMOUNT);
+        assert_eq!(super_block.reconfigure(&mut context), Err(VfsError::ReadOnlyFilesystem));
+        assert!(super_block.is_readonly());
+        {
+            let state = ext4_private(&super_block).unwrap().read();
+            assert_eq!(state.statfs().unwrap(), stats);
+            assert_eq!(state.quota_mount_options, mount_options);
+            state.ensure_writable().unwrap();
+        }
+        assert_eq!(
+            super_block.quota_info().info(QuotaType::User).map(|info| info.state()),
+            quota_state
+        );
+        assert_eq!(inode.is_noquota(), was_noquota);
+        assert_eq!(device.write_count(), writes);
+
+        context.set_operations(&crate::FS_CONTEXT_OPERATIONS);
+        super_block.reconfigure(&mut context).unwrap();
+        assert!(!super_block.is_readonly());
+        assert_eq!(ext4_private(&super_block).unwrap().read().quota_mount_options, 1);
+        let quota = super_block.quota_info();
+        let info = quota.info(QuotaType::User).unwrap();
+        assert!(info.is_active());
+        assert!(info.state().contains(QuotaState::LIMITS_ENABLED));
+    }
+}
+
+#[def_test]
+fn read_only_notification_after_ext4_commit_does_not_reject_applied_options() {
+    let (super_block, _file, device) = internal_quota_fixture();
+    let writes = device.write_count();
+    let cred = kcred::initial_cred();
+    let mut context = kvfs::FsContext::new_reconfigure(
+        &super_block,
+        None,
+        Some(b"minixdf,usrquota"),
+        SuperBlockFlags::empty(),
+        SuperBlockFlags::RDONLY,
+        &cred,
+    ).unwrap();
+    context.set_operations(&NOTIFY_AFTER_EXT4_REMOUNT);
+    assert_eq!(super_block.reconfigure(&mut context), Ok(()));
+    assert!(super_block.is_readonly());
+    assert_eq!(ext4_private(&super_block).unwrap().read().quota_mount_options, 1);
+    let quota = super_block.quota_info();
+    assert!(quota.info(QuotaType::User).unwrap().state().contains(QuotaState::LIMITS_ENABLED));
+    assert_eq!(device.write_count(), writes);
+}
+
 fn accounted_vfs_inode(super_block: &Arc<SuperBlock>, uid: u32) -> Arc<VfsInode> {
     let inode = {
         let mut state = ext4_private(super_block).unwrap().write(super_block);
@@ -1483,7 +1576,7 @@ fn owner_initialization_reuses_sparse_quota_blocks_below_eof() {
         ));
     }
     state
-        .enable_internal_quota(&super_block, QuotaType::User, file.inode())
+        .prepare_internal_quota(&mut super_block.quota_info(), QuotaType::User, file.inode())
         .unwrap();
     state.initialize_owner_quotas(1000, 1000, 0).unwrap();
     for logical in [4, 6] {

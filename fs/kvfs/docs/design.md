@@ -1707,6 +1707,24 @@ before releasing mutation protection, so that the existing VFS write entry point
 The filesystem's reconfigure callback must reject restoring writability based on the existing failure state, and must not apply
 other mount options before returning the error. `RDONLY` itself remains a mount flag and cannot replace the filesystem's internal write admission checks.
 
+The flags and the active reconfiguration's acceptance permission share one
+atomic word. The umount write lock serializes reconfiguration; callbacks finish
+with `FsContext::commit_reconfigure` while holding their configuration locks.
+It validates the final proposal and atomically checks permission before calling
+the application closure. A preceding `mark_read_only()` sets `RDONLY` and
+revokes permission, so a writable proposal returns EROFS without applying
+configuration, even when the filesystem was already read-only. The closure
+must leave configuration unchanged on failure; success publishes flags without
+another fallible validation. A notification after acceptance remains effective:
+publication preserves `RDONLY`, and an applied remount succeeds. This also
+covers notifications after the filesystem callback returns. A failed application
+retains the old flags plus concurrent read-only notifications.
+
+Read-only proposals may still commit. Permission is cleared on exit and is
+excluded from user-visible flags. It neither publishes filesystem-private state
+nor replaces internal write admission after journal abort. Contexts cannot
+commit outside an active callback or commit the same operation twice.
+
 ### Submission-based writeback batches
 
 `AddressSpace::submit_cached_ranges` transfers bounded PageCache snapshots and

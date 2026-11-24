@@ -170,6 +170,10 @@ needs no knowledge of VFS or filesystem types.
 `BlockCompletionOperations` expresses finite, non-sleeping reclamation. The host
 serializes callbacks and retains the target until stop completes. Virtio reclaims
 completed descriptors and submits pending requests without waking a caller for admission.
+`BlockCompletionStatus::MorePending` requires another host pass without waiting
+for a new IRQ. `CaughtUp` means no visible completion remains at that observation;
+it does not mean every admitted request has completed. A processing budget counts
+work, not elapsed time or a whole BIO's lifetime.
 Terminal bio callbacks run after releasing the device lock and must not sleep.
 
 `BioWait` is a caller-side adapter over the existing `BlockWaiter`/`BlockSignals`

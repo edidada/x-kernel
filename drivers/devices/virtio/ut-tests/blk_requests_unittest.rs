@@ -471,7 +471,7 @@ fn request_read_write_flush_complete_without_driver_copy() {
                 let token = hardware.lock().submitted[0];
                 hardware.lock().complete(token, status);
                 assert!(disk.handle(0).handled());
-                disk.process_completed_requests();
+                while disk.process_completed_requests() == BlockCompletionStatus::MorePending {}
                 assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
                 let (actual, vectors) = result.lock().take().unwrap();
                 assert_eq!(
@@ -489,7 +489,7 @@ fn request_read_write_flush_complete_without_driver_copy() {
                 if operation == BioOperation::Read {
                     assert!(vectors[0].bytes().iter().all(|byte| *byte == 0xa5));
                 }
-                disk.process_completed_requests();
+                while disk.process_completed_requests() == BlockCompletionStatus::MorePending {}
                 assert!(result.lock().is_none());
             }
         }
@@ -533,7 +533,7 @@ fn submit_batch_then_wait_preserves_fifo_and_owned_scatter_memory() {
     drop(waits.pop());
     while hardware.lock().completed < 24 {
         hardware.lock().complete_pending();
-        disk.process_completed_requests();
+        while disk.process_completed_requests() == BlockCompletionStatus::MorePending {}
     }
     for wait in waits {
         let (status, vectors) = wait.wait();
@@ -577,11 +577,65 @@ fn request_immediate_completion_and_noop_flush() {
     )
     .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
     device.submit_bio(bio);
-    disk.process_completed_requests();
+    while disk.process_completed_requests() == BlockCompletionStatus::MorePending {}
     assert!(wait.wait().0.is_ok());
     assert_eq!(device.flush(), Ok(()));
     assert_eq!(hardware.lock().submitted_count(), 1);
     assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
+}
+
+#[def_test(serial)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: BioVec uses the production Box<[u8]> constructor \
+              and retains that owner until DMA retirement and terminal completion"
+)]
+fn completion_budget_keeps_unprocessed_dma_owned_and_close_waiting() {
+    let (disk, hardware) = disk(1 << 28, false);
+    let device = view(&disk);
+    let returned = Arc::new(AtomicUsize::new(0));
+    let count = COMPLETION_BATCH_TRANSFERS * 2;
+    for _ in 0..count {
+        let returned = returned.clone();
+        device.submit_bio(block::Bio::new(
+            device.clone(),
+            0,
+            BioOperation::Read,
+            vec![block::BioVec::new(vec![0; SECTOR_SIZE].into_boxed_slice())],
+            move |status, vectors| {
+                core::assert_eq!(status, Ok(()));
+                core::assert!(vectors[0].bytes().iter().all(|byte| *byte == 0xa5));
+                returned.fetch_add(1, Ordering::Relaxed);
+            },
+        ));
+    }
+    assert_eq!(hardware.lock().complete_pending(), count);
+    assert_eq!(
+        disk.process_completed_requests(),
+        BlockCompletionStatus::MorePending
+    );
+    assert_eq!(returned.load(Ordering::Relaxed), COMPLETION_BATCH_TRANSFERS);
+    assert_eq!(
+        disk.state.lock().active_requests,
+        COMPLETION_BATCH_TRANSFERS
+    );
+    assert!(MAPPINGS.load(Ordering::Relaxed) > 0);
+    let drained = Arc::new(Signals::default());
+    disk.begin_close(drained.clone());
+    assert_eq!(drained.completion.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        disk.process_completed_requests(),
+        BlockCompletionStatus::CaughtUp
+    );
+    assert_eq!(returned.load(Ordering::Relaxed), count);
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
+    assert_eq!(drained.completion.load(Ordering::Relaxed), 1);
+    disk.finish_close();
 }
 
 #[def_test(serial)]
@@ -633,13 +687,13 @@ fn scatter_transfers_preserve_addresses_and_split_only_at_device_limits() {
             device.submit_bio(bio);
             assert_eq!(hardware.lock().submitted_count(), 1);
             hardware.lock().complete_pending();
-            disk.process_completed_requests();
+            while disk.process_completed_requests() == BlockCompletionStatus::MorePending {}
             // The common request has not completed; its remaining extent was
             // submitted by completion processing, without waking the caller.
             assert_eq!(disk.state.lock().active_requests, 1);
             assert_eq!(hardware.lock().submitted_count(), 2);
             hardware.lock().complete_pending();
-            disk.process_completed_requests();
+            while disk.process_completed_requests() == BlockCompletionStatus::MorePending {}
             let (status, vectors) = wait.wait();
             status.unwrap();
             assert_eq!(disk.state.lock().active_requests, 0);

@@ -291,8 +291,7 @@ fn devpts_reconfigure(context: &mut FsContext<'_>) -> VfsResult<()> {
     let options = MountOptions::parse(context.data())?;
     // A data-level `ro`/`rw` lands on the superblock on remount too, like
     // Linux's `vfs_parse_sb_flag`: extend the applied mask with RDONLY and
-    // set/clear the proposed bit (`SuperBlock::reconfigure` computes the
-    // stored flags after this callback returns).
+    // set/clear the proposed bit before the final commit validates policy.
     if let Some(ro) = options.data_rdonly {
         context.set_sb_flags_mask(context.sb_flags_mask() | SuperBlockFlags::RDONLY);
         let mut sb_flags = context.sb_flags();
@@ -308,13 +307,15 @@ fn devpts_reconfigure(context: &mut FsContext<'_>) -> VfsResult<()> {
     let shared = fs
         .private::<ksync::Mutex<MountOptions>>()
         .ok_or(kvfs::VfsError::InvalidInput)?;
-    *shared.lock() = options;
     let ptmx = super_block.root_dir().lookup(root::PTMX_NAME)?;
-    ptmx.update_metadata(MetadataUpdate {
-        mode: Some(NodePermission::from_bits_truncate(options.ptmx_mode)),
-        ..MetadataUpdate::default()
-    })?;
-    Ok(())
+    context.commit_reconfigure(|| {
+        ptmx.update_metadata(MetadataUpdate {
+            mode: Some(NodePermission::from_bits_truncate(options.ptmx_mode)),
+            ..MetadataUpdate::default()
+        })?;
+        *shared.lock() = options;
+        Ok(())
+    })
 }
 
 static FS_CONTEXT_OPERATIONS: FsContextOperations =

@@ -1582,3 +1582,18 @@ The name-storage `Vec::try_reserve` path does not currently guarantee a return
 from real OOM because the global allocator may abort. No security property may
 claim an OOM-safe statistics read until the public fallible collection exists;
 capacity growth and retry are distinct from OOM and are documented separately.
+
+## Deferred Softirq Placement
+
+The current-CPU deferred mask is kernel-owned advisory state. Only the ordinary
+pending bit accepts work; a placement request cannot free callback storage,
+complete device I/O or bypass the action's non-sleeping contract. IRQ masking and
+CPU pinning serialize local publication; atomic masks also cover IRQ reentry
+while actions run with local IRQs enabled. Inline claiming preserves deferred
+pending bits, and daemon draining clears hints only for drained vectors.
+
+A busy vector cannot force unrelated vectors out of the inline pass. As with the
+existing restart-limit fallback, progress requires the registered per-CPU daemon
+and advancing scheduler. A callback that continually republishes work can keep
+that CPU busy; the restart/reschedule limits provide handoff, not a latency bound
+or a repair for a non-terminating action.

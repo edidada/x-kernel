@@ -13,6 +13,58 @@ use crate::{
 const FORMAT: QuotaFormat = QuotaFormat::VfsV1;
 
 #[def_test]
+fn abandoned_remount_preserves_suspension_and_limits_then_can_retry() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut live = io.enable_all(FORMAT);
+    live.suspend_cached(QuotaType::User).unwrap();
+    let before = QuotaType::ALL.map(|kind| live.info(kind).unwrap().state());
+    let mut prepared = QuotaInfo::new();
+    {
+        let _plan = live.prepare_reconfigure(&mut prepared, true, Some(0)).unwrap();
+    }
+    assert_eq!(QuotaType::ALL.map(|kind| live.info(kind).unwrap().state()), before);
+    assert!(matches!(
+        live.prepare_reconfigure(&mut prepared, false, Some(0)),
+        Err(error) if LinuxError::from(error) == LinuxError::ESRCH
+    ));
+    live.prepare_reconfigure(&mut prepared, true, Some(0)).unwrap().apply();
+    for kind in QuotaType::ALL {
+        let info = live.info(kind).unwrap();
+        assert!(info.is_active());
+        assert!(!info.state().contains(QuotaState::LIMITS_ENABLED));
+    }
+    assert_eq!(io.writes.get(), 0);
+}
+
+#[def_test]
+fn prepared_quota_files_remain_detached_until_the_remount_is_applied() {
+    let mut io = MemoryFiles::new(FORMAT);
+    let mut prepared = io.enable_all(FORMAT);
+    let mut live = QuotaInfo::new();
+    {
+        let _plan = live.prepare_reconfigure(&mut prepared, true, Some(1)).unwrap();
+    }
+    for kind in QuotaType::ALL {
+        assert!(live.info(kind).is_none());
+        assert!(prepared.info(kind).is_some());
+    }
+    live.prepare_reconfigure(&mut prepared, true, Some(1)).unwrap().apply();
+    for kind in QuotaType::ALL {
+        assert!(prepared.info(kind).is_none());
+        let info = live.info(kind).unwrap();
+        assert!(info.is_active());
+        assert_eq!(info.state().contains(QuotaState::LIMITS_ENABLED), kind == QuotaType::User);
+    }
+    let mut duplicate = io.enable_all(FORMAT);
+    assert!(matches!(
+        live.prepare_reconfigure(&mut duplicate, true, Some(0)),
+        Err(error) if LinuxError::from(error) == LinuxError::EBUSY
+    ));
+    assert!(live.info(QuotaType::User).unwrap().state().contains(QuotaState::LIMITS_ENABLED));
+    assert_eq!(io.writes.get(), 0);
+}
+
+#[def_test]
 fn inode_records_import_reservations_again_after_class_reactivation() {
     let mut io = MemoryFiles::new(FORMAT);
     let mut quota = io.enable_all(FORMAT);

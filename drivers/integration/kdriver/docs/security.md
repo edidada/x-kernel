@@ -835,6 +835,17 @@ sleepable context and waits for a completion signaled after transport and claim
 destruction before another scenario resets shared accounting. This test-only
 notification does not bypass the production claim or weaken DMA leak checks.
 
+### Budgeted Block Requeue
+
+`MorePending` follows the same lock-protected Queued transition as an IRQ racing
+a running callback. The pending list retains the device registration before the
+Block vector is raised for deferred service. The global pending lock is released
+before touching kirq or waking the daemon. Hardware request buffers remain solely
+in the driver; no new pending state machine or execution-resource owner is added.
+A processing callback remains finite and non-sleeping in the daemon. Admission
+closure overrides requeue, after activation has drained actual requests and
+synchronized IRQ producers, preserving the existing terminal stop ordering.
+
 ## VirtIO block binding data
 
 VirtIO block activation is owned by the block binding's typed `Data`, not by a

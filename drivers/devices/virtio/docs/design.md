@@ -622,6 +622,14 @@ maximum payload of 8148 bytes.
 
 ## Concurrency Model
 
+With the dependency's `alloc` feature, PCI transport queue setup caches each
+queue's notification-register index. A configured queue's kick then writes
+that register without selecting and reading common configuration again under
+the caller's device lock. Setup may grow this table; notification does not
+allocate. Device reset invalidates it before queues are configured again.
+Unconfigured queues and builds without `alloc` retain the register lookup path.
+This changes neither the block completion context nor DMA-before-callback order.
+
 - **blk:** Submission and completion use one device `SpinNoIrq` for queue and
   state. Caller waits and terminal callbacks occur outside it. IRQ
   acknowledgement uses the same lock, and the host serializes per-device
@@ -891,3 +899,15 @@ unchanged capacity, rebuilds empty rings in their retained allocations and
 restores notification policy before reopening admission. No transport is
 destroyed or republished. Other VirtIO device kinds do not advertise this PM
 contract.
+
+### Circular Virtqueue Notification Decisions
+
+`VirtQueue::should_notify` and the owning-queue wrapper consume successful
+additions since their preceding decision. With EVENT_IDX, notification tests
+whether the device's event falls in the newly published circular u16 interval;
+ordinary integer ordering is insufficient across index wrap and repeats kicks
+when the event index has not advanced. A caller must perform the requested kick
+before making another decision. More than a full index cycle conservatively
+requests a kick; failed additions never advance this count. Legacy used-ring
+notification flags retain their existing behavior. This changes no request or
+DMA ownership and adds no per-I/O allocation.

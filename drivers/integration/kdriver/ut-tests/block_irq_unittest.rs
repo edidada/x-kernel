@@ -5,7 +5,7 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use block::completion::BlockCompletionOperations;
+use block::completion::{BlockCompletionOperations, BlockCompletionStatus};
 use driver_os_api::{IrqHandlerToken, IrqTrigger, ResError};
 use kirq::{
     context::test_support::ScopedHardIrqContext, softirq::test_support::ScopedDaemonWakeGate,
@@ -85,8 +85,9 @@ impl IrqHandler for TestDevice {
 }
 
 impl BlockCompletionOperations for TestDevice {
-    fn process_completed_requests(&self) {
+    fn process_completed_requests(&self) -> BlockCompletionStatus {
         self.reclaims.fetch_add(1, Ordering::Relaxed);
+        BlockCompletionStatus::CaughtUp
     }
 }
 

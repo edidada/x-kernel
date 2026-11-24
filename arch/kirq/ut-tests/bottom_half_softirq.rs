@@ -373,3 +373,82 @@ fn test_softirq_diagnostics_clear() {
     clear_softirq_diagnostics();
     assert_eq!(softirq_diagnostics(), SoftirqDiagnostics::default());
 }
+
+static DEFERRED_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+fn deferred_once_action() {
+    if DEFERRED_CALLS.fetch_add(1, Ordering::Relaxed) == 0 {
+        super::raise_softirq_deferred(SoftirqVec::Hrtimer);
+    }
+}
+
+fn deferred_count_action() {
+    DEFERRED_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[def_test(serial)]
+fn test_budgeted_action_moves_the_next_occurrence_to_the_daemon() {
+    let _irq = kspin::NoPreemptIrqSave::new();
+    let _wake_gate = begin_softirq_test();
+    DEFERRED_CALLS.store(0, Ordering::Relaxed);
+    let _action = ScopedSoftirqAction::install(SoftirqVec::Hrtimer, deferred_once_action);
+    raise_softirq(SoftirqVec::Hrtimer);
+    assert_eq!(run_with_resched(|| false), SoftirqRunResult::Deferred);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 1);
+    assert!(local_softirq_pending() & SoftirqVec::Hrtimer.bit() != 0);
+    // A further IRQ does not steal the retained occurrence from the daemon.
+    raise_softirq(SoftirqVec::Hrtimer);
+    assert_eq!(run_with_resched(|| false), SoftirqRunResult::Deferred);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(run_pending_softirqs(), SoftirqRunResult::Ran);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 2);
+    assert_eq!(local_softirq_pending(), 0);
+}
+
+#[def_test(serial)]
+fn test_deferred_vector_preserves_other_vectors_inline_execution() {
+    let _irq = kspin::NoPreemptIrqSave::new();
+    let _wake_gate = begin_softirq_test();
+    DEFERRED_CALLS.store(0, Ordering::Relaxed);
+    HIGH_ORDER.store(0, Ordering::Relaxed);
+    let _high = ScopedSoftirqAction::install(SoftirqVec::High, high_action);
+    let _action = ScopedSoftirqAction::install(SoftirqVec::Hrtimer, deferred_count_action);
+    super::raise_softirq_deferred(SoftirqVec::Hrtimer);
+    raise_softirq(SoftirqVec::High);
+    assert_eq!(run_with_resched(|| false), SoftirqRunResult::Deferred);
+    assert!(HIGH_ORDER.load(Ordering::Relaxed) != 0);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(run_pending_softirqs(), SoftirqRunResult::Ran);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 1);
+}
+
+#[def_test(serial)]
+fn test_finished_deferred_work_does_not_change_a_later_fast_path() {
+    let _irq = kspin::NoPreemptIrqSave::new();
+    let _wake_gate = begin_softirq_test();
+    DEFERRED_CALLS.store(0, Ordering::Relaxed);
+    let _action = ScopedSoftirqAction::install(SoftirqVec::Hrtimer, deferred_count_action);
+    super::raise_softirq_deferred(SoftirqVec::Hrtimer);
+    assert_eq!(run_pending_softirqs(), SoftirqRunResult::Ran);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 1);
+    raise_softirq(SoftirqVec::Hrtimer);
+    assert_eq!(run_with_resched(|| false), SoftirqRunResult::Ran);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 2);
+    assert_eq!(local_softirq_pending(), 0);
+}
+
+#[def_test(serial)]
+fn test_bh_enable_retains_deferred_work_for_the_daemon() {
+    let _irq = kspin::NoPreemptIrqSave::new();
+    let _wake_gate = begin_softirq_test();
+    DEFERRED_CALLS.store(0, Ordering::Relaxed);
+    let _action = ScopedSoftirqAction::install(SoftirqVec::Hrtimer, deferred_count_action);
+    {
+        let _bh = local_bh_disable();
+        super::raise_softirq_deferred(SoftirqVec::Hrtimer);
+    }
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 0);
+    assert!(local_softirq_pending() & SoftirqVec::Hrtimer.bit() != 0);
+    assert_eq!(run_pending_softirqs(), SoftirqRunResult::Ran);
+    assert_eq!(DEFERRED_CALLS.load(Ordering::Relaxed), 1);
+}

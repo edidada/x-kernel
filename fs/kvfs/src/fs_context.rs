@@ -11,6 +11,7 @@ use kalloc_types::KBox;
 
 use crate::{
     FileSystemType, FsContextOperations, Path, SuperBlock, SuperBlockFlags, VfsError, VfsResult,
+    super_block::{SuperBlockFlagUpdate, validate_block_device_flags},
 };
 
 /// Purpose of one filesystem-context transaction.
@@ -43,6 +44,8 @@ pub struct FsContext<'a> {
     operations: Option<&'static FsContextOperations>,
     fs_private: Option<KBox<dyn Any + Send + Sync>>,
     proposed_super_private: Option<KBox<dyn Any + Send + Sync>>,
+    reconfigure_update: Option<SuperBlockFlagUpdate<'a>>,
+    has_reconfigured: bool,
 }
 
 impl<'a> FsContext<'a> {
@@ -75,6 +78,8 @@ impl<'a> FsContext<'a> {
             operations: None,
             fs_private: None,
             proposed_super_private: None,
+            reconfigure_update: None,
+            has_reconfigured: false,
         })
     }
 
@@ -107,6 +112,8 @@ impl<'a> FsContext<'a> {
             operations: None,
             fs_private: None,
             proposed_super_private: None,
+            reconfigure_update: None,
+            has_reconfigured: false,
         })
     }
 
@@ -166,8 +173,8 @@ impl<'a> FsContext<'a> {
     /// Overrides the superblock flags a reconfigure will apply (within the
     /// caller's mask). Filesystems whose mount data carries sb-level tokens
     /// (`ro`/`rw`, Linux `vfs_parse_sb_flag`) call this from their
-    /// reconfigure callback, which `SuperBlock::reconfigure` runs before
-    /// computing the stored flags.
+    /// reconfigure callback, before `commit_reconfigure` validates the final
+    /// proposal and invokes the filesystem application.
     pub fn set_sb_flags(&mut self, flags: SuperBlockFlags) {
         self.sb_flags = flags;
     }
@@ -204,6 +211,34 @@ impl<'a> FsContext<'a> {
     /// Requires sleepable task context. Mount-purpose contexts return InvalidInput.
     pub fn sync_filesystem(&self) -> VfsResult<()> {
         self.super_block()?.sync_fs_locked()
+    }
+
+    /// Accepts and applies a reconfiguration under the filesystem's own locks.
+    ///
+    /// Reconfigure callbacks call this as their final operation. Complete all
+    /// fallible preparation first; `apply` must leave configuration unchanged on
+    /// error. Keep configuration and mutation exclusion until this returns.
+    /// A read-only notification before acceptance rejects a writable proposal
+    /// without calling `apply`. A later notification still prohibits writes,
+    /// but does not reject an already accepted and successfully applied proposal.
+    ///
+    /// # Errors
+    /// Returns InvalidInput outside an active reconfigure callback, propagates
+    /// device-policy or application errors, and returns EROFS if a read-only
+    /// notification revoked the writable proposal before acceptance.
+    pub fn commit_reconfigure(&mut self, apply: impl FnOnce() -> VfsResult<()>) -> VfsResult<()> {
+        let update = self
+            .reconfigure_update
+            .take()
+            .ok_or(VfsError::InvalidInput)?;
+        let owner = self.super_block()?;
+        let flags = (owner.flags() & !self.sb_flags_mask) | (self.sb_flags & self.sb_flags_mask);
+        if let Some(device) = owner.block_device() {
+            validate_block_device_flags(device, flags)?;
+        }
+        update.commit(flags, apply)?;
+        self.has_reconfigured = true;
+        Ok(())
     }
 
     /// Installs the immutable operation table selected by the filesystem type.
@@ -285,8 +320,16 @@ impl<'a> FsContext<'a> {
     }
 
     /// Validates and applies this transaction to an existing superblock.
-    pub(crate) fn reconfigure(&mut self) -> VfsResult<()> {
-        self.operations()?.reconfigure(self)
+    pub(crate) fn reconfigure(&mut self, update: SuperBlockFlagUpdate<'a>) -> VfsResult<()> {
+        let operations = self.operations()?;
+        self.reconfigure_update = Some(update);
+        self.has_reconfigured = false;
+        let result = operations.reconfigure(self);
+        self.reconfigure_update = None;
+        if result.is_ok() && !self.has_reconfigured {
+            return Err(VfsError::InvalidInput);
+        }
+        result
     }
 
     fn operations(&self) -> VfsResult<&'static FsContextOperations> {

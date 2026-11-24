@@ -157,7 +157,11 @@ fn filesystem_sync_attempts_all_stages_and_keeps_the_first_error() {
 }
 
 impl SuperBlockOperations for TestSuperOperations {
-    fn statfs(&self, super_block: &SuperBlock, _dentry: &crate::Dentry) -> crate::VfsResult<StatFs> {
+    fn statfs(
+        &self,
+        super_block: &SuperBlock,
+        _dentry: &crate::Dentry,
+    ) -> crate::VfsResult<StatFs> {
         if super_block.private::<TestPrivate>()?.0 != 0x5f5f_494e_464f {
             return Err(crate::VfsError::InvalidInput);
         }
@@ -302,6 +306,145 @@ static BDEV_TEST_FILE_SYSTEM_TYPE: FileSystemType =
     FileSystemType::device_backed("bdev-test", init_bdev_test_context);
 static BDEV_ALT_FILE_SYSTEM_TYPE: FileSystemType =
     FileSystemType::device_backed("bdev-alt-test", init_bdev_test_context);
+
+fn notify_read_only_during_reconfigure(context: &mut FsContext<'_>) -> VfsResult<()> {
+    let sb = context.super_block()?;
+    let timing = context.data().unwrap_or(b"before");
+    if timing == b"before" {
+        sb.mark_read_only();
+    }
+    context.commit_reconfigure(|| {
+        if timing == b"failure" {
+            sb.mark_read_only();
+            return Err(VfsError::Io);
+        }
+        sb.private::<AtomicUsize>()?.fetch_add(1, Ordering::Relaxed);
+        if timing == b"during" {
+            sb.mark_read_only();
+        }
+        Ok(())
+    })?;
+    if timing == b"after" {
+        sb.mark_read_only();
+    }
+    Ok(())
+}
+
+static READONLY_RECONFIGURE_OPERATIONS: FsContextOperations =
+    FsContextOperations::with_reconfigure(bdev_test_get_tree, notify_read_only_during_reconfigure);
+
+fn init_readonly_reconfigure_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&READONLY_RECONFIGURE_OPERATIONS);
+    Ok(())
+}
+
+static READONLY_RECONFIGURE_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev(
+    "readonly-reconfigure-test",
+    init_readonly_reconfigure_context,
+);
+
+fn readonly_reconfigure_super_block(initial: SuperBlockFlags) -> Arc<SuperBlock> {
+    SuperBlock::new_with_flags_and_private(
+        &READONLY_RECONFIGURE_FILE_SYSTEM_TYPE,
+        &BDEV_TEST_SUPER_OPERATIONS,
+        kalloc_types::KBox::new(AtomicUsize::new(0)).unwrap(),
+        initial,
+        4096,
+        u64::MAX,
+        |_| {
+            Dentry::new_dir_from_inode(
+                VfsInode::new_dir_with_defaults(
+                    NodeFlags::empty(),
+                    VfsInodeInit::new(
+                        2,
+                        0,
+                        Umode::new(NodeType::Directory, NodePermission::default()),
+                    ),
+                ),
+                None,
+                String::new(),
+            )
+        },
+    )
+}
+
+#[def_test]
+fn remount_does_not_clear_read_only_notification_during_its_callback() {
+    for was_readonly in [false, true] {
+        for request_readonly in [false, true] {
+            let mut initial = SuperBlockFlags::NOATIME;
+            initial.set(SuperBlockFlags::RDONLY, was_readonly);
+            let sb = readonly_reconfigure_super_block(initial);
+            let cred = kcred::initial_cred();
+            let mut context = FsContext::new_reconfigure(
+                &sb,
+                None,
+                None,
+                if request_readonly {
+                    SuperBlockFlags::RDONLY
+                } else {
+                    SuperBlockFlags::empty()
+                },
+                SuperBlockFlags::RDONLY | SuperBlockFlags::NOATIME,
+                &cred,
+            )
+            .unwrap();
+            if request_readonly {
+                assert_eq!(sb.reconfigure(&mut context), Ok(()));
+                assert_eq!(sb.flags(), SuperBlockFlags::RDONLY);
+            } else {
+                assert_eq!(
+                    sb.reconfigure(&mut context),
+                    Err(VfsError::ReadOnlyFilesystem)
+                );
+                assert_eq!(sb.flags(), initial | SuperBlockFlags::RDONLY);
+            }
+            assert_eq!(
+                sb.private::<AtomicUsize>().unwrap().load(Ordering::Relaxed),
+                usize::from(request_readonly)
+            );
+        }
+    }
+}
+
+#[def_test]
+fn read_only_notification_after_remount_acceptance_preserves_success_and_configuration() {
+    for timing in [b"during".as_slice(), b"after".as_slice()] {
+        let sb = readonly_reconfigure_super_block(SuperBlockFlags::NOATIME);
+        let cred = kcred::initial_cred();
+        let mut context = FsContext::new_reconfigure(
+            &sb,
+            None,
+            Some(timing),
+            SuperBlockFlags::empty(),
+            SuperBlockFlags::RDONLY | SuperBlockFlags::NOATIME,
+            &cred,
+        )
+        .unwrap();
+        assert_eq!(sb.reconfigure(&mut context), Ok(()));
+        assert_eq!(sb.flags(), SuperBlockFlags::RDONLY);
+        assert_eq!(sb.private::<AtomicUsize>().unwrap().load(Ordering::Relaxed), 1);
+        assert_eq!(context.commit_reconfigure(|| Ok(())), Err(VfsError::InvalidInput));
+    }
+}
+
+#[def_test]
+fn failed_remount_application_retains_old_flags_and_a_concurrent_write_ban() {
+    let sb = readonly_reconfigure_super_block(SuperBlockFlags::NOATIME);
+    let cred = kcred::initial_cred();
+    let mut context = FsContext::new_reconfigure(
+        &sb,
+        None,
+        Some(b"failure"),
+        SuperBlockFlags::empty(),
+        SuperBlockFlags::RDONLY | SuperBlockFlags::NOATIME,
+        &cred,
+    )
+    .unwrap();
+    assert_eq!(sb.reconfigure(&mut context), Err(VfsError::Io));
+    assert_eq!(sb.flags(), SuperBlockFlags::NOATIME | SuperBlockFlags::RDONLY);
+    assert_eq!(sb.private::<AtomicUsize>().unwrap().load(Ordering::Relaxed), 0);
+}
 
 struct BdevTestSuperOperations;
 

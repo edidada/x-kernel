@@ -206,6 +206,40 @@ pub struct QuotaInfo<F> {
     dquots: BTreeMap<QuotaId, DquotRef>,
 }
 
+/// Validated quota activation, resume and limit changes awaiting filesystem commit.
+///
+/// Borrows both the live state and detached, header-validated classes, preventing
+/// either from changing before [`Self::apply`]. Dropping the plan changes neither
+/// owner and performs no I/O or backing-file release.
+pub struct QuotaReconfigure<'a, F> {
+    live: &'a mut QuotaInfo<F>,
+    prepared: &'a mut QuotaInfo<F>,
+    is_resuming: bool,
+    limit_types: Option<u8>,
+}
+
+impl<F> QuotaReconfigure<'_, F> {
+    /// Applies the validated changes without allocation, I/O or failure.
+    /// The filesystem calls this inside its accepted configuration commit.
+    pub fn apply(self) {
+        for kind in QuotaType::ALL {
+            let index = kind.index();
+            if self.prepared.info[index].is_some() {
+                self.live.info[index] = self.prepared.info[index].take();
+            }
+            if let Some(info) = &mut self.live.info[index] {
+                if self.is_resuming {
+                    info.state.remove(QuotaState::SUSPENDED);
+                }
+                if let Some(types) = self.limit_types {
+                    info.state
+                        .set(QuotaState::LIMITS_ENABLED, types & (1 << index) != 0);
+                }
+            }
+        }
+    }
+}
+
 impl<F> Default for QuotaInfo<F> {
     fn default() -> Self {
         Self {
@@ -264,6 +298,54 @@ impl<F> QuotaInfo<F> {
     /// Returns loaded file information, including when suspended.
     pub fn info(&self, kind: QuotaType) -> Option<&Dqinfo<F>> {
         self.info[kind.index()].as_ref()
+    }
+
+    /// Prepares detached activations and optional resume/limit changes atomically.
+    ///
+    /// `prepared` contains only freshly loaded classes, without dirty state or
+    /// cached records. `limit_types` selects enforcement by quota-class bit;
+    /// `None` preserves it. Keep backing-file owners outside filesystem locks
+    /// so abandoning a preparation cannot run final inode release under them.
+    ///
+    /// # Errors
+    /// Returns EBUSY for an already loaded class, EINVAL for invalid preparation
+    /// or class bits, and ESRCH if enforcement would target an inactive class.
+    /// Neither state changes on error or when the returned plan is dropped.
+    pub fn prepare_reconfigure<'a>(
+        &'a mut self,
+        prepared: &'a mut Self,
+        is_resuming: bool,
+        limit_types: Option<u8>,
+    ) -> KResult<QuotaReconfigure<'a, F>> {
+        if !prepared.dquots.is_empty()
+            || prepared
+                .info
+                .iter()
+                .flatten()
+                .any(|info| info.is_dirty() || !info.is_active())
+            || limit_types.is_some_and(|types| types & !0b111 != 0)
+        {
+            return Err(LinuxError::EINVAL.into());
+        }
+        for kind in QuotaType::ALL {
+            let index = kind.index();
+            if self.info[index].is_some() && prepared.info[index].is_some() {
+                return Err(LinuxError::EBUSY.into());
+            }
+            if limit_types.is_some()
+                && let Some(info) = self.info[index].as_ref().or(prepared.info[index].as_ref())
+                && (!info.state.contains(QuotaState::USAGE_ENABLED)
+                    || (!is_resuming && info.state.contains(QuotaState::SUSPENDED)))
+            {
+                return Err(LinuxError::ESRCH.into());
+            }
+        }
+        Ok(QuotaReconfigure {
+            live: self,
+            prepared,
+            is_resuming,
+            limit_types,
+        })
     }
 
     /// Stops new accounting before inode references and records are released.

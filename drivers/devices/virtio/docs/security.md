@@ -130,6 +130,12 @@ serializes completion passes, keeps IRQ and reclamation active through drain,
 and supplies DMA routines valid in completion context. Waiting resources are
 prepared by the block caller's adapter, not by the transport.
 
+The PCI transport's notification cache stores indices, not unchecked pointers.
+Every notification still checks the selected index against its mapped BAR
+region. Entries come from queue setup and are invalidated on device reset, so
+another queue's current selection cannot redirect a cached kick. Callers retain
+the existing transport serialization and mapped-region lifetime obligations.
+
 Tests use an identity-mapped fake HAL and real dependency descriptors;
 production uses the existing host bounce pool. Passing fake tests does not prove
 physical-device DMA coherency, which remains a hardware-validation obligation.
@@ -696,3 +702,19 @@ or capacity mismatch refuses activation. The transport remains closed after
 failed recovery, and the system coordinator must fail-stop rather than release
 producers. A host-side repeated-reset transfer test checks descriptor/index reuse;
 QEMU system S3 validates the production PCI/IRQ/device ordering separately.
+
+### Completion Budgets And Notification Indices
+
+The one-transfer completion budget retains every unprocessed request node, token
+and DMA mapping in their existing driver-owned tables. `MorePending` reports only
+remaining visible completion work; callers are notified after their own DMA
+retirement. In particular, a single large bounce copy still executes under the
+device `SpinNoIrq`; choosing a later softirq pass does not remove that critical
+section or allow early buffer reuse.
+
+The device-provided EVENT_IDX value is used only in bounded u16 interval
+arithmetic. The driver's successful-addition count is private state, consumed by
+a mutable notification decision, with saturation and a conservative full-cycle
+kick. It creates no address or allocation authority and is unaffected by a
+failed publication. Existing availability-index publication barriers still
+precede the event read and transport kick.
