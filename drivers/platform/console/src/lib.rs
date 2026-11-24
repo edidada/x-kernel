@@ -38,9 +38,9 @@ use alloc::sync::Arc;
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
-use kirq::IrqActionToken;
 #[cfg(any(all(feature = "ns16550-ioport", target_arch = "x86_64"), unittest))]
 use kirq::IrqDesc;
+use kirq::{IrqActionName, IrqActionToken};
 use kspin::{SpinNoIrq, static_lock};
 #[cfg(feature = "ns16550-mmio")]
 pub use ns16550_mmio::SerialRegWidth;
@@ -378,6 +378,10 @@ pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
 
 // Keep failure tests off the live console/IRQ registry. Hardware activation
 // and readiness publication remain in this shared production transaction.
+fn serial_irq_name() -> Result<IrqActionName, kirq::IrqDescError> {
+    IrqActionName::new("serial")
+}
+
 fn prepare_input_with(
     input_irq: &SpinNoIrq<InputIrqState>,
     console: Option<(Arc<SerialPort>, serial::EarlyIrq)>,
@@ -471,7 +475,7 @@ impl kiface_console_api::ConsoleInputSetupIf {
             serial::stdout_port().zip(serial::stdout_irq()),
             SerialPort::prepare_irq_input,
             map_console_irq,
-            kirq::try_register_shared,
+            |virq, handler| kirq::try_register_shared_named(virq, handler, serial_irq_name()?),
         );
     }
 }

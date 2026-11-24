@@ -10,5 +10,6 @@
 pub(crate) mod dir;
 mod error;
 pub(crate) mod file;
+pub(crate) mod interrupts;
 pub(crate) mod namespace;
 pub(crate) mod root;

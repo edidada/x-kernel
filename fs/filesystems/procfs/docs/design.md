@@ -60,6 +60,38 @@ check field presence, unknown identities, feature spelling uniqueness and
 state-policy filtering; common kcpu tests cover sparse snapshot slots.
 
 
+## `/proc/interrupts` view
+
+`/proc/interrupts` is one read-only `SeqFileInode` installed directly in the
+procfs root. Each traversal captures the online logical CPU set through
+`kcpu_id_map::for_each_online_logical_cpu`; an empty online set returns
+`ENODATA`. The header therefore names logical CPU identities, not the
+interrupt-ready subset, and every row in that traversal uses the captured order.
+Rewind drops the capture and samples the online set again. CPU storage is a
+`KBox` sized to the configured CPU capacity; only the initialized online prefix
+is exposed, so a concurrent offline transition cannot expose uninitialized
+slots.
+
+Rows come from `kirq::next_irq_line` plus `stats_snapshot`. Only `Countable`
+Lines with an action or a nonzero historical count are shown. `Nmi` and
+`NoFlow` are skipped in this first view; a retired/replaced handle is a weak row
+disappearance and is skipped rather than treated as EOF. Snapshot allocation,
+identity and lock errors (`NoMemory`, `CapacityChanged`, `Overflow`,
+`InvalidContext`) are mapped to VFS errors and are never converted to EOF.
+Formatting uses the real named-action list only as text: unnamed actions still
+keep `has_actions()` true and therefore keep the row.
+
+The text order is Virq, one right-aligned per-CPU count, controller family,
+hardware IRQ, trigger, then optional action names. The record sink is fallible:
+`FileTooLarge` and `NoMemory` from the `SeqFile` buffer are preserved.
+`max_record_bytes` is `isize::MAX as usize`; a row larger than the initial 4 KiB
+buffer grows dynamically and is not truncated.
+
+`ut-tests/interrupts.rs` covers the header, named and unnamed rows, hidden
+zero/no-action rows, NMI/NoFlow skips, retired-row continuation, historical
+counts, partial/pread/readv/rewind, a record over 4 KiB, `SEEK_END` rejection,
+read-only behaviour and forced observation-error propagation.
+
 ## IRQ affinity view
 
 `/proc/irq` is a non-cacheable sparse `SimpleDir` rooted in a per-superblock
@@ -205,6 +237,7 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |
 | `src/sysrq_nodes/root.rs` | Optional task-backtrace trigger |
 | `src/irq_nodes/{root,dir,namespace,file,error}.rs` | Stable per-superblock `/proc/irq/<virq>/` namespace, KIRQ error mapping and checked write entrance |
+| `src/irq_nodes/interrupts.rs` | `/proc/interrupts` online-CPU columns, KIRQ snapshot rows and owned text formatting |
 | `src/cpu_text_error.rs` | procfs errno adaptation shared by task/status and IRQ; does not depend on either consumer module |
 
 Numeric entry names (`<pid>`, `<tid>`, `fd`, and `fdinfo`) are parsed by

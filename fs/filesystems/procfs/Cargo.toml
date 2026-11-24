@@ -11,7 +11,7 @@ repository.workspace = true
 [package.metadata.cargo-shear]
 # cfg(unittest) assertions in ut-tests are not scanned by cargo-shear, but
 # guest UT needs a regular dependency.
-ignored = ["log"]
+ignored = ["log", "iov_iter"]
 
 [features]
 default = []
@@ -26,6 +26,7 @@ vmm = ["dep:kvmm"]
 [dependencies]
 kalloc-types.workspace = true
 kfd_objects.workspace = true
+iov_iter.workspace = true
 kbuild_config.workspace = true
 kirq.workspace = true
 kerrno.workspace = true

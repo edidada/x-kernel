@@ -56,6 +56,15 @@ A failure immediately ends output of the current byte slice.
 This is an iteration budget, not a wall-clock time guarantee.
 Newline and backspace conversions follow the corresponding backend's transmit semantics.
 
+## Input IRQ ownership
+
+The optional console input action is registered through KIRQ's named shared
+path with the static display name `serial`. The name is presentation metadata
+only; it does not grant removal rights or identify the UART controller. Input
+storage, mapping and enablement remain ordered as before, and a failed named
+registration retains polled input. The name is covered by the console input
+setup unit tests.
+
 ## Receive Storage
 
 `SerialIo` owns the backend and optional `SerialInput` under the same port

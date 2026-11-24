@@ -4855,6 +4855,7 @@ name = "procfs"
 version = "0.3.0-dev"
 dependencies = [
  "entropy",
+ "iov_iter",
  "kaddr_layout",
  "kalloc",
  "kalloc-types",

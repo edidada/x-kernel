@@ -33,6 +33,23 @@ diagnostic; they do not replace the independently generated ELF auxiliary vector
 or guarantee feature availability after migration.
 
 
+## `/proc/interrupts` boundary
+
+`/proc/interrupts` is a read-only, non-cacheable `SeqFileInode`; it has no write
+callback and rejects `SEEK_END`. Reading enumerates current KIRQ Lines and uses
+owned `IrqStatsSnapshot` values. It does not expose handler addresses, mutate
+affinity, or retain a Line handle after formatting. A Line that retires between
+enumeration and snapshot is skipped; KIRQ observation errors are returned as
+VFS errors and are not converted into an empty file.
+
+CPU columns are captured from the online logical CPU map for one traversal.
+The buffer is allocated through the explicit fallible `KBox` path, and the
+record text uses the common `SeqTextSink`; allocation and length errors remain
+VFS errors. The file is readable without interrupt or reclaim-context locks and
+does not create a second IRQ registry. As with the underlying statistics,
+`Vec::try_reserve` cannot guarantee a return from real allocator OOM; that
+limitation remains documented and is not claimed as an OOM-safe boundary.
+
 ## IRQ affinity boundary
 
 `/proc/irq` combines a per-superblock stable `IrqNamespace` with KIRQ-owned

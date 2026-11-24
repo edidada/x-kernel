@@ -50,4 +50,5 @@ fn tracing_capture_stats_is_readable_and_read_only() {
     assert_eq!(file.write(b"0\n"), Err(VfsError::InvalidInput));
 }
 
+mod interrupts;
 mod irq_nodes;

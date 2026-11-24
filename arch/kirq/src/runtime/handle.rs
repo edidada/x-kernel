@@ -72,6 +72,33 @@ impl IrqLineHandle {
         !self.line.lock().is_retired()
     }
 
+    /// Test-only: retires this exact current Line and removes its registry entry.
+    ///
+    /// This models the enumeration-to-snapshot race without exposing retirement
+    /// as a production handle operation.
+    #[cfg(unittest)]
+    pub fn retire_for_tests(&self) {
+        let retirements = {
+            let mut line = self.line.lock();
+            line.set_retired_for_tests();
+            line.take_retirements()
+        };
+        retirement::notify_retirements(self.virq, retirements);
+        let removed = {
+            let mut registry = IRQ_STATE.lock();
+            if registry
+                .descs
+                .get(&self.virq)
+                .is_some_and(|current| Arc::ptr_eq(&current, &self.line))
+            {
+                registry.remove_test_line(self.virq)
+            } else {
+                None
+            }
+        };
+        drop(removed);
+    }
+
     /// Returns whether this Line has ever published an action.
     ///
     /// The fact is not cleared by action removal; it is a visibility input only.

@@ -100,7 +100,7 @@ pub use poll::poll_file_io;
 pub use quota::QuotaOperations;
 pub use seq_file::{
     SeekEndPolicy, SeqCommandOptions, SeqFile, SeqFileInode, SeqFileOptions, SeqIterator,
-    SeqValidateFn, SeqWriteFn, seq_open,
+    SeqTextSink, SeqValidateFn, SeqWriteFn, seq_open,
 };
 pub use simple_dir::{
     ChainedDirOps, DirMaker, DirMapping, IntoDirMappingEntry, SimpleDir, SimpleDirEntry,

@@ -23,11 +23,19 @@ fn descriptor() -> IrqDesc {
 fn repeat_without_work(state: &SpinNoIrq<InputIrqState>, fixture: &SerialPortFixture) {
     prepare_input_with(
         state,
-        Some((fixture.port(), crate::serial::EarlyIrq::Legacy(descriptor()))),
+        Some((
+            fixture.port(),
+            crate::serial::EarlyIrq::Legacy(descriptor()),
+        )),
         |_| panic!("duplicate setup prepared storage"),
         |_| panic!("duplicate setup mapped an IRQ"),
         |_, _| panic!("duplicate setup registered an action"),
     );
+}
+
+#[def_test]
+fn serial_action_name_is_stable() {
+    assert_eq!(serial_irq_name().unwrap().as_str(), "serial");
 }
 
 #[def_test]
@@ -73,7 +81,10 @@ fn setup_failures_never_enable_rx_or_publish_readiness() {
         let stage = Cell::new(0);
         prepare_input_with(
             &state,
-            Some((fixture.port(), crate::serial::EarlyIrq::Legacy(descriptor()))),
+            Some((
+                fixture.port(),
+                crate::serial::EarlyIrq::Legacy(descriptor()),
+            )),
             |port| {
                 stage.set(1);
                 if matches!(failure, Failure::Buffer) {
@@ -130,7 +141,10 @@ fn successful_setup_enables_rx_once_after_action_installation() {
     let stage = Cell::new(0);
     prepare_input_with(
         &state,
-        Some((fixture.port(), crate::serial::EarlyIrq::Legacy(descriptor()))),
+        Some((
+            fixture.port(),
+            crate::serial::EarlyIrq::Legacy(descriptor()),
+        )),
         |port| {
             stage.set(1);
             port.prepare_irq_input()
@@ -151,8 +165,14 @@ fn successful_setup_enables_rx_once_after_action_installation() {
     );
     assert_eq!(stage.get(), 3);
     assert_eq!(fixture.receive_enable_count(), 1);
-    assert_eq!(state.lock().registration, Some((91, IrqActionToken::new(7))));
+    assert_eq!(
+        state.lock().registration,
+        Some((91, IrqActionToken::new(7)))
+    );
     repeat_without_work(&state, &fixture);
     assert_eq!(fixture.receive_enable_count(), 1);
-    assert_eq!(state.lock().registration, Some((91, IrqActionToken::new(7))));
+    assert_eq!(
+        state.lock().registration,
+        Some((91, IrqActionToken::new(7)))
+    );
 }

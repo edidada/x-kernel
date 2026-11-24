@@ -23,6 +23,7 @@ fn builder_with(
     basic_nodes::root::add_root_entries(&mut root, fs.clone());
     device_nodes::root::add_root_entries(&mut root, fs.clone());
     irq_nodes::root::add_root_entries(&mut root, fs.clone());
+    root.add("interrupts", irq_nodes::interrupts::new(fs.clone()));
     mem_nodes::root::add_root_entries(&mut root, fs.clone());
     root.add(
         "mounts",

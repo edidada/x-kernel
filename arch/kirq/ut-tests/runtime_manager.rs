@@ -132,25 +132,10 @@ impl SyntheticLine {
 
     /// Runs the same retired-list handoff used by a real Line retirement.
     pub fn retire_for_tests(&self) {
-        let retirements = {
-            let mut line = self.line.lock();
-            line.set_retired_for_tests();
-            line.take_retirements()
-        };
-        crate::runtime::retirement::notify_retirements(self.virq, retirements);
-        let removed = {
-            let mut registry = IRQ_STATE.lock();
-            if registry
-                .descs
-                .get(&self.virq)
-                .is_some_and(|line| Arc::ptr_eq(&line, &self.line))
-            {
-                registry.remove_test_line(self.virq)
-            } else {
-                None
-            }
-        };
-        drop(removed);
+        let handle = crate::lookup_irq_line(self.virq)
+            .expect("lookup")
+            .expect("current handle");
+        handle.retire_for_tests();
     }
 
     /// The caller exclusively owns this vacant numeric slot for the scope.
