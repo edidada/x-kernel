@@ -455,10 +455,6 @@ fn init_cpu_services() {
     #[cfg(feature = "watchdog")]
     watchdog::init_primary();
 
-    // Keep the PMU PPI masked until watchdog setup has selected NMI delivery.
-    #[cfg(feature = "pmu")]
-    khal::pmu::enable_irq();
-
     // APs cannot complete while the primary is still zero. Release them before
     // drivers, which may themselves wait for work on those CPUs.
     INITED_CPUS.fetch_add(1, Ordering::Release);
@@ -467,6 +463,12 @@ fn init_cpu_services() {
         self::mp::tests_startup_order::record_service_wait();
         core::hint::spin_loop();
     }
+
+    // PMU SPI owner association is only actionable after every AP has published
+    // interrupt readiness. PPI/NMI activation keeps its existing semantics and
+    // is simply moved after the same all-CPU-barrier point.
+    #[cfg(feature = "pmu")]
+    khal::pmu::enable_irq();
 
     #[cfg(feature = "smp")]
     kipi::tlb::mark_all_cpus_started();

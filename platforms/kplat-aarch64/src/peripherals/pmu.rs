@@ -2,7 +2,28 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use aarch64_pmuv3::pmuv3::PmuCounter;
+use kcpu_id_map::{KCpuMask, KCpuMaskExt};
+use kiface_cpu_api::{CpuInterruptReadinessIf, CurrentCpuIf};
+
+pub(crate) mod firmware;
+
+/// Boot CPU recorded before any secondary CPU can run PMU registration.
+static PMU_BOOT_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// One-shot gate for the post-MP SPI activation path.
+static PMU_SPI_ACTIVATED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn remember_boot_cpu() {
+    let cpu = CurrentCpuIf::current_cpu().as_usize();
+    let _ = PMU_BOOT_CPU.compare_exchange(usize::MAX, cpu, Ordering::AcqRel, Ordering::Acquire);
+}
+
+fn is_boot_cpu() -> bool {
+    PMU_BOOT_CPU.load(Ordering::Acquire) == CurrentCpuIf::current_cpu().as_usize()
+}
 type PerfCb = fn();
 const MAX_PMU_COUNTERS: usize = 32;
 
@@ -264,6 +285,7 @@ fn shutdown_local_with(
 
 #[cfg(feature = "nmi-pmu")]
 unittest::path_mod_test!(tests_shutdown, "../../ut-tests/peripherals_pmu_shutdown.rs");
+unittest::path_mod_test!(tests_firmware, "../../ut-tests/peripherals_pmu_firmware.rs");
 #[cfg(feature = "ipi")]
 unittest::path_mod_test!(tests_ordinary, "../../ut-tests/peripherals_pmu_ordinary.rs");
 #[macro_export]
@@ -294,7 +316,32 @@ macro_rules! pmu_if_impl {
             }
 
             fn register_overflow_irq() -> bool {
+                let plan = $crate::peripherals::pmu::firmware::parse_pmu_firmware();
+                $crate::peripherals::pmu::remember_boot_cpu();
+                match plan {
+                    $crate::peripherals::pmu::firmware::PmuIrqPlan::Spi(_) => {
+                        // SPI routes are established and enabled only after the
+                        // all-CPU barrier; no action exists before that point.
+                        return true;
+                    }
+                    $crate::peripherals::pmu::firmware::PmuIrqPlan::Malformed(reason) => {
+                        log::warn!("PMU firmware topology is malformed: {reason}");
+                        return false;
+                    }
+                    $crate::peripherals::pmu::firmware::PmuIrqPlan::Unsupported(reason) => {
+                        log::warn!("PMU firmware topology is unsupported: {reason}");
+                        return false;
+                    }
+                    $crate::peripherals::pmu::firmware::PmuIrqPlan::Ppi { .. }
+                    | $crate::peripherals::pmu::firmware::PmuIrqPlan::Absent => {}
+                }
                 let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
+                if matches!(plan, $crate::peripherals::pmu::firmware::PmuIrqPlan::Absent)
+                    && irq >= 32
+                {
+                    log::warn!("PMU SPI fallback has no owner association: irq={irq}");
+                    return false;
+                }
                 let desc = kirq::gic_level_irq_desc(irq);
                 // The platform owns this mapping independently of the normal
                 // or NMI action. Preparing it does not enable PMU delivery.
@@ -313,15 +360,12 @@ macro_rules! pmu_if_impl {
                 if kplat::nm_irq::NmiMechanismIf::mode() != kplat::nm_irq::NmiMode::None {
                     return kirq::register_nmi_startup(desc, handler);
                 }
-                let registered = if (16..32).contains(&irq) {
-                    // Runtime CPU services explicitly activate each local PPI.
-                    kirq::try_register_percpu_startup(desc, handler)
-                } else {
-                    // Preserve the existing SPI policy; a shared interrupt is
-                    // not a per-CPU registration merely because the PMU is local.
-                    let options = $crate::peripherals::pmu::ordinary_spi_register_options();
-                    kirq::try_register_startup(desc, handler, options)
-                };
+                if !(16..32).contains(&irq) {
+                    log::warn!("PMU IRQ is neither an associated SPI nor a PPI: irq={irq}");
+                    return false;
+                }
+                // Runtime CPU services explicitly activate each local PPI.
+                let registered = kirq::try_register_percpu_startup(desc, handler);
                 match registered {
                     Ok(true) => true,
                     Ok(false) => {
@@ -336,6 +380,20 @@ macro_rules! pmu_if_impl {
             }
 
             fn enable_irq() {
+                // Firmware parsing and SPI routing use sleepable Task APIs.
+                // Keep the IRQ-off guard confined to the local PPI/NMI path.
+                let plan = $crate::peripherals::pmu::firmware::parse_pmu_firmware();
+                if let $crate::peripherals::pmu::firmware::PmuIrqPlan::Spi(routes) = plan {
+                    $crate::peripherals::pmu::try_activate_spi(&routes);
+                    return;
+                }
+                if matches!(
+                    plan,
+                    $crate::peripherals::pmu::firmware::PmuIrqPlan::Malformed(_)
+                        | $crate::peripherals::pmu::firmware::PmuIrqPlan::Unsupported(_)
+                ) {
+                    return;
+                }
                 let _pin = kspin::NoPreemptIrqSave::new();
                 #[cfg(feature = "nmi-pmu")]
                 if !$crate::peripherals::pmu::lifecycle::can_start() {
@@ -366,13 +424,141 @@ macro_rules! pmu_if_impl {
     };
 }
 
-/// Selects the ordinary SPI registration policy without changing PPI/NMI paths.
-pub(crate) fn ordinary_spi_register_options() -> kirq::IrqRegisterOptions {
-    #[cfg(feature = "nmi-pmu")]
-    let options = kirq::IrqRegisterOptions::disabled().restrict_user_affinity();
-    #[cfg(not(feature = "nmi-pmu"))]
-    let options = kirq::IrqRegisterOptions::auto_enable().restrict_user_affinity();
-    options
+/// Establishes all mapped-but-actionless SPI routes before publishing or
+/// enabling any handler. Failure withdraws every action already installed in
+/// this attempt, so no PMU line can deliver a partial service.
+fn activate_spi_routes(routes: &crate::peripherals::pmu::firmware::PmuSpiRoutes) -> bool {
+    const MAX_ROUTES: usize = kbuild_config::NR_CPUS;
+    let mut virqs: [Option<kirq::Virq>; MAX_ROUTES] = [None; MAX_ROUTES];
+    let mut installed = 0usize;
+    let Some(options) = spi_register_options() else {
+        log::warn!("PMU SPI action name is invalid");
+        return false;
+    };
+    let handler: kirq::Handler = Arc::new(|_| {
+        handle_overflows();
+        kirq::IrqEvent::HANDLED
+    });
+
+    for route in routes.as_slice() {
+        let desc = kirq::gic_level_irq_desc(route.hwirq as usize);
+        let virq = match kirq::try_map(desc) {
+            Ok(virq) => virq,
+            Err(err) => {
+                log::warn!("PMU SPI mapping failed: desc={desc:?}, error={err:?}");
+                rollback_actions(&virqs[..installed]);
+                return false;
+            }
+        };
+
+        let mut mask = KCpuMask::new();
+        mask.set_logical(route.cpu, true);
+        let snapshot = match kirq::set_irq_affinity(virq, &mask) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                log::warn!(
+                    "PMU SPI route failed: hwirq={}, cpu={}, error={err:?}",
+                    route.hwirq,
+                    route.cpu.as_usize()
+                );
+                rollback_actions(&virqs[..installed]);
+                return false;
+            }
+        };
+        if snapshot.requested != Some(mask)
+            || snapshot.effective != Some(mask)
+            || snapshot.is_pending
+            || snapshot.has_failed_programming
+        {
+            log::warn!(
+                "PMU SPI route is not owner-exact: hwirq={}, cpu={}, snapshot={:?}",
+                route.hwirq,
+                route.cpu.as_usize(),
+                snapshot
+            );
+            rollback_actions(&virqs[..installed]);
+            return false;
+        }
+
+        match kirq::try_register_startup(virq, Arc::clone(&handler), options) {
+            Ok(true) => {
+                virqs[installed] = Some(virq);
+                installed += 1;
+            }
+            Ok(false) => {
+                log::warn!("PMU SPI registration rejected: hwirq={}", route.hwirq);
+                rollback_actions(&virqs[..installed]);
+                return false;
+            }
+            Err(err) => {
+                log::warn!(
+                    "PMU SPI registration failed: hwirq={}, error={err:?}",
+                    route.hwirq
+                );
+                rollback_actions(&virqs[..installed]);
+                return false;
+            }
+        }
+    }
+
+    for index in 0..installed {
+        let Some(virq) = virqs[index] else {
+            continue;
+        };
+        if let Err(err) = kirq::try_enable_irq(virq) {
+            log::warn!("PMU SPI enable failed: virq={virq:?}, error={err:?}");
+            for virq in virqs[..installed].iter().flatten() {
+                let _ = kirq::try_disable_irq_nosync(*virq);
+            }
+            rollback_actions(&virqs[..installed]);
+            return false;
+        }
+    }
+    true
+}
+
+fn rollback_actions(virqs: &[Option<kirq::Virq>]) {
+    for virq in virqs.iter().flatten() {
+        let _ = kirq::try_free_irq(*virq);
+    }
+}
+
+fn all_spi_owners_ready(routes: &crate::peripherals::pmu::firmware::PmuSpiRoutes) -> bool {
+    let ready = CpuInterruptReadinessIf::ready_cpus();
+    routes
+        .as_slice()
+        .iter()
+        .all(|route| ready.get_logical(route.cpu))
+}
+
+/// Post-MP SPI activation entry. AP hooks and the pre-barrier boot call are
+/// no-ops; only the boot CPU after the all-CPU barrier can commit the plan.
+pub(crate) fn try_activate_spi(routes: &crate::peripherals::pmu::firmware::PmuSpiRoutes) {
+    if !is_boot_cpu() || PMU_SPI_ACTIVATED.load(Ordering::Acquire) {
+        return;
+    }
+    if !all_spi_owners_ready(routes) {
+        log::warn!("PMU SPI activation waits for all owner CPUs");
+        return;
+    }
+    if PMU_SPI_ACTIVATED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if !activate_spi_routes(routes) {
+        PMU_SPI_ACTIVATED.store(false, Ordering::Release);
+        log::warn!("PMU SPI activation failed");
+    }
+}
+
+/// The PMU SPI action is always installed disabled, then enabled only after
+/// every route and handler has been committed.
+pub(crate) fn spi_register_options() -> Option<kirq::IrqRegisterOptions> {
+    let name = kirq::IrqActionName::new("arm-pmu").ok()?;
+    Some(
+        kirq::IrqRegisterOptions::disabled()
+            .restrict_user_affinity()
+            .with_name(name),
+    )
 }
 
 /// Implements the source‑neutral [`kplat::nm_irq::PeriodicNmiSourceIf`] interface

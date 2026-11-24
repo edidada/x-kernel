@@ -7,13 +7,10 @@ With `nmi-pmu`, an available mechanism selects `register_nmi_startup`; mode
 `None` selects an ordinary action, as do PMU-only builds. Ordinary PPIs
 (GIC INTIDs 16..32, exclusive upper bound) use `try_register_percpu_startup`
 and remain disabled until runtime CPU services call `PmuInterruptIf::enable_irq`
-on the BSP and each AP. Ordinary SPIs retain `try_register_startup` with
-`disabled()` for `nmi-pmu` builds and `auto_enable()` for PMU-only builds, and
-add `restrict_user_affinity()` in both cases. This is a user-only routing
-restriction owned by the regular action; it does not block the trusted kernel
-setter, change automatic selection, or establish an SPI-to-CPU initial route.
-PPI and real-NMI lifecycle paths are unchanged. An ordinary action needs no NMI
-preparation or local action publication.
+on the BSP and each AP. Ordinary SPIs use the PMU source-owner association
+path described below; they are not a compatibility fallback to one global
+first-IRQ. PPI and real-NMI lifecycle paths are unchanged. An ordinary PPI
+action needs no NMI preparation or local action publication.
 Activation skips `prepare_nmi_delivery` in mode `None`. Periodic NMI shutdown and global
 NMI retirement remain unsupported in that mode; they do not retire the ordinary
 fallback action.
@@ -135,13 +132,31 @@ peripherals. `src/lib.rs` gates the crate on `target_arch = "aarch64"` and
 
 ## PMU Interrupt Ownership
 
-The PPI registration path requires KIRQ's resolved `PerCpu` flow; failure does
-not retry through generic registration. SPI registration retains compatibility,
-not Linux's full SMP PMU SPI ownership model: `of::pmu_irq_or` selects one global
-IRQ, without per-CPU SPI assignments or forced affinity. Linux
-`drivers/perf/arm_pmu_platform.c` parses those assignments and
-`drivers/perf/arm_pmu.c::armpmu_request_irq` binds non-percpu-devid IRQs to their
-owning CPU. This migration does not add that SPI routing contract.
+The PMU source owns the CPU-to-SPI association; KIRQ only executes the trusted
+route. `src/peripherals/pmu/firmware.rs` traverses the neutral fwnode tree,
+enumerates every PMU interrupt and matches each `interrupt-affinity` phandle to
+its CPU. It classifies absence, the existing PPI shape, a complete SPI plan,
+malformed firmware, and unsupported shapes. A multi-entry node never falls back
+to the first IRQ, a mixed PPI/SPI list is unsupported, and an SPI-shaped
+absence is not accepted from the Kconfig fallback. PPI affinity lists are
+ignored on the existing PerCpu/NMI path; that is intentional, matching the
+single-PPI plus affinity-phandle RK3588/Orange Pi shape. A lone SPI without an
+affinity list is assigned to logical CPU 0, matching Linux's legacy
+"guessing" fallback; multi-entry lists still require explicit association.
+
+PPI registration still requires KIRQ's resolved `PerCpu` flow and does not retry
+through generic registration. SPI planning has no action before the all-CPU
+barrier. `init_cpu_services` starts secondaries, waits for `is_init_ok`, and only
+then calls `PmuInterruptIf::enable_irq`; AP-side SPI hooks are no-ops. The boot
+CPU maps each SPI, calls trusted `set_irq_affinity`, requires
+`requested == effective == owner` with no pending/failed route, registers a
+disabled action with `restrict_user_affinity()` and name `arm-pmu`, and enables
+only after every route/action was installed. Any failure withdraws installed
+actions and leaves no partially enabled PMU service. SPI never uses the NMI
+mechanism; NMI remains PPI-only. Linux
+`drivers/perf/arm_pmu_platform.c` and `drivers/perf/arm_pmu.c::armpmu_request_irq`
+inspired the association, but this implementation has no CPU hotplug or
+`irq_force_affinity` equivalent.
 
 The platform prepares the PMU's GIC domain mapping with `kirq::try_map` before
 installing either its ordinary IRQ action or NMI action. Mapping preparation
@@ -176,7 +191,8 @@ Guest tests live in crate-root `ut-tests/`, mounted by
 | `peripherals::smccc::tests` | `ut-tests/peripherals_smccc.rs` | 4 |
 | `peripherals::trng::tests` | `ut-tests/peripherals_trng.rs` | 6 |
 | `peripherals::pmu::tests_shutdown` | `ut-tests/peripherals_pmu_shutdown.rs` | Local shutdown ordering, retry, reuse and rejection with another event-counter owner |
-| `peripherals::pmu::tests_ordinary` | `ut-tests/peripherals_pmu_ordinary.rs` | Ordinary PPI activation/restoration on each boot CPU and ordinary SPI user-routing policy declaration |
+| `peripherals::pmu::tests_ordinary` | `ut-tests/peripherals_pmu_ordinary.rs` | Ordinary PPI activation/restoration on each boot CPU and SPI disabled/user-routing policy declaration |
+| `peripherals::pmu::tests_firmware` | `ut-tests/peripherals_pmu_firmware.rs` | PMU IRQ/affinity permutation, PPI/mixed/multi-node, absent/malformed/unsupported and capacity cases |
 | `peripherals::pmu::lifecycle::tests` | `ut-tests/pmu_lifecycle.rs` | Real cross-CPU PMU/GIC shutdown, injected incomplete pass, retry and republication |
 
 An event-counter fixture verifies that periodic arm and shutdown reject another

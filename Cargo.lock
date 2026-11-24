@@ -3058,6 +3058,7 @@ version = "0.3.0-dev"
 dependencies = [
  "aarch64-pmuv3",
  "console-driver",
+ "fwnode",
  "heapless",
  "irq-driver",
  "karch",
@@ -3069,6 +3070,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kiface",
+ "kiface-cpu-api",
  "kiface-task-api",
  "kipi",
  "kirq",

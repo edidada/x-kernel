@@ -69,11 +69,8 @@ fn ordinary_pmu_uses_an_enabled_local_action() -> unittest::TestResult {
 }
 
 #[def_test(serial)]
-fn ordinary_spi_registration_declares_user_routing_restriction() {
-    let options = super::ordinary_spi_register_options();
+fn pmu_spi_registration_is_disabled_and_user_routing_restricted() {
+    let options = super::spi_register_options().expect("arm-pmu name is valid");
     assert!(options.is_user_affinity_restricted());
-    #[cfg(feature = "nmi-pmu")]
     assert!(!options.should_auto_enable());
-    #[cfg(not(feature = "nmi-pmu"))]
-    assert!(options.should_auto_enable());
 }

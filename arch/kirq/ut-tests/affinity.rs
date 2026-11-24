@@ -602,6 +602,31 @@ fn query_does_not_fabricate_initial_route_and_setter_checks_context() {
 }
 
 #[def_test(serial)]
+fn trusted_setter_routes_mapped_actionless_spi_line_before_action() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f21;
+    let mut state = entry(&ACCEPT_MASKED);
+    // A mapped Fasteoi SPI Line with no action and no configured/enabled
+    // hardware generation. Routing must work before either publication or
+    // enable, which is the PMU SPI activation order.
+    state.desc = crate::gic_level_irq_desc(36);
+    assert!(!state.has_actions());
+    assert!(!state.is_enabled_for_tests());
+    assert_eq!(state.configured_generation_for_tests(), None);
+    let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+    IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+    let owner = cpu_mask(0);
+    let snapshot = set_irq_affinity(virq, &owner).unwrap();
+    assert_eq!(snapshot.requested, Some(owner));
+    assert_eq!(snapshot.effective, Some(owner));
+    assert!(!snapshot.is_pending);
+    assert!(!snapshot.has_failed_programming);
+    assert_eq!(fixture.line.lock().action_count(), 0);
+    assert!(!fixture.line.lock().is_enabled_for_tests());
+    assert_eq!(fixture.line.lock().configured_generation_for_tests(), None);
+}
+
+#[def_test(serial)]
 fn public_enable_and_registration_cannot_bypass_routing_fault() {
     let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f22;
     assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
