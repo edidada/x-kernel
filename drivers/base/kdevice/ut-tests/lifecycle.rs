@@ -725,6 +725,7 @@ fn test_first_matching_driver_wins_in_registration_order() {
         crate::ProbeStats {
             attempts: 1,
             failures: 0,
+            deferred: 0,
         }
     );
     assert_eq!(b.probe_stats().attempts, 0);
@@ -832,6 +833,7 @@ fn test_failed_candidate_cleanup_precedes_next_probe() {
         crate::ProbeStats {
             attempts: 1,
             failures: 1,
+            deferred: 0,
         }
     );
     assert_eq!(
@@ -839,6 +841,7 @@ fn test_failed_candidate_cleanup_precedes_next_probe() {
         crate::ProbeStats {
             attempts: 1,
             failures: 0,
+            deferred: 0,
         }
     );
     assert_eq!(
@@ -846,6 +849,7 @@ fn test_failed_candidate_cleanup_precedes_next_probe() {
         crate::ProbeStats {
             attempts: 2,
             failures: 1,
+            deferred: 0,
         }
     );
     assert!(a.bound_devices_snapshot().is_empty());

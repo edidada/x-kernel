@@ -282,6 +282,7 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
         ProbeStats {
             attempts: 1,
             failures: 1,
+            deferred: 0,
         }
     );
     assert_eq!(
@@ -289,6 +290,7 @@ pub(super) fn run_wrong_candidate_scenario() -> unittest::TestResult {
         ProbeStats {
             attempts: 1,
             failures: 0,
+            deferred: 0,
         }
     );
     assert_eq!(handle.opens(), 1);

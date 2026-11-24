@@ -184,6 +184,7 @@ fn run_claim_scenario(has_retained_reader: bool) -> unittest::TestResult {
         ProbeStats {
             attempts: 1,
             failures: 0,
+            deferred: 0,
         }
     );
     assert_eq!(handle.opens(), 1);
@@ -226,6 +227,7 @@ fn run_claim_scenario(has_retained_reader: bool) -> unittest::TestResult {
         ProbeStats {
             attempts: 2,
             failures: 1,
+            deferred: 0,
         }
     );
     assert_eq!(handle.opens(), 1);

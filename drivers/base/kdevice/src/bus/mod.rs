@@ -194,6 +194,11 @@ impl BusInstance {
         self.probe.record_failure();
     }
 
+    /// Record one probe attempt that deferred on an external dependency.
+    pub(crate) fn record_probe_deferred(&self) {
+        self.probe.record_deferred();
+    }
+
     /// Snapshot this bus instance's probe accounting.
     pub fn probe_stats(&self) -> ProbeStats {
         self.probe.snapshot()

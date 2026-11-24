@@ -490,6 +490,9 @@ pub(crate) fn map_block_error(error: DriverError) -> VfsError {
         DriverError::ReadOnly => KError::OperationNotPermitted,
         DriverError::ResourceBusy => KError::ResourceBusy,
         DriverError::Unsupported => KError::OperationNotSupported,
+        // Deferred is a probe-scheduling result; block I/O cannot make progress
+        // without a later binding event, so expose the retryable VFS state.
+        DriverError::Deferred => KError::WouldBlock,
     }
 }
 

@@ -8,7 +8,7 @@ use core::marker::PhantomData;
 
 use intrusive_collections::PointerOps;
 
-use crate::KArc;
+use crate::{KArc, KBox};
 
 /// Zero-sized pointer operations for an intrusive adapter owning `KArc<T>`.
 ///
@@ -63,5 +63,55 @@ unsafe impl<T> PointerOps for KArcPointerOps<T> {
 
     fn into_raw(&self, owner: KArc<T>) -> *const T {
         KArc::into_raw(owner)
+    }
+}
+
+/// Zero-sized pointer operations for an intrusive adapter owning `KBox<T>`.
+///
+/// Available with the `intrusive-collections` feature. The concrete adapter
+/// still defines the link-field projections. Conversion neither allocates nor
+/// releases storage; dropping a recovered owner frees it in the caller's
+/// context. `KBox` allocation remains fallible at insertion time, so callers
+/// must construct the owner before taking any subsystem lock.
+pub struct KBoxPointerOps<T>(PhantomData<KBox<T>>);
+
+impl<T> Copy for KBoxPointerOps<T> {}
+
+impl<T> Clone for KBoxPointerOps<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> KBoxPointerOps<T> {
+    /// Const constructor for adapter definitions.
+    pub const NEW: Self = Self::new();
+
+    /// Creates pointer operations without allocating or acquiring a lock.
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T> Default for KBoxPointerOps<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// SAFETY: KBox transfers one stable allocation pointer and its sole ownership.
+// The matching recovery preserves allocator authority and cannot panic for a
+// valid, unrecovered pointer supplied by PointerOps's contract.
+unsafe impl<T> PointerOps for KBoxPointerOps<T> {
+    type Pointer = KBox<T>;
+    type Value = T;
+
+    unsafe fn from_raw(&self, pointer: *const T) -> KBox<T> {
+        // SAFETY: PointerOps requires the original, unrecovered into_raw result.
+        unsafe { KBox::from_raw(pointer.cast_mut()) }
+    }
+
+    fn into_raw(&self, owner: KBox<T>) -> *const T {
+        KBox::into_raw(owner)
     }
 }

@@ -20,7 +20,7 @@ below.
 ┌─────────────────────────────────────────────┐
 │ kdevice                                     │
 │                                             │
-│ all-safe Rust — zero unsafe blocks          │
+│ safe Rust except the audited deferred bridge │
 │                                             │
 │ Safety comes from:                          │
 │  ├─ SpinNoPreempt locks on all mutable      │
@@ -105,16 +105,34 @@ The threat analysis should focus on:
 
 ## Unsafe Code Inventory
 
-**kdevice contains no unsafe code.**
+Production unsafe is confined to `src/lifecycle/deferred.rs`:
+custom `intrusive_collections::PointerOps`/`Adapter` implementations and the
+raw-pointer conversions they require. `KBoxPointerOps<T>` lives in
+`kalloc-types` under its optional `intrusive-collections` feature and only
+converts `KBox<T>` ownership; `RequestAdapter` performs the local
+`container_of!`/`offset_of!` link projection. Every unsafe impl/block has an
+inline SAFETY argument. The deferred state lock is `SpinNoPreempt`; no IRQ
+handler touches the queues. All other concurrency control uses safe
+`kmutex::Mutex`, `SpinNoPreempt`, atomics and `Arc`.
 
-The whole crate (~3500 lines) is 100% safe Rust. All concurrency control
-uses reviewed safe abstractions: the descriptor's `kmutex::Mutex`, and
-`SpinNoPreempt`, `AtomicU8`, `AtomicU64`, `AtomicUsize`, and `Arc` for the
-rest.
+The unsafe surface is limited to:
+- `KBox::from_raw`/`into_raw` ownership round-trips;
+- list-owned link pointers produced by `get_link` and consumed by `get_value`;
+- in-bounds link-field offsets within an initialized `RequestNode`;
+- manual `Send`/`Sync` proofs for the state-less adapter and its lock-protected
+  queue membership.
 
 ## Memory-Safety Invariants
 
-1. **Lock-ordering rule**: descriptor binding lock → Registry → (drop guard)
+1. **Lock-ordering rule**: descriptor binding lock → deferred lock → workqueue handoff outside the lock; descriptor binding lock → Registry → (drop guard)
+   - Deferred trigger holds only the deferred spinlock and splices preallocated
+     intrusive nodes; it never allocates, drops an owner, probes, or sleeps.
+   - The worker removes the node and releases the deferred lock before taking
+     the descriptor binding lock. `claimed` (descriptor + request id) is the
+     sole identity of that removed request; takeover clears only the matching
+     claim, so a stale worker cannot delete a newer wait.
+   - The fixed drain executor is installed once from `kdriver::init_drivers`
+     after workqueue bring-up and is never shutdown/disabled by device removal.
    → per-object (`bus.devices` → `bus.drivers`; one `DeviceObject` leaf lock:
    `slot`, `relations`, `binding.meta`, or `binding.devres`). The slot and the
    binding leaves are never nested. Topology writes may hold several
@@ -421,8 +439,9 @@ parent-attach, unregister and remove paths.
 
 When modifying this module, verify:
 
-- No new `unsafe` blocks are added (currently zero unsafe; keep it that
-  way).
+- New `unsafe` is limited to the audited `lifecycle/deferred.rs` adapter,
+  has a substantive SAFETY argument, and does not extend the raw-pointer
+  surface beyond list-owned `RequestNode` links and KBox ownership.
 - New per-object locks do not violate the lock-ordering rule
   (Registry → at most one of `slot` / `relations` / `binding.meta` /
   `binding.devres`), and no path takes two of those leaves at once. A new

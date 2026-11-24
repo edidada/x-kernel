@@ -20,7 +20,7 @@ extern crate alloc;
 #[cfg(feature = "intrusive-collections")]
 mod intrusive;
 #[cfg(feature = "intrusive-collections")]
-pub use intrusive::KArcPointerOps;
+pub use intrusive::{KArcPointerOps, KBoxPointerOps};
 
 mod karc;
 mod kbox;

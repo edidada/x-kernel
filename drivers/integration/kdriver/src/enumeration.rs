@@ -61,7 +61,7 @@ impl EnumerationContext {
         for desc in pending {
             match kdevice::probe_device_desc(desc.id()) {
                 Ok(ProbeOutcome::Activated) => activated += 1,
-                Ok(ProbeOutcome::Skipped) => {}
+                Ok(ProbeOutcome::Skipped | ProbeOutcome::Deferred) => {}
                 Ok(ProbeOutcome::Unmatched | ProbeOutcome::Unclaimed) => self.add_unclaimed(desc),
                 Ok(ProbeOutcome::Busy) => {
                     // Same-context re-entry means a probe path tried to bind

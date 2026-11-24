@@ -51,6 +51,13 @@ Rust's type system and ownership model:
 - **Event-driven**: lifecycle events (Published/Matched/Bound/Activated/
   Removed and the instance-scoped BindingRetired) are delivered to observers
   such as `kclass` through bucketed subscribers.
+- **Basic deferred probe**: a probe returning `DriverError::Deferred` is
+  treated as a failed candidate after the normal binding retirement, then its
+  descriptor enters a private pending queue. A later successful binding or
+  executor startup moves pending requests to active and kicks one fixed drain
+  work. Workers retry only active deferred descriptors; a repeated defer
+  returns to pending and does not self-trigger. Request identity is independent
+  of binding generations; the executor owns workqueue serialization.
 
 ## Scope
 
@@ -88,6 +95,8 @@ drivers/base/kdevice/
     │   │                         #   register_bus_instance, register_driver_object,
     │   │                         #   probe_device_desc, adopt_active_device,
     │   │                         #   remove_device_managed, parent attach/detach
+    │   ├── deferred.rs           # pending/active deferred queues, trigger
+    │   │                         #   sequence, claimed request, executor handoff
     │   ├── binding_hooks.rs      # cfg(unittest) pause/ownership seams
     │   ├── dispatch.rs           # event distribution and state transition notify
     │   ├── event.rs              # DeviceEvent, DeviceEventKind
@@ -1030,7 +1039,8 @@ S2 adds a phase-scoped context and one typed private-data slot per binding.
 | `driver::data` | internal Data erasure container | lifecycle ordering or data-type policy |
 | `driver::erased` | the single typed-driver ↔ registry erasure boundary; separates driver errors from Data type mismatch | release resources on type mismatch |
 | `device::binding` | BindingRuntime state, usage, devres, DataSlot and its transition errors | call driver callbacks or perform probe/remove policy |
-| `kdevice::lifecycle` | probe/remove/Data transfer and failure classification/order | hide a type mismatch as a normal driver error |
+| `kdevice::lifecycle` | probe/remove/Data transfer and failure classification/order; deferred probe rollback, trigger and entry takeover | hide a type mismatch as a normal driver error |
+| `kdevice::lifecycle::deferred` | pending/active intrusive queues, claimed request identity, trigger sequence, fixed executor handoff | allocate/drop request owners in trigger; own host workqueue or service contracts |
 | `kclass` | consume a `ProbeContext` to publish a class capability | acquire binding-write permission itself |
 | `kdriver::…::virtio::block` | own a block activation and perform its concrete stop/close sequence | rely on the old global activation map |
 

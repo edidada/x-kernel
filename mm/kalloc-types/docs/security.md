@@ -38,7 +38,7 @@ Final strong/weak destruction after recovery retains the normal context rules.
 
 Raw round-trip tests cover both allocation policies, independently transferred
 references, extraction, aligned ZSTs and weak release through recovered
-allocator metadata. Optional KArcPointerOps delegates directly to that raw-owner
+allocator metadata. Optional KArcPointerOps and KBoxPointerOps delegate directly to that raw-owner
 contract, without a new allocator, refcount or queue identity. Its safety depends
 on the concrete adapter preserving link projections and the library returning
 each transferred pointer once. Conversion does not authorize arbitrary removal
@@ -147,6 +147,8 @@ injection remains private; raw ownership recovery has its separate unsafe contra
 | `KBox::drop` | Compute the dynamic layout while the value is valid; the stack-local Storage guard frees storage after destruction or unwinding, without accessing the destroyed value |
 | `KBox::into_inner` | A consumed sized owner supplies initialized aligned storage; ManuallyDrop prevents duplicate destruction, and Storage frees only the original allocation after the move |
 | `Send` / `Sync` | Only values that satisfy the corresponding trait may be moved or shared across threads; the internal pointer is not exposed |
+| `KBoxPointerOps::from_raw` / `into_raw` | PointerOps supplies exactly one valid, unrecovered KBox allocation pointer; conversion transfers sole ownership and performs no allocation or release. The concrete adapter must return each pointer once and keep link projections valid |
+| `KArcPointerOps::from_raw` / `into_raw` | PointerOps supplies exactly one valid, unrecovered KArc pointer; conversion transfers exactly one strong reference without changing refcounts. The concrete adapter must return each pointer once |
 
 ## Threat Analysis
 

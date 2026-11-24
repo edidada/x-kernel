@@ -34,6 +34,7 @@ mod block_completion;
 mod block_completion_dispatch;
 #[cfg(feature = "block")]
 mod block_irq;
+mod deferred;
 #[cfg(feature = "virtio-blk")]
 unittest::path_mod_test!(
     block_requests_unittest,
@@ -47,6 +48,11 @@ unittest::path_mod_test!(
     #[cfg(all(feature = "char", feature = "unittest-threads"))]
     mod binding_reference_class,
     "../ut-tests/binding_reference_class.rs"
+);
+unittest::path_mod_test!(
+    #[cfg(feature = "unittest-threads")]
+    mod deferred_probe,
+    "../ut-tests/deferred_probe.rs"
 );
 unittest::path_mod_test!(
     #[cfg(feature = "unittest-threads")]
@@ -153,6 +159,11 @@ pub fn init_drivers() {
 
     // Initialize global object/metadata stores before any device is activated.
     kdevice::init_device_registry();
+
+    // The executor must exist before discovery so the first binding success can
+    // drain any request deferred during early boot. This context is sleepable
+    // because late-init has already brought up kworkng.
+    deferred::init();
 
     let _registry = discover_unified();
 

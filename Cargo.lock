@@ -2396,6 +2396,8 @@ dependencies = [
  "driver-os-api",
  "driver_base",
  "fwnode",
+ "intrusive-collections",
+ "kalloc-types",
  "kerrno",
  "kmutex",
  "kspin",

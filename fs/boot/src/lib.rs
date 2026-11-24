@@ -80,6 +80,7 @@ fn map_9p_driver_error(error: DriverError) -> KError {
         DriverError::ReadOnly => KError::ReadOnlyFilesystem,
         DriverError::ResourceBusy => KError::ResourceBusy,
         DriverError::Unsupported => KError::OperationNotSupported,
+        DriverError::Deferred => KError::WouldBlock,
     }
 }
 

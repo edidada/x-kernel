@@ -5,6 +5,7 @@
 //! Driver-core lifecycle orchestration over discovery descriptors and stable
 //! device objects.
 
+pub(crate) mod deferred;
 pub(crate) mod dispatch;
 pub(crate) mod event;
 pub(crate) mod subscribers;
@@ -76,6 +77,10 @@ pub enum ProbeOutcome {
     /// At least one matching candidate was probed and all failed normally.
     /// The descriptor is back to `Pending` and may be retried.
     Unclaimed,
+    /// A matching candidate explicitly deferred on an external dependency.
+    /// The failed binding was fully retired and the descriptor is pending in
+    /// the deferred queue.
+    Deferred,
 }
 
 impl ProbeOutcome {
@@ -255,6 +260,7 @@ pub fn register_driver_object<B: Into<BoxedDriver>>(ops: B) -> Arc<DriverObject>
             }
         };
 
+        let attempt = deferred::begin_limited(desc_ref.id);
         if device_registry()
             .mark_device_desc_probing(desc_ref.id)
             .is_none()
@@ -267,21 +273,26 @@ pub fn register_driver_object<B: Into<BoxedDriver>>(ops: B) -> Arc<DriverObject>
             continue;
         }
 
-        match probe_desc_round(
+        let outcome = probe_desc_round(
             desc,
             ProbeCandidates::Only {
                 driver: driver.clone(),
             },
             &permit,
-        ) {
-            Ok(outcome) if outcome.activated() => activated_from_desc += 1,
-            Ok(_) => {}
-            Err(error) => log::warn!(
+            attempt,
+        );
+        drop(guard);
+        if outcome.as_ref().is_ok_and(|outcome| outcome.activated()) {
+            activated_from_desc += 1;
+            deferred::notify_success();
+        }
+        if let Err(error) = outcome {
+            log::warn!(
                 "driver {} descriptor {:?} probe failed: {:?}",
                 driver.name(),
                 desc_ref.id,
                 error
-            ),
+            );
         }
     }
     if activated_from_desc > 0 {
@@ -410,10 +421,16 @@ fn requeue_desc(desc_id: DeviceDescId) {
 /// first success stops the round. Ordinary probe failures are reported as
 /// `Unclaimed` (logged and counted), never as a core error; core setup
 /// failures requeue the descriptor and return `Err`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): split candidate matching, deferred commit and \
+              publication"
+)]
 fn probe_desc_round(
     desc: DeviceDesc,
     candidates: ProbeCandidates,
     permit: &ContextPermit<'_>,
+    attempt: deferred::AttemptToken,
 ) -> Result<ProbeOutcome, DriverError> {
     let Some(bus_type) = bus_type_for_desc(&desc) else {
         requeue_desc(desc.id());
@@ -431,6 +448,7 @@ fn probe_desc_round(
     };
 
     let mut probed = false;
+    let mut deferred_candidate = None;
     for driver in drivers {
         if matches!(
             bus_type.match_desc(driver.as_ref(), &desc),
@@ -481,6 +499,24 @@ fn probe_desc_round(
         let probe_ctx = ProbeContext::new(device.clone(), binding, permit);
         let data = match driver.probe_erased(&probe_ctx) {
             Ok(data) => data,
+            Err(DriverError::Deferred) => {
+                log::debug!(
+                    "driver {} deferred descriptor {:?}",
+                    driver.name(),
+                    desc.id(),
+                );
+                driver.record_probe_deferred();
+                if let Some(bus) = &bus_instance {
+                    bus.record_probe_deferred();
+                }
+                retire_failed_binding(device.as_ref());
+                if deferred_candidate.is_none() {
+                    deferred_candidate = Some(driver.id().raw());
+                }
+                // Probe-time deferral is a failed candidate: keep scanning so
+                // a later matching driver can still bind this descriptor.
+                continue;
+            }
             Err(error) => {
                 log::info!(
                     "driver {} probe failed for descriptor {:?}: {:?}",
@@ -528,10 +564,22 @@ fn probe_desc_round(
         announce_device_bound(device.as_ref(), driver.device_kind());
         dispatch_device_event(DeviceEvent::Published { id: device.id() });
         activate_device(device.as_ref(), driver.device_kind());
+        if attempt.cancel_old_on_success() {
+            deferred::cancel_waits(desc.id());
+        }
         return Ok(ProbeOutcome::Activated);
     }
 
     requeue_desc(desc.id());
+    if let Some(candidate) = deferred_candidate {
+        #[cfg(unittest)]
+        deferred::test_hooks::pause_commit(
+            desc.id(),
+            deferred::test_hooks::CommitPause::BeforeCommit,
+        );
+        deferred::commit_deferred(attempt, deferred::DeferReason::Dependency, candidate)?;
+        return Ok(ProbeOutcome::Deferred);
+    }
     Ok(if probed {
         ProbeOutcome::Unclaimed
     } else {
@@ -633,18 +681,64 @@ pub fn probe_device_desc(id: DeviceDescId) -> Result<ProbeOutcome, DriverError> 
     }
 
     let guard = binding.lock();
-    let permit = ContextPermit::new(&guard);
-    #[cfg(unittest)]
-    test_hooks::pause(test_hooks::BindingPause::ProbeHoldingLock { desc_id: id });
-    match inspect_locked_desc(id)? {
-        None => Ok(ProbeOutcome::Skipped),
-        Some(desc) => {
-            if device_registry().mark_device_desc_probing(id).is_none() {
-                return Err(DriverError::BadState);
+    let outcome = {
+        let permit = ContextPermit::new(&guard);
+        #[cfg(unittest)]
+        test_hooks::pause(test_hooks::BindingPause::ProbeHoldingLock { desc_id: id });
+        match inspect_locked_desc(id)? {
+            None => Ok(ProbeOutcome::Skipped),
+            Some(desc) => {
+                let attempt = deferred::begin_explicit(id);
+                if device_registry().mark_device_desc_probing(id).is_none() {
+                    return Err(DriverError::BadState);
+                }
+                probe_desc_round(desc, ProbeCandidates::BusType, &permit, attempt)
             }
-            probe_desc_round(desc, ProbeCandidates::BusType, &permit)
         }
+    };
+    drop(guard);
+    if outcome.as_ref().is_ok_and(|outcome| outcome.activated()) {
+        deferred::notify_success();
     }
+    outcome
+}
+
+/// Retry one claimed deferred request. The worker already consumed the node;
+/// this path must not re-enter the public probe entry and cancel its own claim.
+pub(crate) fn retry_deferred_request(
+    id: DeviceDescId,
+    request: u64,
+) -> Result<ProbeOutcome, DriverError> {
+    let binding = device_registry()
+        .binding_for_desc(id)
+        .ok_or(DriverError::InvalidInput)?;
+    if binding.is_owned_by_current() {
+        return Ok(ProbeOutcome::Busy);
+    }
+
+    let guard = binding.lock();
+    let outcome = {
+        let permit = ContextPermit::new(&guard);
+        if !deferred::is_claimed(id, request) {
+            Ok(ProbeOutcome::Skipped)
+        } else {
+            match inspect_locked_desc(id)? {
+                None => Ok(ProbeOutcome::Skipped),
+                Some(desc) => {
+                    let attempt = deferred::begin_worker(id, request);
+                    if device_registry().mark_device_desc_probing(id).is_none() {
+                        return Err(DriverError::BadState);
+                    }
+                    probe_desc_round(desc, ProbeCandidates::BusType, &permit, attempt)
+                }
+            }
+        }
+    };
+    drop(guard);
+    if outcome.as_ref().is_ok_and(|outcome| outcome.activated()) {
+        deferred::notify_success();
+    }
+    outcome
 }
 
 /// Adopt a device that boot code already initialized, skipping descriptor match/probe.
@@ -725,7 +819,7 @@ pub fn adopt_active_device(
     // The entry is not published yet, so nobody else can hold or contend for
     // this lock. `try_lock` keeps adoption non-blocking while it runs inside
     // the bus-manager spinlock; failure is a broken invariant, not a race.
-    let _binding_guard = binding.try_lock().ok_or(DriverError::BadState)?;
+    let binding_guard = binding.try_lock().ok_or(DriverError::BadState)?;
 
     // Prepare the binding metadata before the object becomes visible. From
     // this point on a concurrent remove can safely inspect `driver_id()` once
@@ -779,6 +873,11 @@ pub fn adopt_active_device(
     announce_device_bound(device.as_ref(), driver.device_kind());
     dispatch_device_event(DeviceEvent::Published { id: device.id() });
     activate_device(device.as_ref(), driver.device_kind());
+
+    // Adoption runs inside the bus spinlock; notify_success only splices
+    // preallocated nodes and kicks the non-sleeping fixed executor.
+    drop(binding_guard);
+    deferred::notify_success();
 
     Ok(device)
 }
@@ -897,6 +996,12 @@ fn remove_device_from_index(
         desc_id,
         device_id: id,
     });
+
+    if disposition_applied {
+        // Removal/requeue is committed under the descriptor binding lock; only
+        // now may pending/active/claimed deferred state be invalidated.
+        deferred::cancel_waits(desc_id);
+    }
 
     // Detach the device and opportunistically orphan the shared driver entry
     // in one bus critical section. Metadata is still present, which is what
@@ -1034,6 +1139,8 @@ pub fn unregister_device_desc(id: DeviceDescId) -> Result<(), DriverError> {
                 log::error!("descriptor {:?} was not Pending under its binding lock", id);
                 return Err(DriverError::BadState);
             };
+            // The descriptor deletion is committed under the binding lock.
+            deferred::cancel_waits(id);
             if let Some(device) = device {
                 let (parent, children) = device.topology_snapshot();
                 #[cfg(unittest)]

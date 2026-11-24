@@ -155,14 +155,22 @@ pub enum DriverError {
     ResourceBusy,
     /// This operation is unsupported or unimplemented.
     Unsupported,
+    /// The probe cannot proceed until an external dependency becomes ready.
+    ///
+    /// This is not an ordinary I/O failure and callers must not spin on it.
+    /// The device core owns deferred-probe scheduling and retries only after a
+    /// later binding event or executor startup.
+    Deferred,
 }
 
 impl DriverError {
     /// Returns whether the caller may retry the operation later.
     ///
-    /// Only [`WouldBlock`](DriverError::WouldBlock) and
-    /// [`ResourceBusy`](DriverError::ResourceBusy) are considered retryable.
-    /// All other variants indicate permanent failures for the current request.
+    /// [`WouldBlock`](DriverError::WouldBlock),
+    /// [`ResourceBusy`](DriverError::ResourceBusy), and
+    /// [`Deferred`](DriverError::Deferred) are considered retryable.
+    /// `Deferred` specifically requires an external condition change and device
+    /// core scheduling; callers must not loop on it themselves.
     ///
     /// # Returns
     ///
@@ -178,7 +186,7 @@ impl DriverError {
     /// assert!(!DriverError::Io.should_retry());
     /// ```
     pub const fn should_retry(self) -> bool {
-        matches!(self, Self::WouldBlock | Self::ResourceBusy)
+        matches!(self, Self::WouldBlock | Self::ResourceBusy | Self::Deferred)
     }
 
     /// Returns a stable human-readable message for the error.
@@ -210,6 +218,7 @@ impl DriverError {
             ReadOnly => "Read-only device",
             ResourceBusy => "Resource is busy",
             Unsupported => "Unsupported operation",
+            Deferred => "Device not ready",
         }
     }
 }

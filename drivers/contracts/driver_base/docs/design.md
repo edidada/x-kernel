@@ -69,8 +69,11 @@ The module has no complex algorithms; the core logic is enum matching:
 
 1. The caller receives `DriverResult::Err(e)`.
 2. `e.should_retry()` reports whether the error is retryable
-   (`WouldBlock` / `ResourceBusy`).
-3. If retryable, the caller backs off and retries per its own policy.
+   (`WouldBlock` / `ResourceBusy` / `Deferred`).
+3. `WouldBlock`/`ResourceBusy` callers back off and retry per their own
+   policy. `Deferred` is device-core scheduling only: the caller must not
+   spin or self-retry; a later successful binding or executor startup owns
+   the retry.
 
 ### Device classification dispatch
 

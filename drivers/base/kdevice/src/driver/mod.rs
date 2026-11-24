@@ -40,6 +40,8 @@ pub struct ProbeStats {
     pub attempts: u64,
     /// Probe attempts that returned an error.
     pub failures: u64,
+    /// Probe attempts that explicitly deferred on an external dependency.
+    pub deferred: u64,
 }
 
 /// Atomic counters backing a [`ProbeStats`] snapshot.
@@ -47,6 +49,7 @@ pub struct ProbeStats {
 pub(crate) struct ProbeCounters {
     attempts: AtomicU64,
     failures: AtomicU64,
+    deferred: AtomicU64,
 }
 
 impl ProbeCounters {
@@ -54,6 +57,7 @@ impl ProbeCounters {
         Self {
             attempts: AtomicU64::new(0),
             failures: AtomicU64::new(0),
+            deferred: AtomicU64::new(0),
         }
     }
 
@@ -67,11 +71,17 @@ impl ProbeCounters {
         self.failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one probe attempt that deferred on an external dependency.
+    pub(crate) fn record_deferred(&self) {
+        self.deferred.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Snapshot the current counts.
     pub(crate) fn snapshot(&self) -> ProbeStats {
         ProbeStats {
             attempts: self.attempts.load(Ordering::Relaxed),
             failures: self.failures.load(Ordering::Relaxed),
+            deferred: self.deferred.load(Ordering::Relaxed),
         }
     }
 }
@@ -470,6 +480,11 @@ impl DriverObject {
     /// Record one failed probe attempt against this driver.
     pub(crate) fn record_probe_failure(&self) {
         self.probe.record_failure();
+    }
+
+    /// Record one probe attempt that deferred on an external dependency.
+    pub(crate) fn record_probe_deferred(&self) {
+        self.probe.record_deferred();
     }
 
     /// Snapshot this driver's probe accounting.

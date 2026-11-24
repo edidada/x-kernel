@@ -129,6 +129,22 @@ pub use driver::{
 };
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 #[cfg(unittest)]
+#[doc(hidden)]
+pub use lifecycle::deferred::test_hooks as deferred_test_hooks;
+#[doc(hidden)]
+pub use lifecycle::deferred::{
+    DeferredExecutor, drain as drain_deferred, executor_installed as deferred_executor_installed,
+    install_executor as install_deferred_executor,
+};
+#[cfg(unittest)]
+#[doc(hidden)]
+pub use lifecycle::deferred::{
+    backlog_contract_for_test as deferred_backlog_contract_for_test,
+    cancel_all_for_tests as cancel_all_deferred_for_tests,
+    promote_order_for_test as deferred_promote_order_for_test,
+    reset_for_tests as reset_deferred_for_tests,
+};
+#[cfg(unittest)]
 pub use lifecycle::dispatch::dispatch_device_event_for_tests;
 #[cfg(unittest)]
 pub use lifecycle::test_hooks;

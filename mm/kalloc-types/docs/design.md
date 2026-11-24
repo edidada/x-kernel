@@ -62,10 +62,20 @@ No caller-visible policy or allocator state is recoverable from the pointer.
 Introducing arenas, per-allocation release tokens or stateful backends requires
 revisiting this representation before retaining the pointer-only interface.
 
-The optional `intrusive-collections` feature exports `KArcPointerOps<T>` for
-concrete adapters using the existing library. This zero-sized implementation
-transfers exactly one KArc strong reference per occupied link, with no allocation
-or custom queue protocol. The default configuration does not enable this optional
+The optional `intrusive-collections` feature exports two zero-sized pointer
+adapters for concrete subsystem adapters:
+
+- `KArcPointerOps<T>` transfers exactly one KArc strong reference per occupied
+  link.
+- `KBoxPointerOps<T>` transfers exactly one KBox sole owner per occupied link.
+  It performs no allocation or release; callers construct the `KBox` before
+  taking subsystem locks, and the concrete adapter supplies the link projection.
+
+`kalloc-types` provides both implementations; subsystem intrusive-collection
+adapters consume them as the `PointerOps` parameter. Calls flow from
+`intrusive-collections` into `into_raw`/`from_raw` to transfer ownership in and
+out of list nodes. Neither adapter implements queue policy, cancellation or
+synchronization. The default configuration does not enable this optional
 dependency.
 Hosted tests use this production pointer adapter with test-only link projections.
 They cover duplicate-insertion panic recovery, known-member removal, independent
