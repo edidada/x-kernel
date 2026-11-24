@@ -131,9 +131,36 @@ trap_handler_table:
     push    {nmi_vector}
     push    -1                          # orig_rax: not a syscall
     PUSH_GENERAL_REGS
+    # User RIP and RSP are not evidence that kernel NMI glue is active.
+    test    byte ptr [rsp + {cs_offset}], 3
+    jnz     .Lnmi_install_gs
     NMI_CHECK_GLUE_RIP
-    mov     r12, rsp
 
+    # A faulting IRETQ unblocks NMI before the exception stub runs. Its RIP
+    # is outside the NMI glue, but it is still running on this CPU's IST.
+    # Check the saved RSP before touching GS or dispatching another callback.
+    mov     rcx, [rsp + {rsp_offset}]
+    lea     rax, [rsp + {trapframe_size}]
+    cmp     rcx, rax
+    jae     .Lnmi_install_gs
+    sub     rax, {nmi_stack_bytes}
+    cmp     rcx, rax
+    jb      .Lnmi_install_gs
+
+    # CPL alone does not make RSP trustworthy in the SYSCALL/SYSRET windows.
+    mov     rcx, [rsp + {rip_offset}]
+    lea     rax, [rip + syscall_entry]
+    cmp     rcx, rax
+    jb      .Lx86_nmi_halt
+    lea     rax, [rip + .Lsyscall_kernel_rsp]
+    cmp     rcx, rax
+    jb      .Lnmi_install_gs
+    lea     rax, [rip + .Lsysret_user_rsp]
+    cmp     rcx, rax
+    jne     .Lx86_nmi_halt
+
+.Lnmi_install_gs:
+    mov     r12, rsp
     # The IST points to aligned metadata in the permanent CPU area. CS
     # alone cannot identify which GS is active in a SWAPGS transition.
     mov     ecx, 0xc0000101              # IA32_GS_BASE
@@ -172,6 +199,7 @@ syscall_entry:
     swapgs                              # swap in kernel gs
     mov     gs:[offset __KCPU_SLOT_TSS + 12], rsp # store user rsp -> scratch at TSS.sp1
     mov     rsp, gs:[offset __KCPU_SLOT_TSS + 4]  # load end of TrapFrame <- TSS.sp0
+.Lsyscall_kernel_rsp:
 
     push    {UDATA}                     # push ss
     push    gs:[offset __KCPU_SLOT_TSS + 12]      # push rsp
@@ -234,4 +262,5 @@ enter_user:
 
 .Lsysret:
     mov rsp, [rsp + 24]                 # load user rsp
+.Lsysret_user_rsp:
     sysretq

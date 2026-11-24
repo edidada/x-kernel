@@ -7,6 +7,27 @@ use unittest::def_test;
 use super::ExceptionContext;
 
 #[def_test]
+fn nmi_uses_a_present_interrupt_gate_and_dedicated_ist() {
+    use x86_64::instructions::tables::sidt;
+
+    const GATE_BYTES: usize = 16;
+    const GATE_OPTIONS_OFFSET: usize = 4;
+    const GATE_PRESENT_AND_TYPE_MASK: u16 = 0x8f00;
+    const PRESENT_INTERRUPT_GATE: u16 = 0x8e00;
+    const GATE_IST_MASK: u16 = 0x7;
+
+    let idtr = sidt();
+    let entry_offset = usize::from(super::nmi::VECTOR) * GATE_BYTES;
+    assert!(entry_offset + GATE_BYTES <= usize::from(idtr.limit) + 1);
+    let options = (idtr.base.as_u64() as usize + entry_offset + GATE_OPTIONS_OFFSET) as *const u16;
+    // SAFETY: the loaded IDT is permanent and immutable after publication.
+    // The IDTR limit check covers both option bytes in this 64-bit gate.
+    let options = unsafe { options.read_unaligned() };
+    assert_eq!(options & GATE_PRESENT_AND_TYPE_MASK, PRESENT_INTERRUPT_GATE);
+    assert_eq!(options & GATE_IST_MASK, super::nmi::IST_INDEX + 1);
+}
+
+#[def_test]
 fn test_exception_context_args() {
     let mut ctx = ExceptionContext::default();
     ctx.set_arg0(10);

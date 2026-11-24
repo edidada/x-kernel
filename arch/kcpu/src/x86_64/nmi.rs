@@ -11,13 +11,15 @@ use x86_64::{VirtAddr, registers::model_specific::GsBase};
 
 pub(super) const VECTOR: u8 = 2;
 pub(super) const IST_INDEX: u16 = 0;
-const STACK_BYTES: usize = 64 * 1024;
+pub(super) const STACK_BYTES: usize = 64 * 1024;
 
 #[repr(C, align(16))]
 struct Stack {
     bytes: [u8; STACK_BYTES],
     kernel_gs: u64,
 }
+
+const _: () = assert!(core::mem::offset_of!(Stack, kernel_gs) == STACK_BYTES);
 
 // SAFETY: the reset template is all zeroes and contains no ownership or
 // self-references. Each CPU initializes its own permanent stack metadata.

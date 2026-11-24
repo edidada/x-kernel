@@ -567,5 +567,8 @@ The x86 source dispatcher is a no-op in production pending source integration.
 
 The dedicated stack relies on hardware NMI blocking through a successful
 `IRETQ`. The architecture stops the current CPU on exceptions in the callback
-or entry/return glue, and on unexpected reentry. An assembly RIP check handles
-faults in the glue where GS can still hold the interrupted value.
+or entry/return glue, and on unexpected reentry. The assembly checks RIP for
+faults in the glue where GS can still hold the interrupted value. A second NMI
+can also arrive in an exception stub after a faulting `IRETQ`. Its entry checks
+whether the interrupted kernel RSP still points into the local NMI stack
+before using GS or dispatching the callback.

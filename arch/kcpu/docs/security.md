@@ -543,6 +543,11 @@ authorize scheduling. Page-fault callbacks do not inherit this unsafe signature.
 
 ## x86-64 NMI stack and return boundary
 
+`unsafe impl kcpu_slot::StaticSlotValue for nmi::Stack` allows the all-zero
+stack template to be copied bytewise into each permanent CPU area. Its byte
+array and `u64` metadata hold no ownership or self-references. Each CPU writes
+its own kernel GS value after the template is copied.
+
 During pinned CPU bring-up, `nmi::prepare_stack` writes the kernel GS base at
 the aligned top of a permanent local stack. `gdt::init` writes the corresponding
 packed TSS IST element before publishing the descriptor. `idt::init` installs
@@ -559,8 +564,12 @@ It must avoid faulting instructions and paths that execute `IRET` internally.
 An exception raised by the NMI callback stops the local CPU before fault
 recovery. An exception or another NMI that interrupts the entry/return glue
 can arrive with the interrupted GS base active. The assembly RIP check stops
-the CPU before any Rust call in that case. An unexpected nested delivery
-from the callback also stops the CPU, since a repeated IST entry may have
-overwritten the outer frame. These terminal paths use no ordinary logging or
-panic handler. Stack overflow and machine faults are outside this recovery
-model.
+the CPU before any Rust call in that case. A faulting `IRETQ` can unblock NMI
+delivery while the exception stub is still using the NMI stack. The NMI
+entry's saved-RSP check catches that case before installing GS. The bounds
+come from the hardware-selected IST top and the stack size. The check skips
+user mode and the `SYSCALL` and `SYSRET` instruction windows where kernel CS
+can coexist with a user-controlled RSP. Unexpected reentry is terminal since
+the new IST frame may have overwritten the outer frame. These paths use no
+ordinary logging or panic handler. Stack overflow and machine faults are
+outside this recovery model.

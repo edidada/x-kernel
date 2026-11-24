@@ -18,8 +18,11 @@ core::arch::global_asm!(
     UCODE64 = const gdt::UCODE64.0,
     SYSCALL_VECTOR = const LEGACY_SYSCALL_VECTOR,
     nmi_vector = const nmi::VECTOR,
+    nmi_stack_bytes = const nmi::STACK_BYTES,
     vector_offset = const core::mem::offset_of!(ExceptionContext, vector),
     rip_offset = const core::mem::offset_of!(ExceptionContext, rip),
+    cs_offset = const core::mem::offset_of!(ExceptionContext, cs),
+    rsp_offset = const core::mem::offset_of!(ExceptionContext, rsp),
 );
 
 const _: () = assert!(core::mem::size_of::<ExceptionContext>() == 23 * 8);

@@ -50,7 +50,7 @@ pub(super) fn init() {
     // SAFETY: called during per-CPU initialization (boot or secondary CPU
     // bring-up), single-threaded for this CPU. `GlobalDescriptorTable::load`
     // requires a `'static` reference, so this uses the self-hosting mutable
-    // accessor; it is the one x86 raw boundary.
+    // accessor for this CPU's permanent GDT.
     let gdt = unsafe { GDT.current_shared_mut() };
     assert_eq!(gdt.append(Descriptor::kernel_code_segment()), KCODE64);
     assert_eq!(gdt.append(Descriptor::kernel_data_segment()), KDATA);
