@@ -525,6 +525,25 @@ pub fn detach_device(instance: InstanceId, device: DeviceKey) -> Result<(), Iomm
     record.hardware.detach(&master)
 }
 
+/// Snapshot of one registered IOMMU instance, for system bring-up checks.
+#[derive(Clone)]
+pub struct InstanceSnapshot {
+    pub id: InstanceId,
+    pub domain: Arc<IommuDomain>,
+}
+
+/// Returns every registered instance with its domain.
+pub fn registered_instances() -> Vec<InstanceSnapshot> {
+    instances()
+        .lock()
+        .iter()
+        .map(|record| InstanceSnapshot {
+            id: record.id,
+            domain: record.domain.clone(),
+        })
+        .collect()
+}
+
 /// Returns the domain a device translates through, if attached.
 pub fn domain_for_device(device: DeviceKey) -> Option<Arc<IommuDomain>> {
     instances()

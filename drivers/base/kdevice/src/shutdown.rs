@@ -157,14 +157,16 @@ fn shutdown_targets() -> Vec<ShutdownTarget> {
 /// Must run in sleepable task context: descriptor binding locks may block.
 /// Once the internal lockdown guard drops, probing resumes and a later
 /// traversal sees the same bound set, so the function is safe to call again.
-pub fn shutdown_all_devices() {
+pub fn shutdown_all_devices() -> usize {
     let _lockdown = ProbeBlockGuard::acquire();
     let targets = shutdown_targets();
     log::info!(
         "device shutdown: visiting {} bound device(s)",
         targets.len()
     );
+    let mut visited = 0usize;
     for target in &targets {
+        visited += 1;
         if let Err(error) = target
             .device
             .shutdown_transition(&target.binding, &target.driver)
@@ -178,6 +180,7 @@ pub fn shutdown_all_devices() {
         }
     }
     log::info!("device shutdown: traversal complete");
+    visited
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/shutdown.rs");

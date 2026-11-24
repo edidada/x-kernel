@@ -59,6 +59,8 @@ unittest::path_mod_test!(
     mod topology_unittest,
     "../ut-tests/topology_unittest.rs"
 );
+#[cfg(feature = "board-selftest")]
+pub mod board_selftest;
 mod bus;
 pub mod driver_registry;
 mod enumeration;
@@ -172,6 +174,11 @@ pub fn init_drivers() {
     // `iommus` phandle resolve to a live instance.
     #[cfg(feature = "iommu")]
     driver_registry::iommu::attach_consumers();
+
+    // On-board bring-up selftest (KFEAT_BOARD_SELFTEST): shutdown traversal
+    // plus one real IOMMU attach/map/unmap cycle per instance.
+    #[cfg(feature = "board-selftest")]
+    board_selftest::run();
 
     log_class_summary();
     log_device_core_summary();

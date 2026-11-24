@@ -363,6 +363,18 @@ config KFEAT_DRIVER_VIRTIO_INPUT
     help
       Enable the virtio-input input device driver.
 
+comment "Board bring-up selftest"
+
+config KFEAT_BOARD_SELFTEST
+    bool "On-board bring-up selftest (shutdown traversal + IOMMU cycle)"
+    depends on ARCH_AARCH64
+    help
+      Run one bring-up selftest after driver initialization: the system
+      shutdown traversal over every bound device, then one real IOMMU
+      attach/enable-paging/map/unmap cycle per registered instance. Logs its
+      criteria at error level for the board console. Development aid only;
+      leave unset in production configurations.
+
 comment "IOMMU drivers"
 
 config KFEAT_DRIVER_RK_IOMMU

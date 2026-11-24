@@ -99,6 +99,7 @@ sdmmc = ["any_firmware_driver", "block"]
 # IOMMU subsystem: the core framework wires the late device-attach pass into
 # init_drivers; each hardware driver feature registers its descriptor.
 iommu = ["dep:kiommu", "any_firmware_driver"]
+board-selftest = ["iommu", "dep:kdma"]
 rk-iommu = ["iommu", "dep:rk_iommu"]
 arm-smmu = ["iommu", "dep:arm_smmu"]
 

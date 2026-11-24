@@ -164,6 +164,7 @@ driver_ramdisk = ["kdriver/ramdisk"]
 driver_ramdisk_static = ["kdriver/ramdisk-static"]
 # IOMMU drivers. Enabling either pulls the core framework (kdriver `iommu`)
 # plus the concrete hardware driver.
+board_selftest = ["kdriver/board-selftest"]
 driver_rk_iommu = ["kdriver/rk-iommu"]
 driver_arm_smmu = ["kdriver/arm-smmu"]
 driver_ixgbe = ["kdriver/ixgbe"]
