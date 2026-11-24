@@ -304,12 +304,19 @@ def ciJobSlug() {
     return slug ?: 'ci'
 }
 
-def ciTargetVolumePrefix() {
-    return "xkernel-target-${ciJobSlug()}-b${env.BUILD_NUMBER}-"
+/**
+ * Hygiene sweep prefix: every CI target volume, any job and any build, so
+ * leftovers of hard-killed runs are reclaimed by the next preflight on the
+ * host. Active volumes are protected by the container-reference check, not
+ * by the name: a concurrent build's container exists from creation until
+ * inside() teardown, which is exactly the window its volume is in use.
+ */
+def ciTargetVolumeScanPrefix() {
+    return 'xkernel-target-'
 }
 
 def ciTargetVolumeName(String scope) {
-    return "${ciTargetVolumePrefix()}${scope}"
+    return "${ciTargetVolumeScanPrefix()}${ciJobSlug()}-b${env.BUILD_NUMBER}-${scope}"
 }
 
 def ciBuilderDockerArgs(String scope, String seccompProfile = 'unconfined') {
@@ -338,7 +345,8 @@ def ciNodeMinFreeGb() {
 /**
  * Host-side node hygiene, run before any builder container starts. It only ever
  * touches docker objects this CI owns: containers labeled `x-kernel-ci=true` and
- * volumes named `xkernel-target-<jobslug>-b<build>-*`. Compile hosts are shared
+ * volumes named `xkernel-target-*` (any job/build; reference check protects
+ * active ones). Compile hosts are shared
  * with other teams, so `docker volume prune` and unscoped rm are forbidden.
  * Set `_CI_HYGIENE_DRY_RUN=1` in the agent environment to print actions instead of reaping.
  */
@@ -380,7 +388,9 @@ for c in $(docker ps -q --filter "label=${label_key}=true" --filter status=runni
     fi
 done
 
-# 3) This job's target volumes no container references (any state protects them).
+# 3) CI target volumes no container references (any state protects them).
+#    The sweep spans all jobs/builds so killed runs' leftovers are reclaimed;
+#    concurrent builds stay safe because their containers exist while in use.
 volume_names="$(docker volume ls -q | { grep -E "^${volume_prefix}" || true; })"
 for v in $volume_names; do
     if [ -z "$(docker ps -aq --filter "volume=$v")" ]; then
@@ -390,11 +400,16 @@ for v in $volume_names; do
 done
 
 # 4) Capacity gate on the Docker data root (the filesystem that holds all volumes).
+#    Reporting-only scopes (post) skip the gate: their container writes KB-scale
+#    logs/manifests and must start even on a nearly-full disk, otherwise the
+#    infrastructure failure would never be annotated on the PR.
 docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
 avail_kb="$(df -Pk "$docker_root" | awk 'NR==2 {print $4}')"
 required_kb=$(( min_free_gb * 1024 * 1024 ))
 echo "docker root ${docker_root}: ${avail_kb} KiB free (gate ${required_kb} KiB)"
-if [ "${avail_kb:-0}" -lt "$required_kb" ]; then
+if [ "${CI_NODE_DISK_GATE:-1}" != '1' ]; then
+    echo "disk gate skipped for reporting-only scope=${scope}"
+elif [ "${avail_kb:-0}" -lt "$required_kb" ]; then
     echo "node preflight failed: less than ${min_free_gb} GiB free on ${docker_root}" >&2
     df -h "$docker_root" >&2 || true
     exit 1
@@ -403,12 +418,13 @@ echo "CI node hygiene done"
 '''
 }
 
-def ciNodePreflight(String scope) {
+def ciNodePreflight(String scope, boolean diskGate = true) {
     def rc = -1
     withEnv([
         "CI_NODE_SCOPE=${scope}",
-        "CI_TARGET_VOLUME_PREFIX=${ciTargetVolumePrefix()}",
+        "CI_TARGET_VOLUME_PREFIX=${ciTargetVolumeScanPrefix()}",
         "CI_NODE_MIN_FREE_GB=${ciNodeMinFreeGb()}",
+        "CI_NODE_DISK_GATE=${diskGate ? '1' : '0'}",
     ]) {
         rc = sh(returnStatus: true, label: 'CI node preflight (orphan reclaim + disk gate)',
                 script: ciNodeHygieneScript())
@@ -437,7 +453,7 @@ def reclaimCiTargetVolume(String scope) {
 def withCiBuilderNode(Map opts, Closure body) {
     node(opts.label) {
         try {
-            ciNodePreflight(opts.scope)
+            ciNodePreflight(opts.scope, opts.diskGate != false)
             opts.hostPrep?.call()
             def rootWs = pwd()
             // The ARM builder's host kernel misreports io_uring polls on signalfd.
@@ -460,7 +476,10 @@ def withCiBuilderNode(Map opts, Closure body) {
 }
 
 def withFloatingCiDocker(String scope, Closure body) {
-    withCiBuilderNode(label: floatingGuestAgentLabel(), scope: scope, archLeg: false) {
+    // post only reports (KB-scale writes): keep its disk gate off so a full
+    // disk still gets annotated on the PR instead of dying before finalize.
+    withCiBuilderNode(label: floatingGuestAgentLabel(), scope: scope, archLeg: false,
+                      diskGate: scope != 'post') {
         body.call()
     }
 }
