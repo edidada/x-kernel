@@ -69,8 +69,12 @@ pub(crate) fn devm_consume_uart_clocks(ctx: &ProbeContext<'_>) -> DriverResult<V
                 clk.prepare_enable().map_err(map_res_err)?;
                 clks.push(clk);
             }
-            // Provider missing: keep the port working without clocks.
-            Err(ResError::NotFound) => continue,
+            // Provider not registered yet: the probe returns Deferred and the
+            // device core retries after the provider registers (kdevice's
+            // deferred queue / executor). Firmware-configured ports would
+            // still run unclocked, but the clock connection is an ownership
+            // upgrade we should not silently drop when deferral is available.
+            Err(ResError::NotFound) => return Err(DriverError::Deferred),
             Err(error) => return Err(map_res_err(error)),
         }
     }
