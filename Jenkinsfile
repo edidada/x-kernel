@@ -50,7 +50,6 @@ pipeline {
         RUSTUP_DIST_SERVER = 'https://rsproxy.cn'
         RUSTUP_UPDATE_ROOT = 'https://rsproxy.cn/rustup'
         PYTHONUNBUFFERED = '1'
-        TARGET_DIR = '/xkernel-target'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
         ROOTFS_VARIANT = 'xkernel-glibc'
         ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'rootfs-v20261120'}"
@@ -61,56 +60,13 @@ pipeline {
         stage('Prepare') {
             steps {
                 script {
-                    withFloatingCiDocker {
+                    withFloatingCiDocker('prepare') {
                         // Replay builds lose Gitee webhook env; restore before checkout/description.
                         restoreReplayGiteeEnv()
                         currentBuild.description = env.giteePullRequestIid?.trim()
                             ? "PR#${env.giteePullRequestIid}"
                             : "${env.DEFAULT_BRANCH} (manual)"
-                        def prepareError = null
-                        def prepareSucceeded = false
-                        try {
-                            runCiStage(sourceStageName(), ciFailureDetail(sourceStageName()), false) {
-                                initializeCiWorkspace()
-                                prepareSource()
-                                // Create parallel Check Run placeholders first (earlier → lower on Gitee PR).
-                                giteeStartParallelCheckRuns()
-                                giteeStartCheckRun(sourceStageName())
-                            }
-                            runCiStage(setupStageName(), ciFailureDetail(setupStageName())) {
-                                checkBuildEnvironment()
-                            }
-                            runCiStage(rustfmtStageName(), ciFailureDetail(rustfmtStageName())) {
-                                runRustfmt()
-                            }
-                            prepareSucceeded = true
-                        } catch (e) {
-                            prepareError = e
-                        } finally {
-                            if (prepareSucceeded) {
-                                try {
-                                    beginPrepareStashStage(prepareSourceStashStageName())
-                                    stashCiSourceSnapshot()
-                                    completePrepareStashOutcome(prepareSourceStashStageName())
-                                } catch (stashErr) {
-                                    echo "Source snapshot stash failed: ${stashErr.message}"
-                                    completePrepareStashOutcome(prepareSourceStashStageName(), stashErr)
-                                    prepareError = prepareError ?: stashErr
-                                }
-                            }
-                            try {
-                                beginPrepareStashStage(preparePostMetaStashStageName())
-                                stashCiPostMeta()
-                                completePrepareStashOutcome(preparePostMetaStashStageName())
-                            } catch (stashErr) {
-                                echo "Post meta stash failed: ${stashErr.message}"
-                                completePrepareStashOutcome(preparePostMetaStashStageName(), stashErr)
-                                prepareError = prepareError ?: stashErr
-                            }
-                        }
-                        if (prepareError != null) {
-                            throw prepareError
-                        }
+                        runPrepareStages()
                     }
                 }
             }
@@ -131,7 +87,7 @@ pipeline {
     post {
         always {
             script {
-                withFloatingCiDocker {
+                withFloatingCiDocker('post') {
                     initializeCiWorkspace()
                     restoreCiPostMetaFromStash()
                     restoreStashedArchCiOutputs()
@@ -142,10 +98,18 @@ pipeline {
     }
 }
 
+// ==========================================================================
+// Section 1: configuration and naming - stage names, arch matrix, switches, image, agent labels
+// ==========================================================================
+
 def sourceStageName() { return 'Source: Checkout & PR Base' }
+
 def setupStageName() { return 'Setup: Rustfmt toolchain' }
+
 def rustfmtStageName() { return 'Check: Rustfmt' }
+
 def prepareSourceStashStageName() { return 'Prepare: Source snapshot stash' }
+
 def preparePostMetaStashStageName() { return 'Prepare: Post meta stash' }
 
 def runtimeTestArchitectures() { return ['x86_64', 'aarch64', 'riscv64'] }
@@ -154,13 +118,33 @@ def runtimeTestArchitectures() { return ['x86_64', 'aarch64', 'riscv64'] }
 def ciMatrixArchitectures() { return runtimeTestArchitectures() }
 
 def teeTestArchitectures() { return ['x86_64', 'aarch64'] }
+
 def teeTestBinaries() { return ['storage_test', 'cryp_test'] }
+
 def docCheckEnabled() { return params.ENABLE_DOC_CHECK?.toString()?.toBoolean() ?: false }
+
 def coverageEnabled() { return params.ENABLE_COVERAGE?.toString()?.toBoolean() ?: false }
 
 /** Propagate into xconfig/xkmake: 0 skips instrument-coverage and host report generation. */
 def coverageEnableEnv() {
     return "XKERNEL_ENABLE_COVERAGE=${coverageEnabled() ? '1' : '0'}"
+}
+
+def ciSourceStashName() {
+    return 'x-kernel-ci-source-snapshot'
+}
+
+def ciPostMetaStashName() {
+    return 'x-kernel-ci-post-meta'
+}
+
+def ciArchOutputStashName(String arch) {
+    return "x-kernel-ci-arch-output-${arch}"
+}
+
+def ciBuilderImage() {
+    // Agents preload the platform image with docker load (tag preserved, digest may differ).
+    return params.CI_BUILDER_IMAGE?.trim() ?: 'yeanwang/x-kernel-builder:v3.2'
 }
 
 // Fixed native hosts (same as daily-test); ops adds labels on these nodes in Jenkins.
@@ -186,237 +170,9 @@ def guestAgentLabelForArch(String arch) {
     error("No Jenkins agent label mapping for guest arch: ${arch}")
 }
 
-def ciBuilderImage() {
-    // Agents preload the platform image with docker load (tag preserved, digest may differ).
-    return params.CI_BUILDER_IMAGE?.trim() ?: 'yeanwang/x-kernel-builder:v3.2'
-}
-
-def ciBuilderDockerArgs(String seccompProfile = 'unconfined') {
-    // Docker Workflow tokenizes this argument string; quote the agent workspace path.
-    def seccompOption = "seccomp=${seccompProfile}".replace('\\', '\\\\').replace('"', '\\"')
-    return '--dns 223.5.5.5 ' +
-        // Older hosts charge concurrent io_uring queues to the shared UID's memlock budget.
-        '--ulimit memlock=67108864:67108864 ' +
-        '--mount type=volume,dst=/xkernel-target ' +
-        '--mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo ' +
-        // Keep Rustup temporary files and toolchains on the same filesystem.
-        '--mount type=volume,src=xkernel-rustup-home-v6,dst=/usr/local/rustup ' +
-        '--mount type=volume,src=xkernel-rootfs-cache-v3,dst=/xkernel-cache/rootfs ' +
-        '--device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 ' +
-        "--security-opt \"${seccompOption}\" --security-opt no-new-privileges=true"
-}
-
-def ciSourceStashName() {
-    return 'x-kernel-ci-source-snapshot'
-}
-
-def ciPostMetaStashName() {
-    return 'x-kernel-ci-post-meta'
-}
-
-def ciArchOutputStashName(String arch) {
-    return "x-kernel-ci-arch-output-${arch}"
-}
-
-def withCiRootWs(String rootWs, Closure body) {
-    def harnessRoot = "${rootWs}/.ci/rootfs-harness"
-    withEnv(["ROOT_WS=${rootWs}", "HARNESS_ROOTFS_DIR=${harnessRoot}",
-             "ROOTFS_LATEST_FILE=${harnessRoot}/rootfs/releases/${env.ROOTFS_RELEASE_TAG}.json"]) {
-        body.call()
-    }
-}
-
-def cleanCiNodeWorkspace() {
-    cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
-}
-
-def withFloatingCiDocker(Closure body) {
-    node(floatingGuestAgentLabel()) {
-        try {
-            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs()) {
-                withCiRootWs(pwd()) {
-                    body.call()
-                }
-            }
-        } finally {
-            cleanCiNodeWorkspace()
-        }
-    }
-}
-
-/** Legs: source tree + Gitee check-run ids (no stage-logs; those come from arch output stashes). */
-def stashCiSourceSnapshot() {
-    stash name: ciSourceStashName(),
-        includes: '.ci/source/**,.ci/gitee/**',
-        useDefaultExcludes: false,
-        allowEmpty: false
-}
-
-/** Post finalize: Gitee state, CI scripts, Prepare stage logs (small). */
-def stashCiPostMeta() {
-    stash name: ciPostMetaStashName(),
-        includes: '.ci/gitee/**,.ci/source/scripts/ci/**,.ci/stage-logs/**',
-        useDefaultExcludes: false,
-        allowEmpty: true
-    env.CI_POST_META_STASHED = 'true'
-}
-
-/** Register Gitee check id before stash so Post meta unstash includes it in check-ids.json. */
-def beginPrepareStashStage(String stageName) {
-    initStageLog(stageName)
-    giteeEnsureCheckRunStarted(stageName)
-}
-
-def completePrepareStashOutcome(String stageName, Throwable err = null) {
-    if (err != null) {
-        def detail = buildFailureDetail(stageName, ciFailureDetail(stageName), err)
-        ciResults[stageName] = [status: 'failed', detail: detail]
-        def logPath = stageLogFile(stageName)
-        if (env.ROOT_WS?.trim() && detail?.trim()) {
-            writeFile file: logPath, text: "${detail}\n", encoding: 'UTF-8'
-        }
-    } else {
-        ciResults[stageName] = [status: 'passed']
-    }
-    ciFinishGiteeStage(stageName, ciResults, ciFailureDetail(stageName))
-}
-
-def recordCiMetaIssue(String msg) {
-    def text = msg?.trim()
-    if (!text) {
-        return
-    }
-    if (!env.giteePullRequestIid?.trim()) {
-        echo "CI meta issue (non-PR build, not surfaced in comment): ${text}"
-        return
-    }
-    echo "CI meta issue: ${text}"
-    if (!ciMetaIssues.contains(text)) {
-        ciMetaIssues << text
-    }
-}
-
-/** After PR comment is posted so buildCiComment can include meta warnings. */
-def applyDeferredCiMetaUnstable() {
-    if (!env.giteePullRequestIid?.trim() || ciMetaIssues.isEmpty()) {
-        return
-    }
-    if (currentBuild.currentResult == 'SUCCESS') {
-        unstable(ciMetaIssues.join('; '))
-    } else {
-        echo "CI meta issues (build already ${currentBuild.currentResult}): ${ciMetaIssues.join('; ')}"
-    }
-}
-
-def giteeFinalizeScriptMissingMessage() {
-    if (env.CI_POST_META_RESTORED == 'false') {
-        return 'Post meta unstash failed; CI scripts unavailable for Gitee finalize'
-    }
-    if (env.CI_POST_META_STASHED == 'true') {
-        return 'Post meta was stashed but CI scripts are missing after restore'
-    }
-    return 'Post meta stash did not complete; CI scripts unavailable for Gitee finalize'
-}
-
-def restoreCiPostMetaFromStash() {
-    try {
-        unstash ciPostMetaStashName()
-        env.CI_POST_META_RESTORED = 'true'
-    } catch (e) {
-        env.CI_POST_META_RESTORED = 'false'
-        def msg = "Post meta unstash failed: ${e.message}"
-        echo msg
-        recordCiMetaIssue(msg)
-    }
-}
-
-def prepareArchCiWorkspace(String arch) {
-    deleteDir()
-    unstash ciSourceStashName()
-    sh label: 'Prepare per-arch CI workspace layout', script: '''#!/bin/bash
-set -euo pipefail
-install -d -m 0755 .ci/work .ci/gitee/manifests .ci/stage-logs
-'''
-    echo "Arch CI ${arch} on ${env.NODE_NAME}"
-}
-
-def withArchCiAgent(String arch, Closure body) {
-    node(guestAgentLabelForArch(arch)) {
-        try {
-            prepareArchCiWorkspace(arch)
-            def legRootWs = pwd()
-            // The ARM builder's host kernel misreports io_uring polls on signalfd.
-            // Select by node, since the floating riscv64 leg can also run there.
-            def seccompProfile = env.NODE_NAME == nativeGuestAgentLabels().aarch64
-                ? "${legRootWs}/.ci/source/scripts/ci/no-io-uring-seccomp.json"
-                : 'unconfined'
-            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs(seccompProfile)) {
-                withCiRootWs(legRootWs) {
-                    body.call()
-                }
-            }
-        } finally {
-            cleanCiNodeWorkspace()
-        }
-    }
-}
-
-def stashArchCiOutputs(String arch) {
-    def includes = [
-        '.ci/stage-logs/**',
-        '.ci/work/runtime-*/test-harness/logs/**',
-        '.ci/work/**/unittest-output.log',
-        '.ci/work/**/tee-test-output.log',
-        '.ci/work/**/artifacts/**',
-        "${factsArtifactRoot()}/**",
-    ]
-    if (coverageEnabled()) {
-        includes.addAll([
-            "artifacts/coverage/${arch}/coverage.txt",
-            "artifacts/coverage/${arch}/coverage.info",
-            "artifacts/coverage/${arch}/coverage.xml",
-        ])
-    }
-    stash name: ciArchOutputStashName(arch),
-        includes: includes.join(','),
-        useDefaultExcludes: false,
-        allowEmpty: true
-}
-
-def archiveLegHeavyArtifacts(String archLabel) {
-    def patterns = []
-    if (coverageEnabled()) {
-        patterns << "artifacts/coverage/${archLabel}/**"
-    }
-    if (docCheckEnabled()) {
-        patterns << "artifacts/docs/${archLabel}/**"
-    }
-    if (!patterns) {
-        return
-    }
-    archiveArtifacts artifacts: patterns.join(','), allowEmptyArchive: true
-}
-
-def restoreStashedArchCiOutputs() {
-    ciMatrixArchitectures().each { arch ->
-        try {
-            unstash ciArchOutputStashName(arch.toString())
-        } catch (e) {
-            echo "Arch output stash missing for ${arch}: ${e.message}"
-        }
-    }
-}
-
-def prepareRootfsCacheForArch(String arch, String stageName) {
-    dir(env.HARNESS_ROOTFS_DIR) {
-        gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH, true)
-    }
-    sh label: "Prepare rootfs cache ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-'${ciSourceDir()}/scripts/ci/prepare_rootfs_cache.sh' '${arch}'
-"""
-}
+// ==========================================================================
+// Section 2: workspace paths, target layout and platform mappings
+// ==========================================================================
 
 def rootWorkspace() {
     return env.ROOT_WS?.trim() ?: env.WORKSPACE
@@ -441,6 +197,335 @@ def ciStageLogRoot() {
 def ciGiteeRoot() {
     return "${ciRootDir()}/gitee"
 }
+
+/** Container-local build output root: the /xkernel-target volume mount point. */
+def ciTargetRoot() {
+    return '/xkernel-target'
+}
+
+def targetDirForBuild(String platform) {
+    return "${ciTargetRoot()}/build-${platform}"
+}
+
+def targetDirForDylint(String platform) {
+    return "${ciTargetRoot()}/dylint-${platform}"
+}
+
+def targetDirForGuestCases(String arch) {
+    return "${ciTargetRoot()}/guest-cases-${arch}-gnu-dynamic"
+}
+
+def targetDirForArch(String arch) {
+    return "${ciTargetRoot()}/runtime-${arch}"
+}
+
+def targetDirForUnittest(String arch) {
+    return "${ciTargetRoot()}/unittest-${arch}"
+}
+
+def targetDirForDoc(String arch) {
+    return "${ciTargetRoot()}/doc-${arch}"
+}
+
+def ciArtifactRoot() {
+    return "${ciTargetRoot()}/ci-artifacts"
+}
+
+def defconfigFor(String arch) {
+    return "platforms/kplat-${arch}/qemu_defconfig"
+}
+
+def defconfigForPlatform(String platform) {
+    return "platforms/${platform}/qemu_defconfig"
+}
+
+def archForPlatform(String platform) {
+    if (platform.startsWith('kplat-')) {
+        def kplatArch = platform.substring('kplat-'.length()).split('-')[0]
+        if (kplatArch in ciMatrixArchitectures().collect { it.toString() }) {
+            return kplatArch
+        }
+    }
+    if (platform.startsWith('aarch64')) return 'aarch64'
+    if (platform.startsWith('x86_64')) return 'x86_64'
+    if (platform.startsWith('riscv64')) return 'riscv64'
+    error("Unsupported platform: ${platform}")
+}
+
+def targetTripleFor(String archOrPlatform) {
+    if (archOrPlatform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
+    if (archOrPlatform.startsWith('x86')) return 'x86_64-unknown-none'
+    if (archOrPlatform.startsWith('riscv64')) return 'riscv64gc-unknown-none-elf'
+    error("Unsupported arch/platform: ${archOrPlatform}")
+}
+
+def artifactNameForNormal(String arch) {
+    return "${arch}-normal"
+}
+
+def artifactNameForUnittest(String arch) {
+    return "${arch}-unittest"
+}
+
+def sanitizeStageFileName(String stageName) {
+    return stageName.replaceAll(/[^A-Za-z0-9._-]+/, '_').take(80)
+}
+
+// ==========================================================================
+// Section 3: node and container lifecycle - preflight hygiene, builder container, workspace
+// ==========================================================================
+
+def withCiRootWs(String rootWs, Closure body) {
+    def harnessRoot = "${rootWs}/.ci/rootfs-harness"
+    // TARGET_DIR is a path inside the builder container, so it is injected here
+    // (every body enters through this wrapper) rather than in the top-level env block.
+    withEnv(["ROOT_WS=${rootWs}", "TARGET_DIR=${ciTargetRoot()}", "HARNESS_ROOTFS_DIR=${harnessRoot}",
+             "ROOTFS_LATEST_FILE=${harnessRoot}/rootfs/releases/${env.ROOTFS_RELEASE_TAG}.json"]) {
+        body.call()
+    }
+}
+
+def cleanCiNodeWorkspace() {
+    cleanWs deleteDirs: true, disableDeferredWipeout: true, notFailBuild: true
+}
+
+/**
+ * Deterministic per-build target volume name: xkernel-target-<jobslug>-b<BUILD>-<scope>.
+ * Named volumes keep the old anonymous-volume isolation (fresh per container, never
+ * shared across builds) while staying enumerable, so node hygiene can reclaim them.
+ */
+def ciJobSlug() {
+    def raw = env.JOB_NAME?.trim() ?: 'ci'
+    def slug = raw.replaceAll('[^A-Za-z0-9_.-]', '-').replaceAll('^[^A-Za-z0-9]+', '')
+    if (slug.length() > 60) {
+        slug = slug.substring(0, 60)
+    }
+    slug = slug.replaceAll('[^A-Za-z0-9]+$', '')
+    return slug ?: 'ci'
+}
+
+/**
+ * Hygiene sweep prefix: every CI target volume, any job and any build, so
+ * leftovers of hard-killed runs are reclaimed by the next preflight on the
+ * host. Active volumes are protected by the container-reference check, not
+ * by the name: a concurrent build's container exists from creation until
+ * inside() teardown, which is exactly the window its volume is in use.
+ */
+def ciTargetVolumeScanPrefix() {
+    return 'xkernel-target-'
+}
+
+def ciTargetVolumeName(String scope) {
+    return "${ciTargetVolumeScanPrefix()}${ciJobSlug()}-b${env.BUILD_NUMBER}-${scope}"
+}
+
+def ciBuilderDockerArgs(String scope, String seccompProfile = 'unconfined') {
+    // Docker Workflow tokenizes this argument string; quote the agent workspace path.
+    def seccompOption = "seccomp=${seccompProfile}".replace('\\', '\\\\').replace('"', '\\"')
+    return '--dns 223.5.5.5 ' +
+        // Older hosts charge concurrent io_uring queues to the shared UID's memlock budget.
+        '--ulimit memlock=67108864:67108864 ' +
+        "--mount type=volume,src=${ciTargetVolumeName(scope)},dst=/xkernel-target " +
+        '--mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo ' +
+        // Keep Rustup temporary files and toolchains on the same filesystem.
+        '--mount type=volume,src=xkernel-rustup-home-v6,dst=/usr/local/rustup ' +
+        '--mount type=volume,src=xkernel-rootfs-cache-v3,dst=/xkernel-cache/rootfs ' +
+        '--device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 ' +
+        // Node hygiene only ever reaps docker objects carrying the x-kernel-ci label.
+        "--label x-kernel-ci=true --label x-kernel-ci.job=${ciJobSlug()} " +
+        "--label x-kernel-ci.build=${env.BUILD_NUMBER} --label x-kernel-ci.scope=${scope} " +
+        "--security-opt \"${seccompOption}\" --security-opt no-new-privileges=true"
+}
+
+/** Worst-case headroom for concurrent CI containers (~20 GiB peak each) on one host. */
+def ciNodeMinFreeGb() {
+    return 100
+}
+
+/**
+ * Host-side node hygiene, run before any builder container starts. It only ever
+ * touches docker objects this CI owns: containers labeled `x-kernel-ci=true` and
+ * volumes named `xkernel-target-*` (any job/build; reference check protects
+ * active ones). Compile hosts are shared
+ * with other teams, so `docker volume prune` and unscoped rm are forbidden.
+ * Set `_CI_HYGIENE_DRY_RUN=1` in the agent environment to print actions instead of reaping.
+ */
+def ciNodeHygieneScript() {
+    return '''#!/bin/bash
+set -euo pipefail
+
+dry_run="${_CI_HYGIENE_DRY_RUN:-0}"
+label_key='x-kernel-ci'
+volume_prefix="${CI_TARGET_VOLUME_PREFIX:?CI_TARGET_VOLUME_PREFIX is required}"
+min_free_gb="${CI_NODE_MIN_FREE_GB:-100}"
+scope="${CI_NODE_SCOPE:-unknown}"
+
+run_cmd() {
+    if [ "$dry_run" = '1' ]; then
+        echo "[dry-run] would run: $*"
+    else
+        "$@" >/dev/null
+    fi
+}
+
+echo "CI node hygiene on ${NODE_NAME:-$(hostname)} (scope=${scope} dry_run=${dry_run})"
+
+# 1) Terminal CI containers left by killed or aborted runs (they pin target volumes).
+for c in $(docker ps -aq --filter "label=${label_key}=true" --filter status=exited --filter status=dead); do
+    echo "reaping exited CI container $(docker inspect --format '{{.Name}} {{.Config.Labels}}' "$c" 2>/dev/null || echo "$c")"
+    run_cmd docker rm -f "$c" || true
+done
+
+# 2) CI containers still running long past the 90-minute pipeline timeout.
+now_epoch="$(date +%s)"
+for c in $(docker ps -q --filter "label=${label_key}=true" --filter status=running); do
+    started_at="$(docker inspect --format '{{.State.StartedAt}}' "$c" 2>/dev/null || true)"
+    if [ -z "$started_at" ] || [ "$started_at" = '0001-01-01T00:00:00Z' ]; then continue; fi
+    started_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo "$now_epoch")"
+    if [ $(( now_epoch - started_epoch )) -gt 86400 ]; then
+        echo "reaping stale running CI container $(docker inspect --format '{{.Name}}' "$c" 2>/dev/null || echo "$c")"
+        run_cmd docker rm -f "$c" || true
+    fi
+done
+
+# 3) CI target volumes no container references (any state protects them).
+#    The sweep spans all jobs/builds so killed runs' leftovers are reclaimed;
+#    concurrent builds stay safe because their containers exist while in use.
+volume_names="$(docker volume ls -q | { grep -E "^${volume_prefix}" || true; })"
+for v in $volume_names; do
+    if [ -z "$(docker ps -aq --filter "volume=$v")" ]; then
+        echo "reaping unreferenced CI volume $v"
+        run_cmd docker volume rm "$v" || true
+    fi
+done
+
+# 4) Capacity gate on the Docker data root (the filesystem that holds all volumes).
+#    Reporting-only scopes (post) skip the gate: their container writes KB-scale
+#    logs/manifests and must start even on a nearly-full disk, otherwise the
+#    infrastructure failure would never be annotated on the PR.
+docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+avail_kb="$(df -Pk "$docker_root" | awk 'NR==2 {print $4}')"
+required_kb=$(( min_free_gb * 1024 * 1024 ))
+echo "docker root ${docker_root}: ${avail_kb} KiB free (gate ${required_kb} KiB)"
+if [ "${CI_NODE_DISK_GATE:-1}" != '1' ]; then
+    echo "disk gate skipped for reporting-only scope=${scope}"
+elif [ "${avail_kb:-0}" -lt "$required_kb" ]; then
+    echo "node preflight failed: less than ${min_free_gb} GiB free on ${docker_root}" >&2
+    df -h "$docker_root" >&2 || true
+    exit 1
+fi
+echo "CI node hygiene done"
+'''
+}
+
+def ciNodePreflight(String scope, boolean diskGate = true) {
+    def rc = -1
+    withEnv([
+        "CI_NODE_SCOPE=${scope}",
+        "CI_TARGET_VOLUME_PREFIX=${ciTargetVolumeScanPrefix()}",
+        "CI_NODE_MIN_FREE_GB=${ciNodeMinFreeGb()}",
+        "CI_NODE_DISK_GATE=${diskGate ? '1' : '0'}",
+    ]) {
+        rc = sh(returnStatus: true, label: 'CI node preflight (orphan reclaim + disk gate)',
+                script: ciNodeHygieneScript())
+    }
+    if (rc != 0) {
+        def msg = "编译机节点预检失败(scope=${scope}, node=${env.NODE_NAME}, rc=${rc}):" +
+            '宿主 docker 卫生脚本执行异常或磁盘可用空间低于阈值,属基础设施问题,与 PR 代码无关。' +
+            '请稍后 rerun;持续失败请通知维护者检查编译机 /var/lib/docker 所在分区。'
+        recordCiMetaIssue(msg)
+        error(msg)
+    }
+}
+
+/** inside() tears the container down without `docker rm -v`, so drop the named volume here. */
+def reclaimCiTargetVolume(String scope) {
+    sh(returnStatus: true, label: 'Reclaim CI target volume',
+       script: "docker volume rm '${ciTargetVolumeName(scope)}' >/dev/null 2>&1 || true")
+}
+
+/**
+ * Single owner of the CI node lifecycle: enter node → host-side preflight →
+ * optional host prep → builder container on a named target volume → finally
+ * volume reclaim + workspace cleanup. Every stage body runs inside this wrapper;
+ * use withFloatingCiDocker / withArchCiAgent rather than calling it directly.
+ */
+def withCiBuilderNode(Map opts, Closure body) {
+    node(opts.label) {
+        try {
+            ciNodePreflight(opts.scope, opts.diskGate != false)
+            opts.hostPrep?.call()
+            def rootWs = pwd()
+            // The ARM builder's host kernel misreports io_uring polls on signalfd.
+            // Select by node, since the floating riscv64 leg can also run there;
+            // arch legs run hostPrep (unstash) first, so the profile file exists.
+            def seccompProfile = 'unconfined'
+            if (opts.archLeg && env.NODE_NAME == nativeGuestAgentLabels().aarch64) {
+                seccompProfile = "${rootWs}/.ci/source/scripts/ci/no-io-uring-seccomp.json"
+            }
+            docker.image(ciBuilderImage()).inside(ciBuilderDockerArgs(opts.scope, seccompProfile)) {
+                withCiRootWs(rootWs) {
+                    body.call()
+                }
+            }
+        } finally {
+            reclaimCiTargetVolume(opts.scope)
+            cleanCiNodeWorkspace()
+        }
+    }
+}
+
+def withFloatingCiDocker(String scope, Closure body) {
+    // post only reports (KB-scale writes): keep its disk gate off so a full
+    // disk still gets annotated on the PR instead of dying before finalize.
+    withCiBuilderNode(label: floatingGuestAgentLabel(), scope: scope, archLeg: false,
+                      diskGate: scope != 'post') {
+        body.call()
+    }
+}
+
+def withArchCiAgent(String arch, Closure body) {
+    withCiBuilderNode(
+        label: guestAgentLabelForArch(arch),
+        scope: arch,
+        archLeg: true,
+        hostPrep: { prepareArchCiWorkspace(arch) }) {
+        body.call()
+    }
+}
+
+def prepareArchCiWorkspace(String arch) {
+    deleteDir()
+    unstash ciSourceStashName()
+    sh label: 'Prepare per-arch CI workspace layout', script: '''#!/bin/bash
+set -euo pipefail
+install -d -m 0755 .ci/work .ci/gitee/manifests .ci/stage-logs
+'''
+    echo "Arch CI ${arch} on ${env.NODE_NAME}"
+}
+
+def initializeCiWorkspace() {
+    // The declarative Docker agent has already bind-mounted WORKSPACE.
+    // Deleting the mount point replaces its inode and makes later docker exec
+    // calls fail. Remove only its contents so the bind mount remains valid.
+    sh(
+        label: 'Clean CI workspace contents',
+        script: '''#!/bin/bash
+set -euo pipefail
+
+if [[ -z "${WORKSPACE:-}" || "${PWD}" != "${WORKSPACE}" ]]; then
+    echo "Refusing to clean unexpected workspace: PWD=${PWD}, WORKSPACE=${WORKSPACE:-unset}" >&2
+    exit 2
+fi
+
+find "${WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+'''
+    )
+}
+
+// ==========================================================================
+// Section 4: stage catalog and runners - serial/parallel specs, failFast legs
+// ==========================================================================
 
 def ciSequentialStages() {
     return [
@@ -579,116 +664,79 @@ def ciStageNames(List stages) {
     return stages.collect { it.name }
 }
 
+def ciStageOrder() {
+    return ciSequentialStageOrder() + ciParallelStageOrder()
+}
+
+/** 并行阶段顺序（PR 评论表格 + gitee_check_runs.py manifest） */
+def ciParallelStageOrder() {
+    return ciStageNames(ciParallelStages())
+}
+
+/** 串行阶段顺序（PR 评论表格 + gitee_check_runs.py manifest） */
+def ciSequentialStageOrder() {
+    return ciStageNames(ciSequentialStages())
+}
+
 def ciFailureDetail(String stageName) {
     def stage = (ciSequentialStages() + ciParallelStages()).find { it.name == stageName }
     return stage?.failure ?: "${stageName} 失败，请查看 Jenkins 日志"
 }
 
-def archiveArtifactPatterns() {
-    // Success with no meta issues: keep only the PR/summary comment.
-    // Failed stages, timeout/abort, or Gitee post-meta issues keep diagnostic
-    // logs. Do not call unstable() before this — giteeTestShouldPass still
-    // needs SUCCESS at archive time. Coverage/docs only when toggles are on.
-    // Code facts are archived on every outcome: their status.json tells
-    // xreview whether they are ready, partial or failed, and why.
-    def patterns = ['ci-summary.md', "${factsArtifactRoot()}/**/*"]
-    def failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
-    def buildUnsuccessful = !(currentBuild.currentResult in [null, 'SUCCESS'])
-    def hasMetaIssues = !ciMetaIssues.isEmpty()
-    def needsDiagnostics = failedStages || buildUnsuccessful || hasMetaIssues
-    if (needsDiagnostics) {
-        if (failedStages) {
-            failedStages.each { name ->
-                patterns << ".ci/stage-logs/${sanitizeStageFileName(name)}.log"
+/**
+ * Prepare orchestration: checkout and gate stages first, then best-effort
+ * stashes for the arch legs and Post. A stage failure never suppresses the
+ * stashes; the first failure (stage or stash) is rethrown at the end.
+ */
+def runPrepareStages() {
+    def prepareError = null
+    def prepareSucceeded = false
+    try {
+        runCiStage(sourceStageName(), ciFailureDetail(sourceStageName()), false) {
+            initializeCiWorkspace()
+            prepareSource()
+            // Create parallel Check Run placeholders first (earlier → lower on Gitee PR).
+            giteeStartParallelCheckRuns()
+            giteeStartCheckRun(sourceStageName())
+        }
+        runCiStage(setupStageName(), ciFailureDetail(setupStageName())) {
+            checkBuildEnvironment()
+        }
+        runCiStage(rustfmtStageName(), ciFailureDetail(rustfmtStageName())) {
+            runRustfmt()
+        }
+        prepareSucceeded = true
+    } catch (e) {
+        prepareError = e
+    } finally {
+        if (prepareSucceeded) {
+            try {
+                beginPrepareStashStage(prepareSourceStashStageName())
+                stashCiSourceSnapshot()
+                completePrepareStashOutcome(prepareSourceStashStageName())
+            } catch (stashErr) {
+                echo "Source snapshot stash failed: ${stashErr.message}"
+                completePrepareStashOutcome(prepareSourceStashStageName(), stashErr)
+                prepareError = prepareError ?: stashErr
             }
-        } else {
-            // Timeout/abort/incomplete/meta-only: no status=='failed' stages.
-            patterns << '.ci/stage-logs/**/*.log'
         }
-        patterns.addAll([
-            '.ci/work/**/artifacts/**/*',
-            '.ci/work/**/logs/**/*',
-            '.ci/work/**/unittest-output.log',
-            '.ci/work/**/tee-test-output.log',
-        ])
-    }
-    if (coverageEnabled()) {
-        patterns << 'artifacts/coverage/**/*'
-    }
-    if (docCheckEnabled()) {
-        patterns << 'artifacts/docs/**/*'
-    }
-    return patterns
-}
-
-def finalizeCiBuild() {
-    restoreReplayGiteeEnv()
-
-    if (env.giteePullRequestIid?.trim()) {
-        def scriptPath = resolveGiteeCheckRunsScript()
-        if (!scriptPath) {
-            recordCiMetaIssue(giteeFinalizeScriptMissingMessage())
+        try {
+            beginPrepareStashStage(preparePostMetaStashStageName())
+            stashCiPostMeta()
+            completePrepareStashOutcome(preparePostMetaStashStageName())
+        } catch (stashErr) {
+            echo "Post meta stash failed: ${stashErr.message}"
+            completePrepareStashOutcome(preparePostMetaStashStageName(), stashErr)
+            prepareError = prepareError ?: stashErr
         }
     }
-
-    def failedStageLogs = archiveFailedStageLogs(ciResults)
-    def coverageSummary = collectCoverageSummary()
-    def built = buildCombinedComment(ciResults, coverageSummary, failedStageLogs, ciMetaIssues)
-    writeFile file: 'ci-summary.md', text: built.comment.replaceFirst(/^<!-- x-kernel-ci -->\n/, '')
-    currentBuild.description = buildShortBuildDescription(ciResults)
-    archiveArtifacts artifacts: archiveArtifactPatterns().join(','), allowEmptyArchive: true
-
-    deleteOldCiComments()
-    notifyGiteePullRequest(built.comment)
-
-    giteeFinalizeAllCheckRuns(ciResults, failedStageLogs)
-    giteeRefreshFailedCheckOutputs(ciResults, failedStageLogs)
-    giteeReorderSequentialCheckRuns(ciResults, failedStageLogs)
-
-    // Gitee「测试通过」只看阶段结果；Post 元数据异常仍用 unstable() 标 Jenkins，但不撤销 PR test pass。
-    def giteeTestShouldPass = currentBuild.currentResult == 'SUCCESS' &&
-        ciStageOrder().every { ciResults[it]?.status == 'passed' }
-    applyDeferredCiMetaUnstable()
-
-    if (giteeTestShouldPass) {
-        giteeTestPass()
-    } else {
-        giteeTestReset()
+    if (prepareError != null) {
+        throw prepareError
     }
-
-}
-
-def buildShortBuildDescription(Map results) {
-    def pr = env.giteePullRequestIid?.trim() ? "PR#${env.giteePullRequestIid}" : 'manual'
-    def sha = resolveHeadSha()?.take(8) ?: env.GIT_COMMIT?.take(8) ?: ''
-    def failedStages = ciStageOrder().findAll { results[it]?.status == 'failed' }
-    if (currentBuild.currentResult == 'SUCCESS' && failedStages.isEmpty() && ciMetaIssues.isEmpty()) {
-        return "${pr} ✅ ${sha}".trim()
-    }
-    if (env.giteePullRequestIid?.trim() && failedStages.isEmpty() && !ciMetaIssues.isEmpty()) {
-        return "${pr} ⚠️ post-meta ${sha}".trim()
-    }
-    if (!failedStages.isEmpty()) {
-        def failed = failedStages.take(2).join(', ')
-        def suffix = failedStages.size() > 2 ? " +${failedStages.size() - 2}" : ''
-        return "${pr} ❌ ${failed}${suffix} ${sha}".trim()
-    }
-    return "${pr} ❌ ${currentBuild.currentResult} ${sha}".trim()
 }
 
 def runCiStage(String stageName, String failedDetail, Closure body) {
     runCiStage(stageName, failedDetail, true, body)
-}
-
-def isCiAborted(Throwable error) {
-    def ex = error
-    while (ex != null) {
-        if (ex instanceof org.jenkinsci.plugins.workflow.steps.FlowInterruptedException) {
-            return true
-        }
-        ex = ex.getCause()
-    }
-    return false
 }
 
 def runCiStage(String stageName, String failedDetail, boolean startCheckRun, Closure body) {
@@ -712,6 +760,17 @@ def runCiStage(String stageName, String failedDetail, boolean startCheckRun, Clo
     } finally {
         ciFinishGiteeStage(stageName, ciResults, failedDetail)
     }
+}
+
+def isCiAborted(Throwable error) {
+    def ex = error
+    while (ex != null) {
+        if (ex instanceof org.jenkinsci.plugins.workflow.steps.FlowInterruptedException) {
+            return true
+        }
+        ex = ex.getCause()
+    }
+    return false
 }
 
 def buildFailureDetail(String stageName, String defaultDetail, Throwable error) {
@@ -769,14 +828,61 @@ def ciParallelBranchesForStages(List stageSpecs) {
     return branches
 }
 
+def runCiWorkload(Map spec) {
+    switch (spec.type) {
+        case 'build':
+            runClippyAndBuild(spec.platform, spec.defconfig ?: defconfigForPlatform(spec.platform))
+            break
+        case 'dylint':
+            runDylintCheck(spec.name, spec.platform, spec.defconfig, spec.lockStat ?: false)
+            break
+        case 'doc':
+            runDocStage(spec.arch)
+            break
+        case 'build_artifact':
+            runBuildArtifact(spec.arch)
+            break
+        case 'unittest_build':
+            runUnittestBuildArtifact(spec.arch)
+            break
+        case 'runtime_run':
+            runRuntimeTests(spec.arch)
+            break
+        case 'unittest_run':
+            runUnitTestStage(spec.arch)
+            break
+        case 'tee_run':
+            teeResults[spec.arch] = runTeeStorageTest(spec.arch)
+            break
+        default:
+            error("Unsupported CI stage type: ${spec.type}")
+    }
+}
+
+def runParallelCiStage(String stageName, String failedDetail, Closure body) {
+    stage(stageName) {
+        runCiStage(stageName, failedDetail, false) {
+            giteeEnsureCheckRunStarted(stageName)
+            body.call()
+        }
+    }
+}
+
+def withCleanSourceWorkspace(String relativePath, Closure body) {
+    ws("${ciWorkRoot()}/${relativePath}") {
+        def stageWorkspace = pwd()
+        deleteDir()
+        restoreSource()
+        body.call(stageWorkspace)
+    }
+}
+
 def ensureArchLegToolchains(String archLabel, String stageName) {
-    sh label: "Ensure toolchains on ${archLabel} leg", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+    ciSh(stageName, "Ensure toolchains on ${archLabel} leg", """
 cd '${ciSourceDir()}'
 flock -x /usr/local/rustup/toolchains/.jenkins-install.lock \\
   scripts/ci/check_build_environment.sh --leg '${archLabel}'
-"""
+""")
 }
 
 def runCiArchLeg(String archLabel) {
@@ -843,116 +949,40 @@ def ciArchLegBranches() {
     return branches
 }
 
-def runCiWorkload(Map spec) {
-    switch (spec.type) {
-        case 'build':
-            runClippyAndBuild(spec.platform, spec.defconfig ?: defconfigForPlatform(spec.platform))
-            break
-        case 'dylint':
-            runDylintCheck(spec.name, spec.platform, spec.defconfig, spec.lockStat ?: false)
-            break
-        case 'doc':
-            runDocStage(spec.arch)
-            break
-        case 'build_artifact':
-            runBuildArtifact(spec.arch)
-            break
-        case 'unittest_build':
-            runUnittestBuildArtifact(spec.arch)
-            break
-        case 'runtime_run':
-            runRuntimeTests(spec.arch)
-            break
-        case 'unittest_run':
-            runUnitTestStage(spec.arch)
-            break
-        case 'tee_run':
-            teeResults[spec.arch] = runTeeStorageTest(spec.arch)
-            break
-        default:
-            error("Unsupported CI stage type: ${spec.type}")
-    }
-}
-
-def runParallelCiStage(String stageName, String failedDetail, Closure body) {
-    stage(stageName) {
-        runCiStage(stageName, failedDetail, false) {
-            giteeEnsureCheckRunStarted(stageName)
-            body.call()
-        }
-    }
-}
-
-def withCleanSourceWorkspace(String relativePath, Closure body) {
-    ws("${ciWorkRoot()}/${relativePath}") {
-        def stageWorkspace = pwd()
-        deleteDir()
-        restoreSource()
-        body.call(stageWorkspace)
-    }
-}
-
-def finishArchOutputCollection(String archLabel) {
-    def stageName = ciArchCollectStageName(archLabel)
-    stage(stageName) {
-        runCiStage(stageName, ciFailureDetail(stageName), false) {
-            giteeEnsureCheckRunStarted(stageName)
-            initStageLog(stageName)
-            def problems = []
-            try {
-                stashArchCiOutputs(archLabel)
-            } catch (e) {
-                problems << "架构输出 stash 失败: ${e.message}"
-            }
-            try {
-                archiveLegHeavyArtifacts(archLabel)
-            } catch (e) {
-                problems << "重制品归档失败: ${e.message}"
-            }
-            if (problems) {
-                error(problems.join('\n'))
-            }
-        }
-    }
-}
+// ==========================================================================
+// Section 5: workload runners - checks, builds, tests, artifacts, coverage, docs, TEE
+// ==========================================================================
 
 def checkBuildEnvironment() {
     initStageLog(setupStageName())
     withCleanSourceWorkspace('env-check') {
-        sh label: 'Install rustfmt toolchain', script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(setupStageName())}
-flock -x /usr/local/rustup/toolchains/.jenkins-install.lock \
+        ciSh(setupStageName(), 'Install rustfmt toolchain', """
+flock -x /usr/local/rustup/toolchains/.jenkins-install.lock \\
   scripts/ci/check_build_environment.sh --fmt
-"""
+""")
     }
 }
 
 def runRustfmt() {
     initStageLog(rustfmtStageName())
     withCleanSourceWorkspace('rustfmt') {
-        sh label: 'Check Rust formatting', script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(rustfmtStageName())}
-cargo +"${AUX_RUST_TOOLCHAIN}" fmt --all --check
-"""
+        ciSh(rustfmtStageName(), 'Check Rust formatting',
+            "cargo +\"${AUX_RUST_TOOLCHAIN}\" fmt --all --check")
     }
 }
 
 def runClippyAndBuild(String platform, String defconfigPath) {
     def stageName = "Build Check: ${platform}"
     initStageLog(stageName)
-    def buildTargetDir = "/xkernel-target/build-${platform}"
+    def buildTargetDir = targetDirForBuild(platform)
     withCleanSourceWorkspace("clippy-build-${platform}") {
         withEnv(["TARGET_DIR=${buildTargetDir}"]) {
-            sh label: "Clippy and build ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+            ciSh(stageName, "Clippy and build ${platform}", """
 cp ${defconfigPath} .config
 make defconfig
 make clippy
 stdbuf -oL -eL make build
-"""
+""")
         }
     }
 }
@@ -968,7 +998,7 @@ def factsCommitArg() {
 
 def runDylintCheck(String stageName, String platform, String defconfigPath, boolean lockStat) {
     initStageLog(stageName)
-    def dylintTargetDir = "/xkernel-target/dylint-${platform}"
+    def dylintTargetDir = targetDirForDylint(platform)
     def factsDir = "${rootWorkspace()}/${factsArtifactRoot()}/${platform}"
     // A pull request records its merge base with the target branch, which the
     // Source stage fetched into the snapshot.
@@ -1005,9 +1035,7 @@ make dylint
                 "_CI_FACTS_DIR=${factsDir}",
                 "_CI_FACTS_BASE_REF=${factsBaseRef}",
             ]) {
-                sh label: "Dylint check ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+                ciSh(stageName, "Dylint check ${platform}", """
 facts_early_failure() {
     if [ ! -f "\${_CI_FACTS_DIR}/status.json" ]; then
         mkdir -p "\${_CI_FACTS_DIR}"
@@ -1026,7 +1054,7 @@ make defconfig
 make dylint_test
 make dylint FACTS_OUT="\${_CI_FACTS_DIR}" \
     XKMAKE_ARGS="${factsCommitArg()}\${facts_base:+ --facts-base \${facts_base}}"
-${unittestScan}${lockStatScan}"""
+${unittestScan}${lockStatScan}""")
             }
         }
     } finally {
@@ -1057,15 +1085,13 @@ def runBuildArtifact(String arch) {
 
     withCleanSourceWorkspace("build-artifact-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {
-            sh label: "Clippy and build ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+            ciSh(stageName, "Clippy and build ${platform}", """
 cp platforms/${platform}/qemu_defconfig .config
 make defconfig
 ${vendorCheck}
 make clippy
 stdbuf -oL -eL make build
-"""
+""")
             publishKernelArtifact(artifactNameForNormal(arch), platform)
         }
     }
@@ -1079,17 +1105,69 @@ def runUnittestBuildArtifact(String arch) {
 
     withCleanSourceWorkspace("build-artifact-${arch}-unittest") {
         withEnv(["TARGET_DIR=${unittestTargetDir}", coverageEnableEnv()]) {
-            sh label: "Build unittest artifact ${platform}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
+            ciSh(stageName, "Build unittest artifact ${platform}", """
 cp platforms/${platform}/qemu_defconfig .config
 scripts/ci/prepare_unittest_config.sh .config
 make defconfig
 stdbuf -oL -eL make UNITTEST=y VSOCK=n NET=n build
-"""
+""")
             publishKernelArtifact(artifactNameForUnittest(arch), platform)
         }
     }
+}
+
+def publishKernelArtifact(String artifactName, String platform) {
+    def artifactDir = "${ciArtifactRoot()}/${artifactName}"
+    sh label: "Publish artifact ${artifactName}", script: """#!/bin/bash
+set -euo pipefail
+artifact_dir='${artifactDir}'
+rm -rf "\${artifact_dir}"
+mkdir -p "\${artifact_dir}"
+cp .config auto.conf autoconf.h "\${artifact_dir}/"
+shopt -s nullglob
+for image in xkernel_*; do
+    cp "\${image}" "\${artifact_dir}/"
+done
+# Archive the xkmake bundle (release images + manifest, and any runtime
+# state such as OVMF vars) so later test stages can `xkmake run --no-build`
+# without relying on a shared TARGET_DIR mount across agents.
+bundle_src="\${TARGET_DIR}/xkmake/${platform}"
+if [ -d "\${bundle_src}" ]; then
+    tar -cf "\${artifact_dir}/bundle.tar" -C "\${TARGET_DIR}/xkmake" "${platform}"
+else
+    echo "warning: xkmake bundle dir not found at \${bundle_src}; skipping bundle archive" >&2
+fi
+"""
+}
+
+def restoreKernelArtifact(String artifactName) {
+    def artifactDir = "${ciArtifactRoot()}/${artifactName}"
+    // Restores workspace-level runtime inputs (.config, generated Kconfig
+    // side files, final xkernel_* images) plus the xkmake bundle archived by
+    // publishKernelArtifact (bundle.tar), so `xkmake run --no-build` works
+    // even when build and test stages do not share a TARGET_DIR mount.
+    sh label: "Restore artifact ${artifactName}", script: """#!/bin/bash
+set -euo pipefail
+artifact_dir='${artifactDir}'
+if [ ! -d "\${artifact_dir}" ]; then
+    echo "artifact not found: \${artifact_dir}" >&2
+    exit 1
+fi
+cp "\${artifact_dir}/.config" .
+cp "\${artifact_dir}/auto.conf" .
+cp "\${artifact_dir}/autoconf.h" .
+shopt -s nullglob
+for image in "\${artifact_dir}"/xkernel_*; do
+    cp "\${image}" .
+done
+# Restore the xkmake bundle (release/ + runtime/) under TARGET_DIR/xkmake
+# so `xkmake run --no-build` finds a compatible bundle.
+bundle_tar="\${artifact_dir}/bundle.tar"
+if [ -f "\${bundle_tar}" ]; then
+    mkdir -p "\${TARGET_DIR}/xkmake"
+    tar -xf "\${bundle_tar}" -C "\${TARGET_DIR}/xkmake"
+fi
+"""
 }
 
 def runRuntimeTests(String arch) {
@@ -1108,13 +1186,10 @@ def runRuntimeTests(String arch) {
                 withEnv(["XKERNEL_REMOTE=${pwd()}/..", "ARCH=${arch}",
                          "STARRY_SKIP_BUILD=1",
                          "ROOTFS_CACHE_DIR=${env.ROOTFS_CACHE_DIR}",
-                         "GUEST_CASES_TARGET_DIR=/xkernel-target/guest-cases-${arch}-gnu-dynamic",
+                         "GUEST_CASES_TARGET_DIR=${targetDirForGuestCases(arch)}",
                          "JOBS=${env.HARNESS_JOBS}"]) {
-                    sh label: "Run starry-test-harness ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-stdbuf -oL -eL make ci-test run
-"""
+                    ciSh(stageName, "Run starry-test-harness ${arch}",
+                        'stdbuf -oL -eL make ci-test run')
                 }
             }
         }
@@ -1143,25 +1218,6 @@ def runUnitTestStage(String arch) {
             } else {
                 echo "ENABLE_COVERAGE=false: skipping coverage HTML/artifact collection for ${arch}"
             }
-        }
-    }
-}
-
-def runDocStage(String arch) {
-    def stageName = "Doc Check: ${arch}"
-    initStageLog(stageName)
-    def docTargetDir = targetDirForDoc(arch)
-
-    withCleanSourceWorkspace("doc-${arch}") {
-        withEnv(["TARGET_DIR=${docTargetDir}"]) {
-            sh label: "Prepare config for docs ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-cp ${defconfigFor(arch)} .config
-make defconfig
-"""
-            runDocs(stageName)
-            copyDocArtifactsToWorkspace(docTargetDir, arch)
         }
     }
 }
@@ -1210,12 +1266,50 @@ done
     }
 }
 
+def collectCoverageSummary() {
+    def rows = []
+    ['x86_64', 'aarch64'].each { arch ->
+        try {
+            def covFile = "${rootWorkspace()}/artifacts/coverage/${arch}/coverage.txt"
+            def content = sh(label: "Read coverage summary ${arch}", script: "cat '${covFile}' 2>/dev/null || true", returnStdout: true).trim()
+            if (content) {
+                def lines = content.split('\n')
+                def totalLine = lines.find { it.contains('TOTAL') }
+                if (totalLine) {
+                    def cols = totalLine.trim().split(/\s+/)
+                    if (cols.size() >= 10) {
+                        rows.add("| ${arch} | ${cols[9]} | ${cols[6]} | ${cols[3]} | ${cols[7]} | ${cols[8]} |")
+                    }
+                }
+            }
+        } catch (e) {
+            // skip
+        }
+    }
+    if (rows.isEmpty()) return ''
+    def header = "| 架构 | 行覆盖率 | 函数覆盖率 | 区域覆盖率 | 总行数 | 未覆盖行 |\n|------|---------|-----------|-----------|--------|---------|"
+    return header + '\n' + rows.join('\n')
+}
+
+def runDocStage(String arch) {
+    def stageName = "Doc Check: ${arch}"
+    initStageLog(stageName)
+    def docTargetDir = targetDirForDoc(arch)
+
+    withCleanSourceWorkspace("doc-${arch}") {
+        withEnv(["TARGET_DIR=${docTargetDir}"]) {
+            ciSh(stageName, "Prepare config for docs ${arch}", """
+cp ${defconfigFor(arch)} .config
+make defconfig
+""")
+            runDocs(stageName)
+            copyDocArtifactsToWorkspace(docTargetDir, arch)
+        }
+    }
+}
+
 def runDocs(String stageName) {
-    sh label: 'Generate Rust docs', script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-make doc
-"""
+    ciSh(stageName, 'Generate Rust docs', 'make doc')
 }
 
 def copyDocArtifactsToWorkspace(String targetDir, String arch) {
@@ -1235,6 +1329,126 @@ echo "Rust docs collected at artifacts/docs/${arch}/doc/index.html"
 """
     }
 }
+
+def prepareRootfsCacheForArch(String arch, String stageName) {
+    dir(env.HARNESS_ROOTFS_DIR) {
+        gitCheckoutPublic(env.TEST_HARNESS_REPO, env.TEST_HARNESS_BRANCH, true)
+    }
+    ciSh(stageName, "Prepare rootfs cache ${arch}",
+        "'${ciSourceDir()}/scripts/ci/prepare_rootfs_cache.sh' '${arch}'")
+}
+
+def teePortFor(String arch) {
+    def base = arch == 'x86_64' ? 21000 : 21100
+    def build = env.BUILD_NUMBER?.toInteger() ?: 1
+    return firstFreeTcpPort(base + ((build % 50) * 2), 80)
+}
+
+def firstFreeTcpPort(int startPort, int attempts) {
+    return sh(label: 'Allocate TEE hostfwd port', script: """#!/bin/bash
+set -euo pipefail
+python3 - '${startPort}' '${attempts}' <<'PY'
+import socket
+import sys
+
+start = int(sys.argv[1])
+attempts = int(sys.argv[2])
+for port in range(start, start + attempts):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(('127.0.0.1', port))
+        except OSError:
+            continue
+        print(port)
+        raise SystemExit(0)
+raise SystemExit(f'no free TCP port in [{start}, {start + attempts})')
+PY
+""", returnStdout: true).trim().toInteger()
+}
+
+def teeVsockCidFor(String arch) {
+    def archOffset = arch == 'x86_64' ? 1 : 2
+    def build = env.BUILD_NUMBER?.toInteger() ?: 1
+    return 100000000 + (build * 10) + archOffset
+}
+
+def runTeeStorageTest(String arch) {
+    def stageName = "TEE Tests: ${arch}"
+    initStageLog(stageName)
+    def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '', missingApps: []]
+    def teeTargetDir = targetDirForArch(arch)
+    def teeHostfwdPort = teePortFor(arch)
+    def teeVsockCid = teeVsockCidFor(arch)
+    def testBins = teeTestBinaries()
+
+    withCleanSourceWorkspace("tee-test-${arch}") { stageWorkspace ->
+        withEnv(["TARGET_DIR=${teeTargetDir}",
+                 "HOSTFWD_PORT=${teeHostfwdPort}",
+                 "VSOCK_CID=${teeVsockCid}",
+                 "TEE_TEST_BINS=${testBins.join(' ')}",
+                 "SKIP_KERNEL_BUILD=1"]) {
+            restoreKernelArtifact(artifactNameForNormal(arch))
+            ciSh(stageName, "Run TEE tests ${arch}",
+                "scripts/ci/run_tee_storage_test.sh '${arch}'")
+        }
+
+        def logText = readFile("${stageWorkspace}/tee-test-output.log")
+        result.passed = logText.split('<<< test success', -1).length - 1
+        result.failed = logText.split('<<< test failed', -1).length - 1
+        result.missingApps = testBins.findAll { app ->
+            !logText.contains("tee_init: /tee/${app} exited with exit status: 0")
+        }
+
+        if (logText.contains('TEE_RESULT: TIMEOUT')) {
+            result.status = 'timeout'
+            result.errorSnippet = "QEMU 运行超时（1200s），测试未能完成\\n通过: ${result.passed}，失败: ${result.failed}"
+        } else if (logText.contains('TEE_RESULT: QEMU_ERROR')) {
+            result.status = 'failed'
+            result.errorSnippet = extractSnippet(logText, 'TEE_RESULT: QEMU_ERROR', 5)
+        } else if (logText.contains('panicked at')) {
+            result.status = 'panic'
+            result.errorSnippet = extractSnippet(logText, 'panicked at', 8)
+        } else if (result.failed > 0) {
+            result.status = 'failed'
+            result.errorSnippet = extractSnippet(logText, '<<< test failed', 5)
+        } else if (!result.missingApps.isEmpty()) {
+            result.status = 'incomplete'
+            result.errorSnippet = "以下 TEE 测试未成功退出: ${result.missingApps.join(', ')}"
+        } else if (result.passed > 0) {
+            result.status = 'passed'
+        } else {
+            result.status = 'no_output'
+            result.errorSnippet = '未检测到任何测试输出，QEMU 可能未正常启动'
+        }
+
+        if (result.status != 'passed') {
+            error("TEE Tests ${arch}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
+        }
+    }
+
+    return result
+}
+
+def extractSnippet(String log, String keyword, int contextLines) {
+    def lines = log.split('\n')
+    def snippetLines = []
+    for (int i = 0; i < lines.size(); i++) {
+        if (lines[i].contains(keyword)) {
+            def from = Math.max(0, i - 2)
+            def to = Math.min(lines.size() - 1, i + contextLines)
+            for (int j = from; j <= to; j++) {
+                snippetLines << lines[j]
+            }
+            if (snippetLines.size() >= 30) break
+        }
+    }
+    return snippetLines.take(30).join('\n')
+}
+
+// ==========================================================================
+// Section 6: source checkout and PR context
+// ==========================================================================
 
 def restoreReplayGiteeEnv() {
     if (env.giteePullRequestIid?.trim()) return
@@ -1270,84 +1484,6 @@ def prepareSource() {
         if (env.giteePullRequestIid?.trim()) {
             checkNotDiverged(sourceStageName())
         }
-    }
-}
-
-def checkNotDiverged(String stageName = '') {
-    def targetBranch = env.giteeTargetBranch ?: env.DEFAULT_BRANCH
-    def forkPr = isForkPullRequest()
-    def remoteName = forkPr ? 'upstream' : 'origin'
-    def teeLine = stageName ? stageLogTeeLine(stageName) : ''
-    def result
-    def targetRepo = targetRepoUrl()
-
-    withEnv([
-        "_CI_TARGET_BRANCH=${targetBranch}",
-        "_CI_TARGET_REPO=${targetRepo}",
-        "_CI_REMOTE_NAME=${remoteName}",
-        "_CI_FORK_PR=${forkPr}",
-    ]) {
-        result = sh(label: 'Check PR branch is rebased', script: """#!/bin/bash
-set -euo pipefail
-${teeLine}
-if [ "\${_CI_FORK_PR}" = "true" ]; then
-    if git remote get-url upstream >/dev/null 2>&1; then
-        git remote set-url upstream "\${_CI_TARGET_REPO}"
-    else
-        git remote add upstream "\${_CI_TARGET_REPO}"
-    fi
-fi
-git fetch "\${_CI_REMOTE_NAME}" "\${_CI_TARGET_BRANCH}" \
-    --quiet --no-recurse-submodules --no-tags
-BASE=\$(git merge-base HEAD "\${_CI_REMOTE_NAME}/\${_CI_TARGET_BRANCH}")
-TARGET=\$(git rev-parse "\${_CI_REMOTE_NAME}/\${_CI_TARGET_BRANCH}")
-if [ "\$BASE" != "\$TARGET" ]; then
-    echo "DIVERGED"
-fi
-""", returnStdout: true).trim()
-    }
-
-    if (result == 'DIVERGED') {
-        error("该 PR 未包含目标分支 `${targetBranch}` 的最新提交，请先执行 rebase 后再重新提交。")
-    }
-}
-
-def isForkPullRequest() {
-    return normalizeRepoId(sourceRepoUrl()) != normalizeRepoId(targetRepoUrl())
-}
-
-def sourceRepoUrl() {
-    def http = env.giteeSourceRepoHttpUrl?.trim()
-    if (http) return http
-    def ns = env.giteeSourceNamespace?.trim()
-    def repo = env.giteeSourceRepoName?.trim()
-    if (ns && repo) return "https://gitee.com/${ns}/${repo}"
-    return env.PROJECT_REPO
-}
-
-def normalizeRepoId(String urlOrPath) {
-    if (!urlOrPath?.trim()) return ''
-    return urlOrPath.trim().toLowerCase()
-        .replaceFirst(/^https?:\\/\\/(oauth2:[^@]+@)?/, '')
-        .replaceFirst(/\\.git$/, '')
-        .replaceAll('/+$', '')
-}
-
-def targetRepoUrl() {
-    def ns = env.giteeTargetNamespace?.trim()
-    def repo = env.giteeTargetRepoName?.trim()
-    if (ns && repo) {
-        return "https://gitee.com/${ns}/${repo}"
-    }
-    return env.PROJECT_REPO
-}
-
-def restoreSource() {
-    withEnv(["_CI_SOURCE_DIR=${ciSourceDir()}"]) {
-        sh label: 'Restore source snapshot', script: '''#!/bin/bash
-set -euo pipefail
-tar cf - -C "${_CI_SOURCE_DIR}" . | tar xf -
-'''
     }
 }
 
@@ -1422,192 +1558,260 @@ git reset --quiet --hard "${remote_ref}"
     }
 }
 
-def deleteOldCiComments() {
-    if (!env.giteePullRequestIid?.trim()) return
-    try {
-        def prNumber = env.giteePullRequestIid
-        def namespace = env.giteeTargetNamespace ?: 'openkylin'
-        def repo = env.giteeTargetRepoName ?: 'x-kernel'
-        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
-            def ids = sh(label: 'Find old Gitee CI comments', script: """#!/bin/bash
-curl -sS --max-time 15 \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/comments?page=1&per_page=100' \
-  --data-urlencode "access_token=\${GITEE_TOKEN}" | \
-  python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-comments = data if isinstance(data, list) else []
-for c in comments:
-    body = c.get('body', '')
-    user = c.get('user', {}).get('login', '')
-    ctype = c.get('comment_type', '')
-    if ctype == 'pr_comment' and '<!-- x-kernel-ci -->' in body:
-        print(c['id'])
-"
-""", returnStdout: true).trim()
+def restoreSource() {
+    withEnv(["_CI_SOURCE_DIR=${ciSourceDir()}"]) {
+        sh label: 'Restore source snapshot', script: '''#!/bin/bash
+set -euo pipefail
+tar cf - -C "${_CI_SOURCE_DIR}" . | tar xf -
+'''
+    }
+}
 
-            if (ids) {
-                ids.split('\n').each { commentId ->
-                    if (commentId?.trim()) {
-                        sh(label: 'Delete old Gitee CI comment', script: """#!/bin/bash
-curl -sS --max-time 10 -X DELETE \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/comments/${commentId.trim()}' \
-  --data-urlencode "access_token=\${GITEE_TOKEN}" || true
-""")
-                        echo "Deleted old CI comment #${commentId.trim()}"
-                    }
-                }
+def checkNotDiverged(String stageName = '') {
+    def targetBranch = env.giteeTargetBranch ?: env.DEFAULT_BRANCH
+    def forkPr = isForkPullRequest()
+    def remoteName = forkPr ? 'upstream' : 'origin'
+    def teeLine = stageName ? stageLogTeeLine(stageName) : ''
+    def result
+    def targetRepo = targetRepoUrl()
+
+    withEnv([
+        "_CI_TARGET_BRANCH=${targetBranch}",
+        "_CI_TARGET_REPO=${targetRepo}",
+        "_CI_REMOTE_NAME=${remoteName}",
+        "_CI_FORK_PR=${forkPr}",
+    ]) {
+        result = sh(label: 'Check PR branch is rebased', script: """#!/bin/bash
+set -euo pipefail
+${teeLine}
+if [ "\${_CI_FORK_PR}" = "true" ]; then
+    if git remote get-url upstream >/dev/null 2>&1; then
+        git remote set-url upstream "\${_CI_TARGET_REPO}"
+    else
+        git remote add upstream "\${_CI_TARGET_REPO}"
+    fi
+fi
+git fetch "\${_CI_REMOTE_NAME}" "\${_CI_TARGET_BRANCH}" \
+    --quiet --no-recurse-submodules --no-tags
+BASE=\$(git merge-base HEAD "\${_CI_REMOTE_NAME}/\${_CI_TARGET_BRANCH}")
+TARGET=\$(git rev-parse "\${_CI_REMOTE_NAME}/\${_CI_TARGET_BRANCH}")
+if [ "\$BASE" != "\$TARGET" ]; then
+    echo "DIVERGED"
+fi
+""", returnStdout: true).trim()
+    }
+
+    if (result == 'DIVERGED') {
+        error("该 PR 未包含目标分支 `${targetBranch}` 的最新提交，请先执行 rebase 后再重新提交。")
+    }
+}
+
+def isForkPullRequest() {
+    return normalizeRepoId(sourceRepoUrl()) != normalizeRepoId(targetRepoUrl())
+}
+
+def sourceRepoUrl() {
+    def http = env.giteeSourceRepoHttpUrl?.trim()
+    if (http) return http
+    def ns = env.giteeSourceNamespace?.trim()
+    def repo = env.giteeSourceRepoName?.trim()
+    if (ns && repo) return "https://gitee.com/${ns}/${repo}"
+    return env.PROJECT_REPO
+}
+
+def targetRepoUrl() {
+    def ns = env.giteeTargetNamespace?.trim()
+    def repo = env.giteeTargetRepoName?.trim()
+    if (ns && repo) {
+        return "https://gitee.com/${ns}/${repo}"
+    }
+    return env.PROJECT_REPO
+}
+
+def normalizeRepoId(String urlOrPath) {
+    if (!urlOrPath?.trim()) return ''
+    return urlOrPath.trim().toLowerCase()
+        .replaceFirst(/^https?:\\/\\/(oauth2:[^@]+@)?/, '')
+        .replaceFirst(/\\.git$/, '')
+        .replaceAll('/+$', '')
+}
+
+// ==========================================================================
+// Section 7: stash transfer, arch outputs and CI meta issues
+// ==========================================================================
+
+/** Legs: source tree + Gitee check-run ids (no stage-logs; those come from arch output stashes). */
+def stashCiSourceSnapshot() {
+    stash name: ciSourceStashName(),
+        includes: '.ci/source/**,.ci/gitee/**',
+        useDefaultExcludes: false,
+        allowEmpty: false
+}
+
+/** Post finalize: Gitee state, CI scripts, Prepare stage logs (small). */
+def stashCiPostMeta() {
+    stash name: ciPostMetaStashName(),
+        includes: '.ci/gitee/**,.ci/source/scripts/ci/**,.ci/stage-logs/**',
+        useDefaultExcludes: false,
+        allowEmpty: true
+    env.CI_POST_META_STASHED = 'true'
+}
+
+/** Register Gitee check id before stash so Post meta unstash includes it in check-ids.json. */
+def beginPrepareStashStage(String stageName) {
+    initStageLog(stageName)
+    giteeEnsureCheckRunStarted(stageName)
+}
+
+def completePrepareStashOutcome(String stageName, Throwable err = null) {
+    if (err != null) {
+        def detail = buildFailureDetail(stageName, ciFailureDetail(stageName), err)
+        ciResults[stageName] = [status: 'failed', detail: detail]
+        def logPath = stageLogFile(stageName)
+        if (env.ROOT_WS?.trim() && detail?.trim()) {
+            writeFile file: logPath, text: "${detail}\n", encoding: 'UTF-8'
+        }
+    } else {
+        ciResults[stageName] = [status: 'passed']
+    }
+    ciFinishGiteeStage(stageName, ciResults, ciFailureDetail(stageName))
+}
+
+def stashArchCiOutputs(String arch) {
+    def includes = [
+        '.ci/stage-logs/**',
+        '.ci/work/runtime-*/test-harness/logs/**',
+        '.ci/work/**/unittest-output.log',
+        '.ci/work/**/tee-test-output.log',
+        '.ci/work/**/artifacts/**',
+        "${factsArtifactRoot()}/**",
+    ]
+    if (coverageEnabled()) {
+        includes.addAll([
+            "artifacts/coverage/${arch}/coverage.txt",
+            "artifacts/coverage/${arch}/coverage.info",
+            "artifacts/coverage/${arch}/coverage.xml",
+        ])
+    }
+    stash name: ciArchOutputStashName(arch),
+        includes: includes.join(','),
+        useDefaultExcludes: false,
+        allowEmpty: true
+}
+
+def archiveLegHeavyArtifacts(String archLabel) {
+    def patterns = []
+    if (coverageEnabled()) {
+        patterns << "artifacts/coverage/${archLabel}/**"
+    }
+    if (docCheckEnabled()) {
+        patterns << "artifacts/docs/${archLabel}/**"
+    }
+    if (!patterns) {
+        return
+    }
+    archiveArtifacts artifacts: patterns.join(','), allowEmptyArchive: true
+}
+
+def finishArchOutputCollection(String archLabel) {
+    def stageName = ciArchCollectStageName(archLabel)
+    stage(stageName) {
+        runCiStage(stageName, ciFailureDetail(stageName), false) {
+            giteeEnsureCheckRunStarted(stageName)
+            initStageLog(stageName)
+            def problems = []
+            try {
+                stashArchCiOutputs(archLabel)
+            } catch (e) {
+                problems << "架构输出 stash 失败: ${e.message}"
+            }
+            try {
+                archiveLegHeavyArtifacts(archLabel)
+            } catch (e) {
+                problems << "重制品归档失败: ${e.message}"
+            }
+            if (problems) {
+                error(problems.join('\n'))
             }
         }
-    } catch (e) {
-        echo "deleteOldCiComments skipped: ${e.message}"
     }
 }
 
-def notifyGiteePullRequest(String message) {
-    if (env.giteePullRequestIid?.trim()) {
-        addGiteeMRComment comment: message
-    } else {
-        echo 'Skipping Gitee PR comment because this is not a PR build'
-    }
-}
-
-def defconfigFor(String arch) {
-    return "platforms/kplat-${arch}/qemu_defconfig"
-}
-
-def defconfigForPlatform(String platform) {
-    return "platforms/${platform}/qemu_defconfig"
-}
-
-def archForPlatform(String platform) {
-    if (platform.startsWith('kplat-')) {
-        def kplatArch = platform.substring('kplat-'.length()).split('-')[0]
-        if (kplatArch in ciMatrixArchitectures().collect { it.toString() }) {
-            return kplatArch
+def restoreStashedArchCiOutputs() {
+    ciMatrixArchitectures().each { arch ->
+        try {
+            unstash ciArchOutputStashName(arch.toString())
+        } catch (e) {
+            echo "Arch output stash missing for ${arch}: ${e.message}"
         }
     }
-    if (platform.startsWith('aarch64')) return 'aarch64'
-    if (platform.startsWith('x86_64')) return 'x86_64'
-    if (platform.startsWith('riscv64')) return 'riscv64'
-    error("Unsupported platform: ${platform}")
 }
 
-def targetDirForArch(String arch) {
-    return "/xkernel-target/runtime-${arch}"
+def restoreCiPostMetaFromStash() {
+    try {
+        unstash ciPostMetaStashName()
+        env.CI_POST_META_RESTORED = 'true'
+    } catch (e) {
+        env.CI_POST_META_RESTORED = 'false'
+        def msg = "Post meta unstash failed: ${e.message}"
+        echo msg
+        recordCiMetaIssue(msg)
+    }
 }
 
-def targetDirForUnittest(String arch) {
-    return "/xkernel-target/unittest-${arch}"
+def recordCiMetaIssue(String msg) {
+    def text = msg?.trim()
+    if (!text) {
+        return
+    }
+    if (!env.giteePullRequestIid?.trim()) {
+        echo "CI meta issue (non-PR build, not surfaced in comment): ${text}"
+        return
+    }
+    echo "CI meta issue: ${text}"
+    if (!ciMetaIssues.contains(text)) {
+        ciMetaIssues << text
+    }
 }
 
-def targetDirForDoc(String arch) {
-    return "/xkernel-target/doc-${arch}"
+/** After PR comment is posted so buildCiComment can include meta warnings. */
+def applyDeferredCiMetaUnstable() {
+    if (!env.giteePullRequestIid?.trim() || ciMetaIssues.isEmpty()) {
+        return
+    }
+    if (currentBuild.currentResult == 'SUCCESS') {
+        unstable(ciMetaIssues.join('; '))
+    } else {
+        echo "CI meta issues (build already ${currentBuild.currentResult}): ${ciMetaIssues.join('; ')}"
+    }
 }
 
-def ciArtifactRoot() {
-    return "/xkernel-target/ci-artifacts"
+def giteeFinalizeScriptMissingMessage() {
+    if (env.CI_POST_META_RESTORED == 'false') {
+        return 'Post meta unstash failed; CI scripts unavailable for Gitee finalize'
+    }
+    if (env.CI_POST_META_STASHED == 'true') {
+        return 'Post meta was stashed but CI scripts are missing after restore'
+    }
+    return 'Post meta stash did not complete; CI scripts unavailable for Gitee finalize'
 }
 
-def artifactNameForNormal(String arch) {
-    return "${arch}-normal"
+// ==========================================================================
+// Section 8: Gitee PR reporting - comments, check runs, test status
+// ==========================================================================
+
+/** Gitee PR coordinates for API calls; null when this is not a PR build. */
+def giteePrContext() {
+    def pr = env.giteePullRequestIid?.trim()
+    if (!pr) {
+        return null
+    }
+    return [
+        pr: pr,
+        namespace: env.giteeTargetNamespace?.trim() ?: 'openkylin',
+        repo: env.giteeTargetRepoName?.trim() ?: 'x-kernel',
+    ]
 }
-
-def artifactNameForUnittest(String arch) {
-    return "${arch}-unittest"
-}
-
-def publishKernelArtifact(String artifactName, String platform) {
-    def artifactDir = "${ciArtifactRoot()}/${artifactName}"
-    sh label: "Publish artifact ${artifactName}", script: """#!/bin/bash
-set -euo pipefail
-artifact_dir='${artifactDir}'
-rm -rf "\${artifact_dir}"
-mkdir -p "\${artifact_dir}"
-cp .config auto.conf autoconf.h "\${artifact_dir}/"
-shopt -s nullglob
-for image in xkernel_*; do
-    cp "\${image}" "\${artifact_dir}/"
-done
-# Archive the xkmake bundle (release images + manifest, and any runtime
-# state such as OVMF vars) so later test stages can `xkmake run --no-build`
-# without relying on a shared TARGET_DIR mount across agents.
-bundle_src="\${TARGET_DIR}/xkmake/${platform}"
-if [ -d "\${bundle_src}" ]; then
-    tar -cf "\${artifact_dir}/bundle.tar" -C "\${TARGET_DIR}/xkmake" "${platform}"
-else
-    echo "warning: xkmake bundle dir not found at \${bundle_src}; skipping bundle archive" >&2
-fi
-"""
-}
-
-def restoreKernelArtifact(String artifactName) {
-    def artifactDir = "${ciArtifactRoot()}/${artifactName}"
-    // Restores workspace-level runtime inputs (.config, generated Kconfig
-    // side files, final xkernel_* images) plus the xkmake bundle archived by
-    // publishKernelArtifact (bundle.tar), so `xkmake run --no-build` works
-    // even when build and test stages do not share a TARGET_DIR mount.
-    sh label: "Restore artifact ${artifactName}", script: """#!/bin/bash
-set -euo pipefail
-artifact_dir='${artifactDir}'
-if [ ! -d "\${artifact_dir}" ]; then
-    echo "artifact not found: \${artifact_dir}" >&2
-    exit 1
-fi
-cp "\${artifact_dir}/.config" .
-cp "\${artifact_dir}/auto.conf" .
-cp "\${artifact_dir}/autoconf.h" .
-shopt -s nullglob
-for image in "\${artifact_dir}"/xkernel_*; do
-    cp "\${image}" .
-done
-# Restore the xkmake bundle (release/ + runtime/) under TARGET_DIR/xkmake
-# so `xkmake run --no-build` finds a compatible bundle.
-bundle_tar="\${artifact_dir}/bundle.tar"
-if [ -f "\${bundle_tar}" ]; then
-    mkdir -p "\${TARGET_DIR}/xkmake"
-    tar -xf "\${bundle_tar}" -C "\${TARGET_DIR}/xkmake"
-fi
-"""
-}
-
-def teePortFor(String arch) {
-    def base = arch == 'x86_64' ? 21000 : 21100
-    def build = env.BUILD_NUMBER?.toInteger() ?: 1
-    return firstFreeTcpPort(base + ((build % 50) * 2), 80)
-}
-
-def firstFreeTcpPort(int startPort, int attempts) {
-    return sh(label: 'Allocate TEE hostfwd port', script: """#!/bin/bash
-set -euo pipefail
-python3 - '${startPort}' '${attempts}' <<'PY'
-import socket
-import sys
-
-start = int(sys.argv[1])
-attempts = int(sys.argv[2])
-for port in range(start, start + attempts):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind(('127.0.0.1', port))
-        except OSError:
-            continue
-        print(port)
-        raise SystemExit(0)
-raise SystemExit(f'no free TCP port in [{start}, {start + attempts})')
-PY
-""", returnStdout: true).trim().toInteger()
-}
-
-def teeVsockCidFor(String arch) {
-    def archOffset = arch == 'x86_64' ? 1 : 2
-    def build = env.BUILD_NUMBER?.toInteger() ?: 1
-    return 100000000 + (build * 10) + archOffset
-}
-
-def giteeTestPass() { giteePrApi('POST', 'test', 'pass', '--data-urlencode \'force=true\'') }
-def giteeTestReset() { giteePrApi('PATCH', 'testers', 'reset', '') }
 
 def resolveHeadSha() {
     if (env.GIT_COMMIT?.trim()) return env.GIT_COMMIT.trim()
@@ -1749,16 +1953,6 @@ install -d -m 0700 "${_GITEE_ROOT}" "${_GITEE_MANIFEST_DIR}"
     }
 }
 
-/** 并行阶段顺序（PR 评论表格 + gitee_check_runs.py manifest） */
-def ciParallelStageOrder() {
-    return ciStageNames(ciParallelStages())
-}
-
-/** 串行阶段顺序（PR 评论表格 + gitee_check_runs.py manifest） */
-def ciSequentialStageOrder() {
-    return ciStageNames(ciSequentialStages())
-}
-
 /**
  * 调用 scripts/ci/gitee_check_runs.py 处理门禁检查。
  * action: start | finish | start_parallel | ensure_start |
@@ -1782,15 +1976,14 @@ def giteeCheck(String action, String stageName = null, Map ciResults = null, Map
         return
     }
 
-    def namespace = env.giteeTargetNamespace ?: 'openkylin'
-    def repo = env.giteeTargetRepoName ?: 'x-kernel'
-    def prDbArg = env.giteePullRequestId?.trim() ? "--pr-db-id ${env.giteePullRequestId.trim()}" : "--pr ${env.giteePullRequestIid}"
+    def ctx = giteePrContext()
+    def prDbArg = env.giteePullRequestId?.trim() ? "--pr-db-id ${env.giteePullRequestId.trim()}" : "--pr ${ctx.pr}"
 
     def manifest = [
         action: action,
         stage_name: stageName,
-        owner: namespace,
-        repo: repo,
+        owner: ctx.namespace,
+        repo: ctx.repo,
         head_sha: headSha,
         pr_db_id: env.giteePullRequestId?.trim(),
         pr_iid: env.giteePullRequestIid?.trim(),
@@ -1812,8 +2005,8 @@ def giteeCheck(String action, String stageName = null, Map ciResults = null, Map
             sh(label: 'Update Gitee check run', script: """#!/bin/bash
 set -euo pipefail
 python3 '${scriptPath}' \\
-  --owner '${namespace}' \\
-  --repo '${repo}' \\
+  --owner '${ctx.namespace}' \\
+  --repo '${ctx.repo}' \\
   --jenkins-manifest '${manifestFile}' \\
   ${prDbArg} \\
   --details-url '${env.BUILD_URL ?: ''}' || {
@@ -1827,6 +2020,7 @@ python3 '${scriptPath}' \\
 }
 
 def giteeStartCheckRun(String stageName) { giteeCheck('start', stageName) }
+
 def giteeFinishCheckRun(String stageName, Map ciResults, Map failedStageLogs = [:]) {
     giteeCheck('finish', stageName, ciResults, failedStageLogs)
 }
@@ -1839,28 +2033,31 @@ def ciFinishGiteeStage(String stageName, Map results, String failedDetail = null
     }
     giteeFinishCheckRun(stageName, results, [:])
 }
+
 def giteeStartParallelCheckRuns() { giteeCheck('start_parallel') }
+
 def giteeEnsureCheckRunStarted(String stageName) { giteeCheck('ensure_start', stageName) }
+
 def giteeFinalizeAllCheckRuns(Map ciResults, Map failedStageLogs = [:]) {
     giteeCheck('post_finalize', null, ciResults, failedStageLogs)
 }
+
 def giteeRefreshFailedCheckOutputs(Map ciResults, Map failedStageLogs = [:]) {
     giteeCheck('refresh_failed', null, ciResults, failedStageLogs)
 }
+
 def giteeReorderSequentialCheckRuns(Map ciResults, Map failedStageLogs = [:]) {
     giteeCheck('reorder_sequential', null, ciResults, failedStageLogs)
 }
 
 def giteePrApi(String method, String endpoint, String label, String extraArgs) {
-    if (!env.giteePullRequestIid?.trim()) return
+    def ctx = giteePrContext()
+    if (!ctx) return
     try {
-        def prNumber = env.giteePullRequestIid
-        def namespace = env.giteeTargetNamespace ?: 'openkylin'
-        def repo = env.giteeTargetRepoName ?: 'x-kernel'
         withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
             sh(label: "Update Gitee PR test ${label}", script: """#!/bin/bash
 resp=\$(curl -sS -w '\\n%{http_code}' --max-time 15 -X ${method} \
-  'https://gitee.com/api/v5/repos/${namespace}/${repo}/pulls/${prNumber}/${endpoint}' \
+  'https://gitee.com/api/v5/repos/${ctx.namespace}/${ctx.repo}/pulls/${ctx.pr}/${endpoint}' \
   --data-urlencode "access_token=\${GITEE_TOKEN}" ${extraArgs} 2>&1) || true
 code=\$(echo "\$resp" | tail -1)
 echo "Gitee test ${label}: HTTP \$code"
@@ -1871,156 +2068,77 @@ echo "Gitee test ${label}: HTTP \$code"
     }
 }
 
-def initializeCiWorkspace() {
-    // The declarative Docker agent has already bind-mounted WORKSPACE.
-    // Deleting the mount point replaces its inode and makes later docker exec
-    // calls fail. Remove only its contents so the bind mount remains valid.
-    sh(
-        label: 'Clean CI workspace contents',
-        script: '''#!/bin/bash
-set -euo pipefail
+def giteeTestPass() { giteePrApi('POST', 'test', 'pass', '--data-urlencode \'force=true\'') }
 
-if [[ -z "${WORKSPACE:-}" || "${PWD}" != "${WORKSPACE}" ]]; then
-    echo "Refusing to clean unexpected workspace: PWD=${PWD}, WORKSPACE=${WORKSPACE:-unset}" >&2
-    exit 2
-fi
+def giteeTestReset() { giteePrApi('PATCH', 'testers', 'reset', '') }
 
-find "${WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-'''
-    )
-}
+def deleteOldCiComments() {
+    def ctx = giteePrContext()
+    if (!ctx) return
+    try {
+        withCredentials([string(credentialsId: 'gitee-token-secret', variable: 'GITEE_TOKEN')]) {
+            def ids = sh(label: 'Find old Gitee CI comments', script: """#!/bin/bash
+curl -sS --max-time 15 \
+  'https://gitee.com/api/v5/repos/${ctx.namespace}/${ctx.repo}/pulls/${ctx.pr}/comments?page=1&per_page=100' \
+  --data-urlencode "access_token=\${GITEE_TOKEN}" | \
+  python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+comments = data if isinstance(data, list) else []
+for c in comments:
+    body = c.get('body', '')
+    user = c.get('user', {}).get('login', '')
+    ctype = c.get('comment_type', '')
+    if ctype == 'pr_comment' and '<!-- x-kernel-ci -->' in body:
+        print(c['id'])
+"
+""", returnStdout: true).trim()
 
-def targetTripleFor(String archOrPlatform) {
-    if (archOrPlatform.startsWith('aarch64')) return 'aarch64-unknown-none-softfloat'
-    if (archOrPlatform.startsWith('x86')) return 'x86_64-unknown-none'
-    if (archOrPlatform.startsWith('riscv64')) return 'riscv64gc-unknown-none-elf'
-    error("Unsupported arch/platform: ${archOrPlatform}")
-}
-
-def runTeeStorageTest(String arch) {
-    def stageName = "TEE Tests: ${arch}"
-    initStageLog(stageName)
-    def result = [arch: arch, passed: 0, failed: 0, status: 'unknown', errorSnippet: '', missingApps: []]
-    def teeTargetDir = targetDirForArch(arch)
-    def teeHostfwdPort = teePortFor(arch)
-    def teeVsockCid = teeVsockCidFor(arch)
-    def testBins = teeTestBinaries()
-
-    withCleanSourceWorkspace("tee-test-${arch}") { stageWorkspace ->
-        withEnv(["TARGET_DIR=${teeTargetDir}",
-                 "HOSTFWD_PORT=${teeHostfwdPort}",
-                 "VSOCK_CID=${teeVsockCid}",
-                 "TEE_TEST_BINS=${testBins.join(' ')}",
-                 "SKIP_KERNEL_BUILD=1"]) {
-            restoreKernelArtifact(artifactNameForNormal(arch))
-            sh label: "Run TEE tests ${arch}", script: """#!/bin/bash
-set -euo pipefail
-${stageLogTeeLine(stageName)}
-scripts/ci/run_tee_storage_test.sh '${arch}'
-"""
-        }
-
-        def logText = readFile("${stageWorkspace}/tee-test-output.log")
-        result.passed = logText.split('<<< test success', -1).length - 1
-        result.failed = logText.split('<<< test failed', -1).length - 1
-        result.missingApps = testBins.findAll { app ->
-            !logText.contains("tee_init: /tee/${app} exited with exit status: 0")
-        }
-
-        if (logText.contains('TEE_RESULT: TIMEOUT')) {
-            result.status = 'timeout'
-            result.errorSnippet = "QEMU 运行超时（1200s），测试未能完成\\n通过: ${result.passed}，失败: ${result.failed}"
-        } else if (logText.contains('TEE_RESULT: QEMU_ERROR')) {
-            result.status = 'failed'
-            result.errorSnippet = extractSnippet(logText, 'TEE_RESULT: QEMU_ERROR', 5)
-        } else if (logText.contains('panicked at')) {
-            result.status = 'panic'
-            result.errorSnippet = extractSnippet(logText, 'panicked at', 8)
-        } else if (result.failed > 0) {
-            result.status = 'failed'
-            result.errorSnippet = extractSnippet(logText, '<<< test failed', 5)
-        } else if (!result.missingApps.isEmpty()) {
-            result.status = 'incomplete'
-            result.errorSnippet = "以下 TEE 测试未成功退出: ${result.missingApps.join(', ')}"
-        } else if (result.passed > 0) {
-            result.status = 'passed'
-        } else {
-            result.status = 'no_output'
-            result.errorSnippet = '未检测到任何测试输出，QEMU 可能未正常启动'
-        }
-
-        if (result.status != 'passed') {
-            error("TEE Tests ${arch}: ${result.status} (passed=${result.passed}, failed=${result.failed})")
-        }
-    }
-
-    return result
-}
-
-def extractSnippet(String log, String keyword, int contextLines) {
-    def lines = log.split('\n')
-    def snippetLines = []
-    for (int i = 0; i < lines.size(); i++) {
-        if (lines[i].contains(keyword)) {
-            def from = Math.max(0, i - 2)
-            def to = Math.min(lines.size() - 1, i + contextLines)
-            for (int j = from; j <= to; j++) {
-                snippetLines << lines[j]
-            }
-            if (snippetLines.size() >= 30) break
-        }
-    }
-    return snippetLines.take(30).join('\n')
-}
-
-def collectCoverageSummary() {
-    def rows = []
-    ['x86_64', 'aarch64'].each { arch ->
-        try {
-            def covFile = "${rootWorkspace()}/artifacts/coverage/${arch}/coverage.txt"
-            def content = sh(label: "Read coverage summary ${arch}", script: "cat '${covFile}' 2>/dev/null || true", returnStdout: true).trim()
-            if (content) {
-                def lines = content.split('\n')
-                def totalLine = lines.find { it.contains('TOTAL') }
-                if (totalLine) {
-                    def cols = totalLine.trim().split(/\s+/)
-                    if (cols.size() >= 10) {
-                        rows.add("| ${arch} | ${cols[9]} | ${cols[6]} | ${cols[3]} | ${cols[7]} | ${cols[8]} |")
+            if (ids) {
+                ids.split('\n').each { commentId ->
+                    if (commentId?.trim()) {
+                        sh(label: 'Delete old Gitee CI comment', script: """#!/bin/bash
+curl -sS --max-time 10 -X DELETE \
+  'https://gitee.com/api/v5/repos/${ctx.namespace}/${ctx.repo}/pulls/comments/${commentId.trim()}' \
+  --data-urlencode "access_token=\${GITEE_TOKEN}" || true
+""")
+                        echo "Deleted old CI comment #${commentId.trim()}"
                     }
                 }
             }
-        } catch (e) {
-            // skip
         }
+    } catch (e) {
+        echo "deleteOldCiComments skipped: ${e.message}"
     }
-    if (rows.isEmpty()) return ''
-    def header = "| 架构 | 行覆盖率 | 函数覆盖率 | 区域覆盖率 | 总行数 | 未覆盖行 |\n|------|---------|-----------|-----------|--------|---------|"
-    return header + '\n' + rows.join('\n')
 }
 
-def ciStageOrder() {
-    return ciSequentialStageOrder() + ciParallelStageOrder()
+def notifyGiteePullRequest(String message) {
+    if (env.giteePullRequestIid?.trim()) {
+        addGiteeMRComment comment: message
+    } else {
+        echo 'Skipping Gitee PR comment because this is not a PR build'
+    }
 }
 
-def sanitizeStageFileName(String stageName) {
-    return stageName.replaceAll(/[^A-Za-z0-9._-]+/, '_').take(80)
+// ==========================================================================
+// Section 9: stage logs, build comment and finalize
+// ==========================================================================
+
+/**
+ * sh step for stage bodies: prepends the shebang, strict mode and the stage-log
+ * tee line to the caller's script. Blocks that manage those parts themselves
+ * (set +e, returnStdout/returnStatus, or no stage log) keep calling sh directly.
+ */
+def ciSh(String stageName, String label, String script) {
+    sh label: label, script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+${script.trim()}
+"""
 }
 
 def stageLogAnsiFilterPipe() {
     return "sed -u -e 's/\\x1[Bb]\\[[0-9;]*[a-zA-Z]//g' -e 's/\\x9[Bb]\\[[0-9;]*[a-zA-Z]//g' -e 's/\\[[0-9;]*[mK]//g'"
-}
-
-def sanitizeStageLogForDisplay(String text) {
-    if (!text?.trim()) {
-        return ''
-    }
-    def cleaned = text
-        .replaceAll(/\u001B\[[0-9;?]*[ -\/]*[@-~]/, '')
-        .replaceAll(/\u009B[0-9;?]*[ -\/]*[@-~]/, '')
-        .replaceAll(/\[(?:\d{1,3};?)*[mK]/, '')
-        .replaceAll(/\r/, '')
-        .replaceAll(/\n{4,}/, '\n\n\n')
-    return cleaned.trim()
 }
 
 def stageLogFile(String stageName) {
@@ -2061,6 +2179,19 @@ def readStageLogFile(String path) {
         echo "read stage log ${path} failed: ${e.message}"
         return ''
     }
+}
+
+def sanitizeStageLogForDisplay(String text) {
+    if (!text?.trim()) {
+        return ''
+    }
+    def cleaned = text
+        .replaceAll(/\u001B\[[0-9;?]*[ -\/]*[@-~]/, '')
+        .replaceAll(/\u009B[0-9;?]*[ -\/]*[@-~]/, '')
+        .replaceAll(/\[(?:\d{1,3};?)*[mK]/, '')
+        .replaceAll(/\r/, '')
+        .replaceAll(/\n{4,}/, '\n\n\n')
+    return cleaned.trim()
 }
 
 /** PR 评论与 Gitee 侧约定：长阶段日志取尾部片段，便于看到 rootfs 等后段失败。 */
@@ -2107,6 +2238,98 @@ mkdir -p "${_CI_STAGE_LOG_DIR}" || true
         echo "archiveFailedStageLogs failed: ${e.message}"
         return [:]
     }
+}
+
+def archiveArtifactPatterns() {
+    // Success with no meta issues: keep only the PR/summary comment.
+    // Failed stages, timeout/abort, or Gitee post-meta issues keep diagnostic
+    // logs. Do not call unstable() before this — giteeTestShouldPass still
+    // needs SUCCESS at archive time. Coverage/docs only when toggles are on.
+    // Code facts are archived on every outcome: their status.json tells
+    // xreview whether they are ready, partial or failed, and why.
+    def patterns = ['ci-summary.md', "${factsArtifactRoot()}/**/*"]
+    def failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
+    def buildUnsuccessful = !(currentBuild.currentResult in [null, 'SUCCESS'])
+    def hasMetaIssues = !ciMetaIssues.isEmpty()
+    def needsDiagnostics = failedStages || buildUnsuccessful || hasMetaIssues
+    if (needsDiagnostics) {
+        if (failedStages) {
+            failedStages.each { name ->
+                patterns << ".ci/stage-logs/${sanitizeStageFileName(name)}.log"
+            }
+        } else {
+            // Timeout/abort/incomplete/meta-only: no status=='failed' stages.
+            patterns << '.ci/stage-logs/**/*.log'
+        }
+        patterns.addAll([
+            '.ci/work/**/artifacts/**/*',
+            '.ci/work/**/logs/**/*',
+            '.ci/work/**/unittest-output.log',
+            '.ci/work/**/tee-test-output.log',
+        ])
+    }
+    if (coverageEnabled()) {
+        patterns << 'artifacts/coverage/**/*'
+    }
+    if (docCheckEnabled()) {
+        patterns << 'artifacts/docs/**/*'
+    }
+    return patterns
+}
+
+def buildShortBuildDescription(Map results) {
+    def pr = env.giteePullRequestIid?.trim() ? "PR#${env.giteePullRequestIid}" : 'manual'
+    def sha = resolveHeadSha()?.take(8) ?: env.GIT_COMMIT?.take(8) ?: ''
+    def failedStages = ciStageOrder().findAll { results[it]?.status == 'failed' }
+    if (currentBuild.currentResult == 'SUCCESS' && failedStages.isEmpty() && ciMetaIssues.isEmpty()) {
+        return "${pr} ✅ ${sha}".trim()
+    }
+    if (env.giteePullRequestIid?.trim() && failedStages.isEmpty() && !ciMetaIssues.isEmpty()) {
+        return "${pr} ⚠️ post-meta ${sha}".trim()
+    }
+    if (!failedStages.isEmpty()) {
+        def failed = failedStages.take(2).join(', ')
+        def suffix = failedStages.size() > 2 ? " +${failedStages.size() - 2}" : ''
+        return "${pr} ❌ ${failed}${suffix} ${sha}".trim()
+    }
+    return "${pr} ❌ ${currentBuild.currentResult} ${sha}".trim()
+}
+
+def finalizeCiBuild() {
+    restoreReplayGiteeEnv()
+
+    if (env.giteePullRequestIid?.trim()) {
+        def scriptPath = resolveGiteeCheckRunsScript()
+        if (!scriptPath) {
+            recordCiMetaIssue(giteeFinalizeScriptMissingMessage())
+        }
+    }
+
+    def failedStageLogs = archiveFailedStageLogs(ciResults)
+    def coverageSummary = collectCoverageSummary()
+    def built = buildCombinedComment(ciResults, coverageSummary, failedStageLogs, ciMetaIssues)
+    writeFile file: 'ci-summary.md', text: built.comment.replaceFirst(/^<!-- x-kernel-ci -->\n/, '')
+    currentBuild.description = buildShortBuildDescription(ciResults)
+    archiveArtifacts artifacts: archiveArtifactPatterns().join(','), allowEmptyArchive: true
+
+    deleteOldCiComments()
+    notifyGiteePullRequest(built.comment)
+
+    giteeFinalizeAllCheckRuns(ciResults, failedStageLogs)
+    giteeRefreshFailedCheckOutputs(ciResults, failedStageLogs)
+    giteeReorderSequentialCheckRuns(ciResults, failedStageLogs)
+
+    // Gitee「测试通过」只看阶段结果；Post 元数据异常仍用 unstable() 标 Jenkins，但不撤销 PR test pass。
+    def giteeTestShouldPass = currentBuild.currentResult == 'SUCCESS' &&
+        ciStageOrder().every { ciResults[it]?.status == 'passed' }
+    applyDeferredCiMetaUnstable()
+
+    if (giteeTestShouldPass) {
+        giteeTestPass()
+    } else {
+        giteeTestReset()
+    }
+
 }
 
 def buildCombinedComment(Map ciResults, String coverageSummary, Map failedStageLogs = [:], List ciMetaIssues = []) {

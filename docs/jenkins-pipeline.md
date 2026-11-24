@@ -62,7 +62,8 @@ xkernel-agent docker vhost-vsock container-vsock
 ## 容器与设备
 
 流水线使用的 builder 镜像以 `Jenkinsfile` 中 `ciBuilderImage()` 的返回值
-为准（Prepare 与各 arch leg 经 `withFloatingCiDocker` / `withArchCiAgent` 拉取）。
+为准（Prepare、各 arch leg 与 Post 都经统一的生命周期包装器
+`withCiBuilderNode` 拉取；`withFloatingCiDocker` / `withArchCiAgent` 是其薄委托）。
 镜像的 Dockerfile 在仓库内的 `scripts/ci/docker/` 维护，构建、
 检查和发布方法见该目录的 README。OCI index 只包含原生 `linux/amd64` 和
 `linux/arm64` 镜像。镜像默认用户是
@@ -132,9 +133,16 @@ $WORKSPACE/
 
 ## 构建输出与持久缓存
 
-`/xkernel-target` 是当前容器独占的匿名 Docker volume。它只在同一 arch leg 的
-Build 与 Run 之间复用（boot、链接和 Cargo 中间产物），不跨架构、不跨 Prepare/Post，
-也不跨 Jenkins Build。各节点上的 named volume 也彼此独立：同名 volume 在不同节点上不是同一份数据。
+`/xkernel-target` 挂载在当前容器独占的 named volume 上，名称规则为
+`xkernel-target-<jobslug>-b<BUILD_NUMBER>-<scope>`：`jobslug` 是 `JOB_NAME`
+清洗后的片段，`scope` 取 `prepare`、`post` 或架构名（`x86_64` / `aarch64` /
+`riscv64`）。隔离语义与此前的匿名卷完全相同：只在同一 arch leg 的 Build 与
+Run 之间复用（boot、链接和 Cargo 中间产物），不跨架构、不跨 Prepare/Post，
+也不跨 Jenkins Build；区别在于卷名确定、可枚举，构建结束由流水线显式回收，
+残留由节点预检兜底（见「节点磁盘与维护」）。每个 builder 容器带有
+`x-kernel-ci=true` 与 `x-kernel-ci.job/.build/.scope` 标签，这是回收脚本
+唯一的识别依据。各节点上的 named volume 也彼此独立：同名 volume 在不同
+节点上不是同一份数据。
 
 TEE storage tests use `/xkernel-target/libutee-<arch>` as a source/build cache
 within this container only. Each architecture has one script invocation and a
@@ -172,10 +180,10 @@ volume 时，递增 `Jenkinsfile` 中对应的后缀。Cargo 工具本体位于�
 读到半成品。
 
 Rustup 必须挂载整个 `/usr/local/rustup`，使 `tmp` 和 `toolchains` 位于同一
-文件系统，支持安装时的原子改名。当前使用新卷 `xkernel-rustup-home-v5`；
-主线此前使用的 `xkernel-rustup-toolchains-v4`，以及本 PR 早期验证中使用的
-`xkernel-rustup-toolchains-v5`，都只挂载 toolchains 子目录，与当前 home 卷不同。
-这两个旧卷均不迁入新卷，保留供排查；当前流水线不再引用它们。
+文件系统，支持安装时的原子改名。当前使用新卷 `xkernel-rustup-home-v6`；
+主线此前使用的 `xkernel-rustup-toolchains-v4` 与 `xkernel-rustup-toolchains-v5`
+只挂载 toolchains 子目录，`xkernel-rustup-home-v5` 是 v6 之前的 home 卷。
+这些旧卷均不迁入新卷，保留供排查；当前流水线不再引用它们。
 
 整个 home 挂载也会持久化 Rustup settings。镜像的 `rustup default none` 仅是
 新卷初始状态；首次运行时安装可能写入默认 channel，后续容器会保留该设置。
@@ -238,6 +246,39 @@ Dylint 工具、lint toolchain 及其组件和 driver 是否与仓库固定的�
 crate 一样经 Cargo 镜像源下载并缓存在 Cargo volume 中。
 
 guest case target、kernel target、覆盖率与测试制品不能放入共享缓存。
+
+## 节点磁盘与维护
+
+每次进入 CI 节点、启动 builder 容器之前，流水线在宿主侧运行一次预检脚本
+（`Jenkinsfile` 的 `ciNodeHygieneScript()`），按顺序做三件事：
+
+1. 回收本 CI 的孤儿容器：只匹配 `x-kernel-ci=true` 标签；已退出（任意时长）
+   或运行超过 24 小时（流水线超时为 90 分钟）的容器直接删除。
+2. 回收遗留输出卷：匹配 `xkernel-target-` 前缀（**跨 job、跨 build**，硬中止
+   构建的残卷由下一次任意构建的预检兜底），且确认没有任何容器（含
+   `created` / `exited`）引用后才删除。先删容器、后删卷；并发构建的活跃卷
+   由其容器引用保护——容器从创建到 `inside()` 拆除全程存在，恰覆盖卷的使用
+   窗口，与卷名中的 build 号无关。
+3. 容量门槛：按 `docker info` 的 `DockerRootDir` 检查所在分区可用空间，
+   低于 100 GiB 立即失败。该阈值覆盖同一宿主最多约 5 个并发 CI 容器
+   （各 ~20 GiB 峰值）的场景。**post 阶段豁免该门槛**（GC 仍执行）：post
+   容器只写 KB 级日志/清单，必须在磁盘将满时仍能启动，否则基础设施故障
+   反而无法在 PR 评论 / Check-Run 上标注。
+
+预检失败时构建以基础设施错误终止，PR 评论的「Post / Gitee 元数据」块会
+标注「与 PR 代码无关」；处理方式是评论 `rerun` 或通知维护者检查编译机，
+而不是修改 PR。正常路径下，`inside()` 拆除容器后，流水线在 finally 中显式
+`docker volume rm` 本 scope 的输出卷并 `cleanWs`；中止、宿主断电或预检自身
+失败留下的残卷，由下一次任意构建在同宿主上的预检兜底回收。
+
+编译机与其他团队共享，回收脚本只按标签与前缀匹配：绝不执行
+`docker volume prune`，绝不触碰无标签容器或非 `xkernel-target-` 前缀的卷。
+在 agent 环境设置 `_CI_HYGIENE_DRY_RUN=1` 可让预检只打印将执行的动作而不
+删除，用于接入新节点或排障时核对清单。
+
+2026-11-18 之前每次构建遗留的约 17 GiB 匿名输出卷已人工回收；新方案不再
+产生匿名卷，历史上其他来源的无主匿名卷不在流水线回收职责内，由运维按需
+处理。
 
 ## Jenkins Job
 
