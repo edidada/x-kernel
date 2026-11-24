@@ -528,6 +528,11 @@ mod pmu {
 
 /// Device-driver shell: discovers one `rockchip,*-iommu` node and owns the
 /// probe-time resources (MMIO mapping, fault IRQ, domain, registration).
+///
+/// Bring-up note: the board's runtime log floor sits at `error` regardless of
+/// the build `LOG_LEVEL_*` choice, so the probe criterion lines use `error!`
+/// on purpose (the display porting loop documented the same workaround).
+/// Once the runtime level is configurable these should step back down.
 struct RkIommuDriver;
 
 impl kdevice::DeviceDriver for RkIommuDriver {
@@ -567,7 +572,7 @@ impl kdevice::DeviceDriver for RkIommuDriver {
         };
         let instance = InstanceId(u64::from(node.id().raw()));
 
-        log::warn!("rk-iommu: probing instance {instance:?}");
+        log::error!("rk-iommu: probing instance {instance:?}");
         // An instance inside a power domain is unreachable until a PM-domain
         // driver powers the island on: its register file does not answer and
         // the first read would take a bus abort. Skip it explicitly instead
@@ -620,7 +625,7 @@ impl kdevice::DeviceDriver for RkIommuDriver {
         // SAFETY: `pmu` is the mapped PMU window; probe runs single-task at
         // boot with no concurrent PM user.
         if unsafe { pmu::power_nputop_on(pmu) } {
-            log::warn!("rk-iommu: PD_NPUTOP powered on");
+            log::error!("rk-iommu: PD_NPUTOP powered on");
         } else {
             log::error!("rk-iommu: PD_NPUTOP power-on handshake failed; refusing to probe blind");
             return Err(DriverError::Io);
@@ -677,7 +682,7 @@ impl kdevice::DeviceDriver for RkIommuDriver {
                     // the gate entry indexes within the sub-window.
                     unsafe { ungate(window, gate) };
                 }
-                log::warn!(
+                log::error!(
                     "rk-iommu: unguarded {} CRU gate(s) for instance {instance:?}",
                     ids.len()
                 );
@@ -704,7 +709,7 @@ impl kdevice::DeviceDriver for RkIommuDriver {
             );
             return Err(DriverError::Io);
         }
-        log::warn!("rk-iommu: DTE_ADDR read-back ok ({readback:#x}) -- register file answering");
+        log::error!("rk-iommu: DTE_ADDR read-back ok ({readback:#x}) -- register file answering");
 
         // Fault interrupts: a node may declare one IRQ per MMU interface; the
         // handler iterates every base per interrupt, so sharing covers all of
