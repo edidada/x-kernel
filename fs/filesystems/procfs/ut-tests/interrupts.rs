@@ -105,7 +105,7 @@ fn assert_header(text: &str, cpus: &[LogicalCpuId]) {
             cpus.iter()
                 .map(|cpu| format!("CPU{:<8}", cpu.as_usize()))
                 .collect::<String>(),
-            width = 11
+            width = 12
         )
     );
 }
@@ -126,10 +126,23 @@ fn header_always_present_and_named_line_is_formatted() -> unittest::TestResult {
     assert_header(&text, &cpus);
     let row = text
         .lines()
-        .find(|row| row.starts_with(&format!("{:>3}:", line.virq())))
+        .find(|row| row.starts_with(&format!("{:>4}:", line.virq())))
         .expect("IRQ row");
-    assert!(row.contains("GIC 42  Level  serial"));
-    assert!(row.contains(&format!(" {:>10}", 7)));
+    let prefix = format!("{:>4}:", line.virq());
+    assert!(row.starts_with(&prefix));
+    let count_start = prefix.len();
+    for index in 0..cpus.len() {
+        let expected = if index == 0 { 7 } else { 0 };
+        assert_eq!(
+            &row[count_start + index * 11..count_start + (index + 1) * 11],
+            format!(" {:>10}", expected)
+        );
+    }
+    let fields_start = count_start + cpus.len() * 11;
+    assert_eq!(
+        &row[fields_start..],
+        format!("  {:<8} {:>4} {:<8}  serial", "GIC", 42, "Level")
+    );
     assert_eq!(text.lines().filter(|row| row.trim().is_empty()).count(), 0);
     TestResult::Ok
 }
@@ -143,7 +156,7 @@ fn no_action_zero_line_is_hidden_but_historical_counts_are_visible() -> unittest
     assert!(!text.contains(&format!("{}:", zero.virq())));
     let row = text
         .lines()
-        .find(|row| row.starts_with(&format!("{:>3}:", historical.virq())))
+        .find(|row| row.starts_with(&format!("{:>4}:", historical.virq())))
         .expect("historical row");
     assert!(row.contains(" 9"));
     assert!(!row.contains("serial"));
@@ -227,7 +240,7 @@ fn partial_read_pread_rewind_and_read_iter_agree() -> unittest::TestResult {
 
     let file = interrupts_file();
     let full = read_all(&file);
-    assert!(full.starts_with("           CPU"));
+    assert!(full.starts_with("            CPU"));
 
     assert_eq!(file.llseek(0, 0).unwrap(), 0);
     let mut small = [0u8; 3];
@@ -316,7 +329,7 @@ fn observation_errors_are_not_swallowed_as_eof() -> unittest::TestResult {
         };
         crate::irq_nodes::interrupts::force_next_stats_error_for_tests(None);
         assert_eq!(result, Err(expected));
-        assert!(text.starts_with("           CPU"));
+        assert!(text.starts_with("            CPU"));
     }
     unittest::TestResult::Ok
 }

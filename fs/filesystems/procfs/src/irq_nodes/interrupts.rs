@@ -24,7 +24,10 @@ use kvfs::{
     SimpleFs, VfsError, VfsResult,
 };
 
-const IRQ_FIELD_WIDTH: usize = 3;
+const IRQ_NUMBER_WIDTH: usize = 4;
+const CHIP_WIDTH: usize = 8;
+const HWIRQ_WIDTH: usize = 4;
+const TRIGGER_WIDTH: usize = 8;
 const COUNT_FIELD_WIDTH: usize = 10;
 
 /// One row of the file. The header is emitted even when no countable Line is
@@ -223,14 +226,19 @@ fn map_stats_error(error: IrqStatsError) -> VfsError {
 fn show_record(iter: &InterruptsIter, item: &InterruptRecord, out: &mut dyn Write) -> fmt::Result {
     match item {
         InterruptRecord::Header => {
-            write!(out, "{:width$}", "", width = IRQ_FIELD_WIDTH + 8)?;
+            write!(out, "{:width$}", "", width = IRQ_NUMBER_WIDTH + 8)?;
             for cpu in iter.cpus() {
                 write!(out, "CPU{:<8}", cpu.as_usize())?;
             }
             writeln!(out)
         }
         InterruptRecord::Line(snapshot) => {
-            write!(out, "{:>width$}:", snapshot.virq(), width = IRQ_FIELD_WIDTH)?;
+            write!(
+                out,
+                "{:>width$}:",
+                snapshot.virq(),
+                width = IRQ_NUMBER_WIDTH
+            )?;
             for cpu in iter.cpus() {
                 let count = snapshot
                     .counts()
@@ -241,10 +249,13 @@ fn show_record(iter: &InterruptsIter, item: &InterruptRecord, out: &mut dyn Writ
             }
             write!(
                 out,
-                "  {} {}  {}",
+                "  {:<chip$} {:>hwirq$} {:<trigger$}",
                 controller_name(snapshot.controller()),
                 snapshot.hwirq(),
-                trigger_name(snapshot.trigger())
+                trigger_name(snapshot.trigger()),
+                chip = CHIP_WIDTH,
+                hwirq = HWIRQ_WIDTH,
+                trigger = TRIGGER_WIDTH,
             )?;
             for (index, name) in snapshot.action_names().iter().enumerate() {
                 if index == 0 {
