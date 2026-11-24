@@ -30,7 +30,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::ptr::NonNull;
 
 use driver_base::{DeviceKind, DriverError, DriverResult};
@@ -79,6 +79,12 @@ mod irq {
 /// 100 µs poll period, run as a tight spin because bring-up happens in task
 /// context before the device may issue transactions).
 const POLL_STEPS: u32 = 1_000;
+
+/// Dummy value written to DTE_ADDR at probe and read back: the v2 register
+/// file latches address bits [39:4], so this value survives the round trip
+/// when the window answers (Linux uses the same shape in its force_reset
+/// path with the v2 `pt_address` encoding).
+const DTE_ADDR_PROBE: u32 = 0xCAFE_BAB0 & 0xffff_fff0;
 
 /// One 4 KiB table page, as a DMA request.
 const TABLE_PAGE_LEN: usize = 4096;
@@ -335,6 +341,7 @@ impl kdevice::DeviceDriver for RkIommuDriver {
         static SPEC: kdevice::FirmwareMatchSpec = kdevice::FirmwareMatchSpec {
             alias: "rk-iommu",
             dt_compatibles: &[
+                "rockchip,iommu-v2",
                 "rockchip,rk3588-iommu",
                 "rockchip,rk3568-iommu",
                 "rockchip,rk3288-iommu",
@@ -352,26 +359,60 @@ impl kdevice::DeviceDriver for RkIommuDriver {
         };
         let instance = InstanceId(u64::from(node.id().raw()));
 
-        let Some(mmio) = device.first_mmio() else {
+        // One node can expose several identical MMU interfaces (the NPU MMU
+        // declares four `reg` windows sharing its fault IRQs): map them all.
+        let mut bases: Vec<MmuBase> = Vec::new();
+        for resource in device.resources().iter() {
+            let mmio @ kdevice::MmioRegion { .. } = match resource {
+                kdevice::ResourceDesc::Mmio(mmio) => *mmio,
+                _ => continue,
+            };
+            let ptr = kdevice::device::managed::devm_iomap_with_provider(
+                &PROVIDER, ctx, mmio, "rk-iommu",
+            )
+            .map_err(map_res_err)?;
+            // SAFETY: the mapping lives as long as the binding; the hardware
+            // guard stores only the raw base.
+            bases.push(unsafe { MmuBase::new(ptr) });
+        }
+        if bases.is_empty() {
             return Err(DriverError::InvalidInput);
-        };
-        let mmio_ptr =
-            kdevice::device::managed::devm_iomap_with_provider(&PROVIDER, ctx, mmio, "rk-iommu")
-                .map_err(map_res_err)?;
-        // SAFETY: the mapping lives as long as the binding; the hardware
-        // guard stores only the raw base.
-        let bases: Arc<[MmuBase]> = Arc::from(alloc::vec![unsafe { MmuBase::new(mmio_ptr) }]);
+        }
+        let bases: Arc<[MmuBase]> = Arc::from(bases);
 
-        let hardware = Arc::new(RkIommuHw { instance, bases });
+        let hardware = Arc::new(RkIommuHw {
+            instance,
+            bases: bases.clone(),
+        });
 
-        // Fault interrupt: optional in device trees but required for the
-        // observable fault path; a node without one stays usable (its faults
-        // surface as bus hangs, not storms).
-        if let Some(irq) = device.first_irq() {
+        // Probe criterion (the Linux force_reset check): write a dummy value
+        // to DTE_ADDR and read it back. A mismatch means the register file is
+        // not answering -- typically the aclk/iface clocks are still gated in
+        // the CRU. The instance stays unregistered in that case so the DMA
+        // layer never trusts it.
+        let probe_base = &hardware.bases[0];
+        probe_base.write(reg::DTE_ADDR, DTE_ADDR_PROBE);
+        let readback = probe_base.read(reg::DTE_ADDR);
+        if readback != DTE_ADDR_PROBE {
+            log::error!(
+                "rk-iommu: DTE_ADDR read-back failed (wrote {DTE_ADDR_PROBE:#x}, read                  {readback:#x}) -- MMIO window not answering; check CRU aclk/iface gates"
+            );
+            return Err(DriverError::Io);
+        }
+        log::info!("rk-iommu: DTE_ADDR read-back ok ({readback:#x}) -- register file answering");
+
+        // Fault interrupts: a node may declare one IRQ per MMU interface; the
+        // handler iterates every base per interrupt, so sharing covers all of
+        // them. A node without any IRQ stays usable (its faults surface as
+        // bus hangs, not storms).
+        for resource in device.resources().iter() {
+            let kdevice::ResourceDesc::Irq(irq) = resource else {
+                continue;
+            };
             let handler: Arc<dyn DevIrqHandler> = Arc::new(RkIommuFaultHandler {
                 hardware: hardware.clone(),
             });
-            kdevice::device::managed::devm_request_irq_with_provider(&PROVIDER, ctx, irq, handler)
+            kdevice::device::managed::devm_request_irq_with_provider(&PROVIDER, ctx, *irq, handler)
                 .map_err(map_res_err)?;
         }
 

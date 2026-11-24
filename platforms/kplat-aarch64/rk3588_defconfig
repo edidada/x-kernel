@@ -58,3 +58,6 @@ PCI_RANGES=[]
 PHYS_BUS_OFFSET=0x0
 RTC_PADDR=0x0
 TASK_STACK_SIZE=0x40000
+# IOMMU: probe the SoC media MMUs (rockchip,iommu-v2 nodes: VDPU, NPU, ...).
+# First board criterion: DTE_ADDR read-back per instance (aclk/iface gates).
+KFEAT_DRIVER_RK_IOMMU=y
