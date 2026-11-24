@@ -318,6 +318,214 @@ impl DevIrqHandler for RkIommuFaultHandler {
     }
 }
 
+/// RK3588 CRU gate programming for the clocks one IOMMU instance needs.
+///
+/// Transcribed from the reference clock driver (see the reference-anchor
+/// entry): `CLKGATE_CON(x)` lives at `CRU + 0x800 + 4 * x`, gate bit set is
+/// clock *stopped*, and every write needs the hiword mask for the touched
+/// bit. Clearing the bit ungates.
+/// One gate position: `CLKGATE_CON(reg)` bit `bit`, in either the main CRU
+/// window or the PMU-CRU window (the lookup table decides which).
+#[derive(Clone, Copy)]
+struct Gate {
+    reg: usize,
+    bit: u32,
+}
+
+const GATE_OFFSET: usize = 0x800;
+
+/// Ungates one clock: clears the gate bit with a hiword-masked write.
+///
+/// # Safety
+///
+/// `cru` must be the mapped gate window the `Gate` names.
+unsafe fn ungate(cru: *mut u32, gate: Gate) {
+    // SAFETY: `add` stays inside the mapped window.
+    let addr = unsafe { cru.add(GATE_OFFSET / 4 + gate.reg) };
+    // SAFETY: `addr` addresses a live gate register; the hiword mask
+    // confines the write to the one gate bit.
+    unsafe {
+        addr.write_volatile(1 << (gate.bit + 16));
+    }
+}
+
+mod cru {
+    use crate::Gate;
+
+    /// RK3588 CRU base address (clock-controller@fd7c0000).
+    pub(super) const CRU_BASE: usize = 0xfd7c_0000;
+
+    /// DT clock-id -> gate position. Only the ids the board DT declares on
+    /// IOMMU nodes are tabled; an unknown id is a probe error, not a guess.
+    pub(super) const fn gate_for_clock_id(id: u32) -> Option<Gate> {
+        match id {
+            // NPU clock tree (the MMU's declared parents):
+            289 => Some(Gate { reg: 29, bit: 0 }), // HCLK_NPU_ROOT
+            290 => Some(Gate { reg: 29, bit: 1 }), // CLK_NPU_DSU0
+            291 => Some(Gate { reg: 29, bit: 4 }), // PCLK_NPU_ROOT
+            292 => Some(Gate { reg: 29, bit: 6 }), // PCLK_NPU_TIMER
+            293 => Some(Gate { reg: 29, bit: 7 }), // CLK_NPUTIMER_ROOT
+            // The MMU bus interfaces themselves (what the walk needs):
+            287 => Some(Gate { reg: 30, bit: 6 }), // ACLK_NPU0
+            288 => Some(Gate { reg: 30, bit: 8 }), // HCLK_NPU0
+            // Declared (board DT quirk): eMMC bus/timer clocks.
+            301 => Some(Gate { reg: 31, bit: 7 }), // BCLK_EMMC
+            302 => Some(Gate { reg: 31, bit: 8 }), // TMCLK_EMMC
+            _ => None,
+        }
+    }
+}
+
+/// RK3588 PMU-CRU gate table for the PMU-island MMU.
+///
+/// The PMU sub-controller's gates live in a separate window:
+/// `PMU_CLKGATE_CON(x)` at `PMU_CRU_BASE + 0x800 + 4 * x` with
+/// `PMU_CRU_BASE = 0xfd7c8000`.
+mod pmu_cru {
+    use crate::Gate;
+
+    /// The PMU-CRU is an offset window inside the main CRU mapping
+    /// (`RK3588_PMU_CRU_BASE = 0x30000`).
+    pub(super) const PMU_CRU_BASE: usize = 0x3_0000;
+
+    pub(super) const fn gate_for_clock_id(id: u32) -> Option<Gate> {
+        match id {
+            623 => Some(Gate { reg: 5, bit: 2 }), // PCLK_PMU0
+            624 => Some(Gate { reg: 5, bit: 4 }), // PCLK_PMU0IOC
+            _ => None,
+        }
+    }
+}
+
+/// RK3588 PMU power-domain programming for the NPU top island.
+///
+/// The board DTB ships the NPU MMU without its `power-domains` property, but
+/// the hardware island state is unchanged: with PD_NPUTOP off the register
+/// file does not answer and the first read aborts the CPU. The sequence below
+/// is transcribed from the reference power-domain driver (see the
+/// reference-anchor entry); PMU base is the `rockchip,rk3588-pmu` syscon at
+/// `0xfd8d8000`, all writes hiword-masked.
+mod pmu {
+    pub(super) const PMU_BASE: usize = 0xfd8d_8000;
+
+    // RK3588 PMU info offsets.
+    const PWR_OFFSET: usize = 0x14c;
+    const REQ_OFFSET: usize = 0x10c;
+    const MEM_PWR_OFFSET: usize = 0x1a0;
+    const ACK_OFFSET: usize = 0x118;
+    const IDLE_OFFSET: usize = 0x120;
+    const MEM_STATUS_OFFSET: usize = 0x1f8;
+    const CHAIN_STATUS_OFFSET: usize = 0x1f0;
+    const REPAIR_STATUS_OFFSET: usize = 0x290;
+
+    // RK3588_PD_NPUTOP (id 9).
+    const PWR_BIT: u32 = 1 << 3;
+    const REQ_BIT: u32 = 1 << 1;
+    const MEM_STATUS_BIT: u32 = 1 << 11;
+    const REPAIR_STATUS_BIT: u32 = 1 << 2;
+
+    /// Bounded poll iterations for PMU handshakes.
+    const POLL_STEPS: u32 = 100_000;
+
+    fn read(cru: *const u32, offset: usize) -> u32 {
+        // SAFETY: offset is one of the module's register constants inside
+        // the mapped PMU window.
+        let slot = unsafe { cru.add(offset / 4) };
+        // SAFETY: `slot` addresses a live PMU register.
+        unsafe { slot.read_volatile() }
+    }
+
+    /// Writes `value` with the hiword mask for `mask` (Rockchip convention:
+    /// high half enables the write of the low-half bits).
+    fn write_masked(pmu: *mut u32, offset: usize, mask: u32, value: u32) {
+        // SAFETY: offset is one of the module's register constants inside
+        // the mapped PMU window.
+        let slot = unsafe { pmu.add(offset / 4) };
+        // SAFETY: `slot` addresses a live PMU register.
+        unsafe { slot.write_volatile((mask << 16) | (value & mask)) }
+    }
+
+    fn poll(cru: *const u32, offset: usize, ready: impl Fn(u32) -> bool) -> bool {
+        for _ in 0..POLL_STEPS {
+            if ready(read(cru, offset)) {
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+        false
+    }
+
+    fn is_on(pmu: *const u32) -> bool {
+        // NPUTOP carries a repair-status bit: 1 = powered.
+        read(pmu, REPAIR_STATUS_OFFSET) & REPAIR_STATUS_BIT != 0
+    }
+
+    fn is_mem_on(pmu: *const u32) -> bool {
+        read(pmu, MEM_STATUS_OFFSET) & MEM_STATUS_BIT == 0
+    }
+
+    /// Powers PD_NPUTOP on (no-op when the repair status already reports on).
+    ///
+    /// # Safety
+    ///
+    /// `pmu` must be the mapped RK3588 PMU window; callers must hold no
+    /// expectation of PMU state across other cores (probe runs boot-time
+    /// single-task before any PM user exists).
+    pub(super) unsafe fn power_nputop_on(pmu: *mut u32) -> bool {
+        if is_on(pmu) {
+            return true;
+        }
+
+        // Power on: clear the pwr bit with a hiword-masked write.
+        write_masked(pmu, PWR_OFFSET, PWR_BIT, 0);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+        // NPUTOP owns memory repair: when the memory array reports on, swing
+        // it through an off->on reset while the chain status is stable.
+        if is_mem_on(pmu) {
+            let mut chain_on = false;
+            for _ in 0..POLL_STEPS {
+                // SAFETY: chain status lives inside the PMU window.
+                if read(pmu, CHAIN_STATUS_OFFSET) & MEM_STATUS_BIT == 0 {
+                    chain_on = true;
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if !chain_on {
+                return false;
+            }
+            // Delay, drive the memory array through off, then back on.
+            for _ in 0..20_000 {
+                core::hint::spin_loop();
+            }
+            write_masked(pmu, MEM_PWR_OFFSET, PWR_BIT, PWR_BIT);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+            if !poll(pmu, MEM_STATUS_OFFSET, |v| v & MEM_STATUS_BIT != 0) {
+                return false;
+            }
+            write_masked(pmu, MEM_PWR_OFFSET, PWR_BIT, 0);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+            if !poll(pmu, MEM_STATUS_OFFSET, |v| v & MEM_STATUS_BIT == 0) {
+                return false;
+            }
+        }
+
+        if !poll(pmu, REPAIR_STATUS_OFFSET, |v| v & REPAIR_STATUS_BIT != 0) {
+            return false;
+        }
+
+        // Leave idle mode: clear the NIU request, wait ack clear, wait the
+        // domain reports not idle.
+        write_masked(pmu, REQ_OFFSET, REQ_BIT, 0);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        if !poll(pmu, ACK_OFFSET, |v| v & REQ_BIT == 0) {
+            return false;
+        }
+        poll(pmu, IDLE_OFFSET, |v| v & REQ_BIT == 0)
+    }
+}
+
 /// Device-driver shell: discovers one `rockchip,*-iommu` node and owns the
 /// probe-time resources (MMIO mapping, fault IRQ, domain, registration).
 struct RkIommuDriver;
@@ -359,6 +567,18 @@ impl kdevice::DeviceDriver for RkIommuDriver {
         };
         let instance = InstanceId(u64::from(node.id().raw()));
 
+        log::warn!("rk-iommu: probing instance {instance:?}");
+        // An instance inside a power domain is unreachable until a PM-domain
+        // driver powers the island on: its register file does not answer and
+        // the first read would take a bus abort. Skip it explicitly instead
+        // of panicking the boot.
+        if matches!(node.property("power-domains"), Ok(Some(_))) {
+            log::info!(
+                "rk-iommu: instance {instance:?} declares power-domains; skipping until a                  power-domain driver exists"
+            );
+            return Err(DriverError::Unsupported);
+        }
+
         // One node can expose several identical MMU interfaces (the NPU MMU
         // declares four `reg` windows sharing its fault IRQs): map them all.
         let mut bases: Vec<MmuBase> = Vec::new();
@@ -385,6 +605,91 @@ impl kdevice::DeviceDriver for RkIommuDriver {
             bases: bases.clone(),
         });
 
+        // Power the NPU top island before touching any register: the board
+        // DTB ships the NPU MMU without its power-domains property, but the
+        // island state is unchanged and a powered-down register file aborts
+        // on first read.
+        let pmu = memspace::iomap_device(
+            memaddr::PhysAddr::from(pmu::PMU_BASE),
+            0x1000,
+            "rk-iommu-pmu",
+        )
+        .map_err(|_| DriverError::Io)?
+        .as_mut_ptr()
+        .cast::<u32>();
+        // SAFETY: `pmu` is the mapped PMU window; probe runs single-task at
+        // boot with no concurrent PM user.
+        if unsafe { pmu::power_nputop_on(pmu) } {
+            log::warn!("rk-iommu: PD_NPUTOP powered on");
+        } else {
+            log::error!("rk-iommu: PD_NPUTOP power-on handshake failed; refusing to probe blind");
+            return Err(DriverError::Io);
+        }
+
+        // Ungate the CRU clocks the instance declares (plus the MMU bus
+        // gates): a gated instance does not answer MMIO and the first read
+        // would abort the CPU. The DT `clocks` list is <&cru id> pairs; an
+        // unknown id fails the probe loudly.
+        match node.property("clocks") {
+            Ok(Some(property)) => {
+                let declared = clock_ids(&property.value).ok_or(DriverError::InvalidInput)?;
+                if declared.is_empty() {
+                    log::warn!("rk-iommu: instance {instance:?} declares no clocks");
+                }
+                let mut ids = declared.clone();
+                // The board DTB declares only the NPU clock *tree* inputs;
+                // the MMU instance's own bus gates (ACLK_NPU0/HCLK_NPU0) are
+                // what the register file answers on -- upstream wires exactly
+                // these two as the node's clocks. Ungate them with the
+                // declared set.
+                if ids.iter().any(|id| cru::gate_for_clock_id(*id).is_some()) {
+                    for required in [287, 288] {
+                        if !ids.contains(&required) {
+                            ids.push(required);
+                        }
+                    }
+                }
+                // SAFETY: the CRU window is mapped below and both gate
+                // tables index inside it.
+                let cru = memspace::iomap_device(
+                    memaddr::PhysAddr::from(cru::CRU_BASE),
+                    0x40000,
+                    "rk-iommu-cru",
+                )
+                .map_err(|_| DriverError::Io)?
+                .as_mut_ptr()
+                .cast::<u32>();
+                for id in &ids {
+                    // The PMU-island MMU's clocks gate through the PMU-CRU
+                    // sub-window, not the main CRU.
+                    let (gate, window) = if let Some(gate) = pmu_cru::gate_for_clock_id(*id) {
+                        (gate, unsafe { cru.add(pmu_cru::PMU_CRU_BASE / 4) })
+                    } else if let Some(gate) = cru::gate_for_clock_id(*id) {
+                        (gate, cru)
+                    } else {
+                        log::error!(
+                            "rk-iommu: instance {instance:?} declares clock id {id} with no gate \
+                             table entry; refusing to probe blind"
+                        );
+                        return Err(DriverError::Unsupported);
+                    };
+                    // SAFETY: `window` is inside the mapped CRU region and
+                    // the gate entry indexes within the sub-window.
+                    unsafe { ungate(window, gate) };
+                }
+                log::warn!(
+                    "rk-iommu: unguarded {} CRU gate(s) for instance {instance:?}",
+                    ids.len()
+                );
+            }
+            Ok(None) => {
+                log::warn!("rk-iommu: instance {instance:?} declares no clocks property");
+            }
+            Err(error) => {
+                log::warn!("rk-iommu: clocks property unreadable: {error:?}");
+            }
+        }
+
         // Probe criterion (the Linux force_reset check): write a dummy value
         // to DTE_ADDR and read it back. A mismatch means the register file is
         // not answering -- typically the aclk/iface clocks are still gated in
@@ -399,7 +704,7 @@ impl kdevice::DeviceDriver for RkIommuDriver {
             );
             return Err(DriverError::Io);
         }
-        log::info!("rk-iommu: DTE_ADDR read-back ok ({readback:#x}) -- register file answering");
+        log::warn!("rk-iommu: DTE_ADDR read-back ok ({readback:#x}) -- register file answering");
 
         // Fault interrupts: a node may declare one IRQ per MMU interface; the
         // handler iterates every base per interrupt, so sharing covers all of
@@ -440,6 +745,28 @@ impl kdevice::DeviceDriver for RkIommuDriver {
             let _ = data.detach(&[]);
         }
         Ok(())
+    }
+}
+
+/// Extracts the clock-id cells from a DT `clocks` property
+/// (`<&cru id>...` pairs; the phandle half is dropped).
+fn clock_ids(value: &fwnode::FwPropertyValue<'_>) -> Option<Vec<u32>> {
+    match value {
+        fwnode::FwPropertyValue::Bytes(bytes) => {
+            if !bytes.len().is_multiple_of(4) {
+                return None;
+            }
+            Some(
+                bytes
+                    .chunks_exact(4)
+                    .enumerate()
+                    .filter(|(index, _)| index % 2 == 1)
+                    .map(|(_, cell)| u32::from_be_bytes([cell[0], cell[1], cell[2], cell[3]]))
+                    .collect(),
+            )
+        }
+        fwnode::FwPropertyValue::U32(id) => Some(alloc::vec![*id]),
+        _ => None,
     }
 }
 

@@ -47,7 +47,7 @@ KFEAT_FS_TIMES=y
 # KFEAT_VSOCK is not set
 # LOG_LEVEL_DEBUG is not set
 # LOG_LEVEL_ERROR is not set
-# LOG_LEVEL_INFO is not set
+LOG_LEVEL_INFO=y
 # LOG_LEVEL_TRACE is not set
 # No generic ECAM PCI host on RK3588 (its PCIe needs the rockchip,rk3588-pcie
 # driver, not yet ported). PCI_ECAM_BASE=0 makes the PCI subsystem skip

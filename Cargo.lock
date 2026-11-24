@@ -5220,11 +5220,14 @@ dependencies = [
  "driver-os-api",
  "driver-os-api-xkernel",
  "driver_base",
+ "fwnode",
  "io-pgtable",
  "kdevice",
  "kdma",
  "kiommu",
  "log",
+ "memaddr",
+ "memspace",
 ]
 
 [[package]]
