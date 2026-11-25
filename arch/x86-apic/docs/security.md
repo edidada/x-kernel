@@ -257,8 +257,11 @@ of CPU-local context exclusion and does not acknowledge remote processing.
 ## Self-NMI Test Fixtures
 
 The unittest-only `self_nmi_with_swapped_gs` fixture keeps ordinary IRQs masked
-while GS holds an alternate base. `self_nmi_with_irqs_enabled` instead retains
-kernel GS, enables IRQs around the self-NMI and masks them before returning.
+while GS holds an alternate base. Both `GsBase` and `KernelGsBase` values must
+remain available throughout the entire assembly sequence: any mappings required
+by either base must not be unmapped, and neither value may be overwritten by
+another actor. `self_nmi_with_irqs_enabled` instead retains kernel GS, enables
+IRQs around the self-NMI and masks them before returning.
 Both require a serial fixture on an initialized, pinned CPU, exclusive local
 ICR producer access and a live observer counter. The enabled-IRQ fixture must
 also exclude preemption while ordinary IRQs can run and have a valid kernel
