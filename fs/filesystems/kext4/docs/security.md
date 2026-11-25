@@ -518,13 +518,16 @@ or application data. The core does not log xattr values or file contents.
 
 - The whole-disk legacy direct/indirect block-map format currently cannot be mounted; a read-only legacy mount first needs the
   core mount state split into a capability type that cannot obtain the mutation API. In images with the extents feature,
-  individual legacy inodes still support only checked reads; buffered write/page fault is rejected synchronously before reservation,
-  and other mutations are rejected no later than the first metadata access.
+  individual legacy regular inodes support checked direct-slot mutation. Indirect
+  roots, duplicate pointers, out-of-range references and writes past the twelve
+  direct slots are rejected before user data is dirtied. Indirect-tree mutation
+  and legacy fallocate remain unsupported.
 - Runtime already exposes `user.*`, `trusted.*` and `security.*` xattrs through KVFS; namespace/DAC is
   checked in KVFS, and without a complete LSM/capability, `security.*` set/remove requires a privileged
   credential, and the four flag combinations of create/replace are checked by the KExt4 core in the mutation plan
   under the same write lock. The on-disk immutable/append-only flags are mapped to KVFS at iget and block xattr mutation;
-  `FS_IOC_SETFLAGS` is not yet implemented, so there is no modification entry that needs to refresh these flags at runtime.
+  `FS_IOC_SETFLAGS` persists supported flags and publishes the live projection.
+  KVFS excludes writers and revokes/flushes mappings before enabling protection.
 - POSIX ACL is currently only opaque xattr bytes inside the core; ACL permission enforcement,
   mode synchronization or inheritance is not implemented, so the kext4 KVFS layer does not expose `system.posix_acl_*` as an ordinary xattr;
   the mount parser accepts `acl` only for the positive spelling compatible with Linux's default-on option, and it must not change the permission boundary above.
@@ -897,7 +900,9 @@ Project-ID changes transfer allocated and reserved usage before the new ID is
 published. Project-inherit directories reject links and renames whose project
 IDs differ, preventing an operation from bypassing the directory's quota domain.
 Attribute changes require inode ownership or CAP_FOWNER; changing immutable or
-append-only flags remains unsupported until mapped-write exclusion is complete.
+append-only flags additionally requires current CAP_LINUX_IMMUTABLE. KVFS retains
+mapping invalidation exclusion through publication after revoking PTEs and draining
+dirty data. Shared mmap/mprotect and write faults recheck live inode policy.
 For an inode that remains immutable, project identity is checked only when the
 filesystem supports the project feature.
 
@@ -948,3 +953,16 @@ range and copied count; the range's exclusive end is validated before admission,
 and copying stays within that range. Short writes and cancellation release only
 their token-owned unaccepted tail. Writeback retains its live EOF sampling
 protocol.
+
+## Mapping-format transitions
+
+Migration validates the complete bounded candidate before journal admission.
+Reverse migration also bounds visible i_size by twelve filesystem blocks:
+allocated extent coverage alone cannot bound a sparse file's logical size.
+Flags and i_block are committed in one inode entry and published under one inode
+state lock; a reader must not combine a new selector with an old root. Migration
+does not allocate, free or move payload blocks. Unsupported external trees,
+unwritten reverse mappings and non-inline forward mappings leave inode metadata
+unchanged. Subsequent direct writeback initializes new blocks before exposing
+them through the journal, and direct truncate/orphan cleanup removes pointers
+and releases bitmap/quota/i_blocks ownership within the same transaction.

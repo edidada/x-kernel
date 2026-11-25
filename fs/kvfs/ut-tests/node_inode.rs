@@ -253,6 +253,135 @@ fn special_inodes_preserve_rdev() {
     assert_eq!(inode.size(), 0);
 }
 
+struct TimestampPolicyOperations;
+
+impl InodeOperations for TimestampPolicyOperations {
+    fn setattr(
+        &self,
+        _idmap: &MountIdmap,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        let inode = dentry.vfs_inode();
+        core::assert!(inode.namespace_lock.try_write().is_none());
+        core::assert!(inode.data_lock.try_write().is_none());
+        Ok(update)
+    }
+}
+
+impl FileOperations for TimestampPolicyOperations {}
+
+fn timestamp_policy_path(flags: NodeFlags) -> Path {
+    let super_block = crate::nullfs::new_superblock();
+    let mount = crate::Mount::new_root(&super_block);
+    let operations = Arc::new(TimestampPolicyOperations);
+    let inode = VfsInode::new_file_with_operations(
+        Arc::new(()),
+        operations.clone(),
+        operations,
+        flags,
+        VfsInodeInit::new(
+            43,
+            0,
+            Umode::new(
+                NodeType::RegularFile,
+                NodePermission::from_bits_truncate(0o666),
+            ),
+        )
+        .with_owner_links_and_rdev(1000, 100, 1, DeviceId::default()),
+    );
+    let dentry = Dentry::new_file_from_inode(inode, None, String::from("timestamp-policy"));
+    dentry.bind_super_block(&super_block);
+    Path::new(mount, dentry)
+}
+
+#[def_test]
+fn append_only_timestamp_updates_preserve_touch_authorization() {
+    let path = timestamp_policy_path(NodeFlags::APPEND_ONLY);
+    let owner = Cred::new(1000, 100);
+    let current = Some(SetattrTime::Current);
+    let explicit = Some(SetattrTime::Explicit(SystemTime::from_unix_seconds(1)));
+    assert_eq!(path.set_times(current, current, &owner), Ok(()));
+    assert_eq!(path.metadata().atime, path.metadata().mtime);
+    assert_eq!(path.metadata().mtime, path.metadata().ctime);
+    for (atime, mtime) in [(explicit, explicit), (current, None), (None, current)] {
+        assert_eq!(
+            path.set_times(atime, mtime, &owner),
+            Err(VfsError::OperationNotPermitted)
+        );
+    }
+    let other = Cred::new(2000, 200);
+    assert_eq!(path.set_times(current, current, &other), Ok(()));
+    let immutable = timestamp_policy_path(NodeFlags::IMMUTABLE);
+    assert_eq!(
+        immutable.set_times(current, current, &owner),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(immutable.set_times(None, None, &owner), Ok(()));
+}
+
+#[def_test]
+fn timestamp_updates_wait_for_namespace_without_holding_data() {
+    let path = timestamp_policy_path(NodeFlags::empty());
+    let inode = path.inode();
+    let namespace = inode.lock_namespace_exclusive();
+    let result = Arc::new(Mutex::new(None));
+    let completed = result.clone();
+    let task = ktask::spawn(move || {
+        *completed.lock() = Some(path.set_times(
+            Some(SetattrTime::Current),
+            Some(SetattrTime::Current),
+            &Cred::new(1000, 100),
+        ));
+    });
+    while !task.state().is_blocked() && task.state() != ktask::TaskState::Exited {
+        ktask::yield_now();
+    }
+    let is_data_available = inode.data_lock.try_write().is_some();
+    drop(namespace);
+    assert_eq!(task.join(), 0);
+    assert_eq!(*result.lock(), Some(Ok(())));
+    assert!(
+        is_data_available,
+        "namespace wait must not retain the data lock"
+    );
+}
+
+#[def_test]
+fn timestamp_authorization_requires_mapped_inode_ids_for_namespace_capability() {
+    let path = timestamp_policy_path(NodeFlags::empty());
+    let namespace =
+        kcred::UserNamespace::new_child(&kcred::initial_user_namespace(), 2000, 200, false)
+            .unwrap();
+    let caller = Cred::new(2000, 200).with_user_namespace(namespace.clone());
+    assert!(caller.has_cap_in(caller.user_ns(), kcred::CAP_FOWNER));
+    let explicit = Some(SetattrTime::Explicit(SystemTime::from_unix_seconds(1)));
+    assert_eq!(
+        path.set_times(explicit, explicit, &caller),
+        Err(VfsError::OperationNotPermitted)
+    );
+    let writer = Cred::root();
+    namespace
+        .write_uid_map(
+            &writer,
+            &writer,
+            alloc::vec![kcred::IdMapExtent::new(0, 1000, 1).unwrap()],
+        )
+        .unwrap();
+    assert_eq!(
+        path.set_times(explicit, explicit, &caller),
+        Err(VfsError::OperationNotPermitted)
+    );
+    namespace
+        .write_gid_map(
+            &writer,
+            &writer,
+            alloc::vec![kcred::IdMapExtent::new(0, 100, 1).unwrap()],
+        )
+        .unwrap();
+    assert_eq!(path.set_times(explicit, explicit, &caller), Ok(()));
+}
+
 #[def_test]
 fn filesystem_attribute_operations_are_the_vfs_inode_state() {
     let node = Arc::new(TestChrdevInode::new(DeviceId::new(1, 3)));

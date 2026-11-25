@@ -175,6 +175,7 @@ impl FileSharedRuntime {
 
     fn check_shared_writable_mapping_allowed(&self, flags: MappingFlags) -> KResult {
         if flags.contains(MappingFlags::WRITE) {
+            self.0.source.file().check_shared_writable_mapping()?;
             shmem::check_shared_writable_mapping_allowed(self.0.source.file().path())?;
         }
         Ok(())

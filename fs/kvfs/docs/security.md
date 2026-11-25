@@ -641,7 +641,12 @@ Locks constrain only cooperating callers; file reads and writes without an advis
   strip privileges. A per-inode privilege lock covers the revocation and the
   protected backend change; `setxattr`, `chown`, `chmod`, file-attribute
   changes, `truncate`, `fallocate`, native `copy_file_range` and exec metadata
-  sampling share it. Revocation precedes the first content or size commit:
+  sampling share it. Namespace exclusion follows privilege exclusion and
+  precedes data exclusion; fallocate revocation retains no data lock. An
+  authorized append can clear only the inherited set-ID bits through a narrow
+  internal entry, while explicit chmod and truncate remain forbidden. A denied
+  append-only truncate returns before revocation. Revocation precedes the first
+  content or size commit:
   a failed backend therefore leaves privileges removed, and a failed
   revocation leaves content and length unchanged. `chown` samples and
   authorizes inside the lock. Content-changing paths bump an inode content
@@ -1134,3 +1139,27 @@ removed after procfs IRQ moved to `SeqFileInode` command transport. Its
 callback-once behavior and iterator rollback now belong to the retained
 `SeqCommandOptions` path; ordinary `CommandFile` and read-only snapshots keep
 their existing behavior.
+
+## Inode flag publication
+
+A flag update uses current caller ownership/capabilities, never opener authority.
+Data exclusion prevents an old fd from passing a stale write check.
+Generic buffered admission checks immutable and append-only from one live flags
+snapshot under that exclusion before invoking filesystem preparation, including
+for empty requests. The callback can rely on the checked policy until copying
+finishes; a pre-dispatch check alone cannot provide that guarantee. Namespace
+exclusion serializes explicit metadata updates with fileattr changes. Before
+protection is published, all registered mapped PTEs and their TLB entries must
+be revoked; invalidate exclusion stays held across publication. A failed flush
+or notifier leaves flags unchanged. Clean cache pages retain their ownership
+across publication; backing-store invalidation still discards them explicitly.
+Open admission runs DAC before the append-only rule, so an unauthorized writer
+cannot distinguish an append-only inode from an ordinary permission denial
+(`EACCES`); an authorized writer without `O_APPEND` still gets `EPERM`.
+Immutable and append-only inodes reject truncate and explicit attribute changes.
+Only a two-current-times touch may explicitly update an append-only inode;
+namespace then data exclusion spans request classification, authorization and publication.
+Append-only writes validate and choose EOF from one open-status snapshot, so a
+concurrent F_SETFL cannot split those decisions. The atomic status update rejects
+both directions of an O_APPEND change for every descriptor mode. Private COW does
+not mutate the file.

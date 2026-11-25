@@ -725,6 +725,15 @@ impl<'a> Nameidata<'a> {
             path.check_writable_mount()?;
         }
         path.permission(crate::Permission::MAY_OPEN | acc_mode.permission(), cred)?;
+        // Linux `may_open()` runs `inode_permission()` before the append-only
+        // rules, so an unauthorized writer sees `EACCES`, not `EPERM`.
+        if d_inode(path.dentry())
+            .flags()
+            .contains(crate::NodeFlags::APPEND_ONLY)
+            && (truncate || acc_mode.requires_write() && !open_flags.contains(OpenFlags::APPEND))
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
         Ok(MayOpenResult { truncate })
     }
 

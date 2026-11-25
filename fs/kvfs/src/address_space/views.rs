@@ -39,12 +39,14 @@ impl AddressSpaceViewGuard {
     ///
     /// # Errors
     /// Returns InvalidInput for overflowing coordinates, or BadState if detached.
+    /// Joins invalidate protection before updating the view; may sleep.
     pub fn extend_to(&self, end: u64) -> crate::VfsResult<()> {
         let mapping = self
             .inner
             .address_space
             .upgrade()
             .ok_or(crate::VfsError::BadState)?;
+        let _invalidate_guard = mapping.invalidate_lock.read();
         let mut views = mapping.views.lock();
         let registered = views
             .get_mut(&self.inner.id)
@@ -83,7 +85,13 @@ pub(super) struct RegisteredView {
 
 impl AddressSpace {
     /// Registers a VMA view of this inode address space.
+    /// May sleep acquiring invalidate protection. The caller must not hold
+    /// that protection exclusively or recursively while a writer is waiting.
     pub fn register_view(self: &Arc<Self>, spec: MappingViewSpec) -> AddressSpaceViewGuard {
+        // Fork/mremap hold their MM locks while registering and publishing
+        // aliases. Join invalidation exclusion so its snapshot cannot miss an
+        // alias created between PTE revocation and inode policy publication.
+        let _invalidate_guard = self.invalidate_lock.read();
         let id = next_mapping_view_id();
         self.views.lock().insert(
             id,

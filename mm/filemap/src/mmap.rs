@@ -158,6 +158,7 @@ fn mmap_file(req: FileMmapRequest, mode: FileMappingMode) -> KResult<(VmArea, Vm
 /// Resolves a Linux `MAP_SHARED`-style file-backed mapping request.
 pub fn mmap_shared_file(req: FileMmapRequest) -> KResult<(VmArea, VmRuntimeRef)> {
     if req.flags.contains(MappingFlags::WRITE) {
+        req.file.check_shared_writable_mapping()?;
         shmem::check_shared_writable_mapping_allowed(req.file.path())?;
     }
     mmap_file(req, FileMappingMode::Shared)

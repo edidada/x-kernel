@@ -277,6 +277,8 @@ impl Path {
     ) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
+        let _privilege_guard = inode.lock_privileges();
+        let _data_guard = inode.lock_data();
         check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         // A file-capability attribute that does not decode is rejected here, so
         // the exec path never has to distinguish "no capabilities" from
@@ -290,8 +292,6 @@ impl Path {
                 }
             })?;
         }
-        let _privilege_guard = inode.lock_privileges();
-        let _data_guard = inode.lock_data();
         let result = inode.set_xattr(self.dentry(), name, value, flags);
         if result.is_ok() {
             inode.mark_extended_attributes();
@@ -309,9 +309,9 @@ impl Path {
     pub fn remove_xattr(&self, name: &XattrName, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
-        check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         let _privilege_guard = inode.lock_privileges();
         let _data_guard = inode.lock_data();
+        check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         let observed = inode.file_capability_snapshot();
         let result = inode.remove_xattr(self.dentry(), name);
         if result.is_ok() && name.as_bytes() == kcred::SECURITY_CAPABILITY_XATTR.as_bytes() {

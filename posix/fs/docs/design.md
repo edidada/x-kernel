@@ -712,3 +712,13 @@ Quota format and information queries build owned ABI snapshots under the quota
 state mutex and release it before copying to user memory. Record and extended
 status queries follow the same boundary: a user destination may fault into file
 allocation and quota accounting, so no quota-state or record guard spans copyout.
+
+F_SETFL applies status flags through VfsFile::set_status_flags, which validates
+and replaces the same atomic status word without acquiring the inode data lock.
+An append-only inode rejects any actual O_APPEND toggle, regardless of descriptor
+access mode; changing unrelated status bits remains allowed. Timestamp requests
+retain Current/Explicit/omitted categories until KVFS authorization, including
+the append-only exception for a two-current-times touch.
+Inode flags continue to use copied u32 values at the ioctl boundary; KVFS
+and the concrete filesystem own authorization, mapped-write exclusion and
+journaled publication.

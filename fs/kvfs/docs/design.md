@@ -1496,7 +1496,12 @@ released with its last reference; hard links share the same active session becau
   data lock, covers the revocation and the backend content or metadata change
   it protects; `setxattr`, `chown`, `chmod`, file-attribute changes,
   `truncate`, `fallocate`, native `copy_file_range` and exec
-  security-metadata sampling take the same lock. The revocation runs before
+  security-metadata sampling take the same lock. When namespace exclusion is
+  needed, it follows the privilege lock and precedes data exclusion. Fallocate
+  revokes privileges before taking the data lock, so its mode update cannot
+  invert that order. Authorized append-only writes use a dedicated set-ID
+  clearing entry; explicit chmod remains forbidden. Truncate rejects
+  append-only files before revoking privileges. The revocation runs before
   the first content or size commit, so a failed backend leaves the privileges
   removed (the safe direction) and a failed revocation leaves the content and
   length untouched. `chown` samples owner/mode and authorizes inside the lock,
@@ -2076,3 +2081,32 @@ The writable `SnapshotCommand` backend, its per-open generation state and its
 tests have been removed. Writable command semantics are now owned by
 `SeqFileInode` plus the shared complete-command transport; ordinary
 `CommandFile` and read-only snapshot helpers are unchanged.
+
+## Mutable inode flags
+
+Path fileattr changes serialize through namespace and inode data locks. Enabling
+immutable/append-only protection or changing extent format uses
+AddressSpace::with_quiesced_mappings: revoke mapped PTEs synchronously, drain
+writeback, retain clean cache pages and hold the invalidate write lock through the
+filesystem callback. A busy target MM is retried after releasing invalidate
+protection so its fault can unwind. Buffered writes recheck flags under the data
+lock and choose append EOF from the same open-status snapshot. Each admission
+checks immutable and append-only from one live inode-flags snapshot. The locked
+generic check precedes filesystem preparation, which can rely on that policy
+admission without projecting the flags again. F_SETFL atomically
+checks and replaces one status word without waiting for the inode data lock;
+any O_APPEND toggle on an append-only inode is rejected, including read-only fds.
+Open admission checks mount writability and DAC before the append-only access
+rule, so an unauthorized writer of an append-only inode sees `EACCES`, while
+only an authorized non-append write or truncate sees `EPERM`, matching Linux
+`may_open()`. Truncate and explicit metadata changes reject protected inodes.
+Timestamp updates preserve their request category until validation:
+append-only permits only the two-current-times touch form. All timestamp and
+fileattr updates acquire namespace before data protection. The internal
+metadata publisher reuses those guards.
+Shared mappings and write faults consult live policy; private COW stays permitted.
+
+Full live invalidation remains separate: invalidate_cached_pages composes the
+same revocation/writeback boundary with cache discard for callers such as quota
+backing-store transitions. Busy-MM retries precede writeback; mapped stores may
+still dirty data until all writable PTEs have been revoked.

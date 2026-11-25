@@ -1351,7 +1351,7 @@ impl Path {
     /// Changes filesystem-specific file attributes for this path.
     pub fn fileattr_set(&self, mut attributes: FileAttr, cred: &Cred) -> VfsResult<()> {
         use linux_raw_sys::general::{
-            FS_APPEND_FL, FS_DAX_FL, FS_IMMUTABLE_FL, FS_NOATIME_FL, FS_NODUMP_FL,
+            FS_APPEND_FL, FS_DAX_FL, FS_EXTENT_FL, FS_IMMUTABLE_FL, FS_NOATIME_FL, FS_NODUMP_FL,
             FS_PROJINHERIT_FL, FS_SYNC_FL, FS_VERITY_FL,
         };
 
@@ -1369,6 +1369,7 @@ impl Path {
         // Immutability is an exec-security input; serialize the flag change
         // with sampling and with privilege revocation.
         let _privilege_guard = inode.lock_privileges();
+        let _namespace_guard = inode.lock_namespace_exclusive();
         let inode_ns = self.dentry.user_namespace();
         let metadata = inode.metadata();
         if cred.fsuid() != metadata.uid
@@ -1381,7 +1382,6 @@ impl Path {
         {
             return Err(VfsError::OperationNotPermitted);
         }
-        let _namespace_guard = inode.lock_namespace_exclusive();
         let _data_guard = inode.lock_data();
         let old = inode.fileattr_get()?;
         if attributes.flags_valid {
@@ -1398,7 +1398,16 @@ impl Path {
         if attributes.project_id != old.project_id && attributes.project_id == u32::MAX {
             return Err(VfsError::InvalidInput);
         }
-        inode.fileattr_set(attributes)
+        let needs_mapping_flush = inode.node_type() == NodeType::RegularFile
+            && ((attributes.flags & !old.flags) & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0
+                || (attributes.flags ^ old.flags) & FS_EXTENT_FL != 0);
+        if needs_mapping_flush {
+            inode
+                .address_space()
+                .with_quiesced_mappings(|| inode.fileattr_set(attributes))
+        } else {
+            inode.fileattr_set(attributes)
+        }
     }
 
     /// Synchronizes the filesystem containing this path.
@@ -1903,10 +1912,8 @@ impl Path {
         }
         let mode = Self::strip_write_privileges(permission, metadata.gid, cred);
         if mode.bits() != permission.bits() {
-            self.dentry.update_metadata(MetadataUpdate {
-                mode: Some(mode),
-                ..Default::default()
-            })?;
+            self.inode()
+                .remove_setid_bits(self.dentry(), permission & !mode)?;
         }
         if has_attributes {
             self.kill_file_caps_locked()?;
@@ -2005,11 +2012,12 @@ impl Path {
     ///
     /// One wall-clock sample resolves every `Current` request and the derived
     /// ctime, so a "set to now" update publishes identical mtime and ctime.
-    /// The inode data lock is held across the update, matching the order used
+    /// The inode namespace and data locks are held across the update, matching
+    /// fileattr publication order. The data lock also matches the order used
     /// by `fallocate` and buffered writes, so a concurrent buffered write
     /// cannot interleave its timestamp publication with this update.
     ///
-    /// Locking: acquires mount write admission, then the inode data lock.
+    /// Locking: acquires mount write admission, then namespace and data locks.
     pub fn set_times(
         &self,
         atime: Option<SetattrTime>,
@@ -2021,44 +2029,7 @@ impl Path {
         }
 
         let _write_guard = self.lock_writable_mount()?;
-        let inode = self.inode();
-        let _data_guard = inode.lock_data();
-        let metadata = self.metadata();
-        let is_owner = cred.fsuid() == metadata.uid;
-        let inode_ns = self.dentry.user_namespace();
-        let is_touch = matches!(
-            (atime, mtime),
-            (Some(SetattrTime::Current), Some(SetattrTime::Current))
-        );
-        if !is_touch {
-            if !is_owner
-                && !crate::permission::capable_wrt_inode_uidgid(
-                    cred,
-                    &inode_ns,
-                    &metadata,
-                    kcred::CAP_FOWNER,
-                )
-            {
-                return Err(VfsError::OperationNotPermitted);
-            }
-        } else if !is_owner
-            && !crate::permission::capable_wrt_inode_uidgid(
-                cred,
-                &inode_ns,
-                &metadata,
-                kcred::CAP_FOWNER,
-            )
-        {
-            self.permission(Permission::MAY_WRITE, cred)?;
-        }
-
-        let now = inode.current_time();
-        self.dentry.update_metadata(MetadataUpdate {
-            atime: atime.map(|time| time.resolve(now)),
-            mtime: mtime.map(|time| time.resolve(now)),
-            ctime: Some(now),
-            ..Default::default()
-        })
+        self.inode().set_times(self.dentry(), atime, mtime, cred)
     }
 
     /// Returns metadata without security checks.
@@ -2205,13 +2176,13 @@ impl Path {
             return Err(VfsError::OperationNotPermitted);
         }
         let source_inode = source.inode();
+        let _source_guard = source_inode.lock_namespace_exclusive();
         if source_inode
             .flags()
             .intersects(crate::NodeFlags::IMMUTABLE | crate::NodeFlags::APPEND_ONLY)
         {
             return Err(VfsError::OperationNotPermitted);
         }
-        let _source_guard = source_inode.lock_namespace_exclusive();
         self.inode().link(candidate, &source.dentry)
     }
 
@@ -2716,7 +2687,12 @@ impl Path {
         // filesystem commits `ATTR_SIZE`, so a failed capability removal must
         // leave the old length in place. The reverse failure (privileges gone,
         // length unchanged) is the safe direction and is not rolled back.
-        inode.check_mutable()?;
+        if inode
+            .flags()
+            .intersects(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
         self.file_remove_privs_locked(cred)?;
         if !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
             inode.set_len(len)?;

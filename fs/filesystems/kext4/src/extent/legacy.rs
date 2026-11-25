@@ -9,10 +9,35 @@ use crate::{
 };
 
 const LEGACY_BLOCK_POINTER_SIZE: usize = 4;
-const LEGACY_DIRECT_BLOCKS: u64 = 12;
+pub(crate) const LEGACY_DIRECT_BLOCKS: u64 = 12;
 const LEGACY_SINGLE_INDIRECT_INDEX: usize = 12;
 const LEGACY_DOUBLE_INDIRECT_INDEX: usize = 13;
 const LEGACY_TRIPLE_INDIRECT_INDEX: usize = 14;
+
+/// Decodes the supported mutable shape without accepting indirect trees or
+/// duplicate ownership of a data block. Read-only mapping keeps its wider
+/// indirect-tree support.
+pub(crate) fn legacy_direct_block_pointers(
+    root: &[u8; crate::disk::inode::INODE_BLOCK_BYTES],
+) -> Ext4Result<[u32; LEGACY_DIRECT_BLOCKS as usize]> {
+    if root[LEGACY_DIRECT_BLOCKS as usize * LEGACY_BLOCK_POINTER_SIZE..]
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err(Ext4Error::Unsupported(
+            crate::UnsupportedKind::NonExtentInode,
+        ));
+    }
+    let mut pointers = [0; LEGACY_DIRECT_BLOCKS as usize];
+    for index in 0..pointers.len() {
+        let pointer = codec::le_u32(root, index * LEGACY_BLOCK_POINTER_SIZE)?;
+        if pointer != 0 && pointers[..index].contains(&pointer) {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
+        }
+        pointers[index] = pointer;
+    }
+    Ok(pointers)
+}
 
 pub(super) fn legacy_max_file_size(block_size: u32, has_huge_file: bool) -> Ext4Result<u64> {
     let block_bits = ext4_block_bits(block_size)?;

@@ -11,7 +11,7 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::{
     Dentry, DirContext, FileDirOperations, FileOperations, InodeDirOperations, InodeOperations,
-    InodeSymlinkOperations, LockedDentry, MagicLinkOps, Metadata, MetadataUpdate, Mount,
+    InodeSymlinkOperations, LockedDentry, MagicLinkOps, Metadata, MetadataUpdate, Mount, NodeFlags,
     NodePermission, NodeType, ResolvedObject, StatFs, SuperBlock, SuperBlockOperations, VfsError,
     VfsFile, VfsInode, VfsInodeInit,
 };
@@ -1274,6 +1274,129 @@ fn open_checks_final_inode_and_captures_opening_credential() {
         )
         .unwrap();
     assert!(Arc::ptr_eq(file.cred(), &cred));
+}
+
+fn append_only_tree(flags: NodeFlags, mode: NodePermission) -> Path {
+    let root_ops = Arc::new(TestDir::new(1));
+    let root_init = VfsInodeInit::new(
+        1,
+        0,
+        crate::Umode::new(
+            NodeType::Directory,
+            NodePermission::from_bits_truncate(0o711),
+        ),
+    )
+    .with_owner_links_and_rdev(0, 0, 1, Default::default())
+    .with_stat_data(
+        4096,
+        1,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
+        SystemTime::UNIX_EPOCH,
+    );
+    let root = VfsInode::new_openable_dir(root_ops.clone(), root_init);
+    let root = Dentry::new_dir_from_inode(root, None, String::new());
+
+    let target_init = VfsInodeInit::new(2, 6, crate::Umode::new(NodeType::RegularFile, mode))
+        .with_owner_links_and_rdev(1000, 100, 1, Default::default())
+        .with_stat_data(
+            4096,
+            1,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+        );
+    let target_inode = VfsInode::new_file_with_flags(
+        Arc::new(TestFile::new(2, NodeType::RegularFile, b"target", None)),
+        flags,
+        target_init,
+    );
+    let target =
+        Dentry::new_file_from_inode(target_inode, Some(root.clone()), String::from("target"));
+    root_ops.insert("target", target);
+
+    let fs = SuperBlock::new(&TEST_FILE_SYSTEM_TYPE, &TEST_SUPER_BLOCK_OPERATIONS, |_| {
+        root.clone()
+    });
+    Mount::new_root(&fs).root_path()
+}
+
+#[def_test]
+fn append_only_open_checks_dac_before_append_only_policy() {
+    let root = append_only_tree(
+        NodeFlags::APPEND_ONLY,
+        NodePermission::from_bits_truncate(0o600),
+    );
+    let other = Arc::new(kcred::Cred::new(2000, 200));
+
+    for flags in [
+        linux_raw_sys::general::O_WRONLY,
+        linux_raw_sys::general::O_RDONLY | linux_raw_sys::general::O_TRUNC,
+    ] {
+        let denied = Filename::new("/target").open_with_flags_at(
+            &root,
+            &root,
+            flags,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            other.clone(),
+        );
+        // Linux `may_open()` runs the DAC check first, so an unauthorized
+        // writer of an append-only inode gets `EACCES`, not `EPERM`.
+        assert!(matches!(denied, Err(VfsError::PermissionDenied)));
+    }
+}
+
+#[def_test]
+fn append_only_open_rejects_owner_writes_without_append() {
+    let root = append_only_tree(
+        NodeFlags::APPEND_ONLY,
+        NodePermission::from_bits_truncate(0o600),
+    );
+    let owner = Arc::new(kcred::Cred::new(1000, 100));
+
+    for flags in [
+        linux_raw_sys::general::O_WRONLY,
+        linux_raw_sys::general::O_RDONLY | linux_raw_sys::general::O_TRUNC,
+    ] {
+        let denied = Filename::new("/target").open_with_flags_at(
+            &root,
+            &root,
+            flags,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            owner.clone(),
+        );
+        assert!(matches!(denied, Err(VfsError::OperationNotPermitted)));
+    }
+}
+
+#[def_test]
+fn append_only_open_allows_append_and_read() {
+    let root = append_only_tree(
+        NodeFlags::APPEND_ONLY,
+        NodePermission::from_bits_truncate(0o644),
+    );
+
+    let appended = Filename::new("/target").open_with_flags_at(
+        &root,
+        &root,
+        linux_raw_sys::general::O_WRONLY | linux_raw_sys::general::O_APPEND,
+        NodePermission::empty(),
+        NodePermission::empty(),
+        Arc::new(kcred::Cred::new(1000, 100)),
+    );
+    assert!(appended.is_ok());
+
+    let read = Filename::new("/target").open_with_flags_at(
+        &root,
+        &root,
+        linux_raw_sys::general::O_RDONLY,
+        NodePermission::empty(),
+        NodePermission::empty(),
+        Arc::new(kcred::Cred::new(2000, 200)),
+    );
+    assert!(read.is_ok());
 }
 
 #[def_test]

@@ -136,7 +136,8 @@ impl WritebackPass {
         }
         // Different cache pages can share a larger filesystem block. Keep
         // their read/modify/write serialized until block-granular exclusion exists.
-        if self.super_block.block_size() > super::PAGE_SIZE_4K as u64 {
+        if !self.private.has_extents() || self.super_block.block_size() > super::PAGE_SIZE_4K as u64
+        {
             self.drain_mapped()?;
             queue.drain();
             let offset = batch.offset();

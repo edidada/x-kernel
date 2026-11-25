@@ -125,6 +125,20 @@ impl AddressSpace {
     /// so it does not re-enter the invalidate read lock under the write lock.
     /// Errors leave cache ownership intact, although mappings may be revoked.
     pub fn invalidate_cached_pages(&self) -> VfsResult<()> {
+        self.with_quiesced_mappings(|| self.i_pages.truncate_final())
+    }
+
+    /// Changes inode policy after revoking every mapped PTE and flushing data.
+    /// Clean cached folios remain owned by the address space: these transitions
+    /// do not change file contents or relocate the payload blocks.
+    /// The caller holds the inode data lock; the invalidate write lock stays
+    /// held through publication so a fault cannot reinstall a writable PTE
+    /// between invalidation and the policy change. A busy MM is retried
+    /// without this lock so its fault can unwind.
+    pub(crate) fn with_quiesced_mappings<T>(
+        &self,
+        update: impl FnOnce() -> VfsResult<T>,
+    ) -> VfsResult<T> {
         if !ktask::is_sleepable_context() {
             return Err(VfsError::InvalidInput);
         }
@@ -139,8 +153,7 @@ impl AddressSpace {
             self.write_and_wait_range_with(0..u64::MAX, |control| {
                 self.ops.writepages(self, control)
             })?;
-            self.i_pages.truncate_final()?;
-            return Ok(());
+            return update();
         }
     }
 

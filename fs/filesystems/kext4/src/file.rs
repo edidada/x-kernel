@@ -14,6 +14,7 @@ use crate::{
 };
 
 mod async_writeback;
+mod legacy;
 mod mapped_writeback;
 
 pub(crate) use async_writeback::PreparedWriteback;
@@ -255,11 +256,15 @@ impl Ext4SbInfo {
         &self,
         inode: &Ext4Inode,
     ) -> Ext4Result<()> {
-        crate::inode::regular_file_extent_mutation_supported(
+        crate::inode::regular_file_mutation_supported(
             inode.kind(),
             inode.flags(),
             self.superblock().features().has_huge_file(),
-        )
+        )?;
+        if !inode.has_extents() {
+            self.ensure_legacy_direct_mutation_supported(inode)?;
+        }
+        Ok(())
     }
 
     /// Commits metadata needed by this inode without forcing a checkpoint.
@@ -620,6 +625,17 @@ impl Ext4SbInfo {
             .ok_or(Ext4Error::Overflow)?;
         if write_end > visible_size || visible_size < inode.disk_size() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::UnallocatedWrite).into());
+        }
+
+        if !inode.has_extents() && !input.is_empty() {
+            return match input {
+                OrderedWritebackData::Write(bytes) => self
+                    .writeback_legacy_direct_at(inode, offset, bytes, visible_size, intent)
+                    .map_err(Into::into),
+                OrderedWritebackData::Completed(_) => {
+                    Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode).into())
+                }
+            };
         }
 
         if input.is_empty() {

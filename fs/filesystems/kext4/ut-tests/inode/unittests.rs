@@ -63,12 +63,11 @@ fn initialized_write_admission_keeps_mapping_format_validation() {
         inode.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, true),
         Err(Ext4Error::Unsupported(UnsupportedKind::HugeFile))
     );
-    // A legacy (non-extent) inode is built directly: the extents bit is
-    // immutable on a resident inode, so it cannot be flipped off in place.
+    // Direct maps use the checked reservation path instead of an extent proof.
     let legacy = test_inode_with_flags(0, disk_inode::S_IFREG | 0o644, regular_inode_metadata());
     assert_eq!(
         legacy.check_initialized_overwrite(LogicalBlock::new(0), 1, 4096, false),
-        Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode))
+        Ok(false)
     );
 }
 
@@ -127,6 +126,31 @@ fn initialized_overwrites_survive_timestamp_updates() {
     metadata.mtime = timestamp(123, 0);
     inode.publish_metadata(metadata).unwrap();
     assert!(inode.has_initialized_overwrite(0, 4, 4096));
+}
+
+#[def_test]
+fn mapping_selector_publication_invalidates_proofs_even_with_unchanged_root() {
+    let mut metadata = regular_inode_metadata();
+    metadata.disk_size = 4 * 4096;
+    let inode = test_inode(metadata);
+    inode.cache_initialized_blocks(0, 4);
+    assert_ne!(inode.initialized_extent_end.load(Ordering::Acquire), 0);
+    let metadata = inode.metadata_snapshot();
+    let flags = inode.flags() ^ disk_inode::EXT4_EXTENTS_FL;
+    let has_proof = inode.update_state(|state| {
+        inode.publish_metadata_state(
+            state,
+            metadata,
+            Some(flags),
+            PendingInodeTimestamps::default(),
+            None,
+            None,
+        );
+        state.extent_status.contains_written(0, 1)
+    });
+    assert!(!has_proof);
+    assert_eq!(inode.flags(), flags);
+    assert_eq!(inode.initialized_extent_end.load(Ordering::Acquire), 0);
 }
 
 #[def_test]

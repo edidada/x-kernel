@@ -1218,11 +1218,19 @@ impl InodeOperations for Ext4Inode {
     }
 
     fn fileattr_set(&self, inode: &VfsInode, attributes: kvfs::FileAttr) -> VfsResult<()> {
-        use crate::disk::inode::{EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL, EXT4_PROJINHERIT_FL};
+        use crate::disk::inode::{
+            EXT4_APPEND_FL, EXT4_EXTENTS_FL, EXT4_IMMUTABLE_FL, EXT4_NOATIME_FL,
+            EXT4_PROJINHERIT_FL,
+        };
 
         const VISIBLE_FLAGS: u32 = 0x725b_dfff;
         const MODIFIABLE_FLAGS: u32 = 0x624b_c0ff;
-        const SUPPORTED_FLAGS: u32 = EXT4_NOATIME_FL | 0x0000_0040 | EXT4_PROJINHERIT_FL;
+        const SUPPORTED_FLAGS: u32 = EXT4_NOATIME_FL
+            | 0x0000_0040
+            | EXT4_PROJINHERIT_FL
+            | EXT4_IMMUTABLE_FL
+            | EXT4_APPEND_FL
+            | EXT4_EXTENTS_FL;
         if attributes.flags & !VISIBLE_FLAGS != 0 {
             return Err(VfsError::OperationNotSupported);
         }
@@ -1246,9 +1254,15 @@ impl InodeOperations for Ext4Inode {
         }
         let mut state = ext4.write(&super_block);
         let timestamp = current_ext4_timestamp(inode);
-        state
-            .set_inode_user_flags(self, flags, timestamp)
-            .map_err(into_vfs_err)?;
+        if (old ^ flags) & EXT4_EXTENTS_FL != 0 {
+            state
+                .migrate_inode_mapping(self, flags, timestamp)
+                .map_err(into_vfs_err)?;
+        } else {
+            state
+                .set_inode_user_flags(self, flags, timestamp)
+                .map_err(into_vfs_err)?;
+        }
         state
             .set_inode_project_id(self, attributes.project_id, timestamp)
             .map_err(into_vfs_err)
@@ -1842,10 +1856,10 @@ impl BatchedWriteOperations for Ext4AddressSpaceOperations {
 }
 
 impl Ext4Inode {
-    /// Linux `ext4_generic_write_checks`: rejects immutable files and
-    /// out-of-range positions before the journal check.
+    /// Checks format-selected size limits before journal admission.
+    /// KVFS has already checked live immutable/append-only policy under the
+    /// inode data lock before invoking the preparation callback.
     ///
-    /// - `inode`: VFS inode carrying immutable flags and node policy.
     /// - `pos`: requested write offset in bytes.
     /// - `count`: requested byte count; zero skips the size check.
     /// - `extent_max_size`: extent-mapped size limit in bytes.
@@ -1855,21 +1869,17 @@ impl Ext4Inode {
     /// admission; `false` for an empty request, which the caller finishes
     /// without journal admission or timestamp publication.
     ///
-    /// Errors: `OperationNotPermitted` for an immutable inode; `FileTooLarge`
-    /// when `pos` is at or beyond the inode's format-selected size limit.
+    /// Errors: `FileTooLarge` when `pos` is at or beyond the inode's
+    /// format-selected size limit.
     ///
     /// Locking: lock-free; reads published flags and caller-supplied limits.
-    fn ext4_generic_write_checks(
+    fn ext4_write_check_limits(
         &self,
-        inode: &VfsInode,
         pos: u64,
         count: usize,
         extent_max_size: u64,
         bitmap_max_size: u64,
     ) -> VfsResult<bool> {
-        if inode.flags().contains(kvfs::NodeFlags::IMMUTABLE) {
-            return Err(VfsError::OperationNotPermitted);
-        }
         if count == 0 {
             return Ok(false);
         }
@@ -1927,11 +1937,10 @@ impl FileOperations for Ext4Inode {
             let ext4 = ext4_private(&super_block)?;
             iocb.generic_file_write_iter_with_prepare(iter, |iocb, count| {
                 let file = iocb.file();
-                // Linux `ext4_generic_write_checks`: immutable and size limits
-                // precede the journal check; the count clamp and automatic
-                // timestamps are applied by `prepare_buffered_write`.
-                if !self.ext4_generic_write_checks(
-                    file.inode(),
+                // KVFS checks live inode policy before this callback under the
+                // same data lock. Size limits still precede the journal check;
+                // `prepare_buffered_write` clamps count and updates timestamps.
+                if !self.ext4_write_check_limits(
                     iocb.ki_pos(),
                     *count,
                     super_block.max_file_size(),

@@ -342,6 +342,57 @@ fn online_invalidation_retains_cache_until_revocation_completes() {
 }
 
 #[def_test]
+fn policy_quiescence_retains_clean_cache_on_success_and_publication_error() {
+    let inode = VfsInode::new_file_with_address_space(
+        Arc::new(TruncateOps),
+        &TRUNCATE_OPERATIONS,
+        VfsInodeInit::new(
+            8,
+            PAGE_SIZE_4K as u64,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let mapping = inode.address_space();
+    mapping
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"retained"))
+        .unwrap();
+    let notifier = Arc::new(OnlineNotifier {
+        mapping: Arc::downgrade(&mapping),
+        attempts: Mutex::new(0),
+    });
+    let _view = mapping.register_view(MappingViewSpec {
+        mm_id: 2,
+        vma_start: 0x5000,
+        vma_len: PAGE_SIZE_4K,
+        object_start: 0,
+        object_len: PAGE_SIZE_4K,
+        kind: MappingViewKind::Shared,
+        notifier: Some(notifier.clone()),
+    });
+    let _data_guard = inode.lock_data();
+    for expected in [Ok(()), Err(VfsError::Io)] {
+        assert_eq!(
+            mapping.with_quiesced_mappings(|| {
+                assert!(mapping.invalidate_lock.try_write().is_none());
+                assert_eq!(mapping.nrpages(), 1);
+                expected
+            }),
+            expected
+        );
+        mapping
+            .i_pages
+            .with_folio(0, |folio| {
+                let folio = folio.unwrap();
+                assert!(!folio.is_dirty());
+                assert_eq!(&folio.data()[..8], b"retained");
+            })
+            .unwrap();
+    }
+    assert_eq!(*notifier.attempts.lock(), 3);
+}
+
+#[def_test]
 fn live_invalidation_rejects_deferred_only_notifiers_without_freeing_pages() {
     let inode = VfsInode::new_file_with_address_space(
         Arc::new(TruncateOps),

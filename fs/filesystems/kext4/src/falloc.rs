@@ -8,7 +8,7 @@ use kvfs::SuperBlock;
 
 use crate::{
     BlockCount, BlockMapping, CorruptKind, Ext4Error, Ext4Inode, Ext4Result, Ext4SbInfo,
-    LogicalBlock,
+    LogicalBlock, UnsupportedKind,
     disk::extent::EXT_UNWRITTEN_MAX_LEN,
     extent::ExtentMappingState,
     file::RegularWriteMetadata,
@@ -73,6 +73,9 @@ impl Ext4Mount {
         let (block_size, start_lblk, end_lblk, old_size, extend_size) = {
             let state = self.read();
             state.ensure_regular_file_mutation_supported(inode)?;
+            if !inode.has_extents() {
+                return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
+            }
             let block_size = state.layout().block_size();
             let start_lblk = offset / u64::from(block_size);
             let end_lblk = file_block_count(end, block_size)?;

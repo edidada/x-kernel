@@ -154,7 +154,7 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             }
             kprocess::current_files()
                 .get_file(fd)?
-                .replace_flags(SETFL_MASK, OpenFlags::from_bits_retain(flags));
+                .set_status_flags(SETFL_MASK, OpenFlags::from_bits_retain(flags))?;
             Ok(0)
         }
         F_GETFL => Ok(kprocess::current_files().get_file(fd)?.flags().bits() as _),

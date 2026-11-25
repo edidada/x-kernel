@@ -432,3 +432,11 @@ Quota format and information queries build owned ABI snapshots under the quota
 state mutex and release it before copying to user memory. Record and extended
 status queries follow the same boundary: a user destination may fault into file
 allocation and quota accounting, so no quota-state or record guard spans copyout.
+
+Changing append-only status cannot be bypassed through an already open file:
+F_SETFL checks live inode policy in the atomic update before either O_APPEND
+toggle, including on read-only descriptors. Timestamp authorization distinguishes
+touch from explicit updates before resolving requested times; NOW plus OMIT is
+still explicit for append-only policy. Inode-flag ioctl
+requests use current subjective credentials; CAP_LINUX_IMMUTABLE is required
+for immutable/append-only transitions independently of opener credentials.

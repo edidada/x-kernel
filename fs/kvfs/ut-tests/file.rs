@@ -12,6 +12,105 @@ struct TestInodeOperations;
 
 impl crate::InodeOperations for TestInodeOperations {}
 
+fn status_test_file(mode: FMode, flags: OpenFlags, inode_flags: NodeFlags) -> Arc<VfsFile> {
+    let super_block = crate::nullfs::new_superblock();
+    let mount = crate::Mount::new_root(&super_block);
+    let operations = Arc::new(EmptyFileOperations);
+    let inode = VfsInode::new_file_with_operations(
+        Arc::new(()),
+        Arc::new(TestInodeOperations),
+        operations.clone(),
+        inode_flags,
+        crate::VfsInodeInit::new(
+            3,
+            0,
+            crate::Umode::new(NodeType::RegularFile, crate::NodePermission::default()),
+        ),
+    );
+    let dentry = crate::Dentry::new_file_from_inode(inode, None, "status-test".into());
+    dentry.bind_super_block(&super_block);
+    VfsFileBuilder::from_path_state(
+        crate::Path::new(mount, dentry),
+        mode,
+        flags,
+        operations,
+        kcred::initial_cred(),
+    )
+    .finish()
+    .unwrap()
+}
+
+#[def_test]
+fn append_only_status_changes_reject_only_actual_append_toggles_in_all_modes() {
+    let mask = OpenFlags::APPEND | OpenFlags::NONBLOCK;
+    for mode in [FMode::READ, FMode::WRITE] {
+        for append in [OpenFlags::empty(), OpenFlags::APPEND] {
+            let file = status_test_file(mode, append, NodeFlags::APPEND_ONLY);
+            let next = append | OpenFlags::NONBLOCK;
+            assert_eq!(file.set_status_flags(mask, next), Ok(()));
+            assert_eq!(file.flags(), next);
+            assert_eq!(
+                file.set_status_flags(mask, next ^ OpenFlags::APPEND),
+                Err(VfsError::OperationNotPermitted)
+            );
+            assert_eq!(file.flags(), next);
+            // A replacement bit outside the update mask does not change append.
+            assert_eq!(
+                file.set_status_flags(OpenFlags::NONBLOCK, OpenFlags::APPEND),
+                Ok(())
+            );
+            assert_eq!(file.flags(), append);
+        }
+    }
+}
+
+#[def_test]
+fn status_changes_complete_while_inode_data_is_exclusively_locked() {
+    let file = status_test_file(FMode::WRITE, OpenFlags::empty(), NodeFlags::empty());
+    let _data_guard = file.inode().lock_data();
+    assert_eq!(
+        file.set_status_flags(OpenFlags::APPEND | OpenFlags::NONBLOCK, OpenFlags::APPEND),
+        Ok(())
+    );
+    assert_eq!(file.flags(), OpenFlags::APPEND);
+}
+
+#[def_test]
+fn buffered_preparation_cannot_bypass_inode_write_policy_even_for_empty_requests() {
+    for inode_flags in [
+        NodeFlags::empty(),
+        NodeFlags::IMMUTABLE,
+        NodeFlags::APPEND_ONLY,
+        NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY,
+    ] {
+        for flags in [OpenFlags::empty(), OpenFlags::APPEND] {
+            let file = status_test_file(FMode::WRITE, flags, inode_flags);
+            for bytes in [b"".as_slice(), b"x".as_slice()] {
+                let mut source = iov_iter_kvec_source(bytes);
+                let mut iocb = Kiocb::new(&file, 7);
+                let mut is_prepared = false;
+                let result = iocb.generic_file_write_iter_with_prepare(&mut source, |_, _| {
+                    is_prepared = true;
+                    Err(VfsError::Io)
+                });
+                let is_denied = inode_flags.contains(NodeFlags::IMMUTABLE)
+                    || inode_flags.contains(NodeFlags::APPEND_ONLY)
+                        && !flags.contains(OpenFlags::APPEND);
+                assert_eq!(is_prepared, !is_denied);
+                assert_eq!(
+                    result,
+                    Err(if is_denied {
+                        VfsError::OperationNotPermitted
+                    } else {
+                        VfsError::Io
+                    })
+                );
+                assert_eq!(source.count(), bytes.len());
+            }
+        }
+    }
+}
+
 fn sync_test_file(operations: Arc<dyn FileOperations>, mode: FMode) -> Arc<VfsFile> {
     let super_block = crate::nullfs::new_superblock();
     let mount = crate::Mount::new_root(&super_block);

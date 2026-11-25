@@ -309,6 +309,16 @@ new ones. Source offsets and view lengths follow the actual VMA range; expansion
 extends the existing reverse-mapping registration. The source adapter no longer
 keeps a duplicate immutable length. Write faults still check current inode policy.
 
+Shared file mappings check VfsFile::check_shared_writable_mapping at mmap and
+mprotect admission. Actual write faults repeat policy validation under inode
+data protection in page_mkwrite. The inode fileattr transition revokes old PTEs
+and retains invalidate exclusion through publication; existing fds or VMAs
+therefore cannot retain a writable PTE across immutable/append-only activation.
+Private COW mappings continue to modify only their anonymous copies.
+Policy publication drains dirty folios after revocation while retaining clean
+cached contents. A subsequent read fault can reuse those folios; write faults
+still recheck the published inode policy.
+
 Anonymous file copies, partial/tail pages and private-file COW targets use
 `alloc_frame` and the anonymous object's typed `commit_after` transaction.
 The object and PTE each retain a physical hold. File-content copying, EOF and

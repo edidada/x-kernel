@@ -162,7 +162,7 @@ fn full_orphan_file_falls_back_to_legacy_list() {
 }
 
 #[def_test]
-fn recovery_orphan_propagates_unsupported_inode_format() {
+fn recovery_orphan_propagates_unsupported_indirect_inode_format() {
     let (filesystem, inode) = orphan_test_filesystem();
     let journal = JournalTransactions::new(TransactionId::new(1003));
     let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
@@ -187,6 +187,8 @@ fn recovery_orphan_propagates_unsupported_inode_format() {
         .update_inode_table_entry_allow_zero_links(&mut bytes, inode.number(), |inode_bytes| {
             let start = crate::disk::inode::I_BLOCK_OFFSET;
             inode_bytes[start..start + crate::disk::inode::INODE_BLOCK_BYTES].fill(0);
+            // Indirect trees remain read-only, including during recovery.
+            inode_bytes[start + 12 * 4..start + 13 * 4].copy_from_slice(&1u32.to_le_bytes());
             Ok(())
         })
         .unwrap();

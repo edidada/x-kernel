@@ -21,7 +21,7 @@ impl JournalCredits {
 
     fn for_preallocation_discard(filesystem: &Ext4SbInfo, inode: &Ext4Inode) -> Ext4Result<Self> {
         let new_blocks = file_block_count(inode.disk_size(), filesystem.layout().block_size())?;
-        Ok(Self::new(filesystem.extent_truncate_metadata_credits(
+        Ok(Self::new(filesystem.mapping_truncate_metadata_credits(
             inode,
             LogicalBlock::new(new_blocks),
         )?))
@@ -34,7 +34,7 @@ impl JournalCredits {
     ) -> Ext4Result<Self> {
         let new_blocks = file_block_count(new_size, filesystem.layout().block_size())?;
         let extent_credits =
-            filesystem.extent_truncate_metadata_credits(inode, LogicalBlock::new(new_blocks))?;
+            filesystem.mapping_truncate_metadata_credits(inode, LogicalBlock::new(new_blocks))?;
         let credits = extent_credits
             .checked_add(ORPHAN_METADATA_UPDATE_CREDITS)
             .and_then(|credits| credits.checked_add(INODE_UPDATE_CREDITS))
@@ -134,7 +134,7 @@ impl Ext4SbInfo {
             return Ok(());
         }
         let disk_blocks = file_block_count(inode.disk_size(), self.layout().block_size())?;
-        if !self.has_initialized_extent_mapping_from(inode, LogicalBlock::new(disk_blocks))? {
+        if !self.has_initialized_inode_mapping_from(inode, LogicalBlock::new(disk_blocks))? {
             return Ok(());
         }
 
@@ -146,7 +146,7 @@ impl Ext4SbInfo {
         )?;
         let mut handle = journal.begin(credits)?;
         let result =
-            self.truncate_extent_mappings(inode, LogicalBlock::new(disk_blocks), true, &mut handle);
+            self.truncate_inode_mappings(inode, LogicalBlock::new(disk_blocks), true, &mut handle);
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -244,7 +244,7 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
         let blocks = file_block_count(new_size, self.layout().block_size())?;
-        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), false, handle)?;
+        self.truncate_inode_mappings(inode, LogicalBlock::new(blocks), false, handle)?;
         self.remove_orphan(inode, handle)
     }
 
@@ -255,7 +255,7 @@ impl Ext4SbInfo {
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
         let blocks = file_block_count(target_size, self.layout().block_size())?;
-        self.truncate_extent_mappings(inode, LogicalBlock::new(blocks), false, handle)?;
+        self.truncate_inode_mappings(inode, LogicalBlock::new(blocks), false, handle)?;
         self.remove_orphan(inode, handle)
     }
 

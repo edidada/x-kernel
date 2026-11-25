@@ -365,10 +365,13 @@ fn data_write_and_wait_covers_clean_old_writeback_and_new_errors_after_submissio
 
 #[def_test]
 fn live_invalidation_waits_for_owned_writeback_and_retains_failed_data() {
-    for (fail_submission, completion_error) in [
-        (false, None),
-        (false, Some(VfsError::Io)),
-        (true, Some(VfsError::Io)),
+    for (fail_submission, completion_error, retain_cache) in [
+        (false, None, false),
+        (false, None, true),
+        (false, Some(VfsError::Io), false),
+        (false, Some(VfsError::Io), true),
+        (true, Some(VfsError::Io), false),
+        (true, Some(VfsError::Io), true),
     ] {
         let (inode, operations) = deferred_mapping(fail_submission.then_some(1), None).unwrap();
         let mapping = inode.address_space();
@@ -379,7 +382,13 @@ fn live_invalidation_waits_for_owned_writeback_and_retains_failed_data() {
         let invalidating_finished = finished.clone();
         let invalidating_result = result.clone();
         let task = ktask::spawn(move || {
-            *invalidating_result.lock() = Some(invalidating_inode.invalidate_cached_pages());
+            let _data_guard = invalidating_inode.lock_data();
+            let result = if retain_cache {
+                invalidating_inode.address_space().with_quiesced_mappings(|| Ok(()))
+            } else {
+                invalidating_inode.invalidate_cached_pages()
+            };
+            *invalidating_result.lock() = Some(result);
             invalidating_finished.store(true, Ordering::Release);
         });
         operations
@@ -395,13 +404,13 @@ fn live_invalidation_waits_for_owned_writeback_and_retains_failed_data() {
             completion_error
         };
         assert_eq!(*result.lock(), Some(expected_error.map_or(Ok(()), Err)));
-        if expected_error.is_some() {
+        if expected_error.is_some() || retain_cache {
             assert_eq!(mapping.nrpages(), 1);
             mapping
                 .i_pages
                 .with_folio(0, |folio| {
                     let folio = folio.unwrap();
-                    assert!(folio.is_dirty());
+                    assert_eq!(folio.is_dirty(), expected_error.is_some());
                     assert!(!folio.is_under_writeback());
                     assert_eq!(&folio.data()[..8], b"retained");
                 })

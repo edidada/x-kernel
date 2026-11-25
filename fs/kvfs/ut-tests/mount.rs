@@ -1993,6 +1993,52 @@ fn immutable_targets_reject_revocation_before_touching_capabilities() {
     );
 }
 
+fn protected_setid_path(flags: crate::NodeFlags) -> Path {
+    let init = VfsInodeInit::new(
+        1,
+        8,
+        crate::Umode::new(
+            NodeType::RegularFile,
+            NodePermission::from_bits_truncate(0o6755),
+        ),
+    )
+    .with_owner_links_and_rdev(1000, 100, 1, Default::default());
+    let inode = VfsInode::new_file_with_flags(
+        Arc::new(MockDirOps::new(StatFsFlags::empty(), 1)),
+        flags,
+        init,
+    );
+    let root = Dentry::new_file_from_inode(inode, None, String::new());
+    Mount::new_root(&mock_superblock(root, StatFsFlags::empty())).root_path()
+}
+
+#[def_test]
+fn append_only_content_revokes_setid_without_permitting_explicit_chmod() {
+    let path = protected_setid_path(crate::NodeFlags::APPEND_ONLY);
+    let caller = Cred::new(1000, 100);
+    let _mount_guard = path.lock_writable_mount().unwrap();
+    assert_eq!(path.file_remove_privs(&caller), Ok(()));
+    assert_eq!(path.metadata().mode.permission().bits(), 0o755);
+    assert_eq!(
+        path.chmod(NodePermission::from_bits_truncate(0o600), &caller),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(path.metadata().mode.permission().bits(), 0o755);
+}
+
+#[def_test]
+fn protected_truncate_rejects_before_revoking_setid() {
+    for flags in [crate::NodeFlags::APPEND_ONLY, crate::NodeFlags::IMMUTABLE] {
+        let path = protected_setid_path(flags);
+        assert_eq!(
+            path.truncate_opened(0, &Cred::new(1000, 100)),
+            Err(VfsError::OperationNotPermitted)
+        );
+        assert_eq!(path.metadata().mode.permission().bits(), 0o6755);
+        assert_eq!(path.inode().size(), 8);
+    }
+}
+
 #[def_test]
 fn set_gid_without_group_execute_still_drops_for_a_writer_outside_the_group() {
     // Set-GID without group-execute is normally the mandatory-locking mark,

@@ -4,10 +4,13 @@
 
 mod checksum;
 mod legacy;
+mod legacy_mutate;
 mod map;
+mod migrate;
 mod mutate;
 mod validate;
 
+pub(crate) use legacy::{LEGACY_DIRECT_BLOCKS, legacy_direct_block_pointers};
 pub(crate) use map::InodeMappingRoot;
 pub(crate) use mutate::ordered_writeback_credit_bound;
 

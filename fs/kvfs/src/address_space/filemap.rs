@@ -398,6 +398,13 @@ impl AddressSpace {
     ) -> VfsResult<usize> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let _data_guard = inode.lock_data();
+        // F_SETFL need not acquire the data lock. Validate and position this
+        // write from one snapshot so it cannot remove append between the checks.
+        let flags = iocb.file().flags();
+        iocb.file().check_write_flags(flags)?;
+        if flags.contains(crate::OpenFlags::APPEND) {
+            iocb.set_ki_pos(inode.size());
+        }
         let mut count = iter.count();
         prepare(iocb, &mut count)?;
         iter.truncate(count);

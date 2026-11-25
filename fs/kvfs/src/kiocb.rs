@@ -133,7 +133,9 @@ impl<'a> Kiocb<'a> {
     /// Performs a buffered write with filesystem-owned admission and timestamps.
     ///
     /// `prepare` runs once under the inode data lock, before any folio lock or
-    /// copy, including for an empty request. It must apply filesystem policy
+    /// copy, including for an empty request. Generic immutable/append-only
+    /// admission and append positioning precede it under that same lock; the
+    /// callback need not repeat them. It must apply filesystem-specific policy
     /// and [`Self::generic_write_check_limits`] in the required order, and may
     /// narrow `count`. After all fallible admission checks, it must publish
     /// automatic timestamps for an accepted nonempty request using this inode's

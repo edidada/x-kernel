@@ -167,6 +167,12 @@ The `msync` runtime hook runs without the MM mutex and takes an already checked
 file byte range. Its owned runtime retains the source open file even if its VMA
 is concurrently removed. It must not recover coordinates from live VMA state.
 
+Live immutable/append-only checks cover new shared writable mappings and
+mprotect upgrades. page_mkwrite rechecks under inode data protection; protection
+activation synchronously removes existing mapped PTEs before publishing flags.
+The mapping registry and existing invalidation/TLB protocol remain the sole
+owners of revocation. Private COW does not acquire file write authority.
+
 File-copy and private COW candidates are typed exact PageRef allocations. The
 candidate is fully initialized under the existing file-content protocol before
 an expected-slot/expected-PTE transaction publishes its independent mapping

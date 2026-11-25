@@ -969,9 +969,9 @@ pub struct Ext4Inode {
     permissions: AtomicU16,
     /// Raw ext4 `i_flags`, the sole copy (`EXT4_EXTENTS_FL`, `EXT4_INDEX_FL`, ...).
     /// It stays in the on-disk flag domain; the VFS `NodeFlags` are projected
-    /// from it on read in `node_flags`. `EXT4_EXTENTS_FL` is immutable after
-    /// load; the single writer publishes under the inode-state write lock and
-    /// readers load lock-free.
+    /// from it on read in `node_flags`. Format transitions publish the new
+    /// `i_block` root and flags under the same inode-state write lock, while
+    /// KVFS data/invalidate protection and mount exclusion drain mapping users.
     flags: AtomicU32,
     /// Runtime-only quota switch, kept out of the disk flag domain (Linux
     /// `S_NOQUOTA`). Written by `set_noquota`, read lock-free.
@@ -1206,55 +1206,74 @@ impl Ext4Inode {
 
     fn publish_metadata_and_quotas(
         &self,
-        mut metadata: Ext4InodeMetadata,
+        metadata: Ext4InodeMetadata,
         persisted: PendingInodeTimestamps,
         transaction: Option<Arc<RuntimeTransaction>>,
         records: Option<[Option<kquota::DquotRef>; 3]>,
     ) -> Ext4Result<()> {
         self.update_state(|state| {
-            // Publication without an owner invalidates older sync evidence.
-            // Xattr/recovery paths can therefore retain conservative sync until
-            // they explicitly provide the transaction covering their mutation.
-            state.sync_transaction = transaction;
-            if metadata.block != state.metadata.block
-                || metadata.disk_size < state.metadata.disk_size
-            {
-                self.clear_extent_proofs(state);
-            }
-            // Mapping/xattr publications must not restore older on-disk times
-            // over an automatic update made while metadata I/O was in flight.
-            for (current, incoming, dirty, captured) in [
-                (
-                    &state.metadata.atime,
-                    &mut metadata.atime,
-                    &mut state.has_dirty_atime,
-                    persisted.atime,
-                ),
-                (
-                    &state.metadata.mtime,
-                    &mut metadata.mtime,
-                    &mut state.has_dirty_mtime,
-                    persisted.mtime,
-                ),
-                (
-                    &state.metadata.ctime,
-                    &mut metadata.ctime,
-                    &mut state.has_dirty_ctime,
-                    persisted.ctime,
-                ),
-            ] {
-                if *dirty && captured != Some(*current) {
-                    *incoming = *current;
-                } else {
-                    *dirty = false;
-                }
-            }
-            state.metadata = metadata;
-            if let Some(records) = records {
-                state.dquots = records;
-            }
+            self.publish_metadata_state(state, metadata, None, persisted, transaction, records);
         });
         Ok(())
+    }
+
+    fn publish_metadata_state(
+        &self,
+        state: &mut Ext4InodeState,
+        mut metadata: Ext4InodeMetadata,
+        flags: Option<u32>,
+        persisted: PendingInodeTimestamps,
+        transaction: Option<Arc<RuntimeTransaction>>,
+        records: Option<[Option<kquota::DquotRef>; 3]>,
+    ) {
+        // Publication without an owner invalidates older sync evidence.
+        // Xattr/recovery paths can therefore retain conservative sync until
+        // they explicitly provide the transaction covering their mutation.
+        state.sync_transaction = transaction;
+        let is_format_changed =
+            flags.is_some_and(|flags| (flags ^ self.flags()) & disk_inode::EXT4_EXTENTS_FL != 0);
+        if metadata.block != state.metadata.block
+            || metadata.disk_size < state.metadata.disk_size
+            || is_format_changed
+        {
+            self.clear_extent_proofs(state);
+        }
+        // Mapping/xattr publications must not restore older on-disk times
+        // over an automatic update made while metadata I/O was in flight.
+        for (current, incoming, dirty, captured) in [
+            (
+                &state.metadata.atime,
+                &mut metadata.atime,
+                &mut state.has_dirty_atime,
+                persisted.atime,
+            ),
+            (
+                &state.metadata.mtime,
+                &mut metadata.mtime,
+                &mut state.has_dirty_mtime,
+                persisted.mtime,
+            ),
+            (
+                &state.metadata.ctime,
+                &mut metadata.ctime,
+                &mut state.has_dirty_ctime,
+                persisted.ctime,
+            ),
+        ] {
+            if *dirty && captured != Some(*current) {
+                *incoming = *current;
+            } else {
+                *dirty = false;
+            }
+        }
+        state.metadata = metadata;
+        if let Some(records) = records {
+            state.dquots = records;
+        }
+        if let Some(flags) = flags {
+            // Acquire-only policy readers must observe the prepared root first.
+            self.flags.store(flags, Ordering::Release);
+        }
     }
 
     /// Captures dirty values without retaining inode-state protection over I/O.
@@ -1361,7 +1380,11 @@ impl Ext4Inode {
         has_huge_file: bool,
     ) -> Ext4Result<bool> {
         self.with_state(|state| {
-            regular_file_extent_mutation_supported(self.kind, self.flags(), has_huge_file)?;
+            regular_file_mutation_supported(self.kind, self.flags(), has_huge_file)?;
+            if !self.has_extents() {
+                crate::extent::legacy_direct_block_pointers(&state.metadata.block)?;
+                return Ok(false);
+            }
             Ok(state.has_initialized_overwrite(start.get(), count, block_size, self.size()))
         })
     }
@@ -1716,15 +1739,16 @@ impl Ext4Inode {
         self.flags.load(Ordering::Acquire)
     }
 
-    /// Returns an error when publishing `flags` would change the immutable
-    /// `EXT4_EXTENTS_FL` mapping-format bit.
+    /// Rejects a mapping-format change through ordinary flag publication.
+    /// A format transition must publish the corresponding root through
+    /// `update_inode_mapping_metadata` under mapping exclusion.
     ///
     /// - `flags`: candidate `i_flags`; non-format bits may differ freely.
     ///
     /// Returns: nothing when the update keeps the mapping format.
     ///
-    /// Errors: `Corrupt` when `EXT4_EXTENTS_FL` would change, which would
-    /// invalidate the lock-free mapping-interpreter reads.
+    /// Errors: `Corrupt` when `EXT4_EXTENTS_FL` would change without coordinated
+    /// publication of its mapping root.
     ///
     /// Locking: lock-free; reads the `flags` atomic.
     pub(crate) fn ensure_flags_publishable(&self, flags: u32) -> Ext4Result<()> {
@@ -1741,8 +1765,8 @@ impl Ext4Inode {
     ///
     /// Returns: nothing.
     ///
-    /// Errors: `Corrupt` when `EXT4_EXTENTS_FL` changed, which would invalidate
-    /// the lock-free mapping-interpreter reads that depend on its immutability.
+    /// Errors: `Corrupt` when `EXT4_EXTENTS_FL` changes. Format transitions
+    /// require the coordinated mapping-root publisher instead of this setter.
     ///
     /// Locking: caller must not hold the inode-state lock; this takes the write
     /// lock internally.
@@ -2009,11 +2033,17 @@ impl Ext4Inode {
             return Ok(Vec::new());
         }
         self.update_state(|state| {
-            regular_file_extent_mutation_supported(
+            regular_file_mutation_supported(
                 self.kind,
                 self.flags(),
                 sb.superblock().features().has_huge_file(),
             )?;
+            if !self.has_extents() {
+                crate::extent::legacy_direct_block_pointers(&state.metadata.block)?;
+                if end > crate::extent::LEGACY_DIRECT_BLOCKS {
+                    return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
+                }
+            }
             if state.has_initialized_overwrite(
                 start.get(),
                 block_count,
@@ -2340,21 +2370,18 @@ fn insert_unreserved_delalloc_extents_in_state(
     state.reserved_data_blocks = new_reserved_data_blocks;
 }
 
-/// Shared admission rule for mutating regular-file extent mappings.
+/// Shared scalar admission rule for regular-file mapping mutations.
 ///
 /// Called both outside the inode-state lock (VFS entry checks) and inside it
 /// (`reserve_delalloc_range` reads the fields directly from the state), so
 /// the check takes values instead of an inode to stay lock-free.
-pub(crate) fn regular_file_extent_mutation_supported(
+pub(crate) fn regular_file_mutation_supported(
     kind: InodeKind,
     inode_flags: u32,
     has_huge_file_feature: bool,
 ) -> Ext4Result<()> {
     if kind != InodeKind::RegularFile {
         return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
-    }
-    if inode_flags & disk_inode::EXT4_EXTENTS_FL == 0 {
-        return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
     }
     if inode_flags & disk_inode::EXT4_HUGE_FILE_FL != 0 {
         if !has_huge_file_feature {
@@ -3205,13 +3232,56 @@ impl Ext4SbInfo {
             self.inode_extra_isize_allocation_blocks(inode),
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self
-            .update_dirty_inode_metadata(inode, &mut handle, |_, bytes| {
-                put_u32(bytes, 0x20, flags)?;
-                update_inode_ctime_bytes(bytes, timestamp)
-            })
-            .and_then(|()| inode.set_flags(flags));
+        let result = self.update_inode_mapping_metadata(
+            inode,
+            flags,
+            &inode.raw_i_block(),
+            Some(timestamp),
+            &mut handle,
+        );
         self.complete_metadata_mutation(handle, result)
+    }
+
+    /// Publishes the disk root and its format selector as one resident state.
+    /// The caller has validated the candidate and holds mount mutation exclusion;
+    /// live format changes additionally hold KVFS data/invalidate protection.
+    pub(crate) fn update_inode_mapping_metadata(
+        &self,
+        inode: &Ext4Inode,
+        flags: u32,
+        root: &[u8; disk_inode::INODE_BLOCK_BYTES],
+        timestamp: Option<Ext4Timestamp>,
+        handle: &mut JournalHandle<'_>,
+    ) -> Ext4Result<()> {
+        self.try_expand_inode_extra_isize(inode, handle)?;
+        let persisted = inode.pending_timestamps();
+        let table_block = self.inode_table_entry_block(inode.number())?;
+        let mut table = self.read_metadata_block(table_block)?.as_ref().to_vec();
+        let decoded = self.update_referenced_inode_table_entry(&mut table, inode, |bytes| {
+            persisted.encode(bytes)?;
+            put_u32(bytes, 0x20, flags)?;
+            bytes[disk_inode::I_BLOCK_OFFSET
+                ..disk_inode::I_BLOCK_OFFSET + disk_inode::INODE_BLOCK_BYTES]
+                .copy_from_slice(root);
+            if let Some(timestamp) = timestamp {
+                update_inode_ctime_bytes(bytes, timestamp)?;
+            }
+            Ok(())
+        })?;
+        let access = self.metadata_io.write_access(table_block, handle)?;
+        self.replace_inode_table_entry(&access, inode.number(), &table)?;
+        let transaction = handle.transaction()?;
+        inode.update_state(|state| {
+            inode.publish_metadata_state(
+                state,
+                decoded.metadata,
+                Some(flags),
+                persisted,
+                Some(transaction),
+                None,
+            );
+        });
+        Ok(())
     }
 
     pub(crate) fn update_inode_flags_timestamps_metadata(

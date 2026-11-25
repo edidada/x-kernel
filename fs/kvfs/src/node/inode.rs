@@ -33,8 +33,8 @@ use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
     FileOperations, InodeTimes, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex,
     MutexGuard, NodePermission, NodeType, Path, Permission, RwLock, RwLockReadGuard,
-    RwLockWriteGuard, SuperBlock, Umode, VfsError, VfsFileBuilder, VfsResult, XattrName,
-    XattrNameSink, XattrSetFlags,
+    RwLockWriteGuard, SetattrTime, SuperBlock, Umode, VfsError, VfsFileBuilder, VfsResult,
+    XattrName, XattrNameSink, XattrSetFlags,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
     pipe::{PipeObject, fifo_file_operations},
@@ -2084,8 +2084,98 @@ impl VfsInode {
     /// An applied size is published through
     /// [`Self::update_size_after_backing_change`], so cached folios and
     /// mappings are resized or invalidated before this returns.
-    pub fn update_metadata(&self, dentry: &Dentry, mut update: MetadataUpdate) -> VfsResult<()> {
+    /// Acquires namespace exclusion; callers must not already hold namespace
+    /// or data protection. Timestamp requests use the dedicated typed entry.
+    pub fn update_metadata(&self, dentry: &Dentry, update: MetadataUpdate) -> VfsResult<()> {
+        let _namespace_guard = self.lock_namespace_exclusive();
+        if self
+            .flags()
+            .intersects(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        self.apply_metadata_update(dentry, update)
+    }
+
+    /// Removes set-ID privileges before an authorized content change.
+    ///
+    /// A legal append must revoke inherited privileges even though explicit
+    /// chmod requests are forbidden. Only set-ID bits can be cleared here.
+    /// The caller holds mount write admission and the privilege lock, without
+    /// namespace or data protection.
+    pub(crate) fn remove_setid_bits(&self, dentry: &Dentry, bits: NodePermission) -> VfsResult<()> {
+        let _namespace_guard = self.lock_namespace_exclusive();
         self.check_mutable()?;
+        let mut mode = self.metadata().mode.permission();
+        mode.remove(bits & (NodePermission::SET_UID | NodePermission::SET_GID));
+        self.apply_metadata_update(
+            dentry,
+            MetadataUpdate {
+                mode: Some(mode),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Applies an authorized timestamp request without losing touch semantics.
+    /// Namespace exclusion precedes data exclusion, as in fileattr publication.
+    /// Only a request setting both times to now may touch an append-only inode.
+    ///
+    /// # Errors
+    /// Rejects protected or unauthorized requests and propagates permission and
+    /// backend errors. Callers must not already hold namespace or data protection.
+    pub(crate) fn set_times(
+        &self,
+        dentry: &Dentry,
+        atime: Option<SetattrTime>,
+        mtime: Option<SetattrTime>,
+        cred: &Cred,
+    ) -> VfsResult<()> {
+        if atime.is_none() && mtime.is_none() {
+            return Ok(());
+        }
+        let _namespace_guard = self.lock_namespace_exclusive();
+        let _data_guard = self.lock_data();
+        let is_touch = matches!(
+            (atime, mtime),
+            (Some(SetattrTime::Current), Some(SetattrTime::Current))
+        );
+        let flags = self.flags();
+        if flags.contains(NodeFlags::IMMUTABLE)
+            || flags.contains(NodeFlags::APPEND_ONLY) && !is_touch
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        let metadata = self.metadata();
+        let is_owner = cred.fsuid() == metadata.uid;
+        if !is_owner
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &dentry.user_namespace(),
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
+        {
+            if !is_touch {
+                return Err(VfsError::OperationNotPermitted);
+            }
+            self.permission(Permission::MAY_WRITE, cred)?;
+        }
+        let now = self.current_time();
+        self.apply_metadata_update(
+            dentry,
+            MetadataUpdate {
+                atime: atime.map(|time| time.resolve(now)),
+                mtime: mtime.map(|time| time.resolve(now)),
+                ctime: Some(now),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Publishes a validated update while the caller retains namespace exclusion.
+    /// Timestamp requests also retain data exclusion; do not reacquire either lock.
+    fn apply_metadata_update(&self, dentry: &Dentry, mut update: MetadataUpdate) -> VfsResult<()> {
         let changed = update.size.is_some()
             || update.mode.is_some()
             || update.owner.is_some()
@@ -2157,8 +2247,13 @@ impl VfsInode {
     }
 
     pub(crate) fn set_len(&self, len: u64) -> VfsResult<()> {
-        self.check_mutable()?;
         let _data_guard = self.data_lock.write();
+        if self
+            .flags()
+            .intersects(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
         let _invalidate_guard = self.mapping.lock_invalidate_exclusive();
         self.inode_operations.set_len(self, len)?;
         if self.size() == len {

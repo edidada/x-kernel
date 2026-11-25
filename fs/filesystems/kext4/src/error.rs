@@ -46,8 +46,10 @@ pub enum ChecksumTarget {
 pub enum UnsupportedKind {
     /// The filesystem does not enable extent-based block mapping.
     NonExtentFilesystem,
-    /// The inode uses legacy block mapping on an extent-enabled filesystem.
+    /// The legacy inode requires unsupported indirect-tree mutation.
     NonExtentInode,
+    /// The requested mapping-format transition cannot fit the supported inline shape.
+    InodeMappingConversion,
     /// The inode stores data inline in metadata.
     InlineData,
     /// The inode uses encrypted-name semantics.

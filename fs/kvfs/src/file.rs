@@ -1088,6 +1088,7 @@ impl VfsFile {
         self.verify_mode(FMode::WRITE)?;
         let _data_guard = self.inode().try_lock_data_shared()?;
         self.inode().check_mutable()?;
+        self.check_shared_writable_mapping()?;
         // Timestamp policy may acquire filesystem locks; keep it outside the folio.
         self.file_update_time()?;
         let result = self.mapping().page_mkwrite(
@@ -1248,12 +1249,68 @@ impl VfsFile {
         if !mode.contains(FMode::CAN_WRITE) {
             return Err(VfsError::InvalidInput);
         }
+        self.check_write_flags(self.flags())?;
         self.verify_io_area(pos, count)?;
         if self.node_type().is_special() {
             Ok(())
         } else {
             self.path().check_writable_mount()
         }
+    }
+
+    pub(crate) fn check_write_flags(&self, flags: OpenFlags) -> VfsResult<()> {
+        let inode_flags = self.inode().flags();
+        if inode_flags.contains(NodeFlags::IMMUTABLE)
+            || inode_flags.contains(NodeFlags::APPEND_ONLY) && !flags.contains(OpenFlags::APPEND)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        Ok(())
+    }
+
+    /// Checks live inode policy before a shared mapping may acquire write access.
+    /// Private COW mappings do not use this check. Write faults recheck it while
+    /// holding inode data protection, so an earlier mapping cannot bypass a
+    /// completed immutable or append-only transition.
+    ///
+    /// # Errors
+    /// Returns `PermissionDenied` for immutable or append-only inodes, or the
+    /// mount's write-protection error.
+    pub fn check_shared_writable_mapping(&self) -> VfsResult<()> {
+        self.path().check_writable_mount()?;
+        if self
+            .inode()
+            .flags()
+            .intersects(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY)
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    /// Changes file status flags while preserving live append-only policy.
+    ///
+    /// # Errors
+    /// Returns `OperationNotPermitted` when changing `O_APPEND` on an append-only
+    /// inode, including for read-only descriptions. Checks and replaces the same
+    /// atomic status snapshot without waiting for inode data I/O. Concurrent
+    /// inode-policy changes are rechecked by buffered writes under the data lock.
+    pub fn set_status_flags(&self, mask: OpenFlags, replacement: OpenFlags) -> VfsResult<()> {
+        // A racing F_SETFL must be checked against the status word this CAS
+        // actually replaces. Release publication pairs with the write snapshot.
+        self.flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let next = (replacement.bits() & mask.bits()) | (current & !mask.bits());
+                if (current ^ next) & OpenFlags::APPEND.bits() != 0
+                    && self.inode().flags().contains(NodeFlags::APPEND_ONLY)
+                {
+                    None
+                } else {
+                    Some(next)
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| VfsError::OperationNotPermitted)
     }
 
     /// Reads from this open file and advances `f_pos` when applicable.
@@ -1775,15 +1832,20 @@ impl VfsFile {
             return Err(VfsError::from(LinuxError::EOPNOTSUPP));
         }
         let _privilege_guard = inode.lock_privileges();
-        let _data_guard = inode.lock_data();
-        // Recheck under the data lock: a concurrent `FS_IOC_SETFLAGS` also
-        // takes it, so IMMUTABLE cannot be installed between the check and the
-        // first backend write.
+        // Fileattr publication also takes the privilege lock, keeping this
+        // policy stable until the backend completes. Revoke privileges before
+        // taking data protection: revocation takes namespace exclusion.
         inode.check_mutable()?;
+        if inode.flags().contains(NodeFlags::APPEND_ONLY)
+            && !(flags & !FallocateFlags::KEEP_SIZE).is_empty()
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
         // Linux `setattr_prepare()` removes inherited privileges before the
         // filesystem commits any content or size change; revoke before the
         // backend can partially allocate and then fail.
         self.path().file_remove_privs_locked(cred)?;
+        let _data_guard = inode.lock_data();
         let _invalidate_guard = self.mapping().lock_invalidate_exclusive();
         let result = operations.fallocate(self, flags, offset, len);
         // A failed backend may still have committed a prefix (kext4).

@@ -287,18 +287,20 @@ fn delayed_allocation_only_reserves_holes_between_allocated_blocks() {
 }
 
 #[def_test]
-fn delayed_allocation_rejects_legacy_inode_before_reserving_space() {
+fn delayed_allocation_rejects_indirect_growth_before_reserving_space() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);
     let journal = JournalTransactions::new(TransactionId::new(390));
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     let transaction = handle.id();
-    // EXT4_EXTENTS_FL is immutable for a resident inode, so rewrite the on-disk
-    // flags and reload instead of flipping the bit in place.
+    // This fixture has no native migration journal; construct a valid empty
+    // direct root on disk and load it through the ordinary inode decoder.
     let legacy_flags = inode.flags() & !crate::disk::inode::EXT4_EXTENTS_FL;
     filesystem
         .update_dirty_inode_metadata(&inode, &mut handle, move |_filesystem, inode_bytes| {
             inode_bytes[0x20..0x24].copy_from_slice(&legacy_flags.to_le_bytes());
+            let start = crate::disk::inode::I_BLOCK_OFFSET;
+            inode_bytes[start..start + crate::disk::inode::INODE_BLOCK_BYTES].fill(0);
             Ok(())
         })
         .expect("prepare an extents-enabled filesystem containing one legacy inode");
@@ -313,10 +315,14 @@ fn delayed_allocation_rejects_legacy_inode_before_reserving_space() {
     let legacy = filesystem.internal_iget(inode.number()).unwrap();
     assert!(!legacy.has_extents());
     assert_eq!(
-        filesystem.reserve_delalloc_range_into(&legacy, LogicalBlock::new(0), 1),
+        filesystem.reserve_delalloc_range_into(&legacy, LogicalBlock::new(12), 1),
         Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode))
     );
     assert!(!legacy.has_delalloc_reservations());
+    assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
+    filesystem.reserve_delalloc_range_into(&legacy, LogicalBlock::new(0), 1).unwrap();
+    assert!(legacy.has_delalloc_reservations());
+    filesystem.release_all_delalloc(&legacy).unwrap();
     assert_eq!(filesystem.delalloc_reserved_block_count(), 0);
 }
 

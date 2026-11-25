@@ -61,11 +61,27 @@ classes, and ensures that mount negotiation can still report the original unsupp
 
 The current `Ext4SbInfo` mount state publishes both the read and mutation APIs, and the type system does not yet distinguish a read-only
 legacy block-map mount. Mount negotiation therefore requires the superblock to enable `EXT4_FEATURE_INCOMPAT_EXTENTS`:
-a whole-disk `^extents` format returns
-`Unsupported(NonExtentFilesystem)` before reading the group descriptors, replaying the journal, or publishing the VFS root. An image with the extents feature can still have individual legacy inodes parsed read-only,
-but its buffered-write reservation, `page_mkwrite` and subsequent mutations return
-`Unsupported(NonExtentInode)` before copying or dirtying user data. Fully allowing the whole-disk legacy format must also implement
-allocation, freeing, truncate and resize for direct/single/double/triple indirect blocks; it is not enough to merely remove the mount check.
+a whole-disk `^extents` format returns `Unsupported(NonExtentFilesystem)` before
+recovery or root publication. Individual legacy regular inodes support mutation
+when all mappings fit the twelve direct slots and all indirect roots are zero.
+`extent/legacy_mutate.rs` validates pointers and owns truncation/release;
+`file/legacy.rs` performs bounded synchronous ordered writeback, including hole
+allocation, zero padding and quota/i_blocks accounting. Indirect trees remain
+read-only; attempts to dirty beyond the direct slots fail before data copying.
+Legacy fallocate remains unsupported.
+
+`extent/migrate.rs` implements `FS_IOC_SETFLAGS` mapping transitions. Clearing
+`EXT4_EXTENTS_FL` follows Linux's simple reverse-migration scope: an empty root
+or one initialized inline extent ending before slot twelve, on a filesystem
+whose blocks fit 32-bit pointers. Because indirect allocation is not supported,
+the visible file size must also fit twelve filesystem blocks, including when
+the extent root is empty. Logical offsets are retained, including a
+leading hole. Enabling extents compacts direct pointers into at most four
+inline initialized runs. Other shapes fail without changing inode metadata.
+Both transitions drain writeback and revoke mapped PTEs under KVFS data and
+invalidate protection, then journal flags and the root together without moving
+payload blocks. Direct writes, truncate and orphan cleanup retain the existing
+journal and quota owners.
 
 ## Background
 
@@ -396,17 +412,12 @@ This lock is the synchronization implementation of the current ext4 state, and t
 `kind` is decoded once from the on-disk `i_mode` at inode load (iget) and stored as a plain
 `Ext4Inode` field that never changes afterwards. The raw `i_flags` has a single resident copy,
 the `Ext4Inode` atomic; it is decoded alongside `kind` and never stored in the resident
-metadata. Non-format bits change at runtime (e.g. setting `EXT4_INDEX_FL` when a directory
-gains an index) and are published only by `set_flags` under the inode-state write lock. The
-generic `update_dirty_inode_metadata` raw-byte path must not touch `i_flags` because it does not
-synchronize the atomic; flag changes go through `update_inode_flags_timestamps_metadata`, which
-rejects a mapping-format change before writing the entry. The mapping-format bit
-`EXT4_EXTENTS_FL` is immutable for a resident inode after iget/create:
-lock-free readers such as `has_extents()` select the mapping interpreter from it, so `set_flags`
-rejects a format-bit change as corruption rather than silently diverging. Write paths read the
-plain field for `S_ISREG` and the atomic for `EXT4_EXTENTS_FL` without taking the inode-state
-lock, matching Linux's read pattern, where `ext4_iget` fills `inode->i_mode` and `ei->i_flags`
-once and both are read lock-free at runtime.
+metadata. Ordinary flag publishers reject mapping-format changes.
+`update_inode_mapping_metadata` is the format transition's publication boundary:
+it stages the flags/root in the same journal entry and publishes both under the
+inode-state write lock, clearing mapping proofs. Mapping walkers sample both
+under that lock. Lock-free format decisions require the surrounding KVFS data/
+invalidate or mount protection; migration excludes and drains those users.
 
 The on-disk `i_mode` is split the same way instead of kept as a full resident copy: the type bits
 live only in the immutable `kind`, and the permission/special bits (`i_mode & 0o7777`) live in the
@@ -1441,8 +1452,10 @@ Buffered writes use KVFS `generic_file_write_iter_with_prepare` to combine ext4
 size admission, journal/mount writability checks, and automatic timestamp
 publication. The callback runs under the inode data lock, before folio locking
 and user-data copying; zero-length or rejected writes do not update timestamps.
-It checks live immutable policy before generic size limits, including for empty
-requests, so already-open quota files remain protected during quota activation.
+KVFS checks live immutable/append-only policy before invoking this callback,
+including for empty requests, so already-open quota files remain protected during
+quota activation. The callback relies on the retained data lock and does not
+repeat the generic policy projection before checking format-selected size limits.
 Shared writable faults retain KVFS `file_update_time()`. Both entries use KVFS
 `current_time()`, which samples the tick-granular coarse realtime clock and
 applies superblock range and precision clipping, including when
@@ -1810,3 +1823,13 @@ cancellation release only their token-owned unaccepted tail.
 Generic scans sample live EOF per folio and charge attempted work independently
 of completion prefixes. Existing inode, extent and queued-I/O lifetime owners
 remain unchanged.
+
+## User inode flags
+
+The existing ioctl/fileattr chain reads user-visible ext4 flags and persists
+nodump, no-atime, project-inherit, immutable and append-only changes. KVFS checks
+ownership/CAP_FOWNER and CAP_LINUX_IMMUTABLE using current credentials. Before
+introducing write protection, it revokes mapping PTEs, flushes dirty data and
+retains invalidate exclusion through flag publication while preserving clean
+cached folios. NodeFlags are derived
+from the sole ext4 flag value, so old file descriptions see the new policy.

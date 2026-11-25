@@ -194,7 +194,7 @@ impl Ext4Credits {
         let extent_delete = if filesystem.unlinked_inode_data_blocks(inode)? == 0 {
             0
         } else {
-            filesystem.extent_truncate_metadata_credits(inode, LogicalBlock::new(0))?
+            filesystem.mapping_truncate_metadata_credits(inode, LogicalBlock::new(0))?
         };
         let credits = Self::ORPHAN_LINK_UPDATE
             .checked_add(Self::INODE_UPDATE)
@@ -1333,7 +1333,7 @@ impl Ext4SbInfo {
         inode: &Ext4Inode,
     ) -> Ext4Result<()> {
         if self.unlinked_inode_data_blocks(inode)? != 0 && !inode.has_extents() {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode));
+            self.ensure_legacy_direct_mutation_supported(inode)?;
         }
         Ok(())
     }
@@ -1360,7 +1360,7 @@ impl Ext4SbInfo {
         self.add_namespace_orphan(inode, handle)?;
         self.release_external_xattr_block_for_eviction(inode, handle)?;
         if self.unlinked_inode_data_blocks(inode)? != 0 {
-            self.truncate_extent_mappings(inode, LogicalBlock::new(0), false, handle)?;
+            self.truncate_inode_mappings(inode, LogicalBlock::new(0), false, handle)?;
         }
         self.update_unlinked_inode_metadata(inode, size, timestamp, handle)?;
         self.remove_orphan(inode, handle)?;
