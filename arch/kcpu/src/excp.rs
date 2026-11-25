@@ -32,8 +32,9 @@ pub static IRQ: [unsafe fn(usize) -> bool];
 /// # Safety
 /// Invoke only for an architecture-classified NMI on an initialized CPU with
 /// ordinary IRQs and migration excluded until return. No scheduling is allowed.
-/// On x86, the callback must also avoid operations that can enter an exception
-/// and return with IRET while the dedicated IST frame is live.
+/// Callbacks must not block, allocate, or enable ordinary IRQs. On x86,
+/// exception recovery is limited to breakpoint return and exception-table
+/// fixup of page faults or general-protection faults; other faults stop the CPU.
 #[def_trap_handler]
 pub static NMI: [unsafe fn(usize) -> bool];
 

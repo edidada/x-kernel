@@ -112,7 +112,7 @@ fn x86_trap_handler(tf: &mut ExceptionContext) {
 
 /// Dispatches the architectural NMI with its interrupted context published.
 // SAFETY: the dedicated assembly entry calls this symbol with a complete
-// ExceptionContext on the local IST stack and the trusted GS base installed.
+// ExceptionContext on a live CPU/task stack and the trusted GS base installed.
 #[unsafe(no_mangle)]
 extern "C" fn x86_nmi_handler(tf: &ExceptionContext) {
     if !nmi::begin_dispatch() {
