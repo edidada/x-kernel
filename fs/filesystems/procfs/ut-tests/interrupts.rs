@@ -63,6 +63,31 @@ fn mapped(virq: usize, trigger: IrqTrigger) -> SyntheticLine {
     line
 }
 
+/// Erases the per-CPU count fields of every IRQ row so snapshots taken at
+/// different times can be compared. Timer and IPI Lines keep counting on other
+/// CPUs between a rewind and the following traversal, exactly as they do for
+/// Linux `/proc/interrupts`; only the presentation must stay stable.
+fn mask_count_columns(text: &str, cpu_count: usize) -> String {
+    let mut masked = String::with_capacity(text.len());
+    for (index, row) in text.lines().enumerate() {
+        if index == 0 {
+            masked.push_str(row);
+        } else {
+            // `{:>4}:` keeps the IRQ number at the left and every count column
+            // is `" {:>10}"`, so the count block is fixed-width per CPU.
+            let counts_start = row.find(':').expect("IRQ row prefix") + 1;
+            let counts_end = counts_start + cpu_count * 11;
+            masked.push_str(&row[..counts_start]);
+            for _ in 0..cpu_count {
+                masked.push_str(" **********");
+            }
+            masked.push_str(&row[counts_end..]);
+        }
+        masked.push('\n');
+    }
+    masked
+}
+
 struct TwoSliceSink<'a> {
     first: &'a mut [u8],
     second: &'a mut [u8],
@@ -250,9 +275,12 @@ fn partial_read_pread_rewind_and_read_iter_agree() -> unittest::TestResult {
 
     assert_eq!(file.llseek(0, 0).unwrap(), 0);
     let mut read_buffer = [0u8; 32];
-    let mut reader = iov_iter::iov_iter_kvec_dest(&mut read_buffer);
-    let count = file.read_iter(&mut reader).unwrap();
+    let count = {
+        let mut reader = iov_iter::iov_iter_kvec_dest(&mut read_buffer);
+        file.read_iter(&mut reader).unwrap()
+    };
     assert!(count > 0);
+    assert_eq!(&read_buffer[..count], &full.as_bytes()[..count]);
 
     assert_eq!(file.llseek(0, 0).unwrap(), 0);
     let mut pos = 0;
@@ -261,7 +289,11 @@ fn partial_read_pread_rewind_and_read_iter_agree() -> unittest::TestResult {
     assert_eq!(&pread[..count], &full.as_bytes()[..count]);
 
     assert_eq!(file.llseek(0, 0).unwrap(), 0);
-    assert_eq!(read_all(&file), full);
+    let cpus = online_cpus();
+    assert_eq!(
+        mask_count_columns(&read_all(&file), cpus.len()),
+        mask_count_columns(&full, cpus.len())
+    );
     TestResult::Ok
 }
 

@@ -82,15 +82,18 @@ Formatting uses the real named-action list only as text: unnamed actions still
 keep `has_actions()` true and therefore keep the row.
 
 The text order is Virq, one right-aligned per-CPU count, controller family,
-hardware IRQ, trigger, then optional action names. The record sink is fallible:
+hardware IRQ, trigger, then optional action names. Counters are sampled per
+traversal: timer and IPI Lines keep counting on other CPUs, so two traversals
+are not byte-identical while the system is live. The record sink is fallible:
 `FileTooLarge` and `NoMemory` from the `SeqFile` buffer are preserved.
 `max_record_bytes` is `isize::MAX as usize`; a row larger than the initial 4 KiB
 buffer grows dynamically and is not truncated.
 
 `ut-tests/interrupts.rs` covers the header, named and unnamed rows, hidden
 zero/no-action rows, NMI/NoFlow skips, retired-row continuation, historical
-counts, partial/pread/readv/rewind, a record over 4 KiB, `SEEK_END` rejection,
-read-only behaviour and forced observation-error propagation.
+counts, partial/pread/readv/rewind (comparing snapshots with the live count
+columns masked), a record over 4 KiB, `SEEK_END` rejection, read-only behaviour
+and forced observation-error propagation.
 
 ## IRQ affinity view
 
