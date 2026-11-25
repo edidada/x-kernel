@@ -32,7 +32,7 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 
 use khal::time::monotonic_time;
 use kspin::SpinRwNoIrq;
@@ -193,6 +193,126 @@ static TIMEKEEPER: SpinRwNoIrq<Timekeeper> = SpinRwNoIrq::new(Timekeeper::INITIA
 static CHANGE_ID: AtomicU64 = AtomicU64::new(0);
 static REALTIME_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Lock-free publication of the clock correlation consumed by
+/// [`realtime_coarse`].
+///
+/// Writers hold the TIMEKEEPER write lock and bump `seq` around the two base
+/// stores; readers retry while `seq` is odd and keep their base loads ahead of
+/// the re-check with an acquire fence, so a stale pair cannot pass validation on
+/// a weakly ordered CPU. [`Self::new`] matches
+/// [`ClockCorrelation::FALLBACK`] (monotonic origin, Unix epoch).
+struct CoarseCorrelation {
+    /// Odd while [`Self::publish`] stores the base pair.
+    seq: AtomicU32,
+    /// [`ClockCorrelation::monotonic_base`] in nanoseconds since the monotonic
+    /// origin.
+    monotonic_base_ns: AtomicU64,
+    /// [`ClockCorrelation::realtime_base`] in Unix nanoseconds.
+    realtime_base_ns: AtomicU64,
+}
+
+impl CoarseCorrelation {
+    /// Creates the record before the first publication.
+    ///
+    /// Returns: a zeroed record whose base pair equals
+    /// [`ClockCorrelation::FALLBACK`] (monotonic origin, Unix epoch).
+    ///
+    /// Errors: none.
+    ///
+    /// Locking: none; construction only.
+    const fn new() -> Self {
+        Self {
+            seq: AtomicU32::new(0),
+            monotonic_base_ns: AtomicU64::new(0),
+            realtime_base_ns: AtomicU64::new(0),
+        }
+    }
+
+    /// Publishes one clock correlation for the lock-free coarse reader.
+    ///
+    /// - `correlation`: the base pair committed under the TIMEKEEPER write lock.
+    ///
+    /// Returns: nothing.
+    ///
+    /// Errors: none.
+    ///
+    /// Locking: caller must hold the TIMEKEEPER write lock. Single writer, so
+    /// the sequence brackets cannot interleave; readers only spin while it is
+    /// odd.
+    fn publish(&self, correlation: ClockCorrelation) {
+        let monotonic_ns = correlation
+            .monotonic_base
+            .span_since_origin()
+            .as_nanos_u64_saturating();
+        let realtime_ns = correlation
+            .realtime_base
+            .unix_nanos()
+            .clamp(0, u64::MAX as i128) as u64;
+        self.seq.fetch_add(1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        self.monotonic_base_ns
+            .store(monotonic_ns, Ordering::Relaxed);
+        self.realtime_base_ns.store(realtime_ns, Ordering::Relaxed);
+        fence(Ordering::Release);
+        self.seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// Returns the base pair of the last completed publication.
+    ///
+    /// Returns: the published correlation, or [`ClockCorrelation::FALLBACK`]
+    /// before the first publication.
+    ///
+    /// Errors: none.
+    ///
+    /// Locking: lock-free and valid in interrupt context; spins only while a
+    /// publisher sits between its sequence bumps.
+    fn snapshot(&self) -> ClockCorrelation {
+        self.snapshot_with(|| {})
+    }
+
+    /// Returns the base pair of the last completed publication, running
+    /// `after_bases` once the pair is loaded and before the sequence re-check.
+    ///
+    /// - `after_bases`: runs inside the read window. Production
+    ///   [`Self::snapshot`] passes a no-op that monomorphizes away; unit tests
+    ///   use it to interleave a publish and prove the re-check drops the torn
+    ///   pair.
+    ///
+    /// Returns: the published correlation, or [`ClockCorrelation::FALLBACK`]
+    /// before the first publication.
+    ///
+    /// Errors: none.
+    ///
+    /// Locking: lock-free and valid in interrupt context; spins only while a
+    /// publisher sits between its sequence bumps.
+    #[inline]
+    fn snapshot_with(&self, mut after_bases: impl FnMut()) -> ClockCorrelation {
+        let (monotonic_base_ns, realtime_base_ns) = loop {
+            let seq = self.seq.load(Ordering::Acquire);
+            if seq & 1 != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            let monotonic_base_ns = self.monotonic_base_ns.load(Ordering::Relaxed);
+            let realtime_base_ns = self.realtime_base_ns.load(Ordering::Relaxed);
+            after_bases();
+            // The acquire load above only pins accesses after it, so the two
+            // base loads need this load-load barrier to stay ahead of the
+            // re-check on a weakly ordered CPU.
+            fence(Ordering::Acquire);
+            if self.seq.load(Ordering::Relaxed) == seq {
+                break (monotonic_base_ns, realtime_base_ns);
+            }
+        };
+        ClockCorrelation::new(
+            MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(monotonic_base_ns)),
+            SystemTime::from_unix_nanos(realtime_base_ns as i128).unwrap_or(SystemTime::MAX),
+        )
+    }
+}
+
+static COARSE: CoarseCorrelation = CoarseCorrelation::new();
+
 /// Duration of one kernel tick in nanoseconds, rounded like Linux `TICK_NSEC`.
 ///
 /// The rate is `TICKS_PER_SECOND`, the x-kernel analogue of Linux `CONFIG_HZ`.
@@ -241,6 +361,7 @@ pub fn initialize_realtime(sample: SystemTime) {
         // matches the correlation we publish.
         let monotonic_base = monotonic_time();
         timekeeper.correlation = ClockCorrelation::new(monotonic_base, sample);
+        COARSE.publish(timekeeper.correlation);
         REALTIME_INITIALIZED.store(true, Ordering::Release);
         let update = prepare_clock_update(&timekeeper, false);
         let wake = change::publish(false);
@@ -284,6 +405,7 @@ pub fn set_realtime_checked(sample: SystemTime) -> Result<(), RealtimeOutOfRange
     let monotonic_base = monotonic_time();
 
     timekeeper.set_realtime_checked(sample, monotonic_base)?;
+    COARSE.publish(timekeeper.correlation);
     REALTIME_INITIALIZED.store(true, Ordering::Release);
     let update = prepare_clock_update(&timekeeper, false);
     let wake = change::publish(false);
@@ -330,24 +452,27 @@ pub fn realtime() -> SystemTime {
 ///
 /// While the correlation is unchanged, repeated reads inside one tick return
 /// the same value, which lets callers recognize an unchanged timestamp, as
-/// Linux `current_time` does on its `ktime_get_coarse_real_ts64` path. The
-/// result trails [`realtime`] by less
-/// than one tick, keeps full sub-second precision, and reflects a wall-clock
+/// Linux `current_time` does on its `ktime_get_coarse_real_ts64` path. Absent a
+/// concurrent correlation commit the result trails [`realtime`] by less than one
+/// tick; a read that races a commit may observe the previous correlation until
+/// the next read. It keeps full sub-second precision and reflects a wall-clock
 /// update — including a backward step — on the next read.
 ///
 /// Returns: the coarse wall-clock timestamp.
 ///
 /// Errors: none.
 ///
-/// Locking: takes the timekeeper read lock, like [`realtime`]. Does not sleep
-/// and is valid in interrupt context.
+/// Locking: lock-free. Reads the correlation published by the last
+/// [`initialize_realtime`]/[`set_realtime_checked`]/sleep-injection commit
+/// through a seqlock, then samples monotonic time without the timekeeper lock.
+/// Does not sleep and is valid in interrupt context.
 pub fn realtime_coarse() -> SystemTime {
-    let timekeeper = TIMEKEEPER.read();
+    let correlation = COARSE.snapshot();
     let monotonic = monotonic_time();
     let now_ns = monotonic.span_since_origin().as_nanos_u64_saturating();
     let floored =
         MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(now_ns - now_ns % TICK_NS));
-    timekeeper.correlation.realtime_at(floored)
+    correlation.realtime_at(floored)
 }
 
 /// Returns the current boot-time instant, including injected sleep intervals.
@@ -402,6 +527,7 @@ pub fn inject_sleeptime(delta: TimeSpan) -> Result<(), SleepTimeError> {
     }
     let mut timekeeper = TIMEKEEPER.write();
     timekeeper.inject_sleeptime(delta, monotonic_time())?;
+    COARSE.publish(timekeeper.correlation);
     let update = prepare_clock_update(&timekeeper, true);
     let wake = change::publish(true);
     drop(timekeeper);

@@ -59,6 +59,11 @@ fn sys_riscv_flush_icache(flags: usize) -> KResult<isize> {
 ///
 /// # Arguments
 ///
+/// - `uctx`: the current user thread's exclusively borrowed trap context.
+/// - `thread`: the same calling thread, already held by the syscall entry loop;
+///   the seccomp check reads its per-thread mode instead of re-deriving the
+///   current task.
+///
 /// `uctx` must be the current user thread's exclusively borrowed trap context.
 /// The runtime must have established current process/thread state, address-space
 /// access, scheduler, allocator, and subsystem initialization. Despite the name,
@@ -83,7 +88,10 @@ fn sys_riscv_flush_icache(flags: usize) -> KResult<isize> {
     reason = "CG-028-focused-functions: linear syscall dispatch table: one short match arm per \
               syscall number, arms share no state"
 )]
-pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
+pub fn handle_syscall(
+    uctx: &mut UserContext,
+    thread: &kprocess::Thread,
+) -> UserThreadRuntimeAction {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
         warn!("Invalid syscall number: {}", uctx.sysno());
         uctx.set_retval(-LinuxError::ENOSYS.into_raw() as _);
@@ -99,7 +107,7 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
     // seccomp filters run before dispatch (Linux evaluates seccomp before
     // the syscall handler). The current thread's mode/chain decides whether
     // the syscall is allowed, gets an errno, or kills the process/thread.
-    if let Some(seccomp_decision) = evaluate_seccomp(uctx) {
+    if let Some(seccomp_decision) = evaluate_seccomp(uctx, thread) {
         return seccomp_decision;
     }
 
@@ -1027,17 +1035,19 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 /// Returns `Some(action)` when seccomp decided the syscall must not be
 /// dispatched normally: an errno was forced, or the process/thread was
 /// killed. Returns `None` when the syscall is allowed to proceed.
-fn evaluate_seccomp(uctx: &mut UserContext) -> Option<UserThreadRuntimeAction> {
+fn evaluate_seccomp(
+    uctx: &mut UserContext,
+    thread: &kprocess::Thread,
+) -> Option<UserThreadRuntimeAction> {
     use kseccomp::Decision;
 
-    // Borrow the current thread instead of cloning a task handle. The disabled
+    // The caller passes the thread the entry loop already holds. The disabled
     // case returns before building the `seccomp_data` snapshot, so an
     // unconfined process pays one lock-free mode load and no argument copying.
-    let decision = kprocess::with_current_user_thread(|thread| {
-        let seccomp = thread.seccomp();
-        if seccomp.is_disabled() {
-            return Decision::Allow;
-        }
+    let seccomp = thread.seccomp();
+    let decision = if seccomp.is_disabled() {
+        Decision::Allow
+    } else {
         let data = kseccomp::SeccompData::new(
             uctx.sysno() as i32,
             audit_arch(),
@@ -1052,7 +1062,7 @@ fn evaluate_seccomp(uctx: &mut UserContext) -> Option<UserThreadRuntimeAction> {
             ],
         );
         seccomp.evaluate(&data)
-    });
+    };
 
     match decision {
         Decision::Allow => None,

@@ -735,6 +735,10 @@ impl InodeAttributeOperations for Ext4Inode {
         self.node_flags()
     }
 
+    fn is_immutable(&self) -> bool {
+        self.immutable_flag()
+    }
+
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         debug_assert_eq!(inode_number, u64::from(self.number().get()));
         metadata_from_inode(self, block_size)
@@ -1952,7 +1956,7 @@ impl FileOperations for Ext4Inode {
                 // so this stays ahead of `prepare_buffered_write` even though the
                 // per-page reservation repeats it. Mount writability was
                 // established at VFS write admission (`lock_writable_mount` plus
-                // `verify_write_area`), so it does not repeat here.
+                // `verify_write_area_locked`), so it does not repeat here.
                 ext4.ensure_writable().map_err(into_vfs_err)?;
                 *count = self
                     .prepare_buffered_write(

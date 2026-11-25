@@ -1888,29 +1888,59 @@ impl Path {
     /// Revokes a content write's inherited privileges while the caller holds
     /// [`VfsInode::lock_privileges`] and the writable-mount lock.
     pub(crate) fn file_remove_privs_locked(&self, cred: &Cred) -> VfsResult<()> {
+        self.file_remove_privs_locked_inode(&self.inode(), cred)
+    }
+
+    /// Revokes a content write's inherited privileges on `inode`.
+    ///
+    /// - `inode`: target inode; the caller already holds the inode handle.
+    /// - `cred`: writing task's credential, used for the set-GID decision.
+    ///
+    /// Returns: nothing; a write with nothing to revoke returns immediately.
+    ///
+    /// Errors: immutable targets and metadata-update failures propagate.
+    ///
+    /// Locking: caller must hold the inode's privilege lock and the writable
+    /// mount lock. Does not take the inode handle from the path again.
+    pub(crate) fn file_remove_privs_locked_inode(
+        &self,
+        inode: &VfsInode,
+        cred: &Cred,
+    ) -> VfsResult<()> {
         // Linux rejects an immutable target before `notify_change()`; doing it
         // here keeps a doomed write, truncate or copy from stripping
         // `security.capability` first.
-        self.inode().check_mutable()?;
-        let metadata = self.metadata();
-        if metadata.mode.node_type() != NodeType::RegularFile {
+        inode.check_mutable()?;
+        // Linux `S_NOSEC` fast path: with no set-ID bit to clear and no
+        // attribute store to consult, a content write must not touch
+        // filesystem metadata at all.
+        let file_mode = inode.mode();
+        if file_mode.node_type() != NodeType::RegularFile {
             return Ok(());
         }
-        let permission = metadata.mode.permission();
+        let permission = file_mode.permission();
+        let has_attributes = inode.has_extended_attributes();
+        if !permission.contains(NodePermission::SET_UID)
+            && !permission.contains(NodePermission::SET_GID)
+            && !has_attributes
+        {
+            return Ok(());
+        }
         let strips_uid = permission.contains(NodePermission::SET_UID);
+        let gid = if permission.contains(NodePermission::SET_GID) {
+            inode.owner().1
+        } else {
+            0
+        };
         // `strip_write_privileges()` drops set-GID for a group-execute mark
         // and for a writer outside the file's group, so both must keep the
         // fast path from skipping the metadata update.
         let strips_gid = permission.contains(NodePermission::SET_GID)
-            && (permission.contains(NodePermission::GROUP_EXEC) || !cred.in_group(metadata.gid));
-        let has_attributes = self.inode().has_extended_attributes();
-        // Linux `S_NOSEC` fast path: with no set-ID bit to clear and no
-        // attribute store to consult, a content write must not touch
-        // filesystem metadata at all.
+            && (permission.contains(NodePermission::GROUP_EXEC) || !cred.in_group(gid));
         if !strips_uid && !strips_gid && !has_attributes {
             return Ok(());
         }
-        let mode = Self::strip_write_privileges(permission, metadata.gid, cred);
+        let mode = Self::strip_write_privileges(permission, gid, cred);
         if mode.bits() != permission.bits() {
             self.inode()
                 .remove_setid_bits(self.dentry(), permission & !mode)?;

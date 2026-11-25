@@ -1241,7 +1241,21 @@ impl VfsFile {
         self.verify_io_area(pos, count)
     }
 
-    fn verify_write_area(&self, pos: u64, count: usize) -> VfsResult<()> {
+    /// Write-area validation for a write that already passed write admission.
+    ///
+    /// - `pos`: write start offset in bytes.
+    /// - `count`: requested length in bytes.
+    ///
+    /// Returns: nothing when the open mode and address range are valid.
+    ///
+    /// Errors: `BadFileDescriptor` for a non-writable path-only handle,
+    /// `InvalidInput` for an unsupported range; other errors propagate.
+    ///
+    /// Locking: none, and this check never consults the mount. A writer holds
+    /// the write-admission guard taken by its caller; a handle opened without
+    /// `FMode::WRITER` (special files) holds none, matching the open path that
+    /// exempts special files from write admission.
+    fn verify_write_area_locked(&self, pos: u64, count: usize) -> VfsResult<()> {
         let mode = self.mode();
         if !mode.contains(FMode::WRITE) || mode.contains(FMode::PATH) {
             return Err(VfsError::BadFileDescriptor);
@@ -1250,12 +1264,7 @@ impl VfsFile {
             return Err(VfsError::InvalidInput);
         }
         self.check_write_flags(self.flags())?;
-        self.verify_io_area(pos, count)?;
-        if self.node_type().is_special() {
-            Ok(())
-        } else {
-            self.path().check_writable_mount()
-        }
+        self.verify_io_area(pos, count)
     }
 
     pub(crate) fn check_write_flags(&self, flags: OpenFlags) -> VfsResult<()> {
@@ -1414,7 +1423,9 @@ impl VfsFile {
         pos: &mut u64,
         cred: &Cred,
     ) -> VfsResult<usize> {
-        let _write_guard = if self.mode().contains(FMode::WRITER) {
+        let file_mode = self.mode();
+        let writes = file_mode.contains(FMode::WRITER);
+        let _write_guard = if writes {
             Some(self.path().lock_writable_mount()?)
         } else {
             None
@@ -1431,8 +1442,11 @@ impl VfsFile {
         } else {
             *pos
         };
-        // Reject an impossible range before touching metadata.
-        self.verify_write_area(start, iter.count())?;
+        // Reject an impossible range before touching metadata. A writer holds
+        // the writable-mount guard taken above; a handle opened without
+        // `FMode::WRITER` (special files) holds none, so only the open-file
+        // mode and the address range are re-validated here.
+        self.verify_write_area_locked(start, iter.count())?;
         // Linux runs its generic write checks before `file_remove_privs()`, so
         // a write the filesystem rejects with `EFBIG` must not revoke the
         // file's privileges first. A position at or beyond the size limit is
@@ -1448,14 +1462,14 @@ impl VfsFile {
         // between them. An empty or doomed write changes no content and takes
         // no revocation; it still reaches the backend so its own checks report
         // as before.
-        let revokes_privileges =
-            iter.count() > 0 && !beyond_size_limit && self.mode().contains(FMode::WRITER);
+        let revokes_privileges = iter.count() > 0 && !beyond_size_limit && writes;
         let privilege_inode = revokes_privileges.then(|| self.inode());
         let _privilege_guard = privilege_inode
             .as_ref()
             .map(|inode| inode.lock_privileges());
         if revokes_privileges {
-            self.path().file_remove_privs_locked(cred)?;
+            self.path()
+                .file_remove_privs_locked_inode(self.inode(), cred)?;
         }
         let mut iocb = Kiocb::new(self, start);
         let written = self.operations().write_iter(&mut iocb, iter)?;

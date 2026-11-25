@@ -226,21 +226,30 @@ prove RTC continuity across real host sleep, device recovery or CPU quiescence.
 
 ## Coarse Tick-Granular Wall Clock
 
-`realtime_coarse` derives the wall clock at tick granularity: it takes the
-timekeeper read lock, floors the monotonic sample to the tick boundary with
-`TICK_NS`, and evaluates the existing `ClockCorrelation::realtime_at` at that
-instant. There is no cached state, no identity tracking, and no second lock.
-This mirrors the role of Linux timekeeping's `xtime_coarse` image
-(`ktime_get_coarse_real_ts64`); Linux refreshes that image from the tick path,
-while x-kernel computes it per read, which is observationally equivalent
-because the derivation depends only on the tick floor and the committed
-correlation.
+`realtime_coarse` derives the wall clock at tick granularity without taking the
+timekeeper lock. Each global timekeeper commit (initialize, set, sleep
+injection, suspend resume) publishes the committed `(monotonic_base,
+realtime_base)` pair into a private `CoarseCorrelation` seqlock; the reader loads
+that pair, samples monotonic time, floors the sample to the tick boundary with
+`TICK_NS`, and evaluates `ClockCorrelation::realtime_at` at that instant. Local
+`Timekeeper` copies used by unit tests never publish, so they cannot overwrite
+the global snapshot. This mirrors the role of Linux timekeeping's `xtime_coarse`
+image (`ktime_get_coarse_real_ts64`): Linux refreshes that image from the tick
+path, while x-kernel recomputes it per read from the published base pair and the
+tick floor.
 
-Contract (true by construction): while the correlation is unchanged, repeated
-reads within one tick return the same value, the result trails `realtime` by
-less than one tick, and successive reads are monotonic; a wall-clock update —
-including a backward step — is visible on the next read and rescales the value
-even inside the current tick. The value keeps full
-sub-second precision of the correlation at the tick instant; filesystems
-apply `timestamp_truncate` separately. Consumers needing exact elapsed wall
-time (quota timers, RTC, tracing) keep using `realtime`.
+The seqlock keeps the pair coherent. Writers bump an `AtomicU32` sequence around
+the two base stores, and readers retry while it is odd and re-check it after an
+acquire fence, so a torn pair cannot pass validation on a weakly ordered CPU.
+The published record is a read-only projection of the committed correlation; the
+timekeeper stays the single authority.
+
+Contract: while the correlation is unchanged, repeated reads within one tick
+return the same value and successive reads are monotonic. Absent a concurrent
+commit the result trails `realtime` by less than one tick; a read that races a
+commit may observe the previous correlation until the next read. A wall-clock
+update — including a backward step — becomes visible on the next read and
+rescales the value even inside the current tick. The value keeps full sub-second
+precision of the correlation at the tick instant; filesystems apply
+`timestamp_truncate` separately. Consumers needing exact elapsed wall time
+(quota timers, RTC, tracing) keep using `realtime`.

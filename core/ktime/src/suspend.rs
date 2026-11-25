@@ -218,6 +218,7 @@ pub fn resume_suspend_accounting(
     if delta.is_zero() {
         return Ok(());
     }
+    crate::COARSE.publish(timekeeper.correlation);
     let update = prepare_clock_update(&timekeeper, true);
     let wake = change::publish(true);
     drop(timekeeper);

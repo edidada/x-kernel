@@ -1411,6 +1411,16 @@ impl Ext4Inode {
         });
     }
 
+    /// Returns whether the on-disk immutable flag is set, without decoding the
+    /// full behavior-flag set.
+    ///
+    /// Returns: `true` when `EXT4_IMMUTABLE_FL` is set in the published flags.
+    ///
+    /// Locking: lock-free; reads the `flags` atomic.
+    pub(crate) fn immutable_flag(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & disk_inode::EXT4_IMMUTABLE_FL != 0
+    }
+
     /// Composes the VFS `NodeFlags`: disk-projected bits derived on read from
     /// the raw `flags` atomic, plus the runtime-only `NO_QUOTA`.
     ///
@@ -1784,7 +1794,7 @@ impl Ext4Inode {
     ///
     /// Locking: lock-free; reads the published `i_flags` atomic.
     pub fn is_immutable(&self) -> bool {
-        self.flags() & disk_inode::EXT4_IMMUTABLE_FL != 0
+        self.immutable_flag()
     }
 
     /// Returns whether the inode carries the ext4 append-only flag.

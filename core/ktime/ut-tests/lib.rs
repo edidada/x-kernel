@@ -237,3 +237,61 @@ fn realtime_coarse_equals_correlation_at_the_floored_tick() {
     }
     assert!(verified, "tick floor or correlation never stayed stable");
 }
+
+#[def_test]
+fn coarse_correlation_round_trips_each_publication() {
+    // A local instance keeps the assertions off the global `COARSE` snapshot.
+    let coarse = CoarseCorrelation::new();
+    assert_eq!(coarse.snapshot(), ClockCorrelation::FALLBACK);
+
+    let first = ClockCorrelation::new(
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(4)),
+        SystemTime::from_unix_seconds(1_000),
+    );
+    coarse.publish(first);
+    assert_eq!(coarse.snapshot(), first);
+
+    let second = ClockCorrelation::new(
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(9)),
+        SystemTime::from_unix_seconds(2_000),
+    );
+    coarse.publish(second);
+    assert_eq!(coarse.snapshot(), second);
+}
+
+#[def_test]
+fn coarse_correlation_sequence_brackets_publication() {
+    // Each publish advances the sequence by two and leaves it even; a writer
+    // that stored the pair without the brackets would fail here.
+    let coarse = CoarseCorrelation::new();
+    assert_eq!(coarse.seq.load(Ordering::Relaxed), 0);
+    coarse.publish(ClockCorrelation::FALLBACK);
+    assert_eq!(coarse.seq.load(Ordering::Relaxed), 2);
+    coarse.publish(ClockCorrelation::FALLBACK);
+    assert_eq!(coarse.seq.load(Ordering::Relaxed), 4);
+}
+
+#[def_test]
+fn coarse_correlation_rejects_a_torn_read() {
+    // Interleave a publish between the base loads and the sequence re-check.
+    // Dropping the re-check, or the publisher's sequence brackets, would let
+    // the stale first pair survive, so `observed` would differ from `second`.
+    let coarse = CoarseCorrelation::new();
+    let first = ClockCorrelation::new(
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(4)),
+        SystemTime::from_unix_seconds(1_000),
+    );
+    let second = ClockCorrelation::new(
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(9)),
+        SystemTime::from_unix_seconds(2_000),
+    );
+    coarse.publish(first);
+    let mut injected = false;
+    let observed = coarse.snapshot_with(|| {
+        if !injected {
+            injected = true;
+            coarse.publish(second);
+        }
+    });
+    assert_eq!(observed, second);
+}

@@ -792,6 +792,14 @@ pub trait InodeAttributeOperations: Send + Sync {
     /// Returns the behavior flags owned by the resident attribute storage.
     fn flags(&self) -> NodeFlags;
 
+    /// Returns whether the immutable bit rejects content and metadata changes.
+    ///
+    /// Backends whose flags live in an atomic override this to test one bit
+    /// instead of projecting every behavior flag.
+    fn is_immutable(&self) -> bool {
+        self.flags().contains(NodeFlags::IMMUTABLE)
+    }
+
     /// Builds a snapshot using the inode number owned by the VFS identity.
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata;
 
@@ -1026,6 +1034,10 @@ impl InodeAttributeOperations for OwnedInodeAttributes {
         self.flags
     }
 
+    fn is_immutable(&self) -> bool {
+        self.flags.contains(NodeFlags::IMMUTABLE)
+    }
+
     fn fill_metadata(&self, inode_number: u64, block_size: u64) -> Metadata {
         OwnedInodeAttributes::fill_metadata(self, inode_number, block_size)
     }
@@ -1152,6 +1164,10 @@ impl InodeAttributes {
 
     fn flags(&self) -> NodeFlags {
         self.operations.flags()
+    }
+
+    fn is_immutable(&self) -> bool {
+        self.operations.is_immutable()
     }
 
     fn operation_flags(&self) -> u16 {
@@ -2379,7 +2395,7 @@ impl VfsInode {
     }
 
     pub(crate) fn check_mutable(&self) -> VfsResult<()> {
-        if self.flags().contains(NodeFlags::IMMUTABLE) {
+        if self.attributes.is_immutable() {
             return Err(VfsError::OperationNotPermitted);
         }
         Ok(())
@@ -2566,6 +2582,16 @@ impl VfsInode {
 
     pub(crate) fn cached_link(&self) -> Option<String> {
         self.special_state.cached_link()
+    }
+
+    /// Returns the cached mode without building a metadata snapshot.
+    pub(crate) fn mode(&self) -> Umode {
+        self.attributes.mode()
+    }
+
+    /// Returns the cached owner uid and gid without building a snapshot.
+    pub(crate) fn owner(&self) -> (u32, u32) {
+        self.attributes.operations.owner()
     }
 
     /// Returns the VFS node type for this inode.

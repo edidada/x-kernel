@@ -79,7 +79,9 @@ fn load_init_image(
 pub fn spawn_init_process(
     args: &[String],
     envs: &[String],
-    dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
+    dispatch_syscall: impl FnMut(&mut UserContext, &kprocess::Thread) -> UserThreadRuntimeAction
+    + Send
+    + 'static,
     after_init_exit: impl FnOnce() + Send + 'static,
 ) {
     // PID 1: must be the first root PID allocation in the system. The late-init

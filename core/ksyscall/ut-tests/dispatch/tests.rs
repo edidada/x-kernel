@@ -56,7 +56,7 @@ fn dispatch_rt_sigqueueinfo_ignores_the_trailing_register() {
     // be interpreted as a signal-set size or the siginfo pointer.
     uctx.set_arg3(usize::MAX);
 
-    assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
+    assert_eq!(handle_syscall(&mut uctx, &kprocess::current_user_thread()), UserThreadRuntimeAction::Continue);
     assert_eq!(uctx.retval(), 0);
 }
 
@@ -76,7 +76,7 @@ fn dispatch_rt_tgsigqueueinfo_uses_four_arguments() {
     uctx.set_arg3(siginfo_address);
     uctx.set_arg4(usize::MAX);
 
-    assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
+    assert_eq!(handle_syscall(&mut uctx, &kprocess::current_user_thread()), UserThreadRuntimeAction::Continue);
     assert_eq!(uctx.retval(), 0);
 }
 
@@ -92,7 +92,7 @@ fn dispatch_legacy_epoll_wait_maps_number_and_arguments() {
     uctx.set_arg2(1);
     uctx.set_arg3(0);
 
-    assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
+    assert_eq!(handle_syscall(&mut uctx, &kprocess::current_user_thread()), UserThreadRuntimeAction::Continue);
     assert_eq!(
         uctx.retval(),
         KError::BadFileDescriptor.into_syscall_return() as usize
@@ -108,7 +108,7 @@ fn dispatch_legacy_epoll_create_maps_number_and_arguments() {
     uctx.set_sysno(Sysno::epoll_create.id() as usize);
     uctx.set_arg0(0); // a non-positive size is rejected before any allocation
 
-    assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
+    assert_eq!(handle_syscall(&mut uctx, &kprocess::current_user_thread()), UserThreadRuntimeAction::Continue);
     assert_eq!(
         uctx.retval(),
         KError::InvalidInput.into_syscall_return() as usize

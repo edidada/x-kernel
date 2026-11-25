@@ -37,7 +37,9 @@ use posix_ipc::SHM_MANAGER;
 pub fn prepare_user_entry(
     uctx: UserContext,
     set_child_tid: usize,
-    dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
+    dispatch_syscall: impl FnMut(&mut UserContext, &kprocess::Thread) -> UserThreadRuntimeAction
+    + Send
+    + 'static,
 ) -> KResult<PreparedTaskEntry> {
     #[cfg(target_arch = "x86_64")]
     let inherited = uctx.save_user_restorable();
@@ -78,7 +80,7 @@ pub fn new_user_task(
 pub(crate) fn run_user_thread_loop(
     mut uctx: UserContext,
     set_child_tid: usize,
-    mut dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction,
+    mut dispatch_syscall: impl FnMut(&mut UserContext, &kprocess::Thread) -> UserThreadRuntimeAction,
 ) {
     let curr = current();
     let thr = current_user_thread();
@@ -113,7 +115,7 @@ pub(crate) fn run_user_thread_loop(
         match reason {
             ReturnReason::Syscall => {
                 uctx.save_syscall_args();
-                runtime_action = dispatch_syscall(&mut uctx);
+                runtime_action = dispatch_syscall(&mut uctx, &thr);
             }
             ReturnReason::PageFault(addr, flags) => {
                 let address_space = thr

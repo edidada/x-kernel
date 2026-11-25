@@ -172,7 +172,7 @@ fn getaffinity_raw(pid: i32, size_register: usize, pointer: usize) -> isize {
     context.set_arg1(size_register);
     context.set_arg2(pointer);
     core::assert_eq!(
-        crate::handle_syscall(&mut context),
+        crate::handle_syscall(&mut context, &kprocess::current_user_thread()),
         kprocess::UserThreadRuntimeAction::Continue
     );
     context.retval() as isize
