@@ -268,7 +268,7 @@ Each inode caches an atomic notification event mask. The notification registry
 serializes all aggregate updates, including subscription replacement and removal.
 The cache filters work; the notifier still validates each watch at delivery.
 Namespace event records retain inode references captured under the operation's
-namespace locks, keeping routing independent of mount IDs and name reuse.
+inode locks, keeping routing independent of mount IDs and name reuse.
 
 `kvfs` provides a Linux-style VFS object model, including superblock, mount, dentry, inode,
 open file, path resolution, and generic filesystem helpers. Concrete filesystems plug in through inode/file operation
@@ -781,7 +781,7 @@ context, and the caller must not hold a non-sleepable lock or a lock needed by t
 One complete pathname operation must reuse the same credential snapshot. The caller must not re-query the current task for each path
 component, otherwise a concurrent credential commit could make one resolution mix identities.
 
-A filesystem callback may block on I/O, but while holding the same set of VFS inode namespace locks it must not
+A filesystem callback may block on I/O, but while holding the same set of VFS inode locks it must not
 re-enter these VFS namespace operations, otherwise it would deadlock on itself.
 
 Built-in filesystem types must also finish registering before user processes start. Runtime lookup only reads the registry, and is not responsible for
@@ -828,13 +828,13 @@ last extent whose traversal is confirmed to have finished gets `LAST`.
 
 The VFS follows the Linux directory-locking ownership model:
 
-- slow lookup takes the shared namespace lock on the parent directory inode;
-- create takes the exclusive namespace lock on the parent directory inode;
+- slow lookup takes the shared inode lock on the parent directory inode;
+- create takes the exclusive inode lock on the parent directory inode;
 - unlink and rmdir lock the parent directory first, then the victim inode;
 - link locks the new parent directory first, then the non-directory source inode;
 - same-directory rename decides by parent dentry identity and locks the parent directory only once;
 - cross-directory rename first acquires the superblock topology mutex, then locks the parent directories in topological order. When there is no ancestor relationship,
-  ordering uses `Dentry::namespace_lock_key()` (the chain of ancestor inode pointers, then the pointer itself); `pivot_root`
+  ordering uses `Dentry::inode_lock_key()` (the chain of ancestor inode pointers, then the pointer itself); `pivot_root`
   takes the locks of its multiple inodes with the same rule. The participant inodes of rename are a separate later stage and do not belong to this total order.
 
 Slow lookup corresponds to Linux `d_alloc_parallel()`: the task that suffers a cache miss creates a unique hashed negative
@@ -842,7 +842,7 @@ dentry, sets the parallel-lookup state, and calls the filesystem
 `lookup` while holding that dentry's lookup mutex; concurrent lookups of the same name reuse this object and wait for the owner to finish. The filesystem expresses a
 negative miss with `Ok(None)`; when it finds an inode it usually instantiates the candidate in place; it returns another dentry only when `d_splice_alias()` semantics require
 reusing a directory alias. Ordinary lookup and namespace mutation use the same
-locked-lookup object method, differing only in whether the parent directory holds the shared or the exclusive namespace lock;
+locked-lookup object method, differing only in whether the parent directory holds the shared or the exclusive inode lock;
 there is no negative-cache path specific to mutation.
 
 After the two parent directories are stable, rename resolves source and target, then locks the participating child directories first, and then the non-directory
@@ -872,7 +872,7 @@ dentry; lookup returns another dentry only when it reuses an existing directory 
 final lookup under the lock is still negative.
 
 unlink and rmdir likewise first resolve the parent via `Filename::unlink_at()` / `Filename::rmdir_at()`,
-and then Dentry resolves the victim exactly once under the parent directory's exclusive namespace lock. The syscall does not first obtain a
+and then Dentry resolves the victim exactly once under the parent directory's exclusive inode lock. The syscall does not first obtain a
 complete target Path and then look it up by name, so it cannot delete another inode with the same name in a replacement race.
 
 ### Path traversal and DAC
@@ -1036,7 +1036,7 @@ but runs `get_tree` again. A new mount of the same shared superblock that reques
 mount, final shutdown is deferred just as in Linux. A sync error during shutdown is logged but does not roll back the already committed
 topology; cleanup and the final flush still continue.
 Unmounting removes the parent child index and restores the covered
-mount under the inode namespace lock of the parent mountpoint, and clears the parent location of the detached mount, so that an open path still holding that mount cannot walk back along the old
+mount under the inode lock of the parent mountpoint, and clears the parent location of the detached mount, so that an open path still holding that mount cannot walk back along the old
 parent into a namespace it has already left.
 
 `MntNamespace::pivot_root()` (`pivot_root(2)` semantics) replaces the visible root of the namespace with the registered mount that
@@ -1044,7 +1044,7 @@ parent into a namespace it has already left.
 `umount2(MNT_DETACH)`). Requirements: `new_root` is a registered mount root, and `put_old` is a directory and
 lies within the `new_root` subtree; `put_old == new_root` is allowed (the runc `pivot_root(".", ".")`
 path), and when `put_old` is covered by other mounts the covered layers are preserved. The surgery runs under the registry mutex plus the namespace write locks of the affected inodes
-(in the total order of `Dentry::namespace_lock_key()`, deduplicated by Arc), and after taking the locks it rechecks that the old visible
+(in the total order of `Dentry::inode_lock_key()`, deduplicated by Arc), and after taking the locks it rechecks that the old visible
 root is still mounted on its own parent mountpoint (the stack read may predate lock acquisition), returning an error rather than asserting if not. It first detaches `new_root` from its original location and restores its covered
 layers, so that it is stacked on top of the namespace's structural root, then takes the original visible root out of the
 position where it was covered by `new_root` (its own overmount chain is still preserved with the subsequent root, corresponding to Linux's stack-preserving move), and finally mounts the
@@ -1253,18 +1253,18 @@ The filesystem type registry is protected by a dedicated mutex. Built-in types a
 copies a static descriptor while holding the lock, and enumeration takes a snapshot of the list and then formats the output, without creating a
 superblock or executing filesystem code while the lock is held.
 
-Namespace callbacks run under the inode namespace lock. A filesystem should synchronize the core
+Namespace callbacks run under the inode lock. A filesystem should synchronize the core
 mutation result into the affected live inodes before the callback returns, and should complete the inode attachment of the created
 object through `LockedDentry::instantiate()`; removal/rebind in the dentry cache is still done by KVFS after the callback returns successfully.
 
-The global namespace lock order is:
+The global inode lock order is:
 
 ```text
 mount-namespace registry mutex (mount tree operations only)
     -> superblock rename mutex (rename only)
-    -> parent-directory namespace locks
-    -> child-directory namespace locks
-    -> non-directory namespace locks (pointer order)
+    -> parent-directory inode locks
+    -> child-directory inode locks
+    -> non-directory inode locks (pointer order)
     -> per-dentry parallel-lookup mutex
     -> mount topology lock
     -> dentry cache and location locks
@@ -1281,11 +1281,11 @@ sync and the global sync snapshot of the Weak registry also acquire the umount l
 eviction, and after acquiring the lock they skip superblocks that are already dying/dead. Shutdown does not acquire the
 mount-namespace registry mutex in the reverse direction.
 
-Both mount operations and the namespace validator run in the order with the inode namespace lock outside and the mount topology lock inside,
+Both mount operations and the namespace validator run in the order with the inode lock outside and the mount topology lock inside,
 so mountpoint checks do not introduce reverse nesting. The parallel-lookup mutex serializes only the filesystem lookup callback of the same hashed
 candidate, and does not serialize slow lookups of different names.
 `SuperBlock::rename_mutex` corresponds to Linux `s_vfs_rename_mutex` and is not the dcache rename
-seqlock; it is acquired only in cross-directory rename. `VfsInode::namespace_lock` expresses the
+seqlock; it is acquired only in cross-directory rename. `VfsInode::i_rwsem` expresses the
 namespace-related subset of Linux `inode->i_rwsem`. `DentryLocation` uses a single `RwLock`
 to protect both `parent` and `name`, so readers never observe a mixed location.
 
@@ -1337,7 +1337,7 @@ lock model and regression coverage are stable.
   transaction state structure; `Umode::mknod_node_type()` only decodes the type bits,
   and the namei-layer `may_mknod()` assigns the Linux errors uniformly and returns the validated `NodeType`.
   The syscall boundary writes that type back into the existing `Umode` before starting `dirfd`/pathname resolution.
-- The namespace lock uses a blocking lock, because filesystem callbacks may perform I/O.
+- The inode lock uses a blocking lock, because filesystem callbacks may perform I/O.
 
 ### SimpleFile Write Modes
 
@@ -1491,13 +1491,13 @@ released with its last reference; hard links share the same active session becau
   `capable(CAP_FSETID)` is the current task and not the descriptor's opener
   credential. Every revocation first rejects an immutable inode, and a write
   whose position is at or beyond the file size limit skips the revocation and
-  lets the backend rule, so an `EFBIG` does not strip privileges. A per-inode
-  privilege lock, taken after the writable-mount lock and before the inode
-  data lock, covers the revocation and the backend content or metadata change
+  lets the backend rule, so an `EFBIG` does not strip privileges. The inode
+  lock (`i_rwsem`), taken after the superblock write admission and before the
+  inode data lock, covers the revocation and the backend content or metadata change
   it protects; `setxattr`, `chown`, `chmod`, file-attribute changes,
-  `truncate`, `fallocate`, native `copy_file_range` and exec
-  security-metadata sampling take the same lock. When namespace exclusion is
-  needed, it follows the privilege lock and precedes data exclusion. Fallocate
+  `truncate`, `fallocate` and native `copy_file_range` take it exclusively,
+  while exec security-metadata sampling takes it shared. Inode exclusion
+  precedes data exclusion. Fallocate
   revokes privileges before taking the data lock, so its mode update cannot
   invert that order. Authorized append-only writes use a dedicated set-ID
   clearing entry; explicit chmod remains forbidden. Truncate rejects

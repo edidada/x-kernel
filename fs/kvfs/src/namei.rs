@@ -858,7 +858,7 @@ impl<'a> Nameidata<'a> {
             LookupCreateResult::Existing(entry) => Ok(self.path.with_dentry(entry)),
             LookupCreateResult::Created(entry) => {
                 file.mark_created();
-                // Captured here, under the parent's namespace lock: the created
+                // Captured here, under the parent's inode lock: the created
                 // dentry's location is mutable afterwards, so the inotify
                 // create event must use this snapshot of where and under what
                 // name the entry was born.
@@ -1086,7 +1086,7 @@ impl Filename {
     }
 
     /// Creates a directory with the final lookup and VFS policy under the
-    /// parent directory namespace lock.
+    /// parent directory inode lock.
     ///
     /// # Errors
     ///
@@ -1305,13 +1305,13 @@ impl Filename {
     /// # Errors
     ///
     /// Returns the pathname, target-type, authorization, mount, or filesystem
-    /// error for the final entry protected by the parent namespace lock.
+    /// error for the final entry protected by the parent inode lock.
     pub fn unlink_at(&self, root: &Path, base: &Path, cred: &Cred) -> VfsResult<()> {
         self.unlink_at_tracked(root, base, cred).map(|_| ())
     }
 
     /// Unlinks like [`Filename::unlink_at`] and reports the removed entry's
-    /// metadata, captured under the removal's own namespace lock.
+    /// metadata, captured under the removal's own inode lock.
     pub fn unlink_at_tracked(
         &self,
         root: &Path,

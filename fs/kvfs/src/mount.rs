@@ -279,7 +279,7 @@ impl MntNamespace {
 
     /// Creates and attaches a filesystem selected by a filesystem context.
     ///
-    /// Filesystem construction completes before the namespace lock is
+    /// Filesystem construction completes before the inode lock is
     /// acquired, so `get_tree` may perform blocking device I/O. If the
     /// selected superblock enters final shutdown before activation, lookup is
     /// repeated just as Linux retries after losing the `sget` race.
@@ -440,7 +440,7 @@ impl MntNamespace {
     /// re-grafted at the target, keeping its identity and submounts.
     ///
     /// The whole detach + re-graft runs under the namespace registry lock and
-    /// the touched inodes' namespace-exclusive locks (CG-015), so a concurrent
+    /// the touched inodes' inode-exclusive locks (CG-015), so a concurrent
     /// mount/umount can never observe a detached-but-not-reattached mount, and a
     /// failing move leaves the tree unchanged.
     pub fn move_mount_to(&self, source: &Path, target: &Path) -> VfsResult<()> {
@@ -469,7 +469,7 @@ impl MntNamespace {
         let mut push_target = |path: &Path| {
             let inode = path.inode();
             if !targets.iter().any(|(held, _)| Arc::ptr_eq(held, &inode)) {
-                targets.push((inode, path.dentry.namespace_lock_key()));
+                targets.push((inode, path.dentry.inode_lock_key()));
             }
         };
         push_target(&parent_path);
@@ -477,7 +477,7 @@ impl MntNamespace {
         targets.sort_by(|left, right| left.1.cmp(&right.1));
         let _guards: Vec<_> = targets
             .iter()
-            .map(|(inode, _)| inode.lock_namespace_exclusive())
+            .map(|(inode, _)| inode.lock_inode_exclusive())
             .collect();
 
         // Re-validate the source edge under the locks: the mount stack may have
@@ -886,7 +886,7 @@ impl MntNamespace {
         // path (an ancestor before its descendant, then a stable pointer
         // tiebreak), so a concurrent multi-inode acquisition cannot ABBA against
         // this surgery. Inodes are never taken twice because
-        // `lock_namespace_exclusive` is a non-reentrant write lock.
+        // `lock_inode_exclusive` is a non-reentrant write lock.
         let new_parent_path = new_mnt.location().ok_or(VfsError::InvalidInput)?;
         // Linux `root_parent`/`root_mp`: the old root's own parent mount and
         // mountpoint, where `new_mnt` takes over. The visible root may sit
@@ -897,7 +897,7 @@ impl MntNamespace {
         let mut push_target = |path: &Path| {
             let inode = path.inode();
             if !targets.iter().any(|(held, _)| Arc::ptr_eq(held, &inode)) {
-                targets.push((inode, path.dentry.namespace_lock_key()));
+                targets.push((inode, path.dentry.inode_lock_key()));
             }
         };
         push_target(&old_parent_path);
@@ -906,7 +906,7 @@ impl MntNamespace {
         targets.sort_by(|left, right| left.1.cmp(&right.1));
         let _guards: Vec<_> = targets
             .iter()
-            .map(|(inode, _)| inode.lock_namespace_exclusive())
+            .map(|(inode, _)| inode.lock_inode_exclusive())
             .collect();
 
         // Re-validate under the locks: the mount stacks read while resolving the
@@ -961,7 +961,7 @@ impl MntNamespace {
 /// mount it covered there, and clears the mount's location pointer.
 ///
 /// Infallible: callers hold the namespace registry lock and the affected inode
-/// namespace-exclusive locks (see [`MntNamespace::pivot_root`]).
+/// inode-exclusive locks (see [`MntNamespace::pivot_root`]).
 fn mount_edge_detach(parent: &Mount, dentry: &Dentry, mount: &Arc<Mount>) {
     match mount.covers.lock().take() {
         Some(covered) => {
@@ -1368,8 +1368,7 @@ impl Path {
         let inode = self.inode();
         // Immutability is an exec-security input; serialize the flag change
         // with sampling and with privilege revocation.
-        let _privilege_guard = inode.lock_privileges();
-        let _namespace_guard = inode.lock_namespace_exclusive();
+        let _inode_guard = inode.lock_inode_exclusive();
         let inode_ns = self.dentry.user_namespace();
         let metadata = inode.metadata();
         if cred.fsuid() != metadata.uid
@@ -1743,10 +1742,10 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
         // Linux `chown_common()` samples, authorizes and commits under the
-        // inode lock. Taking the privilege lock before the snapshot keeps a
+        // inode lock. Taking the inode lock before the snapshot keeps a
         // concurrent chown from losing the other's fields or authorizing
         // against an owner/mode that is already stale.
-        let _privilege_guard = inode.lock_privileges();
+        let _inode_guard = inode.lock_inode_exclusive();
         let metadata = self.metadata();
         let inode_ns = self.dentry.user_namespace();
         let caller_ns = cred.user_ns_arc().clone();
@@ -1824,7 +1823,7 @@ impl Path {
         if metadata.mode.node_type() != NodeType::Directory {
             self.kill_file_caps_locked()?;
         }
-        self.dentry.update_metadata(MetadataUpdate {
+        self.dentry.update_metadata_locked(MetadataUpdate {
             owner: Some((stored_uid, new_gid)),
             mode: Some(mode),
             ..Default::default()
@@ -1837,7 +1836,7 @@ impl Path {
         let inode = self.inode();
         // Mode and owner are part of the exec security sample; a concurrent
         // chmod must not interleave with it or with a revocation.
-        let _privilege_guard = inode.lock_privileges();
+        let _inode_guard = inode.lock_inode_exclusive();
         let metadata = self.metadata();
         let inode_ns = self.dentry.user_namespace();
         if cred.fsuid() != metadata.uid
@@ -1861,7 +1860,7 @@ impl Path {
         {
             mode.remove(NodePermission::SET_GID);
         }
-        self.dentry.update_metadata(MetadataUpdate {
+        self.dentry.update_metadata_locked(MetadataUpdate {
             mode: Some(mode),
             ..Default::default()
         })
@@ -1878,15 +1877,15 @@ impl Path {
     /// that its new content never earned (Linux
     /// `security_inode_killpriv()`).
     ///
-    /// The caller must hold the writable-mount lock.
+    /// The caller must hold the superblock write admission.
     pub fn file_remove_privs(&self, cred: &Cred) -> VfsResult<()> {
         let inode = self.inode();
-        let _privilege_guard = inode.lock_privileges();
+        let _inode_guard = inode.lock_inode_exclusive();
         self.file_remove_privs_locked(cred)
     }
 
     /// Revokes a content write's inherited privileges while the caller holds
-    /// [`VfsInode::lock_privileges`] and the writable-mount lock.
+    /// the inode lock (exclusive) and the superblock write admission.
     pub(crate) fn file_remove_privs_locked(&self, cred: &Cred) -> VfsResult<()> {
         self.file_remove_privs_locked_inode(&self.inode(), cred)
     }
@@ -1900,8 +1899,9 @@ impl Path {
     ///
     /// Errors: immutable targets and metadata-update failures propagate.
     ///
-    /// Locking: caller must hold the inode's privilege lock and the writable
-    /// mount lock. Does not take the inode handle from the path again.
+    /// Locking: caller must hold the inode lock (exclusive) and the
+    /// superblock write admission. Does not take the inode handle from the
+    /// path again.
     pub(crate) fn file_remove_privs_locked_inode(
         &self,
         inode: &VfsInode,
@@ -1943,7 +1943,7 @@ impl Path {
         let mode = Self::strip_write_privileges(permission, gid, cred);
         if mode.bits() != permission.bits() {
             self.inode()
-                .remove_setid_bits(self.dentry(), permission & !mode)?;
+                .remove_setid_bits_locked(self.dentry(), permission & !mode)?;
         }
         if has_attributes {
             self.kill_file_caps_locked()?;
@@ -1975,7 +1975,8 @@ impl Path {
     /// A filesystem without extended-attribute support has no attribute to
     /// drop, which Linux's `security_inode_killpriv()` also reports as success.
     ///
-    /// The caller must hold the writable-mount lock.
+    /// Locking: caller must hold the inode lock (exclusive) and the
+    /// superblock write admission.
     fn kill_file_caps_locked(&self) -> VfsResult<()> {
         use crate::FileCapabilityState;
 
@@ -2042,12 +2043,13 @@ impl Path {
     ///
     /// One wall-clock sample resolves every `Current` request and the derived
     /// ctime, so a "set to now" update publishes identical mtime and ctime.
-    /// The inode namespace and data locks are held across the update, matching
+    /// The inode and data locks are held across the update, matching
     /// fileattr publication order. The data lock also matches the order used
     /// by `fallocate` and buffered writes, so a concurrent buffered write
     /// cannot interleave its timestamp publication with this update.
     ///
-    /// Locking: acquires mount write admission, then namespace and data locks.
+    /// Locking: acquires the superblock write admission, then the inode and
+    /// data locks.
     pub fn set_times(
         &self,
         atime: Option<SetattrTime>,
@@ -2206,7 +2208,7 @@ impl Path {
             return Err(VfsError::OperationNotPermitted);
         }
         let source_inode = source.inode();
-        let _source_guard = source_inode.lock_namespace_exclusive();
+        let _source_guard = source_inode.lock_inode_exclusive();
         if source_inode
             .flags()
             .intersects(crate::NodeFlags::IMMUTABLE | crate::NodeFlags::APPEND_ONLY)
@@ -2247,7 +2249,7 @@ impl Path {
     /// Creates a regular file under this directory path.
     ///
     /// The final lookup and authorization are serialized by the parent
-    /// directory namespace lock, and the filesystem receives an exclusive
+    /// directory inode lock, and the filesystem receives an exclusive
     /// create request.
     pub fn create(&self, name: &str, permission: NodePermission, cred: &Cred) -> VfsResult<Self> {
         let mode = Umode::new(NodeType::RegularFile, permission);
@@ -2322,7 +2324,7 @@ impl Path {
 
     /// Renames like `Mount::rename` and reports what moved and was replaced.
     ///
-    /// The identities are captured under the namespace lock the rename holds,
+    /// The identities are captured under the inode lock the rename holds,
     /// from the very dentries it operates on, so they cannot describe a
     /// different object than the one that moved.
     pub fn rename_tracked(
@@ -2339,7 +2341,7 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
 
         // The identities the event sources need are captured here, inside the
-        // callback the rename runs under its namespace lock, from the very
+        // callback the rename runs under its inode lock, from the very
         // dentries being moved and replaced. A path lookup afterwards could
         // describe a different object entirely. Only the replacement link
         // count needs a backend metadata query.
@@ -2414,7 +2416,7 @@ impl Path {
         cred: &Cred,
     ) -> VfsResult<Option<RemovedEntry>> {
         let _write_guard = self.lock_writable_mount()?;
-        // Captured under the namespace lock, from the dentry the removal
+        // Captured under the inode lock, from the dentry the removal
         // actually unlinks -- the event identity must describe that object,
         // not whatever a separate lookup saw before the lock was taken.
         let mut removed = None;
@@ -2520,7 +2522,7 @@ impl Path {
 
     fn graft_tree(&self, mount: Mount) -> VfsResult<Arc<Mount>> {
         let inode = self.inode();
-        let _namespace_guard = inode.lock_namespace_exclusive();
+        let _inode_guard = inode.lock_inode_exclusive();
         if mount.mnt.mnt_root.as_dir().is_ok() != self.is_dir() {
             // Linux `graft_tree()` returns `ENOTDIR` for either direction of
             // a directory/non-directory mismatch.
@@ -2540,7 +2542,7 @@ impl Path {
     /// location is recorded rather than re-wrapping it.
     fn graft_tree_arc(&self, mount: Arc<Mount>) -> VfsResult<Arc<Mount>> {
         let inode = self.inode();
-        let _namespace_guard = inode.lock_namespace_exclusive();
+        let _inode_guard = inode.lock_inode_exclusive();
         if mount.mnt.mnt_root.as_dir().is_ok() != self.is_dir() {
             return Err(VfsError::NotADirectory);
         }
@@ -2558,7 +2560,7 @@ impl Path {
         }
         let parent_path = self.mnt.location().ok_or(VfsError::InvalidInput)?;
         let inode = parent_path.inode();
-        let _namespace_guard = inode.lock_namespace_exclusive();
+        let _inode_guard = inode.lock_inode_exclusive();
         if !parent_path
             .mnt
             .child_mount_at(&parent_path.dentry)
@@ -2605,7 +2607,7 @@ impl Path {
         }
         let parent_path = self.mnt.location().ok_or(VfsError::InvalidInput)?;
         let inode = parent_path.inode();
-        let _namespace_guard = inode.lock_namespace_exclusive();
+        let _inode_guard = inode.lock_inode_exclusive();
         if !parent_path
             .mnt
             .child_mount_at(&parent_path.dentry)
@@ -2641,7 +2643,7 @@ impl Path {
 
         let parent_path = self.mnt.location().ok_or(VfsError::InvalidInput)?;
         let inode = parent_path.inode();
-        let _namespace_guard = inode.lock_namespace_exclusive();
+        let _inode_guard = inode.lock_inode_exclusive();
         if !parent_path
             .mnt
             .child_mount_at(&parent_path.dentry)
@@ -2694,7 +2696,7 @@ impl Path {
     /// Linux `do_truncate()` reaches `notify_change()` with
     /// `ATTR_KILL_SUID`/`ATTR_KILL_SGID`/`ATTR_KILL_PRIV`, so truncation drops
     /// set-ID bits and the file capability attribute exactly like a write. The
-    /// caller must hold the writable-mount lock.
+    /// caller must hold the superblock write admission.
     pub(crate) fn truncate_opened(&self, len: u64, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         if self.is_dir() {
@@ -2712,7 +2714,7 @@ impl Path {
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
-        let _privilege_guard = inode.lock_privileges();
+        let _inode_guard = inode.lock_inode_exclusive();
         // Linux `setattr_prepare()` removes inherited privileges before the
         // filesystem commits `ATTR_SIZE`, so a failed capability removal must
         // leave the old length in place. The reverse failure (privileges gone,
@@ -2727,7 +2729,7 @@ impl Path {
         if !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
             inode.set_len(len)?;
         } else {
-            self.dentry.update_metadata(MetadataUpdate {
+            self.dentry.update_metadata_locked(MetadataUpdate {
                 size: Some(len),
                 ..Default::default()
             })?;

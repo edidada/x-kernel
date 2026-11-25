@@ -365,6 +365,11 @@ impl Dentry {
         self.vfs_inode().update_metadata(self, update)
     }
 
+    /// Updates metadata for the instantiated dentry; caller holds the inode lock.
+    pub(crate) fn update_metadata_locked(&self, update: MetadataUpdate) -> VfsResult<()> {
+        self.vfs_inode().update_metadata_locked(self, update)
+    }
+
     #[expect(
         clippy::len_without_is_empty,
         reason = "CG-024-lint-exceptions: clippy::len_without_is_empty: Length is the inode byte \
@@ -667,9 +672,9 @@ impl Dentry {
     /// The key is the chain of ancestor inode pointers from this mount's dentry
     /// root down to this entry, so an ancestor always compares before its
     /// descendant and unrelated entries fall back to a pointer comparison.
-    /// Multi-inode namespace-lock acquisitions (`rename`, `pivot_root`) sort by
+    /// Multi-inode inode-lock acquisitions (`rename`, `pivot_root`) sort by
     /// this key so they share one total order and cannot ABBA.
-    pub(crate) fn namespace_lock_key(&self) -> Vec<usize> {
+    pub(crate) fn inode_lock_key(&self) -> Vec<usize> {
         let mut chain = Vec::new();
         let mut current = Some(self.clone());
         while let Some(dentry) = current {
@@ -928,7 +933,7 @@ impl Dentry {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let _inode_guard = dir_inode.lock_inode_exclusive();
         self.forget_cache_entry(name);
         Ok(())
     }
@@ -1072,7 +1077,7 @@ impl Dentry {
             return Err(VfsError::NameTooLong);
         }
         let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_shared();
+        let _inode_guard = dir_inode.lock_inode_shared();
         self.lookup_positive_locked(&dir_inode, name)
     }
 
@@ -1158,7 +1163,7 @@ impl Dentry {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let _inode_guard = dir_inode.lock_inode_exclusive();
         let candidate = self.lookup_locked(&dir_inode, name)?;
         operation_fn(&candidate)
     }
@@ -1166,7 +1171,7 @@ impl Dentry {
     /// Runs an exclusive child-creation callback after a locked final lookup.
     ///
     /// The callback receives a negative dentry and runs while the parent
-    /// directory namespace lock is held. It must instantiate that dentry
+    /// directory inode lock is held. It must instantiate that dentry
     /// before returning success.
     pub(crate) fn create_exclusive_with(
         &self,
@@ -1224,13 +1229,13 @@ impl Dentry {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let _inode_guard = dir_inode.lock_inode_exclusive();
         let entry = self.lookup_positive_locked(&dir_inode, name)?;
         let victim_inode = entry.vfs_inode();
         if Arc::ptr_eq(&victim_inode, &dir_inode) {
             return Err(VfsError::InvalidInput);
         }
-        let _victim_guard = victim_inode.lock_namespace_exclusive();
+        let _victim_guard = victim_inode.lock_inode_exclusive();
         if entry.is_dir() {
             return Err(VfsError::IsADirectory);
         }
@@ -1257,13 +1262,13 @@ impl Dentry {
         self.as_dir()?;
         Self::verify_child_name(name)?;
         let dir_inode = self.vfs_inode();
-        let _namespace_guard = dir_inode.lock_namespace_exclusive();
+        let _inode_guard = dir_inode.lock_inode_exclusive();
         let entry = self.lookup_positive_locked(&dir_inode, name)?;
         let victim_inode = entry.vfs_inode();
         if Arc::ptr_eq(&victim_inode, &dir_inode) {
             return Err(VfsError::InvalidInput);
         }
-        let _victim_guard = victim_inode.lock_namespace_exclusive();
+        let _victim_guard = victim_inode.lock_inode_exclusive();
         if !entry.is_dir() {
             return Err(VfsError::NotADirectory);
         }
@@ -1413,7 +1418,7 @@ impl RenameData<'_> {
         let new_dir_inode = self.new_parent.vfs_inode();
 
         if self.old_parent.ptr_eq(self.new_parent) {
-            let _parent_guard = old_dir_inode.lock_namespace_exclusive();
+            let _parent_guard = old_dir_inode.lock_inode_exclusive();
             return self.execute_with_parents_locked(
                 &old_dir_inode,
                 &new_dir_inode,
@@ -1438,7 +1443,7 @@ impl RenameData<'_> {
         let _topology_guard = old_super_block.lock_rename_topology();
         let (old_parent_first, trap) = self.parent_lock_order()?;
         if Arc::ptr_eq(&old_dir_inode, &new_dir_inode) {
-            let _parent_guard = old_dir_inode.lock_namespace_exclusive();
+            let _parent_guard = old_dir_inode.lock_inode_exclusive();
             return self.execute_with_parents_locked(
                 &old_dir_inode,
                 &new_dir_inode,
@@ -1448,8 +1453,8 @@ impl RenameData<'_> {
             );
         }
         if old_parent_first {
-            let _old_parent_guard = old_dir_inode.lock_namespace_exclusive();
-            let _new_parent_guard = new_dir_inode.lock_namespace_exclusive();
+            let _old_parent_guard = old_dir_inode.lock_inode_exclusive();
+            let _new_parent_guard = new_dir_inode.lock_inode_exclusive();
             self.execute_with_parents_locked(
                 &old_dir_inode,
                 &new_dir_inode,
@@ -1458,8 +1463,8 @@ impl RenameData<'_> {
                 may_rename_fn,
             )
         } else {
-            let _new_parent_guard = new_dir_inode.lock_namespace_exclusive();
-            let _old_parent_guard = old_dir_inode.lock_namespace_exclusive();
+            let _new_parent_guard = new_dir_inode.lock_inode_exclusive();
+            let _old_parent_guard = old_dir_inode.lock_inode_exclusive();
             self.execute_with_parents_locked(
                 &old_dir_inode,
                 &new_dir_inode,
@@ -1491,7 +1496,7 @@ impl RenameData<'_> {
                 // parent-directory locks, instead of the role-based old-first
                 // order.
                 return Ok((
-                    self.old_parent.namespace_lock_key() < self.new_parent.namespace_lock_key(),
+                    self.old_parent.inode_lock_key() < self.new_parent.inode_lock_key(),
                     None,
                 ));
             }
@@ -1569,10 +1574,10 @@ impl RenameData<'_> {
         };
         let _first_guard = first_participant
             .as_ref()
-            .map(|inode| inode.lock_namespace_exclusive());
+            .map(|inode| inode.lock_inode_exclusive());
         let _second_guard = second_participant
             .as_ref()
-            .map(|inode| inode.lock_namespace_exclusive());
+            .map(|inode| inode.lock_inode_exclusive());
         self.execute_locked(
             old_dir_inode,
             new_dir_inode,

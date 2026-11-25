@@ -277,7 +277,7 @@ impl Path {
     ) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
-        let _privilege_guard = inode.lock_privileges();
+        let _inode_guard = inode.lock_inode_exclusive();
         let _data_guard = inode.lock_data();
         check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         // A file-capability attribute that does not decode is rejected here, so
@@ -309,7 +309,7 @@ impl Path {
     pub fn remove_xattr(&self, name: &XattrName, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
-        let _privilege_guard = inode.lock_privileges();
+        let _inode_guard = inode.lock_inode_exclusive();
         let _data_guard = inode.lock_data();
         check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
         let observed = inode.file_capability_snapshot();
@@ -334,14 +334,14 @@ impl Path {
     ///
     /// This backs kernel-initiated removals such as
     /// `security_inode_killpriv()`, which Linux performs on behalf of the
-    /// kernel rather than the caller. The caller must hold the writable-mount
-    /// lock.
+    /// kernel rather than the caller. The caller must hold the superblock
+    /// write admission.
     ///
     /// It deliberately does not take the inode data lock: the write path calls
     /// it while a filesystem writeback may already hold its superblock lock,
     /// and nesting the data lock under that order inverts the writeback lock
     /// order. The backend serializes the attribute update itself. The caller
-    /// must hold [`VfsInode::lock_privileges`].
+    /// must hold the inode lock.
     pub fn remove_xattr_unchecked(&self, name: &XattrName) -> VfsResult<()> {
         let inode = self.inode();
         let observed = inode.file_capability_snapshot();

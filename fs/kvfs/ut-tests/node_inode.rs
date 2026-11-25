@@ -263,7 +263,7 @@ impl InodeOperations for TimestampPolicyOperations {
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate> {
         let inode = dentry.vfs_inode();
-        core::assert!(inode.namespace_lock.try_write().is_none());
+        core::assert!(inode.i_rwsem.try_write().is_none());
         core::assert!(inode.data_lock.try_write().is_none());
         Ok(update)
     }
@@ -324,7 +324,7 @@ fn append_only_timestamp_updates_preserve_touch_authorization() {
 fn timestamp_updates_wait_for_namespace_without_holding_data() {
     let path = timestamp_policy_path(NodeFlags::empty());
     let inode = path.inode();
-    let namespace = inode.lock_namespace_exclusive();
+    let namespace = inode.lock_inode_exclusive();
     let result = Arc::new(Mutex::new(None));
     let completed = result.clone();
     let task = ktask::spawn(move || {

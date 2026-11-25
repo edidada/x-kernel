@@ -464,7 +464,7 @@ writable mount of a canonical read-only block device before calling the filesyst
 filesystem-type pointer and the canonical block-device object and holds an exclusive
 claim; concurrent requests with the same identity wait for the same fill, and on failure or final shutdown the registry identity is removed and the claim
 released before waking them to retry. Different filesystem types cannot own the same device at the same time.
-mount attach/detach modifies the topology under the mountpoint inode namespace lock. Each child mount
+mount attach/detach modifies the topology under the mountpoint inode lock. Each child mount
 protects its complete parent `Path` with a single mutex, the parent's child map stores `Weak<Mount>`, and the namespace
 registry stores the `Arc<Mount>` of visible mounts; detach clears the parent path before removing the registry reference.
 attach, bind, remount and detach all first use the existing registry to validate that the mounts involved belong to the current
@@ -483,12 +483,12 @@ and cache truncation. The target folio lock serializes fault preparation, dirtyi
 and PTE publication. Filesystem mapping/reservation locks are acquired within these
 boundaries. Writeback callbacks must not upgrade to invalidate exclusive protection.
 
-All namespace locks are sleepable locks. Mount tree operations first take the mount-namespace registry
+All inode locks are sleepable locks. Mount tree operations first take the mount-namespace registry
 mutex; the global order after that is superblock topology, parent directory, child directory, non-directory inode, and only last
-dentry cache/location. Cross-directory ordering is decided by parent dentry identity: parent locks are taken ancestor-first, and unrelated parents are ordered by `Dentry::namespace_lock_key()` (ancestor inode pointer chain, then pointer value).
+dentry cache/location. Cross-directory ordering is decided by parent dentry identity: parent locks are taken ancestor-first, and unrelated parents are ordered by `Dentry::inode_lock_key()` (ancestor inode pointer chain, then pointer value).
 Directory
 inodes rely on the single-alias invariant; the inode locks corresponding to non-directory aliases are deduplicated by identity and sorted by pointer value.
-The mount topology lock is always acquired after the related inode namespace locks.
+The mount topology lock is always acquired after the related inode locks.
 
 The default dentry operation table is published when the nascent superblock is initialized. Root/child dentries inherit only
 a static reference; concurrent paths neither allocate nor replace the operation object.
@@ -537,7 +537,7 @@ KVFS returns the mapped error, does not fabricate a successful byte count, and d
 | T-05 | A dentry operation is inconsistent with its owning superblock | High | A concrete filesystem adds or replaces the operation object one by one after the dentry is created | The nascent superblock installs the static counterpart of the default `s_d_op`, and the root/child inherit it at binding time and cannot replace it |
 | T-06 | A path checks only the final inode, bypassing a non-searchable directory or wrongly accepting a final object that cannot be looked up | High | namei does not check execute/search on intermediate directories, or leaves the trailing `/` and `LOOKUP_DIRECTORY` to the open layer | Before each next-component lookup, `Path::permission(MAY_EXEC, cred)` is called; the generic `path_lookupat()` converts the trailing `/` before the final walk and consumes the directory constraint with `Dentry::can_lookup()` |
 | T-07 | After a missing owner class, access wrongly falls back to group/other | High | DAC treats the three classes of permissions as an arbitrarily selectable set | `generic_permission` selects only one class, in the mutually exclusive order owner, group, other |
-| T-08 | A namespace modification bypasses parent directory permissions | High | A backend callback is called directly or a VFS wrapper misses the check | The `Path` mutation API performs the parent directory `MAY_WRITE | MAY_EXEC` check while the final object is still protected by the namespace lock |
+| T-08 | A namespace modification bypasses parent directory permissions | High | A backend callback is called directly or a VFS wrapper misses the check | The `Path` mutation API performs the parent directory `MAY_WRITE | MAY_EXEC` check while the final object is still protected by the inode lock |
 | T-09 | A sticky directory deletes another user's file | High | A name checked outside the lock is replaced before the callback | The validator of unlink/rmdir/rename enforces the sticky owner and mountpoint policy on the final victim under the lock |
 | T-10 | A created object is fixed to root or the wrong group | High | The backend fills in the UID/GID itself | The create callback receives `&Cred` and uses `inode_init_owner()` |
 | T-11 | One namei mixes credentials | High | Every component calls the current helper in reverse | The syscall captures an `Arc<Cred>` once, and the VFS passes the reference explicitly |
@@ -563,7 +563,7 @@ KVFS returns the mapped error, does not fabricate a successful byte count, and d
 | T-22 | A directory alias forms two child caches or bypasses topology serialization | High | The same directory inode establishes multiple live dentries | The inode alias table enforces a single alias per directory; lookup reuses the existing alias, and rename topology decides by parent dentry identity |
 | T-23 | A filesystem callback replaces the creation object already checked by the VFS | High | The callback returns a dentry under another parent/name | A create-like callback may only instantiate the transaction's negative dentry; the lookup alternate result validates positive state, parent and name |
 | T-24 | Concurrent slow lookups create duplicate dentries | High | The cache-miss check is separated from candidate publication, or a waiter observes an unfinished object early | The candidate is atomically added to the dcache before the callback; the owner keeps the parallel-lookup state and the lookup mutex, and waiters read the result only after lookup is done |
-| T-29 | A detached mount can still return to the original namespace along the old parent | High | Unmount deletes only the parent child map but keeps the parent/mountpoint state in the mount | parent and mountpoint are merged into one mutex-protected `Option<Path>`; detach removes the topology under the mountpoint namespace lock and clears that location |
+| T-29 | A detached mount can still return to the original namespace along the old parent | High | Unmount deletes only the parent child map but keeps the parent/mountpoint state in the mount | parent and mountpoint are merged into one mutex-protected `Option<Path>`; detach removes the topology under the mountpoint inode lock and clears that location |
 | T-30 | The mount support set drifts from `/proc/filesystems` | Medium | The syscall and procfs each maintain filesystem names or construction branches | Both read the same `FileSystemType` registry; registering a duplicate name fails |
 | T-31 | An immutable symlink target has two separable copies of state | Medium | A simple-file closure and the inode cache each store the target | A cached-link inode is constructed directly at creation; the target lives only in the inode, and the node keeps only metadata such as the length |
 | T-34 | The last mount release loses dirty pages, inode metadata or a journal checkpoint | High | After topology detach the superblock has no active lifetime, and the Weak registry cannot keep it alive | `VfsMount` acquires/releases a superblock active reference; the last reference performs writeback, dcache eviction and the final filesystem/device sync under the umount lock; teardown still completes after errors are recorded |
@@ -638,11 +638,11 @@ Locks constrain only cooperating callers; file reads and writes without an advis
   `capable()`, not the opener's credential. An immutable target is rejected
   before any revocation, and a write starting at or beyond the size limit
   leaves the decision and the revocation to the backend, so an `EFBIG` does not
-  strip privileges. A per-inode privilege lock covers the revocation and the
+  strip privileges. A per-inode lock covers the revocation and the
   protected backend change; `setxattr`, `chown`, `chmod`, file-attribute
-  changes, `truncate`, `fallocate`, native `copy_file_range` and exec metadata
-  sampling share it. Namespace exclusion follows privilege exclusion and
-  precedes data exclusion; fallocate revocation retains no data lock. An
+  changes, `truncate`, `fallocate` and native `copy_file_range` take it
+  exclusively, while exec metadata sampling takes it shared. Namespace
+  exclusion precedes data exclusion; fallocate revocation retains no data lock. An
   authorized append can clear only the inherited set-ID bits through a narrow
   internal entry, while explicit chmod and truncate remain forbidden. A denied
   append-only truncate returns before revocation. Revocation precedes the first
@@ -715,7 +715,7 @@ completed prefix is returned preferentially, and an error is reported only when 
 - Whether dentry cache insert, rename, unlink, and forget keep the parent weak index and the superblock
   strong ownership in sync.
 - Whether mount attach/detach validates current namespace membership, holds the mountpoint inode
-  namespace lock, and clears the parent location after detach.
+  inode lock, and clears the parent location after detach.
 - Whether a hashed child can still take part in the directory non-empty check when there is no external `Dentry` reference.
 - Whether the default dentry operations of a new filesystem are installed on the superblock, rather than allocated and patched in per dentry?
 - Whether new pathname entry points explicitly accept and pass down the same `&Cred` at every level.
@@ -732,7 +732,7 @@ completed prefix is returned preferentially, and an error is reported only when 
   `fchown`/`fchmod` owner/mode updates are published on the KVFS-resident inode instead of being rejected with `EOPNOTSUPP`.
 - Whether pivot_root completes all fallible validation before any mutation (new_root is a registered mount root,
   put_old is reachable from new_root and not inside the current root filesystem, `put_old` is a directory),
-  and, once all inode namespace locks (totally ordered by `namespace_lock_key`, deduplicated by Arc) are held,
+  and, once all inode locks (totally ordered by `inode_lock_key`, deduplicated by Arc) are held,
   rechecks that the old root is still attached to its own parent mountpoint before changing the topology.
 - Whether pathname FIFO time updates are performed through VFS policy only after a successful external I/O.
 - Whether xattr raw flags are first converted to `XattrSetFlags`, whether set/remove check for a read-only mount and hold the

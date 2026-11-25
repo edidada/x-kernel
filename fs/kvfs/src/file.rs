@@ -607,7 +607,7 @@ pub struct VfsFileBuilder {
     /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
     pipe_generation: u64,
     /// Identity of the directory that received a newly created entry, plus the
-    /// name it was created under, captured inside the creation's namespace
+    /// name it was created under, captured inside the creation's inode
     /// lock. The created dentry's own location is mutable afterwards, so event
     /// attribution must use this snapshot, not a later read.
     created_under: Option<(Arc<VfsInode>, String)>,
@@ -686,7 +686,7 @@ impl VfsFileBuilder {
 
     /// Records where and under what name this open created its entry.
     ///
-    /// Called from the creation branch while the parent's namespace lock is
+    /// Called from the creation branch while the parent's inode lock is
     /// still held; the created dentry's own location is mutable afterwards, so
     /// attribution uses this snapshot.
     pub(crate) fn set_created_under(&mut self, parent: Arc<VfsInode>, name: &str) {
@@ -1172,7 +1172,7 @@ impl VfsFile {
     /// Returns the parent identity and the name this file's entry was created
     /// with, when the open that produced this file created it.
     ///
-    /// Both were captured inside the creation's namespace lock, so they stay
+    /// Both were captured inside the creation's inode lock, so they stay
     /// correct even if the entry is renamed before the caller reads them.
     pub fn created_under(&self) -> Option<(&Arc<VfsInode>, &str)> {
         self.created_under
@@ -1279,7 +1279,7 @@ impl VfsFile {
 
     /// Checks live inode policy before a shared mapping may acquire write access.
     /// Private COW mappings do not use this check. Write faults recheck it while
-    /// holding inode data protection, so an earlier mapping cannot bypass a
+    /// holding the inode data lock, so an earlier mapping cannot bypass a
     /// completed immutable or append-only transition.
     ///
     /// # Errors
@@ -1443,9 +1443,9 @@ impl VfsFile {
             *pos
         };
         // Reject an impossible range before touching metadata. A writer holds
-        // the writable-mount guard taken above; a handle opened without
-        // `FMode::WRITER` (special files) holds none, so only the open-file
-        // mode and the address range are re-validated here.
+        // the superblock write-admission guard taken above; a handle opened
+        // without `FMode::WRITER` (special files) holds none, so only the
+        // open-file mode and the address range are re-validated here.
         self.verify_write_area_locked(start, iter.count())?;
         // Linux runs its generic write checks before `file_remove_privs()`, so
         // a write the filesystem rejects with `EFBIG` must not revoke the
@@ -1457,16 +1457,16 @@ impl VfsFile {
         // Linux `vfs_write()` drops set-UID/set-GID bits and the file
         // capability attribute before the filesystem sees the data, so a
         // writable privileged executable cannot keep authority it no longer
-        // matches. The privilege lock covers the revocation and the backend
+        // matches. The inode lock covers the revocation and the backend
         // write, so a concurrent `setxattr` cannot install a capability
         // between them. An empty or doomed write changes no content and takes
         // no revocation; it still reaches the backend so its own checks report
         // as before.
         let revokes_privileges = iter.count() > 0 && !beyond_size_limit && writes;
         let privilege_inode = revokes_privileges.then(|| self.inode());
-        let _privilege_guard = privilege_inode
+        let _inode_guard = privilege_inode
             .as_ref()
-            .map(|inode| inode.lock_privileges());
+            .map(|inode| inode.lock_inode_exclusive());
         if revokes_privileges {
             self.path()
                 .file_remove_privs_locked_inode(self.inode(), cred)?;
@@ -1845,10 +1845,10 @@ impl VfsFile {
         if !operations.supported_fallocate_modes().contains(flags) {
             return Err(VfsError::from(LinuxError::EOPNOTSUPP));
         }
-        let _privilege_guard = inode.lock_privileges();
-        // Fileattr publication also takes the privilege lock, keeping this
+        let _inode_guard = inode.lock_inode_exclusive();
+        // Fileattr publication also takes the inode lock, keeping this
         // policy stable until the backend completes. Revoke privileges before
-        // taking data protection: revocation takes namespace exclusion.
+        // taking the data lock, under the inode lock held here.
         inode.check_mutable()?;
         if inode.flags().contains(NodeFlags::APPEND_ONLY)
             && !(flags & !FallocateFlags::KEEP_SIZE).is_empty()

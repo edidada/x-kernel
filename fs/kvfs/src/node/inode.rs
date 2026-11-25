@@ -32,9 +32,9 @@ use super::{
 use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
     FileOperations, InodeTimes, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex,
-    MutexGuard, NodePermission, NodeType, Path, Permission, RwLock, RwLockReadGuard,
-    RwLockWriteGuard, SetattrTime, SuperBlock, Umode, VfsError, VfsFileBuilder, VfsResult,
-    XattrName, XattrNameSink, XattrSetFlags,
+    NodePermission, NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    SetattrTime, SuperBlock, Umode, VfsError, VfsFileBuilder, VfsResult, XattrName, XattrNameSink,
+    XattrSetFlags,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
     pipe::{PipeObject, fifo_file_operations},
@@ -311,7 +311,7 @@ impl FiemapCapability<'_> {
                 self.operations.fiemap(self.inode, info, start, length)
             }
             NodeType::Directory => {
-                let _namespace_guard = self.inode.lock_namespace_shared();
+                let _inode_guard = self.inode.lock_inode_shared();
                 self.operations.fiemap(self.inode, info, start, length)
             }
             _ => Err(VfsError::OperationNotSupported),
@@ -1311,12 +1311,7 @@ pub struct VfsInode {
     read_count: AtomicUsize,
     notification_mask: AtomicU32,
     data_lock: RwLock<()>,
-    namespace_lock: RwLock<()>,
-    /// Serializes privilege revocation with the content/metadata change it
-    /// protects (Linux's `inode_lock` around `file_remove_privs()` and the
-    /// write). Acquire after the writable-mount lock and before
-    /// [`Self::lock_data`]; the writeback path never takes it.
-    privilege_lock: Mutex<()>,
+    i_rwsem: RwLock<()>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Arc<dyn FileOperations>,
     private_data: Arc<dyn Any + Send + Sync>,
@@ -1900,8 +1895,7 @@ impl VfsInode {
             read_count: AtomicUsize::new(0),
             notification_mask: AtomicU32::new(0),
             data_lock: RwLock::new(()),
-            namespace_lock: RwLock::new(()),
-            privilege_lock: Mutex::new(()),
+            i_rwsem: RwLock::new(()),
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
             private_data,
@@ -2100,10 +2094,28 @@ impl VfsInode {
     /// An applied size is published through
     /// [`Self::update_size_after_backing_change`], so cached folios and
     /// mappings are resized or invalidated before this returns.
-    /// Acquires namespace exclusion; callers must not already hold namespace
-    /// or data protection. Timestamp requests use the dedicated typed entry.
+    /// Acquires the inode lock, exclusive; callers must not already hold the
+    /// inode or data locks. Timestamp requests use the dedicated typed entry.
     pub fn update_metadata(&self, dentry: &Dentry, update: MetadataUpdate) -> VfsResult<()> {
-        let _namespace_guard = self.lock_namespace_exclusive();
+        let _inode_guard = self.lock_inode_exclusive();
+        self.update_metadata_locked(dentry, update)
+    }
+
+    /// Updates metadata while the caller already holds the inode lock.
+    ///
+    /// - `dentry`: the dentry whose backing inode is updated.
+    /// - `update`: requested field changes; timestamps are truncated to inode granularity.
+    ///
+    /// Returns: `()` after size/time/mode/owner are published.
+    ///
+    /// Errors: immutability and backend `setattr` errors propagate unchanged.
+    ///
+    /// Locking: caller must hold the inode lock; this does not reacquire it.
+    pub(crate) fn update_metadata_locked(
+        &self,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<()> {
         if self
             .flags()
             .intersects(NodeFlags::IMMUTABLE | NodeFlags::APPEND_ONLY)
@@ -2117,10 +2129,13 @@ impl VfsInode {
     ///
     /// A legal append must revoke inherited privileges even though explicit
     /// chmod requests are forbidden. Only set-ID bits can be cleared here.
-    /// The caller holds mount write admission and the privilege lock, without
-    /// namespace or data protection.
-    pub(crate) fn remove_setid_bits(&self, dentry: &Dentry, bits: NodePermission) -> VfsResult<()> {
-        let _namespace_guard = self.lock_namespace_exclusive();
+    /// Locking: caller must hold the inode lock (exclusive) and the
+    /// superblock write admission; this does not reacquire the inode lock.
+    pub(crate) fn remove_setid_bits_locked(
+        &self,
+        dentry: &Dentry,
+        bits: NodePermission,
+    ) -> VfsResult<()> {
         self.check_mutable()?;
         let mut mode = self.metadata().mode.permission();
         mode.remove(bits & (NodePermission::SET_UID | NodePermission::SET_GID));
@@ -2134,12 +2149,12 @@ impl VfsInode {
     }
 
     /// Applies an authorized timestamp request without losing touch semantics.
-    /// Namespace exclusion precedes data exclusion, as in fileattr publication.
+    /// The inode lock precedes the data lock, as in fileattr publication.
     /// Only a request setting both times to now may touch an append-only inode.
     ///
     /// # Errors
     /// Rejects protected or unauthorized requests and propagates permission and
-    /// backend errors. Callers must not already hold namespace or data protection.
+    /// backend errors. Callers must not already hold the inode or data locks.
     pub(crate) fn set_times(
         &self,
         dentry: &Dentry,
@@ -2150,7 +2165,7 @@ impl VfsInode {
         if atime.is_none() && mtime.is_none() {
             return Ok(());
         }
-        let _namespace_guard = self.lock_namespace_exclusive();
+        let _inode_guard = self.lock_inode_exclusive();
         let _data_guard = self.lock_data();
         let is_touch = matches!(
             (atime, mtime),
@@ -2189,8 +2204,9 @@ impl VfsInode {
         )
     }
 
-    /// Publishes a validated update while the caller retains namespace exclusion.
-    /// Timestamp requests also retain data exclusion; do not reacquire either lock.
+    /// Publishes a validated update while the caller retains the inode lock.
+    /// Timestamp requests also retain the data lock; do not reacquire either
+    /// lock.
     fn apply_metadata_update(&self, dentry: &Dentry, mut update: MetadataUpdate) -> VfsResult<()> {
         let changed = update.size.is_some()
             || update.mode.is_some()
@@ -2335,16 +2351,6 @@ impl VfsInode {
     /// Acquire before filesystem-private mutation and mapping invalidation locks.
     pub fn lock_data(&self) -> RwLockWriteGuard<'_, ()> {
         self.data_lock.write()
-    }
-
-    /// Serializes a privilege-sensitive operation for this inode.
-    ///
-    /// Covers the revocation plus the content or metadata change it guards, so
-    /// `setxattr`, `chown`, `truncate`, native copies and buffered writes agree
-    /// on one order. Acquire after the writable-mount lock and before
-    /// [`Self::lock_data`]. Writeback never takes it.
-    pub fn lock_privileges(&self) -> MutexGuard<'_, ()> {
-        self.privilege_lock.lock()
     }
 
     pub(crate) fn lock_data_shared(&self) -> crate::RwLockReadGuard<'_, ()> {
@@ -2631,12 +2637,12 @@ impl VfsInode {
             .ok_or(VfsError::InvalidData)
     }
 
-    pub(crate) fn lock_namespace_shared(&self) -> RwLockReadGuard<'_, ()> {
-        self.namespace_lock.read()
+    pub fn lock_inode_shared(&self) -> RwLockReadGuard<'_, ()> {
+        self.i_rwsem.read()
     }
 
-    pub(crate) fn lock_namespace_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
-        self.namespace_lock.write()
+    pub(crate) fn lock_inode_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+        self.i_rwsem.write()
     }
 
     pub(crate) fn supports_directory_operations(&self) -> bool {

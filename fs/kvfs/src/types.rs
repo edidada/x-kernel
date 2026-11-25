@@ -146,7 +146,7 @@ impl Umode {
     }
 }
 
-/// What a completed unlink/rmdir removed, captured under the namespace lock
+/// What a completed unlink/rmdir removed, captured under the inode lock
 /// the removal held.
 ///
 /// The parent inode, the entry name and the victim dentry all come from
@@ -171,7 +171,7 @@ pub struct RemovedEntry {
     pub victim_nlink: Option<u64>,
 }
 
-/// What a completed rename moved and replaced, captured under the namespace
+/// What a completed rename moved and replaced, captured under the inode
 /// lock the rename itself held.
 ///
 /// The identities come from the dentries the rename operated on, not from a

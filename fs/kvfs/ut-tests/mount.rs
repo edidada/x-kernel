@@ -1981,7 +1981,7 @@ fn immutable_targets_reject_revocation_before_touching_capabilities() {
     let path = Mount::new_root(&mock_superblock(root, StatFsFlags::empty())).root_path();
     let inode = path.inode();
     let _mount_guard = path.lock_writable_mount().unwrap();
-    let _privilege_guard = inode.lock_privileges();
+    let _inode_guard = inode.lock_inode_exclusive();
 
     assert_eq!(
         path.file_remove_privs_locked(&Cred::root()),
