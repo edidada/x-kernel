@@ -492,7 +492,7 @@ The user-mode switch on each architecture needs different additional state:
 
 On x86_64, `UserContext::run()` passes `&mut UserContext` directly to the assembly `enter_user`:
 `kernel_rsp` sits right next to `tf`, and the assembly treats `&kernel_rsp` as a private frame, saves the kernel stack pointer of the Rust caller,
-and uses `tf` in place as the temporary trap stack (TSS.rsp0 points to the end of `tf`), avoiding copying the whole trap frame before and after the user-mode window.
+and uses `tf` as the user-exception landing area (TSS.rsp0 points to its end). Return attempts use a task-stack copy so an IRET fault cannot overwrite the saved kernel continuation.
 Therefore the relative offset between `kernel_rsp` and `tf`
 (`KERNEL_RSP_TO_TRAPFRAME_OFFSET`) is a layout invariant of `UserContext`.
 
@@ -551,31 +551,49 @@ the ordinary adapter is responsible for the scheduling tail after the interrupt 
 return without queuing. The page-fault callback keeps its own safe signature.
 ## x86-64 native NMI entry
 
-Each CPU prepares a 64 KiB interrupt stack in its permanent CPU area before
-loading the IDT. Vector 2 selects TSS IST slot 0. The aligned IST top holds the
-trusted kernel GS base, which the entry can read immediately above the saved
-`ExceptionContext`. This layout works when the interrupted instruction lies
-in a `SWAPGS` transition. Entry saves the active `IA32_GS_BASE`, installs the
-CPU-area base, and restores the interrupted value on the way to `IRETQ`.
+Each CPU owns a permanent 64 KiB NMI stack selected by vector 2's TSS IST slot
+0. `nmi::prepare_stack` records the trusted kernel GS base at the aligned stack
+top, outside the downward-growing hardware frame. The implementation in
+`x86_64/nmi_entry.S` follows the frame/replay design in Linux's x86 entry code,
+while using this kernel's `ExceptionContext` and `UserContext` ABI.
 
-`x86_nmi_handler` publishes the interrupted frame through
-`ExceptionContextGuard` and invokes the existing `NMI` callback, which reaches
-KIRQ's effective NMI scope through the HAL adapter. The guard restores the
-outer exception marker before assembly returns. The path retains the interrupt
-gate's ordinary IRQ exclusion and has no IRQ completion or scheduling tail.
-The x86 source dispatcher is a no-op in production pending source integration.
+Kernel-origin entries reserve the top 48 bytes for the hardware frame and a
+scratch register. Below that landing area are an execution marker, a working
+IRET frame and an immutable outer frame. Callbacks use a complete
+`ExceptionContext` below those copies. A nested arrival leaves the outer
+callback running, rewrites the working return to `.Lnmi_repeat` and returns
+through its own landing frame. The outer entry restores its registers and GS,
+then its IRET starts another callback pass. Arrivals during frame copying are
+coalesced into that imminent pass. The marker and the final IRET instruction
+address cover the exit window without trusting a user-controlled RSP.
 
-The dedicated stack relies on hardware NMI blocking through a successful
-`IRETQ`. The architecture stops the current CPU on exceptions in the callback
-or entry/return glue, and on unexpected reentry. The assembly checks RIP for
-faults in the glue where GS can still hold the interrupted value. A second NMI
-can also arrive in an exception stub after a faulting `IRETQ`. Its entry checks
-whether the interrupted kernel RSP still points into the local NMI stack
-before using GS or dispatching the callback.
+A user-origin NMI copies its frame into the current `UserContext`, then runs
+on the suspended task's kernel stack. The atomic CPU-local dispatch state
+transitions through idle, running and latched. A nested kernel-origin entry
+can latch a repeat without recursively calling the source callback. The
+compare-exchange at callback exit prevents losing a latch during cleanup.
 
-`x86_nmi_entry_must_stop` performs the pre-GS reentry classification in assembly
-and returns its decision to the vector 2 entry. The unit tests in
-`ut-tests/x86_nmi.rs` execute that same routine with saved frames naming the
-exception stub, both stack bounds and the user-stack transition windows.
-The helper is kept inside the protected NMI glue range so an exception in it
-cannot reach Rust with an interrupted GS base.
+Both paths preserve the interrupted CR2 value. During NMI, #BP can return
+and exception-table #PF/#GP faults can be fixed up; ordinary page-fault callbacks are
+bypassed because they can allocate or schedule. Unrecoverable faults still
+terminate the local CPU. Unexpected faults in entry glue remain terminal
+before Rust can depend on a GS value that may belong to the interrupted code.
+
+User returns are attempted from a copy on the task kernel stack, keeping the
+owning `UserContext` and its saved kernel continuation outside the exception
+frame a failing IRET can push. #NP/#SS/#GP at either the ordinary or NMI user
+IRET restore kernel GS and copy the fault's vector/error plus target user
+frame into `UserContext`. Control resumes through its saved continuation, so
+`UserContext::run` reports a user exception instead of invoking kernel panic.
+The ordinary slow IRET path uses the same copy, while SYSRET retains its fast path.
+
+The NMI callback still reaches the HAL and KIRQ without ordinary IRQ
+completion or scheduling. x86 source dispatch remains empty in production
+pending PMU/watchdog integration. Guest tests exercise breakpoint return,
+exception-table fixup with CR2 preservation, hardware nested self-NMI replay,
+and synthetic user-origin / bad-IRET recovery. The invalid-CS fixture faults
+at IRET; the unmapped-RIP fixture faults on the first user instruction fetch.
+The synthetic fixtures test
+the production return instructions and frame handoff, not delivery from a
+real running user task. The dedicated stack has no guard page; exhaustion or
+kernel memory corruption is outside the recovery contract.

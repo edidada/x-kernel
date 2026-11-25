@@ -31,6 +31,3 @@ pub use self::ctx::{ExceptionContext as TrapFrame, ExceptionContext, FxStateBloc
 
 #[cfg(all(unittest, target_arch = "x86_64"))]
 unittest::path_mod_test!(pub mod tests_arch, "../../ut-tests/x86_64.rs");
-
-#[cfg(all(unittest, target_arch = "x86_64"))]
-unittest::path_mod_test!(tests_nmi, "../../ut-tests/x86_nmi.rs");

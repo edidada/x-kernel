@@ -265,3 +265,10 @@ also exclude preemption while ordinary IRQs can run and have a valid kernel
 stack. Its assembly reads RFLAGS before sending and after NMI return to verify
 that IF was set at both points. The KIRQ observer independently checks that
 IF is clear inside the NMI callback.
+
+`send_test_self_nmi` is a unittest-only lock-free submission for the armed
+nested-NMI probe. The serial caller exclusively owns ICR production, runs on
+an initialized CPU with ordinary IRQs masked and has reopened NMI delivery by
+returning from a deliberate #BP. x2APIC uses the usual MFENCE/LFENCE ordering;
+xAPIC writes only ICR-low with self shorthand. The probe retains its observer
+and waits for the nested-entry counter, not a timer or callback recursion.

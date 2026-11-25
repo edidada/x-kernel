@@ -714,7 +714,11 @@ The native x86 NMI tests exercise separate entry conditions. The swapped-GS
 fixture starts with IRQs masked to verify that NMI can still enter. The
 `native_nmi_masks_enabled_irqs_and_restores_if_on_return` fixture sends its
 self-NMI with IF set, checks IF is clear in the callback, and checks that NMI
-return restores IF. Preemption stays disabled throughout that serial fixture.
+return restores IF. Preemption stays disabled throughout that serial fixture. Further serial probes
+trigger #BP inside NMI, perform an exception-table-protected unmapped read and
+verify CR2 preservation, and submit a second hardware self-NMI after #BP has
+reopened delivery. The nested probe requires two sequential callback passes
+and verifies that callback depth never exceeds one.
 
 ## GIC Source Admission
 

@@ -179,3 +179,105 @@ fn test_exec_reset_entry_can_be_reestablished() {
     assert_eq!(uctx.rip, 0x2004);
     assert_eq!(uctx.rsp, 0x3000);
 }
+
+#[def_test(serial)]
+fn nmi_bad_user_iret_restores_kernel_gs_and_reports_user_exception() {
+    use x86_64::{
+        instructions::interrupts::without_interrupts,
+        registers::model_specific::GsBase,
+        structures::tss::TaskStateSegment,
+    };
+
+    unsafe extern "C" {
+        fn x86_nmi_test_bad_iret(context: &mut super::userspace::UserContext);
+    }
+
+    let (vector, target_rip, gs_restored) = without_interrupts(|| {
+        let original_gs = GsBase::read();
+        let tss = original_gs.as_u64() as usize
+            + kcpu_slot::__cpu_slot_symbol_offset!(super::gdt::__KCPU_SLOT_TSS);
+        let rsp0 = (tss + core::mem::offset_of!(TaskStateSegment, privilege_stack_table)) as *mut u64;
+        // SAFETY: IRQ exclusion pins this CPU; its permanent TSS contains
+        // this packed RSP0 field. No observer retains a Rust reference.
+        let previous_rsp0 = unsafe { rsp0.read_unaligned() };
+        let mut context = super::userspace::UserContext::new(0x1234, va!(0x2000), 0);
+        context.cs = 0; // Deliberately invalid user-return CS, producing #GP.
+        // SAFETY: this test wrapper saves a real kernel continuation, copies
+        // the frame to the task stack and jumps to the production NMI IRET.
+        // The #GP return adapter must restore kernel GS before returning.
+        unsafe { x86_nmi_test_bad_iret(&mut context) };
+        // SAFETY: restore the original current-CPU RSP0 before IRQ restore.
+        unsafe { rsp0.write_unaligned(previous_rsp0) };
+        (context.vector, context.rip, GsBase::read() == original_gs)
+    });
+    assert_eq!(vector, 13);
+    assert_eq!(target_rip, 0x1234);
+    assert!(gs_restored);
+}
+
+#[def_test(serial)]
+fn user_origin_nmi_moves_off_ist_and_preserves_invalid_user_target() {
+    use x86_64::{
+        instructions::interrupts::without_interrupts,
+        registers::model_specific::GsBase,
+        structures::tss::TaskStateSegment,
+    };
+
+    unsafe extern "C" {
+        fn x86_nmi_test_user_origin(context: &mut super::userspace::UserContext);
+    }
+
+    let (vector, target_rip, gs_restored) = without_interrupts(|| {
+        let original_gs = GsBase::read();
+        let tss = original_gs.as_u64() as usize
+            + kcpu_slot::__cpu_slot_symbol_offset!(super::gdt::__KCPU_SLOT_TSS);
+        let rsp0 = (tss + core::mem::offset_of!(TaskStateSegment, privilege_stack_table)) as *mut u64;
+        // SAFETY: IRQ exclusion pins this CPU's permanent packed TSS field.
+        let previous_rsp0 = unsafe { rsp0.read_unaligned() };
+        let mut context = super::userspace::UserContext::new(0x4000_0000_0000, va!(0x2000), 0);
+        context.rflags = 0; // Keep IRQs masked through the synthetic fixture.
+        // SAFETY: the assembly constructs an IST frame with ring-3 CS and
+        // installs alternate GS, then enters the production user-NMI path.
+        // The invalid target must fault before any user instruction executes.
+        unsafe { x86_nmi_test_user_origin(&mut context) };
+        // SAFETY: restore the original CPU-local RSP0 before restoring IRQs.
+        unsafe { rsp0.write_unaligned(previous_rsp0) };
+        (context.vector, context.rip, GsBase::read() == original_gs)
+    });
+    assert_eq!(vector, 14);
+    assert_eq!(target_rip, 0x4000_0000_0000);
+    assert!(gs_restored);
+}
+
+#[def_test(serial)]
+fn ordinary_user_return_reports_an_unmapped_target_through_run() {
+    use x86_64::{
+        instructions::interrupts::without_interrupts,
+        registers::model_specific::{FsBase, GsBase, KernelGsBase},
+        structures::tss::TaskStateSegment,
+    };
+
+    let (is_user_fault, vector, target_rip) = without_interrupts(|| {
+        let tss = GsBase::read().as_u64() as usize
+            + kcpu_slot::__cpu_slot_symbol_offset!(super::gdt::__KCPU_SLOT_TSS);
+        let rsp0 = (tss + core::mem::offset_of!(TaskStateSegment, privilege_stack_table)) as *mut u64;
+        // SAFETY: this CPU is pinned by IRQ exclusion until on_user_exit.
+        let previous_rsp0 = unsafe { rsp0.read_unaligned() };
+        let mut context = super::userspace::UserContext::new(0x4000_0000_0000, va!(0x2000), 0);
+        context.rflags = 0;
+        context.fs_base = FsBase::read().as_u64();
+        context.gs_base = KernelGsBase::read().as_u64();
+        let reason = context.run(
+            || {},
+            || {
+                // SAFETY: run calls this exit callback on the same CPU with
+                // IRQs still masked, before it can enable IRQs or migrate.
+                unsafe { rsp0.write_unaligned(previous_rsp0) };
+            },
+        );
+        (matches!(reason, crate::userspace_common::ReturnReason::PageFault(..)), context.vector, context.rip)
+    });
+    assert!(is_user_fault);
+    assert_eq!(vector, 14);
+    assert_eq!(target_rip, 0x4000_0000_0000);
+}

@@ -147,6 +147,25 @@ pub unsafe fn self_nmi_with_irqs_enabled(deliveries: &AtomicUsize) -> bool {
         && deliveries.load(Ordering::Acquire) != before
 }
 
+/// Submits a self-NMI from an already active NMI probe without taking locks.
+///
+/// # Safety
+/// The serial probe owns this initialized CPU's ICR producer and has opened
+/// hardware NMI blocking by returning from its deliberate breakpoint.
+pub unsafe fn send_test_self_nmi() {
+    if super::IS_X2APIC.load(Ordering::Relaxed) {
+        // SAFETY: boot selected this live x2APIC; self shorthand has no target
+        // word and the probe exclusively owns submission. Publish before IPI.
+        unsafe { core::arch::asm!("mfence", "lfence", options(nostack)) };
+        // SAFETY: the probe owns this live ICR and self shorthand has no target.
+        unsafe { x86_64::registers::model_specific::Msr::new(0x830).write(0x44400) };
+    } else {
+        let icr = super::XAPIC_BASE.load(Ordering::Relaxed) + 0x300;
+        // SAFETY: boot mapped this CPU's APIC and the probe owns ICR-low.
+        unsafe { (icr as *mut u32).write_volatile(0x44400) };
+    }
+}
+
 fn read_register(msr: u32, offset: usize) -> u32 {
     if super::IS_X2APIC.load(Ordering::Relaxed) {
         // SAFETY: Boot selected x2APIC; callers supply only readable LAPIC MSRs.

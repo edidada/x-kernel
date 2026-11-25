@@ -78,8 +78,8 @@ trap_handler_table:
     POP2    rbx, rbp
 .endm
 
-# Available both to the ordinary exception path and to vector 2 itself.
-# An IRET fault can reopen NMI delivery before normal trap handling begins.
+# Unexpected faults in NMI glue must not reach Rust with an untrusted GS.
+# Identified user IRET faults are adapted separately before this check.
 .macro NMI_CHECK_GLUE_RIP
     mov     rcx, [rsp + {rip_offset}]
     lea     rax, [rip + .Lx86_nmi_entry]
@@ -116,6 +116,15 @@ trap_handler_table:
     # installed. Terminate before entering Rust or returning with IRET.
     cmp     qword ptr [rsp + {vector_offset}], 32
     jae     .Ldispatch_kernel_trap
+    # A user IRET fault occurs before SWAPGS has been undone. Convert its
+    # register frame back into the owning UserContext before calling Rust.
+    mov     rax, [rsp + {rip_offset}]
+    lea     rcx, [rip + .Lnmi_user_iret]
+    cmp     rax, rcx
+    je      .Lbad_user_iret
+    lea     rcx, [rip + .Liret]
+    cmp     rax, rcx
+    je      .Lbad_user_iret
     NMI_CHECK_GLUE_RIP
 .Ldispatch_kernel_trap:
     mov     rdi, rsp
@@ -125,93 +134,26 @@ trap_handler_table:
     add     rsp, 24                     # pop orig_rax, vector, error_code
     iretq
 
-.Lx86_nmi_entry:
-    cld
-    push    0                           # no hardware error code
-    push    {nmi_vector}
-    push    -1                          # orig_rax: not a syscall
-    PUSH_GENERAL_REGS
-    mov     r12, rsp
-    mov     rdi, r12
-    lea     rsi, [r12 + {trapframe_size}]
-    and     rsp, -16
-    call    x86_nmi_entry_must_stop
-    mov     rsp, r12
-    test    eax, eax
-    jnz     .Lx86_nmi_halt
-
-    # The IST points to aligned metadata in the permanent CPU area. CS
-    # alone cannot identify which GS is active in a SWAPGS transition.
-    mov     ecx, 0xc0000101              # IA32_GS_BASE
-    rdmsr
-    shl     rdx, 32
-    or      rax, rdx
-    mov     r13, rax
-    mov     rax, [r12 + {trapframe_size}]
-    mov     rdx, rax
-    shr     rdx, 32
-    wrmsr
-
-    mov     rdi, r12
-    and     rsp, -16
-    call    x86_nmi_handler
-    mov     rsp, r12
-
-    mov     ecx, 0xc0000101
-    mov     rax, r13
-    mov     rdx, rax
-    shr     rdx, 32
-    wrmsr
-    POP_GENERAL_REGS
-    add     rsp, 24
-    iretq
-# SysV ABI: RDI borrows the saved frame, RSI is the current IST top.
-# This classifier only reads the frame and labels. It needs no installed GS.
-.global x86_nmi_entry_must_stop
-.type x86_nmi_entry_must_stop, @function
-x86_nmi_entry_must_stop:
-    xor     eax, eax
-    # User RIP and RSP are not evidence that kernel NMI glue is active.
-    test    byte ptr [rdi + {cs_offset}], 3
-    jnz     .Lnmi_screen_done
-    mov     rcx, [rdi + {rip_offset}]
-    lea     rdx, [rip + .Lx86_nmi_entry]
-    cmp     rcx, rdx
-    jb      .Lnmi_screen_stack
-    lea     rdx, [rip + .Lx86_nmi_end]
-    cmp     rcx, rdx
-    jb      .Lnmi_screen_stop
-.Lnmi_screen_stack:
-    # A faulting IRETQ can unblock NMI in an exception stub outside the glue.
-    # Its interrupted kernel RSP still identifies the live NMI stack.
-    mov     rdx, [rdi + {rsp_offset}]
-    cmp     rdx, rsi
-    jae     .Lnmi_screen_done
-    sub     rsi, {nmi_stack_bytes}
-    cmp     rdx, rsi
-    jb      .Lnmi_screen_done
-    # SYSCALL/SYSRET windows can still carry an arbitrary user RSP at CPL 0.
-    lea     rdx, [rip + syscall_entry]
-    cmp     rcx, rdx
-    jb      .Lnmi_screen_stop
-    lea     rdx, [rip + .Lsyscall_kernel_rsp]
-    cmp     rcx, rdx
-    jb      .Lnmi_screen_done
-    lea     rdx, [rip + .Lsysret_user_rsp]
-    cmp     rcx, rdx
-    je      .Lnmi_screen_done
-.Lnmi_screen_stop:
-    mov     eax, 1
-.Lnmi_screen_done:
-    ret
-.size x86_nmi_entry_must_stop, . - x86_nmi_entry_must_stop
-.Lx86_nmi_end:
-
-.Lx86_nmi_halt:
-    cli
-.Lx86_nmi_halt_loop:
-    hlt
-    jmp     .Lx86_nmi_halt_loop
+# Only #NP/#SS/#GP are return-validation failures. Other faults in this
+# trusted return sequence mean kernel corruption and remain terminal.
+.Lbad_user_iret:
+    mov     rax, [rsp + {vector_offset}]
+    sub     rax, 11
+    cmp     rax, 2
+    ja      .Lx86_nmi_halt
+    swapgs
+    mov     rdx, gs:[offset __KCPU_SLOT_TSS + 4]
+    sub     rdx, {trapframe_size}
+    mov     r8, [rsp + {rsp_offset}]
+    mov     rdi, rdx
+    mov     rsi, rsp
+    mov     ecx, {rip_offset} / 8
+    rep movsq
+    mov     rsi, r8
+    mov     ecx, 5
+    rep movsq
+    mov     rsp, rdx
+    jmp     .Lexit_user_restore_kernel
 
 .global syscall_entry
 syscall_entry:
@@ -232,6 +174,7 @@ syscall_entry:
 
 .Lexit_user:
     PUSH_GENERAL_REGS
+.Lexit_user_restore_kernel:
 
     # Restore kernel context from UserContext.kernel_rsp, stored immediately
     # before the TrapFrame that hardware and this entry code fill.
@@ -250,48 +193,37 @@ enter_user:
     add rdi, {trapframe_size}
     mov gs:[offset __KCPU_SLOT_TSS + 4], rdi      # store end of TrapFrame -> TSS.sp0
 
-    swapgs                              # swap in user gs
-
+    # Keep SYSRET on its existing fast path. Only an IRET attempt needs a
+    # task-stack copy that protects UserContext.kernel_rsp from return faults.
+    mov rax, [rsp + {rcx_offset}]
+    cmp rax, [rsp + {rip_offset}]
+    jne .Lprepare_user_iret
+    mov rax, [rsp + {r11_offset}]
+    cmp rax, [rsp + {rip_offset} + 16]
+    jne .Lprepare_user_iret
+    test rax, 0x10100                   # RF/TF require IRET
+    jnz .Lprepare_user_iret
+    mov rax, [rsp + {rip_offset}]
+    shl rax, 16
+    sar rax, 16
+    cmp rax, [rsp + {rip_offset}]
+    jne .Lprepare_user_iret
+    swapgs
     POP_GENERAL_REGS
-    add rsp, 24                         # pop orig_rax, vector, error_code
-
-    # Determine whether to use sysret or iret.
-    # If returning to user space with a clean context,
-    # the fast sysret path can be used;
-    # otherwise, the slower iret path should be used.
-    # Reference: <https://elixir.bootlin.com/linux/v6.0.9/source/arch/x86/entry/entry_64.S#L122>.
-
-    cmp qword ptr [rsp], rcx            # sysret requires rcx = rip
-    jne .Liret
-
-    cmp qword ptr [rsp + 16], r11       # sysret requires r11 = rflags
-    jne .Liret
-
-    test r11, 0x10100                   # sysret requires rflags not contain RF and TF flags
-    jnz .Liret
-
-    shl rcx, 16
-    sar rcx, 16
-    cmp qword ptr [rsp], rcx            # sysret requires rip be a canonical address
-    je .Lsysret
-    mov rcx, [rsp]
-
-.Liret:
-    iretq
-
-.Lsysret:
-    mov rsp, [rsp + 24]                 # load user rsp
+    add rsp, 24
+    mov rsp, [rsp + 24]
 .Lsysret_user_rsp:
     sysretq
 
-.if {unittest}
-.section .rodata
-.balign 8
-.global x86_nmi_test_code_windows
-.type x86_nmi_test_code_windows, @object
-x86_nmi_test_code_windows:
-    .quad .Lx86_nmi_entry, .Lx86_nmi_end
-    .quad syscall_entry, .Lsyscall_kernel_rsp, .Lsysret_user_rsp
-    .quad .Ltrap_handler_13
-.size x86_nmi_test_code_windows, . - x86_nmi_test_code_windows
-.endif
+.Lprepare_user_iret:
+    mov rsi, rsp
+    mov rsp, [rsi - {kernel_rsp_to_trapframe_offset}]
+    sub rsp, {trapframe_size}
+    mov rdi, rsp
+    mov ecx, {trapframe_size} / 8
+    rep movsq
+    swapgs
+    POP_GENERAL_REGS
+    add rsp, 24
+.Liret:
+    iretq

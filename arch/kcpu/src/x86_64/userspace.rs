@@ -46,9 +46,9 @@ kcpu_slot::cpu_slot_cell! {
 ///
 /// `kernel_rsp` sits immediately before `tf` on purpose: the entry assembly
 /// treats `&kernel_rsp` as its private frame, storing the Rust caller's kernel
-/// stack there and using `tf` in place as the temporary trap stack (TSS.rsp0
-/// points to the end of `tf`). Keeping both in this struct lets the user return
-/// avoid copying the whole trap frame around the user window.
+/// stack there. User-origin exceptions land in `tf` through TSS.rsp0. Return
+/// IRET attempts use a copy on the task stack so a fault cannot overwrite the
+/// saved kernel continuation before the user-exception adapter restores it.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug)]
 pub struct UserContext {
@@ -76,6 +76,10 @@ pub(super) const KERNEL_RSP_TO_TRAPFRAME_OFFSET: usize =
     core::mem::offset_of!(UserContext, tf) - core::mem::offset_of!(UserContext, kernel_rsp);
 
 const _: () = assert!(KERNEL_RSP_TO_TRAPFRAME_OFFSET == core::mem::size_of::<u64>());
+const _: () = assert!(core::mem::align_of::<UserContext>() >= 16);
+const _: () = assert!(
+    (core::mem::offset_of!(UserContext, tf) + core::mem::size_of::<TrapFrame>()).is_multiple_of(16)
+);
 
 /// Installs clean x87/SSE/YMM state for a signal handler or new executable.
 pub fn reset_fp_state() {
@@ -237,7 +241,8 @@ impl UserContext {
         // SAFETY: `enter_user` uses `&self.kernel_rsp` as its private frame and
         // `self.tf` in place as the user trap stack. `self.tf` was initialized
         // by `new()` or restored from validated signal state with user segment
-        // selectors, and the hardware trap frame stays inside `tf`.
+        // selectors. User exceptions land inside `tf`; IRET attempts use
+        // the live task stack below the saved kernel continuation.
         unsafe { enter_user(self) };
 
         on_user_exit();

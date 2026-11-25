@@ -592,3 +592,14 @@ RISC-V transfers a PLIC claim or a local no-completion sentinel. Only the origin
 claiming CPU may consume the cookie, once, before entry exclusion ends. Safe
 generic claim construction is not exposed. Controller MMIO and hardware
 quiescence obligations remain independent of this Rust call boundary.
+
+## x86 NMI Recovery Probes
+
+The armed serial NMI observer retains CPU/IRQ exclusion and owns its local
+ICR producer. Test assembly deliberately faults at an address with an
+immutable `__ex_table` fixup entry. Only that guarded instruction may fault;
+the callback must not enter allocating page-fault recovery. The nested probe
+opens delivery with #BP, submits a hardware self-NMI and waits on a permanent
+same-CPU landing counter. The observer and counters remain live until the
+outer entry and its replay return; callback depth, effective NMI context, IRQ
+masking, alternate GS and the interrupted CR2 are checked before disarming.

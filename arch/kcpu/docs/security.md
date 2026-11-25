@@ -543,43 +543,59 @@ authorize scheduling. Page-fault callbacks do not inherit this unsafe signature.
 
 ## x86-64 NMI stack and return boundary
 
-`unsafe impl kcpu_slot::StaticSlotValue for nmi::Stack` allows the all-zero
-stack template to be copied bytewise into each permanent CPU area. Its byte
-array and `u64` metadata hold no ownership or self-references. Each CPU writes
-its own kernel GS value after the template is copied.
+`unsafe impl kcpu_slot::StaticSlotValue for nmi::Stack` certifies that its
+zero-valued byte array and scalar metadata may be copied into independent,
+permanent CPU areas without ownership, drop or self-reference semantics.
+`nmi::prepare_stack` writes the local kernel GS base at its aligned top during
+exclusive bring-up. `gdt::init` writes the packed TSS IST element using its
+layout-derived offset; `idt::init` loads the vector 2 gate after that setup.
+Every destination must have completed bring-up before a source targets it.
 
-During pinned CPU bring-up, `nmi::prepare_stack` writes the kernel GS base at
-the aligned top of a permanent local stack. `gdt::init` writes the corresponding
-packed TSS IST element before publishing the descriptor. `idt::init` installs
-the vector 2 gate with the same IST index. Stack memory and metadata remain
-kernel-owned and mapped, including across the platform's reset recovery.
-Source owners must wait until every target CPU has loaded its NMI gate.
+`x86_64/nmi_entry.S` is the assembly/Rust boundary. Hardware and the scratch
+register use only the landing area; the outer frame and callback stack are
+below it. Nested entries modify only the working return frame and marker.
+The repeat-copy instruction interval is checked before modifying that frame,
+so an interrupt cannot race a partially reconstructed return target. Clearing
+the marker is followed immediately by an identified kernel IRET, covering
+that exit window. The frame retained for the final kernel return is trusted
+kernel state. Stack exhaustion, corrupted IST pointers and damaged kernel
+return frames remain fatal conditions, not repairable nested arrivals.
 
-The vector 2 assembly uses stack metadata before any GS-relative access. It
-preserves the exact interrupted GS base and the frame supplied by hardware.
-The callback borrows the captured state for the duration of that entry and
-must keep IRQs masked, avoid scheduling and stay within the dedicated stack.
-It must avoid faulting instructions and paths that execute `IRET` internally.
+Kernel-origin entry installs GS from permanent IST metadata before Rust and
+restores the exact interrupted GS afterward. User-origin entry uses SWAPGS
+only after the hardware CS identifies ring 3. It reads the current TSS RSP0
+for the owning `UserContext`, and borrows the saved task kernel continuation
+without scheduling. CR2 is saved and restored on both paths so a callback's
+recoverable fault cannot replace the interrupted fault address.
 
-An exception raised by the NMI callback stops the local CPU before fault
-recovery. An exception or another NMI that interrupts the entry/return glue
-can arrive with the interrupted GS base active. The assembly RIP check stops
-the CPU before any Rust call in that case. A faulting `IRETQ` can unblock NMI
-delivery while the exception stub is still using the NMI stack. The NMI
-entry's saved-RSP check catches that case before installing GS. The bounds
-come from the hardware-selected IST top and the stack size. The check skips
-user mode and the `SYSCALL` and `SYSRET` instruction windows where kernel CS
-can coexist with a user-controlled RSP. Unexpected reentry is terminal since
-the new IST frame may have overwritten the outer frame. These paths use no
-ordinary logging or panic handler. Stack overflow and machine faults are
-outside this recovery model.
+The CPU-local atomic dispatch state only coordinates same-CPU nesting; it
+publishes no cross-CPU data, so Relaxed ordering suffices. Running-to-idle is
+one compare-exchange: an arrival that latches work before that transition
+forces another callback pass. `ExceptionContextGuard` scopes restore the
+previous active frame before the state becomes idle. All callbacks retain
+ordinary IRQ and migration exclusion and must not block, allocate or enable
+IRQs. During NMI, exception handling permits #BP return and immutable
+exception-table fixup of #PF/#GP only. Double faults, machine checks and other
+unrecoverable exceptions never use a memory-access fixup. It never calls the ordinary page-fault backend.
+Unrecoverable callback faults still stop the CPU without ordinary logging.
 
-`x86_nmi_entry_must_stop` uses the SysV ABI, borrows a complete
-`ExceptionContext` in RDI and receives the hardware-selected IST top in RSI.
-It only reads the frame and compares addresses, returns 0 or 1 in EAX, and
-neither accesses GS nor enables IRQs. The entry branches to the terminal path
-on a nonzero decision. `ut-tests/x86_nmi.rs` calls this same assembly routine
-with synthetic saved addresses; these values are never dereferenced. The
-unittest-only `x86_nmi_test_code_windows` object contains six immutable code
-addresses used by those tests. The tests cover stack bounds, exception-stub
-RIP, the glue interval, ring 3 and the SYSCALL/SYSRET user-RSP exclusions.
+User IRET frames are copied to the task stack before attempting return.
+The exact `.Liret` and `.Lnmi_user_iret` instruction addresses identify
+#NP/#SS/#GP return faults while GS is still the user's value. The adapter
+restores kernel GS before reading TSS RSP0, copies the saved registers and
+attempted user target into the live `UserContext`, then restores its original
+kernel continuation. No callback or scheduler runs while GS is untrusted.
+The owning task, its context and both stacks must stay live throughout.
+Other entry-glue faults remain terminal before Rust dispatch.
+
+Unittest-only assembly exposes a nested-delivery counter reader and two
+synthetic user-return fixtures. The counter is scalar permanent metadata,
+written by the same CPU's nested entry and read while pinned with IRQs masked.
+`nmi_bad_user_iret_restores_kernel_gs_and_reports_user_exception` constructs
+an invalid CS and faults at the production IRET. The user-origin fixtures
+construct a ring-3 IST frame with an unmapped target RIP and fault on user
+instruction fetch after IRET. Their contexts have at least 16-byte
+alignment because hardware aligns RSP0 before saving a user exception frame.
+The assembly restores the previous TSS RSP0 before IRQs resume. These tests
+exercise frame/fault adaptation and user-origin dispatch latching, but do not
+claim actual NMI delivery from an executing user task.

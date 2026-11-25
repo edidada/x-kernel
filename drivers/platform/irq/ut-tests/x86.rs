@@ -15,6 +15,49 @@ static NMI_PROBE_CPU: AtomicUsize = AtomicUsize::new(DISARMED_CPU);
 static NMI_DELIVERIES: AtomicUsize = AtomicUsize::new(0);
 static NMI_BAD_CONTEXT: AtomicBool = AtomicBool::new(false);
 
+const PROBE_BREAKPOINT: usize = 1;
+const PROBE_FIXUP: usize = 2;
+const PROBE_REPLAY: usize = 3;
+static NMI_PROBE_ACTION: AtomicUsize = AtomicUsize::new(0);
+static NMI_CALLBACK_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+core::arch::global_asm!(
+    ".section .text",
+    ".global x86_nmi_test_fixup_fault",
+    ".type x86_nmi_test_fixup_fault, @function",
+    "x86_nmi_test_fixup_fault:",
+    "mov rax, 0x400000000000",
+    "2: mov rax, [rax]",
+    "xor eax, eax",
+    "ret",
+    "3: mov eax, 1",
+    "ret",
+    ".size x86_nmi_test_fixup_fault, . - x86_nmi_test_fixup_fault",
+    ".pushsection __ex_table, \"a\"",
+    ".balign 8",
+    ".quad 2b, 3b",
+    ".popsection",
+);
+
+unsafe extern "C" {
+    fn x86_nmi_test_fixup_fault() -> usize;
+    fn x86_nmi_test_nested_count() -> u64;
+    fn x86_nmi_test_user_origin(context: *mut u64);
+}
+
+fn nested_count() -> u64 {
+    // SAFETY: only the armed NMI observer calls this read, with kernel GS
+    // installed, CPU pinning and ordinary IRQ exclusion retained.
+    unsafe { x86_nmi_test_nested_count() }
+}
+
+fn read_cr2() -> u64 {
+    let address: u64;
+    // SAFETY: this probe runs at ring 0; CR2 read has no side effects.
+    unsafe { core::arch::asm!("mov {}, cr2", out(reg) address, options(nostack, preserves_flags)) };
+    address
+}
+
 pub(super) fn observe_native_nmi(vector: usize) {
     if NMI_PROBE_CPU.load(Ordering::Acquire) != kplat::cpu::id().as_usize() {
         return;
@@ -22,7 +65,36 @@ pub(super) fn observe_native_nmi(vector: usize) {
     if vector != 2 || !kirq::context::is_in_nmi() || karch::local_irq_enabled() {
         NMI_BAD_CONTEXT.store(true, Ordering::Relaxed);
     }
+    if NMI_CALLBACK_DEPTH.fetch_add(1, Ordering::Relaxed) != 0 {
+        NMI_BAD_CONTEXT.store(true, Ordering::Relaxed);
+    }
     NMI_DELIVERIES.fetch_add(1, Ordering::Release);
+    match NMI_PROBE_ACTION.swap(0, Ordering::Relaxed) {
+        PROBE_BREAKPOINT => {
+            // SAFETY: the NMI test deliberately exercises resumable #BP.
+            unsafe { core::arch::asm!("int3", options(nostack)) };
+        }
+        PROBE_FIXUP => {
+            // SAFETY: this test assembly has an immutable exception-table
+            // entry for the deliberate fault, and returns its fixup status.
+            let repaired = unsafe { x86_nmi_test_fixup_fault() } == 1;
+            NMI_BAD_CONTEXT.fetch_or(!repaired || read_cr2() != 0x4000_0000_0000, Ordering::Relaxed);
+        }
+        PROBE_REPLAY => {
+            // SAFETY: returning from #BP opens hardware NMI delivery. The
+            // serial observer owns the local ICR and all probe state.
+            unsafe { core::arch::asm!("int3", options(nostack)) };
+            let before = nested_count();
+            // SAFETY: the serial callback owns the local ICR and #BP return
+            // opened NMI delivery; no ordinary IRQ can submit concurrently.
+            unsafe { x86_apic::send_test_self_nmi() };
+            while nested_count() == before {
+                core::hint::spin_loop();
+            }
+        }
+        _ => {}
+    }
+    NMI_CALLBACK_DEPTH.fetch_sub(1, Ordering::Relaxed);
 }
 
 #[def_test(serial)]
@@ -60,6 +132,75 @@ fn native_nmi_masks_enabled_irqs_and_restores_if_on_return() {
     assert!(restored_if);
     assert!(!kirq::context::is_in_interrupt_context());
     assert!(!karch::local_irq_enabled());
+}
+
+fn run_nmi_recovery_probe(action: usize, expected: usize) -> bool {
+    NMI_DELIVERIES.store(0, Ordering::Relaxed);
+    NMI_BAD_CONTEXT.store(false, Ordering::Relaxed);
+    NMI_PROBE_ACTION.store(action, Ordering::Relaxed);
+    NMI_PROBE_CPU.store(kplat::cpu::id().as_usize(), Ordering::Release);
+    let before_cr2 = read_cr2();
+    // SAFETY: callers retain CPU/IRQ exclusion and serial ownership. The
+    // observer remains armed until the hardware self-NMI has returned.
+    let gs_preserved = unsafe { x86_apic::self_nmi_with_swapped_gs(&NMI_DELIVERIES) };
+    let cr2_preserved = read_cr2() == before_cr2;
+    NMI_PROBE_CPU.store(DISARMED_CPU, Ordering::Release);
+    NMI_PROBE_ACTION.store(0, Ordering::Relaxed);
+    gs_preserved && cr2_preserved
+        && NMI_DELIVERIES.load(Ordering::Acquire) == expected
+        && !NMI_BAD_CONTEXT.load(Ordering::Relaxed)
+        && NMI_CALLBACK_DEPTH.load(Ordering::Relaxed) == 0
+        && !kirq::context::is_in_interrupt_context()
+}
+
+#[def_test(serial)]
+fn native_nmi_resumes_after_breakpoint() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    assert!(run_nmi_recovery_probe(PROBE_BREAKPOINT, 1));
+}
+
+#[def_test(serial)]
+fn native_nmi_repairs_fault_and_preserves_interrupted_cr2() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    assert!(run_nmi_recovery_probe(PROBE_FIXUP, 1));
+}
+
+#[def_test(serial)]
+fn nested_nmi_replays_after_the_outer_callback_returns() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    assert!(run_nmi_recovery_probe(PROBE_REPLAY, 2));
+}
+
+#[def_test(serial)]
+fn user_origin_nmi_latches_a_nested_kernel_nmi_without_callback_recursion() {
+    let _guard = kspin::NoPreemptIrqSave::new();
+    // This assembly-only ABI needs one continuation slot and the same 23
+    // register slots as ExceptionContext. No Rust UserContext is constructed.
+    #[repr(C, align(16))]
+    struct ProbeContext([u64; 24]);
+    let mut aligned = ProbeContext([0; 24]);
+    let context = &mut aligned.0;
+    context[19] = 0x4000_0000_0000; // unmapped user instruction -> #PF
+    context[20] = 0x23; // this kernel's 64-bit user CS
+    context[22] = 0x2000;
+    context[23] = 0x1b; // this kernel's user SS
+    NMI_DELIVERIES.store(0, Ordering::Relaxed);
+    NMI_BAD_CONTEXT.store(false, Ordering::Relaxed);
+    NMI_PROBE_ACTION.store(PROBE_REPLAY, Ordering::Relaxed);
+    NMI_PROBE_CPU.store(kplat::cpu::id().as_usize(), Ordering::Release);
+    // SAFETY: this serial pinned fixture owns all probe state and both live
+    // frames. The helper installs a synthetic user IST frame, calls the real
+    // NMI entry and restores TSS RSP0 after its deliberate return fault.
+    unsafe { x86_nmi_test_user_origin(context.as_mut_ptr()) };
+    NMI_PROBE_CPU.store(DISARMED_CPU, Ordering::Release);
+    NMI_PROBE_ACTION.store(0, Ordering::Relaxed);
+    // A new user instruction fault occurs after NMI return; its CR2 is
+    // unrelated to preserving the pre-NMI CR2 (covered by the fixup probe).
+    assert_eq!(context[17], 14);
+    assert_eq!(NMI_DELIVERIES.load(Ordering::Acquire), 2);
+    assert!(!NMI_BAD_CONTEXT.load(Ordering::Relaxed));
+    assert_eq!(NMI_CALLBACK_DEPTH.load(Ordering::Relaxed), 0);
+    assert!(!kirq::context::is_in_interrupt_context());
 }
 
 fn io_desc(pin: usize) -> kirq::IrqDesc {
