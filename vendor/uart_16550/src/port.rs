@@ -48,6 +48,13 @@ impl SerialPort {
         self.port_base() + 4
     }
 
+    /// Interrupt identification port.
+    ///
+    /// Read only.
+    fn port_iir(&self) -> u16 {
+        self.port_base() + 2
+    }
+
     /// Line status port.
     ///
     /// Read only.
@@ -112,6 +119,38 @@ impl SerialPort {
         unsafe { x86::io::inb(self.port_int_en()) & 1 != 0 }
     }
 
+    /// Acknowledge the UART's current interrupt source.
+    ///
+    /// A 16550 has no write-one-to-clear interrupt register. `IIR` reports the
+    /// highest-priority pending source, and the line deasserts only after the
+    /// source is serviced. This follows Linux 8250's `serial8250_handle_irq`
+    /// rule: any `IIR` value other than `UART_IIR_NO_INT` is a real event.
+    /// Receive-timeout and receive-data sources are drained by the caller
+    /// through [`Self::try_receive`]. A receiver-line-status event is latched
+    /// until `LSR` is read, so read it here even when it carries no byte.
+    ///
+    /// The caller must provide exclusive access to this UART. The method only
+    /// performs I/O-port reads; it is allocation-free and suitable for IRQ
+    /// context.
+    pub fn ack_interrupt(&mut self) -> bool {
+        // SAFETY: constructing this port requires exclusive ownership of the
+        // I/O range; the caller supplies the same exclusion for this read.
+        self.ack_interrupt_with(|port| unsafe { x86::io::inb(port) })
+    }
+
+    fn ack_interrupt_with(&self, mut read: impl FnMut(u16) -> u8) -> bool {
+        let iir = read(self.port_iir());
+        if iir & 1 != 0 {
+            return false;
+        }
+        // LSR is the clear-on-read side effect for a receiver-line-status
+        // source. Other non-NO_INT sources are serviced by the data path.
+        if iir & 0x0f == 0x06 {
+            let _lsr = read(self.port_line_sts());
+        }
+        true
+    }
+
     fn line_sts(&mut self) -> LineStsFlags {
         unsafe { LineStsFlags::from_bits_truncate(x86::io::inb(self.port_line_sts())) }
     }
@@ -172,6 +211,41 @@ impl SerialPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ack_interrupt_decodes_iir_and_clears_line_status() {
+        let uart = SerialPort(0x3f8);
+        let mut reads = [0u16; 2];
+        let mut read_len = 0;
+        let mut values = core::iter::once(0x0c);
+        let acked = uart.ack_interrupt_with(|port| {
+            reads[read_len] = port;
+            read_len += 1;
+            values.next().expect("unexpected extra read")
+        });
+        assert!(acked);
+        assert_eq!(&reads[..read_len], [0x3fa]);
+
+        read_len = 0;
+        let mut values = core::iter::once(0x01);
+        let acked = uart.ack_interrupt_with(|port| {
+            reads[read_len] = port;
+            read_len += 1;
+            values.next().expect("unexpected extra read")
+        });
+        assert!(!acked);
+        assert_eq!(&reads[..read_len], [0x3fa]);
+
+        read_len = 0;
+        let mut values = core::iter::once(0x06).chain(core::iter::once(0x41));
+        let acked = uart.ack_interrupt_with(|port| {
+            reads[read_len] = port;
+            read_len += 1;
+            values.next().expect("unexpected extra read")
+        });
+        assert!(acked);
+        assert_eq!(&reads[..read_len], [0x3fa, 0x3fd]);
+    }
 
     #[test]
     fn masked_setup_preserves_configuration_without_rx_enable() {

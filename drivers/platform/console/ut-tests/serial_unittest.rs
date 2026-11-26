@@ -6,6 +6,7 @@ use khal::mem::PhysAddr;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
+use crate::serial::test_support::SerialPortFixture;
 
 #[cfg(feature = "pl011")]
 #[def_test]
@@ -210,6 +211,17 @@ fn input_irq_binding_initial_pass_duplicate_and_stop() {
     // Detach stops future lookups, not notification clones already issued.
     stale.wake();
     assert_eq!(passes.load(Ordering::Acquire), 3);
+}
+
+#[def_test]
+fn test_backend_acked_non_rx_event_without_data_is_handled() {
+    let fixture = SerialPortFixture::new(&[]);
+    let port = fixture.port();
+    port.prepare_irq_input().unwrap();
+    fixture.set_ack_pending(true);
+    assert_eq!(port.handle_input_irq(), IrqEvent::HANDLED);
+    fixture.set_ack_pending(false);
+    assert_eq!(port.handle_input_irq(), IrqEvent::NOT_HANDLED);
 }
 
 #[def_test]

@@ -132,7 +132,7 @@ impl Backend {
     fn ack_interrupt(&mut self) -> bool {
         match self {
             #[cfg(unittest)]
-            Backend::Test(_) => false,
+            Backend::Test(port) => port.ack_interrupt(),
             #[cfg(feature = "pl011")]
             Backend::Pl011(uart) => {
                 if uart.is_receive_interrupt() {
@@ -473,10 +473,14 @@ impl SerialPort {
         let (has_input_event, waker) = {
             let mut io = self.io.lock();
             let SerialIo { backend, input, .. } = &mut *io;
-            let Some(input) = input else {
-                return IrqEvent::NOT_HANDLED;
-            };
             let is_receive_pending = backend.ack_interrupt();
+            let Some(input) = input else {
+                return if is_receive_pending {
+                    IrqEvent::HANDLED
+                } else {
+                    IrqEvent::NOT_HANDLED
+                };
+            };
             let received = input.collect(|| backend.try_receive());
             (is_receive_pending || received > 0, input.waker.clone())
         };

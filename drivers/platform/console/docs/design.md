@@ -122,12 +122,16 @@ and action registration do not hold the port lock; the controller line may be
 enabled during registration while the UART source is still masked. Emergency
 output does not participate in receive activation.
 The action acknowledges and collects a receive batch under the port lock, then
-wakes the bound input `Waker` after unlocking. An unrelated IRQ reports unhandled.
+wakes the bound input `Waker` after unlocking. A valid non-`UART_IIR_NO_INT`
+source is handled even when it carries no RX byte; only a genuinely idle claim
+reports unhandled. An unrelated IRQ reports unhandled.
 
 Acknowledging is per-backend and must cover every source that backend claims. A
 16550 deasserts its line only by having its source serviced, and the sources that
 carry no byte need a register read of their own: a latched receiver error needs
-`LSR`, and a DesignWare busy detect needs `USR`. Only a node whose firmware
+`LSR`, and a DesignWare busy detect needs `USR`. The x86 I/O-port backend reads
+`IIR` before collecting: any value other than `UART_IIR_NO_INT` is handled, and
+a receiver-line-status event consumes the latched `LSR` state. Only a node whose firmware
 compatible is `snps,dw-apb-uart` gets the `USR` read; the register is
 DesignWare-specific, not common ground shared by every 16550-compatible part.
 Draining the FIFO clears neither, so a backend that can only collect bytes

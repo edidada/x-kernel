@@ -61,8 +61,14 @@ concurrent changes to the baud rate or other configuration.
 
 ## Interrupt Acknowledgment
 
-The NS16550 MMIO backend deasserts its line only by servicing the source that
-`IIR` reports. Two sources carry no byte and need their own register read: a
+The NS16550 MMIO and x86 I/O-port backends deassert their line only by servicing
+the source that `IIR` reports. The I/O-port path treats every value other than
+`UART_IIR_NO_INT` as a real event and reads `LSR` for a receiver-line-status
+event; receive-data and timeout sources are drained by the caller. An idle
+`IIR` still reports unhandled, so the KIRQ unclaimed-source diagnostic is not
+silenced. Port I/O is performed only under the port lock and only on the base
+recorded at construction. The MMIO backend additionally decodes DesignWare
+sources. Two sources carry no byte and need their own register read: a
 latched receiver error needs `LSR`, and a DesignWare busy detect needs `USR`
 (at byte offset 0x7C). `ack_interrupt` decodes the whole `IIR` identifier
 nibble, not `IIR[0]`: the DesignWare busy-detect code has bit 0 set, and the

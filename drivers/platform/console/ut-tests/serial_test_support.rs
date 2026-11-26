@@ -12,6 +12,7 @@ const CAPACITY: usize = 256;
 
 pub(super) struct TestBackend {
     pub(super) receive_enable_count: usize,
+    ack_pending: bool,
     input: [u8; CAPACITY],
     input_len: usize,
     input_offset: usize,
@@ -20,6 +21,10 @@ pub(super) struct TestBackend {
 }
 
 impl TestBackend {
+    pub(super) fn ack_interrupt(&mut self) -> bool {
+        core::mem::take(&mut self.ack_pending)
+    }
+
     pub(super) fn try_receive(&mut self) -> Option<u8> {
         if self.input_offset == self.input_len {
             return None;
@@ -66,6 +71,7 @@ impl SerialPortFixture {
         );
         let mut backend = TestBackend {
             receive_enable_count: 0,
+            ack_pending: false,
             input: [0; CAPACITY],
             input_len: input.len(),
             input_offset: 0,
@@ -89,6 +95,15 @@ impl SerialPortFixture {
     /// Clones this fixture's port; the clone retains all byte storage.
     pub fn port(&self) -> Arc<SerialPort> {
         self.port.clone()
+    }
+
+    /// Marks the next IRQ as a valid non-receive event with no RX byte.
+    pub fn set_ack_pending(&self, pending: bool) {
+        let mut io = self.port.io.lock();
+        let Backend::Test(backend) = &mut io.backend else {
+            unreachable!("fixture owns a test serial port");
+        };
+        backend.ack_pending = pending;
     }
 
     /// Number of RX activation requests, initially zero.
