@@ -65,7 +65,12 @@ inside the manager transaction.
 
 `Process::create_posix_timer` pins its runtime first (preserving NoSuchProcess
 precedence), prepares the configuration outside the manager mutex, then admits
-it and refreshes the CPU-timer gate under the mutex. Notifying timers now reserve
+it and derives **and publishes** the CPU-timer gate (armed flag and per-clock
+earliest-deadline cache) under the mutex, atomic with the admission so a
+concurrent arm/disarm cannot interleave a stale gate write. Creation admits a
+disarmed timer, so it never raises the gate; on a rising edge elsewhere the
+running accumulator is seeded before the armed flag is stored, from a sample
+walked before the mutex (see the kprocess gate lock order). Notifying timers now reserve
 one KArc-backed signal record here with KERNEL permissions. NoMemory returns
 before manager admission; SIGEV_NONE skips the allocation. This does not make
 BTreeMap/alarm allocations fallible. The public
@@ -773,8 +778,20 @@ outbound `siginfo` union using its full-width pointer member.
   shares a single time base. `ITIMER_VIRTUAL` uses user time, `ITIMER_PROF`
   uses user plus system, and POSIX process-CPU timers use scheduler runtime;
   like Linux `posix-cpu-timers`, none of them consumes the adjusted split.
-  CPU timers are polled at user return; a periodic timer IRQ gives a busy
-  userspace task return points.
+  While the group is armed, `kprocess` supplies that snapshot from the running
+  group accumulator lock-free (Linux `check_process_timers` /
+  `cpu_clock_sample_group`); only an inactive group falls back to a membership
+  walk. CPU timers are polled at user return; a periodic timer IRQ gives a busy
+  userspace task return points. The manager also derives `cpu_timer_nextevt()`,
+  one earliest armed deadline per CPU clock base (PROF/VIRT/SCHED, `u64::MAX`
+  when a base holds nothing armed). The Process publishes that array lock-free
+  alongside the armed flag so the tick CPU-timer fastpath in `kprocess` can
+  compare an atomically sampled group clock against it (`task_cputimers_expired`
+  equivalent) and only request the user-return poll on a plausible expiry,
+  instead of on every tick while armed. It is a filtering cache, not the source
+  of truth: the authoritative user-return poll still walks every timer here, so
+  a missed or stale `nextevt` defers detection by at most one tick and never
+  loses or mis-fires a timer.
 - The alarm task (`spawn_alarm_task`) is a sleepable kernel task using
   `timeout_at` on the current conversion of the earliest deadline; the expired-owner
   callback re-enters `kprocess` polling and may therefore block on the

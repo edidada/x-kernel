@@ -4154,29 +4154,56 @@ fn test_cpu_timer_gate_tracks_cpu_itimer_arm_and_disarm() {
 }
 
 #[def_test(serial)]
-fn periodic_cpu_timer_work_is_gated_and_coalesced() {
+fn periodic_cpu_timer_work_is_filtered_and_coalesced() {
     let (process, task) = build_prepared_test_user_task();
     let task = prepare_task(task);
     let thread = task.as_thread();
-    // Drives the periodic-tick entry directly, past `on_timer_fire`'s
-    // `periodic_due` gate (raw accounting is no longer unconditional across
-    // all timer IRQs). Within the entry raw ticks always land; only itimer
-    // work follows the `cpu_timers_armed` gate.
+    // Drives the periodic-tick entry directly. The tick now filters expiry in
+    // software (Linux `fastpath_timer_check`): raw accounting always lands, the
+    // running group accumulator is fed while armed, and the coalesced work bit
+    // is requested only when the sampled group clock reaches an armed deadline.
     ktask::UserTaskRuntime::on_periodic_tick(thread, true, 1_000_000);
     assert!(!thread.has_pending_cpu_timer_work());
     assert_eq!(thread.raw_cpu_time(), (1_000_000, 0));
 
-    process.set_cpu_timers_armed(true);
+    // Arm with a PROF deadline a second ahead of the group clock (seeded now),
+    // so the accumulator stays below it and a single tick cannot reach it.
+    let base = process.cpu_timer_sample();
+    let far = base.utime.saturating_add(base.stime).saturating_add(1_000_000_000);
+    process.publish_cpu_timer_gate(true, [far, u64::MAX, u64::MAX], process.cpu_timer_group_sample());
+
+    // A user tick feeds the accumulator but stays far below the deadline: the
+    // fastpath filters it, so no work is requested.
     ktask::UserTaskRuntime::on_periodic_tick(thread, true, 1_000_000);
+    assert!(!thread.has_pending_cpu_timer_work());
+
+    // Re-publish a deadline the very next tick reaches (the current group
+    // clock). Re-arming while already armed is not a rising edge, so it does not
+    // reseed the accumulator.
+    let near = process.cpu_timer_sample();
+    let reached = near.utime.saturating_add(near.stime);
+    let rising = process.publish_cpu_timer_gate(
+        true,
+        [reached, u64::MAX, u64::MAX],
+        process.cpu_timer_group_sample(),
+    );
+    assert!(!rising, "re-arming an already-armed gate is not a rising edge");
+
+    // A system tick advances the group clock past the deadline, so the
+    // fastpath requests coalesced work.
     ktask::UserTaskRuntime::on_periodic_tick(thread, false, 1_000_000);
     assert!(thread.has_pending_cpu_timer_work());
+    // A further tick past an unreached request adds no second request.
+    ktask::UserTaskRuntime::on_periodic_tick(thread, false, 1_000_000);
     assert!(thread.take_cpu_timer_work());
     assert!(!thread.take_cpu_timer_work());
-    assert_eq!(thread.raw_cpu_time(), (2_000_000, 1_000_000));
+
+    // Gate closed: the deadline is still past, but a tick accounts raw time
+    // without requesting work and without feeding the accumulator.
     process.set_cpu_timers_armed(false);
     ktask::UserTaskRuntime::on_periodic_tick(thread, true, 1_000_000);
     assert!(!thread.has_pending_cpu_timer_work());
-    assert_eq!(thread.raw_cpu_time(), (3_000_000, 1_000_000));
+    assert_eq!(thread.raw_cpu_time(), (3_000_000, 2_000_000));
 }
 
 /// Checks the gate short-circuits the poll before the runtime is touched.
@@ -4200,6 +4227,133 @@ fn test_cpu_timer_gate_skips_poll_before_runtime_lookup() {
         Some(kerrno::KError::NoSuchProcess),
         "an open gate must reach the runtime before polling"
     );
+}
+
+/// An armed group CPU clock samples the running accumulator, not a fresh walk,
+/// and the arm edge seeds it from the authoritative membership walk.
+///
+/// The fixture thread is published to the membership ledger and ticked first so
+/// the walked group total is non-zero: the rising-edge `publish_cpu_timer_gate`
+/// must raise the accumulator to exactly that walked total (a never-seeding
+/// implementation would leave it at zero and fail the seed assertion). Feeding
+/// the accumulator directly afterwards (as a scheduler commit does) advances a
+/// clock no membership walk can see — the per-thread counters are untouched — so
+/// reading the delta back proves the armed branch reads the accumulator (Linux
+/// `cpu_clock_sample_group` / `check_process_timers`). Disarming falls back to
+/// the walk, which does not carry the accumulator-only delta. This is what lets
+/// the user-return poll drop its per-pass membership walk and re-sync.
+///
+/// The seed-before-armed-store *ordering* itself is a concurrent invariant: a
+/// read after the call returns cannot observe it, and the guest unit-test
+/// scheduler interleaves tasks only at blocking boundaries, so no instruction
+/// level arm-edge interleaving is observable here. It is guaranteed by
+/// construction instead — `publish_cpu_timer_gate` sequences `seed_from` before
+/// the `Release` store of `armed`, and an `Acquire` reader that sees `armed`
+/// therefore sees the seeded accumulator (see the gate lock order in design.md).
+/// The assertions above pin what *is* single-threaded observable: the seed is
+/// applied from the walked total, and the armed clock reads the accumulator.
+#[def_test(serial)]
+fn armed_group_clock_reads_running_accumulator_not_a_walk() {
+    let (process, task) = build_prepared_test_user_task();
+    let task = prepare_task(task);
+    // The inactive walk sums published membership members' raw counters, so the
+    // fixture thread must be a ledger member: a merely prepared thread is not
+    // walked and would leave the seed sample at zero.
+    process_publication().publish_task(&task).unwrap();
+    let thread = task.as_thread();
+    // Grow the raw counters while the gate is closed (no feed), so the inactive
+    // membership walk is non-zero and the seed is observable.
+    ktask::UserTaskRuntime::on_periodic_tick(thread, true, 1_000_000);
+    ktask::UserTaskRuntime::on_periodic_tick(thread, false, 2_000_000);
+    let walked = process.cpu_timer_group_sample();
+    let walked_prof_ns = walked.utime.saturating_add(walked.stime);
+    assert!(walked_prof_ns > 0, "the fixture walk must be non-zero");
+
+    process.publish_cpu_timer_gate(true, [u64::MAX, u64::MAX, u64::MAX], walked);
+    let sample = process.cpu_timer_sample();
+    assert_eq!(
+        sample.utime.saturating_add(sample.stime),
+        walked_prof_ns,
+        "the arm edge must seed the accumulator from the walked group total"
+    );
+
+    process.add_group_exec_runtime(5_000_000);
+    let fed_ns = sample.sum_exec_runtime.saturating_add(5_000_000);
+    assert_eq!(process.cpu_timer_group_sample().sum_exec_runtime, fed_ns);
+    assert_eq!(process.process_cpu_time().as_nanos_u64_saturating(), fed_ns);
+
+    process.set_cpu_timers_armed(false);
+    assert!(
+        process.process_cpu_time().as_nanos_u64_saturating() < fed_ns,
+        "an inactive group must fall back to the membership walk"
+    );
+}
+
+/// A process CPU timer expired by one thread's kernel runtime must be detected
+/// by a sibling's tick, so whichever thread returns to user can deliver it.
+///
+/// Thread A spins in kernel mode: its system ticks feed the running *group*
+/// accumulator past the armed deadline and flag A, but A never returns to user.
+/// Thread B contributes no runtime of its own; a user-mode tick on B samples the
+/// same group accumulator (Linux `fastpath_timer_check` reads the process clock,
+/// not the interrupted thread's) and flags B too. B is the thread that resumes
+/// to user, so it must carry the delivery work — the long-kernel-mode starvation
+/// fix.
+///
+/// The *negative* assertion below is what discriminates the implementation: a
+/// per-thread blind flag set on every armed tick would flag B even while the
+/// group clock is still far below the deadline. The positive cross-thread
+/// assertion alone passes under that blind implementation too (it also flags B),
+/// so only the negative assertion excludes it.
+#[def_test(serial)]
+fn process_timer_expiry_crosses_threads_to_the_user_return_thread() {
+    let (process, task_a) = build_prepared_test_user_task();
+    let task_a = prepare_task(task_a);
+    let thread_a = task_a.as_thread();
+    let sibling_tid = kidentity::allocate_root_pid_handle()
+        .expect("sibling identity should allocate")
+        .root_nr();
+    let task_b = prepare_test_thread(&process, sibling_tid);
+    let thread_b = task_b.as_thread();
+
+    // Arm a PROF deadline a full second above the seeded group clock, so a
+    // single tick cannot reach it. Tests hold no manager lock, so publish the
+    // gate directly with the walked seed sample (the production arm edge seeds
+    // before arming).
+    let base = process.cpu_timer_sample();
+    let deadline_ns = base
+        .utime
+        .saturating_add(base.stime)
+        .saturating_add(1_000_000_000);
+    process.publish_cpu_timer_gate(
+        true,
+        [deadline_ns, u64::MAX, u64::MAX],
+        process.cpu_timer_group_sample(),
+    );
+
+    // Negative (discriminating) assertion: the group clock is still far below
+    // the deadline, so B's user tick must NOT request work. A blind per-thread
+    // flag set on every armed tick would flag B here and fail this assertion.
+    ktask::UserTaskRuntime::on_periodic_tick(thread_b, true, 1_000_000);
+    assert!(
+        !thread_b.has_pending_cpu_timer_work(),
+        "a tick whose group sample is below every armed deadline must not request work"
+    );
+
+    // A's kernel-mode tick feeds the group accumulator past the deadline and
+    // flags A; A stays in kernel and never delivers.
+    ktask::UserTaskRuntime::on_periodic_tick(thread_a, false, 2_000_000_000);
+    assert!(thread_a.has_pending_cpu_timer_work());
+
+    // B's user-mode tick samples the same group clock (already expired by A)
+    // and flags B, even though B's own raw runtime is far below the deadline.
+    ktask::UserTaskRuntime::on_periodic_tick(thread_b, true, 1_000_000);
+    assert!(
+        thread_b.has_pending_cpu_timer_work(),
+        "the user-return thread must detect a process timer expired by another thread's kernel runtime"
+    );
+    assert!(thread_b.take_cpu_timer_work());
+    assert!(!thread_b.take_cpu_timer_work());
 }
 
 #[def_test(serial)]

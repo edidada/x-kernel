@@ -235,8 +235,27 @@ retains init identity; orphan reparenting reserves an init relation slot.
   captured owner. Rearm finishes its `PosixTimerUpdate` after unlocking, cancelling
   old pending ownership before returning the syscall result.
   Delete and exec clearing now transfer retired timer ownership out of the
-  manager mutex. The CPU-timer gate is updated before unlocking, and the removed
-  timer or detached map is dropped, cancelling invalidated pending ownership.
+  manager mutex. The CPU-timer gate (armed flag plus the per-clock `nextevt`
+  earliest-deadline cache) is derived **and published inside the manager lock**,
+  atomic with the mutation (Linux publishes `timers_active`/`nextevt` under
+  `siglock`), so a concurrent arm/disarm cannot interleave a stale gate write.
+  On the `false -> true` edge the running accumulator is seeded **before** the
+  armed flag is stored, exactly as Linux `thread_group_start_cputime` orders
+  `update_gt_cputime` before `WRITE_ONCE(timers_active)`: a concurrent sampler
+  must never observe `armed == true` while the accumulator still holds its
+  pre-arm stale-low value, which would make `CLOCK_PROCESS_CPUTIME_ID`
+  non-monotonic and let a relative CPU timer arm against a stale clock and fire
+  early. The seed sample is walked *before* the manager lock (the membership
+  lock must precede — never nest inside — the manager mutex); the seed itself is
+  a lock-free compare-exchange-max, so it nests safely inside the manager lock
+  and commutes with concurrent tick feeds. Because the manager lock sleeps with
+  IRQs enabled, ticks between that pre-lock walk and the publication are neither
+  fed nor captured, so the accumulator can lag the true group total by that
+  bounded gap — a monotonic, conservative under-count (clocks read low, timers
+  fire late, never early), within tick granularity. Linux admits no gap only
+  because `siglock` is irqsave and walks inside the same critical section. The
+  removed timer or detached map is dropped, cancelling invalidated pending
+  ownership.
   Process/syscall return types are
   unchanged; the lower-level ktimer removal APIs now return opaque owners.
 - `process_exit` and `wait_reap` are used by lifecycle/syscall owners to sequence
@@ -272,10 +291,23 @@ retains init identity; orphan reparenting reserves an init relation slot.
   `detach` saturates at zero on an un-attached detach instead of panicking. The
   count itself is crate-internal.
 - `timer_delivery` registers `ktimer` expiry and attaches typed dequeue receipts;
-  a periodic tick coalesces CPU-timer work on the current thread while its
-  process has armed timers. User return consumes that request and polls the
-  manager; wall timers run on the alarm task. The per-thread pending bit plays
-  the role of Linux `posix_cputimers_work.scheduled`.
+  the periodic tick runs a lock-free CPU-timer expiry fastpath on the current
+  thread, and user return consumes its request and polls the manager; wall
+  timers run on the alarm task. The tick mirrors Linux `run_posix_cpu_timers`
+  / `fastpath_timer_check`: after accounting the tick it gates on the group's
+  armed flag and the not-yet-scheduled pending bit, samples the running group
+  accumulator atomically, and compares each clock against its cached `nextevt`
+  (`task_cputimers_expired`) — only a real expiry sets the per-thread pending
+  bit, which plays the role of Linux `posix_cputimers_work.scheduled`. Because
+  every thread's tick samples the *group* accumulator, any thread detects a
+  process CPU-timer expiry and any thread's user return delivers it, so a thread
+  parked in long kernel-mode execution no longer starves its siblings' delivery.
+  The hardirq fastpath only *detects* expiry; the signal is still delivered at
+  user return, matching the Linux default `task_work(TWA_RESUME)` layering. The
+  user-return poll samples that same running accumulator lock-free (Linux
+  `check_process_timers`) and walks the manager's timer list to collect
+  expiries; it does not walk thread membership or re-seed the accumulator,
+  because every tick and scheduler commit already feeds it while armed.
   `UserTaskRuntime for Thread` supplies CPU residency, pending-fatal-signal
   queries and AArch64 switch roots to `ktask`; `CurrentThreadSignalIf` adapts
   current-task signal injection.
@@ -348,6 +380,48 @@ getrusage and wait. CPU interval timers instead consume one raw
 a single time base and expiry never derives from the adjusted split — the
 same division Linux draws in `posix-cpu-timers`.
 
+That group ledger is a *query-time* walk: it enumerates live members under the
+membership lock, so it is task-context only and cannot run from the tick. The
+tick CPU-timer fastpath therefore reads a separate running group accumulator,
+`ThreadGroupCputimer` — three lock-free `AtomicU64` clocks (`utime`, `stime`,
+`sum_exec_runtime`) hanging on the process group ledger. This is exactly the
+Linux `thread_group_cputimer.cputime_atomic` that coexists with the query walk.
+Feeds are gated by the group's armed flag (Linux `get_running_cputimer`'s
+`timers_active`): the tick adds `utime`/`stime` per interrupted privilege
+(`account_group_user_time`/`account_group_system_time`), and the scheduler's
+runtime commit adds the `update_curr` delta to `sum_exec_runtime`
+(`account_group_exec_runtime`) as extra accounting that leaves fair-scheduling
+semantics untouched. On the armed false->true edge the accumulator is seeded
+from one authoritative `thread_group_cputime()` walk via a cmpxchg-max
+(`update_gt_cputime`) that only ever raises each clock, so a concurrent tick
+feed can never be overwritten backwards; the seed is applied *before* the armed
+flag is published, so no sampler observes an armed but unseeded accumulator.
+While armed it is the group's live
+time source for *both* the tick fastpath and the task-context timer passes
+(poll, itimer/POSIX set and get, the process CPU clock): each samples it
+lock-free, exactly as Linux `check_process_timers` / `cpu_clock_sample_group`
+do, with no per-pass membership walk and no re-sync — the continuous tick and
+scheduler feeds keep it coherent, and a dying thread's lifetime contribution is
+already in it before its counters transfer to the group's exited totals (the
+`sighand`-gone boundary), so it never double-counts a retired member. Only an
+inactive group falls back to the query walk; arming a timer seeds the
+accumulator from that walk on the false->true edge, *before* the gate is
+published under the manager lock (the walk itself runs before that lock, since
+membership precedes manager). The three clocks are sampled as a non-atomic
+snapshot; Linux's fastpath is likewise heuristic, so a torn read at worst shifts
+expiry by one tick. The sleeping manager lock also leaves a bounded arm-edge
+gap: ticks between the pre-lock walk and the publication are unfeed and
+uncaptured, so the accumulator may lag the true total by that gap — a monotonic,
+conservative under-count (expiry late, never early), within CPU-timer tick
+granularity, never the backwards clock jump a stale-low armed read would cause.
+Only a path that can raise the gate or reads the group clock for a deadline
+samples it before the lock: a process-CPU timer arm always does, and a timer
+record/dequeue does iff its own timer is process-CPU (`needs_cpu_times`) — that
+alone can raise the gate (`any_cpu_timer_armed` counts process-CPU timers only)
+or needs the group clock. A wall-clock record/dequeue neither arms the CPU gate
+nor reads the group clock, so it takes no membership walk, exactly as before the
+running accumulator existed.
+
 The thread CPU clock samples the same scheduler ledger directly. Reading
 advances it: the running delta is committed before the value returns, so the
 caller never observes its own elapsed on-CPU time as missing. The sampler
@@ -387,9 +461,11 @@ CPU clocks depend on the scheduler runtime ledger instead:
 `current_thread_cpu_clock` requires an initialized current task and run queue
 (any task, user thread or kernel task), never sleeps, and must be called
 without the local run-queue lock; `Process::process_cpu_time` requires task
-context with neither the run-queue nor the membership lock held; it samples
-in bounded, allocation-free batches and retries on membership changes. A periodic CPU
-timer poll inherits both constraints through its sampling of these clocks.
+context with neither the run-queue nor the membership lock held: an armed group
+reads the running accumulator lock-free, while an inactive group samples in
+bounded, allocation-free batches and retries on membership changes. A periodic
+CPU-timer poll samples the running accumulator directly and takes only the
+manager mutex, so it never walks membership.
 `Process::exited_thread_time` acquires the IRQ-safe `thread_membership` lock and
 must not be called while holding it. `Thread::cpu_time_adjusted` requires the
 caller to have refreshed the current task's scheduler-runtime sample before

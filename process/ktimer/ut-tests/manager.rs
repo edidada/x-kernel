@@ -465,6 +465,101 @@ fn cpu_timer_expiry_uses_raw_split_not_adjusted() {
     assert_eq!(manager.poll_cpu_timers(reached).len(), 2);
 }
 
+/// The tick fastpath's earliest-deadline cache is derived per CPU-clock base.
+///
+/// `cpu_timer_nextevt` returns `[PROF, VIRT, SCHED]`, `u64::MAX` where that
+/// base has no armed timer. Deadlines are read in each base's own clock units,
+/// matching how the tick compares its running-accumulator sample: `utime+stime`
+/// for PROF, `utime` for VIRT, `sum_exec_runtime` for SCHED.
+#[def_test]
+fn cpu_timer_nextevt_caches_earliest_per_base() {
+    let mut manager = ProcessTimerManager::new(1);
+    assert_eq!(
+        manager.cpu_timer_nextevt(),
+        [u64::MAX, u64::MAX, u64::MAX]
+    );
+
+    // Arm VIRT at 22ns and PROF at 30ns from the origin sample; each lands on
+    // its own base and leaves SCHED inactive.
+    manager.set_itimer(
+        ITimerType::Virtual,
+        TimeSpan::ZERO,
+        TimeSpan::from_nanos(22),
+        cpu_sample(0, 0, 0),
+    );
+    manager.set_itimer(
+        ITimerType::Prof,
+        TimeSpan::ZERO,
+        TimeSpan::from_nanos(30),
+        cpu_sample(0, 0, 0),
+    );
+    assert_eq!(manager.cpu_timer_nextevt(), [30, 22, u64::MAX]);
+
+    // Disarming PROF returns only its base to inactive.
+    manager.set_itimer(
+        ITimerType::Prof,
+        TimeSpan::ZERO,
+        TimeSpan::ZERO,
+        cpu_sample(0, 0, 0),
+    );
+    assert_eq!(manager.cpu_timer_nextevt(), [u64::MAX, 22, u64::MAX]);
+}
+
+#[def_test]
+fn cpu_timer_nextevt_uses_earliest_posix_sched_deadline() {
+    let mut manager = ProcessTimerManager::new(1);
+    let first = manager
+        .create_posix_timer(
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGALRM,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let second = manager
+        .create_posix_timer(
+            configuration(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGALRM,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    // Two process-CPU POSIX timers relative to a 100ns scheduler clock arm at
+    // 150ns and 130ns; the cache must hold the earlier of the two on SCHED.
+    manager
+        .set_posix_timer(
+            first,
+            false,
+            TimeSpan::ZERO,
+            TimeSpan::from_nanos(50),
+            TimeSpan::from_nanos(100),
+        )
+        .unwrap()
+        .finish();
+    manager
+        .set_posix_timer(
+            second,
+            false,
+            TimeSpan::ZERO,
+            TimeSpan::from_nanos(30),
+            TimeSpan::from_nanos(100),
+        )
+        .unwrap()
+        .finish();
+    assert_eq!(manager.cpu_timer_nextevt(), [u64::MAX, u64::MAX, 130]);
+}
+
 #[def_test]
 fn test_posix_timer_signal_seq_invalidates_stale_signal() {
     let mut manager = ProcessTimerManager::new(1);
