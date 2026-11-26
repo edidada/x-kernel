@@ -533,7 +533,7 @@ KVFS returns the mapped error, does not fabricate a successful byte count, and d
 | T-01 | Unknown flags change control flow | Medium | The user passes an unsupported bit | The boundary uses `from_bits` and returns `EINVAL` |
 | T-02 | rename mode conflict | Medium | `EXCHANGE` combined with `NOREPLACE/WHITEOUT` | The syscall and the VFS entry validate twice |
 | T-03 | flags family passed by mistake | Medium | Internal APIs use bare integers | Separate bitflags types give compile-time isolation |
-| T-04 | A missed dentry eviction causes wrong directory state or resource lifetime | Medium | A namespace update modifies only the weak index or only the dcache, or a dynamic filesystem updates out of band without invalidating the cache | The insert/remove/forget paths update both cache layers in pairs; `invalidate_cached_child` evicts positive/negative children for dynamic filesystems under the namespace exclusive lock, and behavior tests cover it |
+| T-04 | A missed dentry eviction causes wrong directory state or resource lifetime | Medium | A namespace update modifies only the weak index or only the dcache, or a dynamic filesystem updates out of band without invalidating the cache | The insert/remove/forget paths update both cache layers in pairs; `invalidate_cached_child` evicts positive/negative children for dynamic filesystems under the inode exclusive lock, and behavior tests cover it |
 | T-05 | A dentry operation is inconsistent with its owning superblock | High | A concrete filesystem adds or replaces the operation object one by one after the dentry is created | The nascent superblock installs the static counterpart of the default `s_d_op`, and the root/child inherit it at binding time and cannot replace it |
 | T-06 | A path checks only the final inode, bypassing a non-searchable directory or wrongly accepting a final object that cannot be looked up | High | namei does not check execute/search on intermediate directories, or leaves the trailing `/` and `LOOKUP_DIRECTORY` to the open layer | Before each next-component lookup, `Path::permission(MAY_EXEC, cred)` is called; the generic `path_lookupat()` converts the trailing `/` before the final walk and consumes the directory constraint with `Dentry::can_lookup()` |
 | T-07 | After a missing owner class, access wrongly falls back to group/other | High | DAC treats the three classes of permissions as an arbitrarily selectable set | `generic_permission` selects only one class, in the mutually exclusive order owner, group, other |
@@ -692,7 +692,7 @@ Locks constrain only cooperating callers; file reads and writes without an advis
 - `MS_MOVE` (`move_mount_to`) is supported with Linux `do_move_mount` safeguards: a target at or below the moved subtree is rejected
   with `ELOOP` (no self-referential mount), the directory/non-directory match is validated before any detach so a failing move leaves
   the source attached, and the whole detach + re-graft runs under the namespace registry lock plus the touched inodes'
-  namespace-exclusive locks (no split critical section).
+  inode-exclusive locks (no split critical section).
 
 ### Validity of buffered read window hints
 
@@ -1158,7 +1158,7 @@ cannot distinguish an append-only inode from an ordinary permission denial
 (`EACCES`); an authorized writer without `O_APPEND` still gets `EPERM`.
 Immutable and append-only inodes reject truncate and explicit attribute changes.
 Only a two-current-times touch may explicitly update an append-only inode;
-namespace then data exclusion spans request classification, authorization and publication.
+inode then data exclusion spans request classification, authorization and publication.
 Append-only writes validate and choose EOF from one open-status snapshot, so a
 concurrent F_SETFL cannot split those decisions. The atomic status update rejects
 both directions of an O_APPEND change for every descriptor mode. Private COW does

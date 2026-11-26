@@ -816,7 +816,7 @@ release from interleaving with a new open and clearing a session that is still i
 ### File extent query
 
 The caller first obtains an optional inode capability from `VfsInode::fiemap_capability()`, and then issues the query with
-`FiemapExtentInfo`. For a regular file the query runs under the inode data shared lock; for a directory it runs under the namespace
+`FiemapExtentInfo`. For a regular file the query runs under the inode data shared lock; for a directory it runs under the inode
 shared lock. The same mechanism therefore covers both regular inodes and directory inodes, without
 wrongly attaching FIEMAP to an open-file operation. The filesystem passes the format limit determined at inode creation to
 `FiemapExtentInfo::prepare()`; this helper first validates the length, the maximum file size and the flags supported by the filesystem,
@@ -1043,7 +1043,7 @@ parent into a namespace it has already left.
 `new_root` points to, and mounts the original visible root at `put_old` (the OCI runtime then detaches it with
 `umount2(MNT_DETACH)`). Requirements: `new_root` is a registered mount root, and `put_old` is a directory and
 lies within the `new_root` subtree; `put_old == new_root` is allowed (the runc `pivot_root(".", ".")`
-path), and when `put_old` is covered by other mounts the covered layers are preserved. The surgery runs under the registry mutex plus the namespace write locks of the affected inodes
+path), and when `put_old` is covered by other mounts the covered layers are preserved. The surgery runs under the registry mutex plus the inode write locks of the affected inodes
 (in the total order of `Dentry::inode_lock_key()`, deduplicated by Arc), and after taking the locks it rechecks that the old visible
 root is still mounted on its own parent mountpoint (the stack read may predate lock acquisition), returning an error rather than asserting if not. It first detaches `new_root` from its original location and restores its covered
 layers, so that it is stacked on top of the namespace's structural root, then takes the original visible root out of the
@@ -2084,7 +2084,7 @@ tests have been removed. Writable command semantics are now owned by
 
 ## Mutable inode flags
 
-Path fileattr changes serialize through namespace and inode data locks. Enabling
+Path fileattr changes serialize through the inode and data locks. Enabling
 immutable/append-only protection or changing extent format uses
 AddressSpace::with_quiesced_mappings: revoke mapped PTEs synchronously, drain
 writeback, retain clean cache pages and hold the invalidate write lock through the
