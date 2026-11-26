@@ -31,7 +31,6 @@ use core::ptr::NonNull;
 
 use alloc_engine::AllocResult;
 use khal::mem::p2v;
-use kiface_mm_api::DmaCacheIf;
 use memaddr::PhysAddr;
 
 use crate::{DmaBusAddress, DmaDirection, dma::ALLOCATOR};
@@ -237,11 +236,11 @@ fn map_direct(segment: &mut SgSegment) {
 /// The segment's physical range must be kernel RAM on the linear map and
 /// owned by the mapping.
 unsafe fn sync_direct(segment: &SgSegment, invalidate: bool) {
-    let vaddr = p2v(segment.page_paddr);
+    let vaddr = p2v(segment.page_paddr).as_usize();
     if invalidate {
-        DmaCacheIf::clean_inval_range(vaddr, segment.input_len);
+        kplat::dma::clean_inval_range(vaddr, segment.input_len);
     } else {
-        DmaCacheIf::clean_range(vaddr, segment.input_len);
+        kplat::dma::clean_range(vaddr, segment.input_len);
     }
 }
 

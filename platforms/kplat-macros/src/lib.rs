@@ -95,9 +95,9 @@ pub fn default_dma_cache_if_impl(item: TokenStream) -> TokenStream {
     quote! {
         #[kplat::__priv::provide]
         impl kplat::dma::DmaCacheIf {
-            fn clean_range(_vaddr: kplat::dma::VirtAddr, _len: usize) {}
+            fn clean_range(_vaddr: usize, _len: usize) {}
 
-            fn clean_inval_range(_vaddr: kplat::dma::VirtAddr, _len: usize) {}
+            fn clean_inval_range(_vaddr: usize, _len: usize) {}
         }
     }
     .into()

@@ -32,17 +32,17 @@ kplat::default_dma_if_impl!();
 /// non-coherent masters, so `dma_map_sg`/`dma_map_page` get actual `dc cvac`
 /// and `dc civac` sequences over the kernel linear map.
 #[kiface::provide]
-impl kiface_mm_api::DmaCacheIf {
-    fn clean_range(vaddr: memaddr::VirtAddr, len: usize) {
-        karch::dma_clean_range(vaddr, len);
+impl kplat::dma::DmaCacheIf {
+    fn clean_range(vaddr: usize, len: usize) {
+        karch::dma_clean_range(vaddr.into(), len);
     }
 
-    fn clean_inval_range(vaddr: memaddr::VirtAddr, len: usize) {
+    fn clean_inval_range(vaddr: usize, len: usize) {
         // Clean first, then drop the lines: a dirty line must not write back
         // over device-written data after the invalidation (the upstream
         // `dma_invalidate_range` caller contract).
-        karch::dma_clean_range(vaddr, len);
-        karch::dma_invalidate_range(vaddr, len);
+        karch::dma_clean_range(vaddr.into(), len);
+        karch::dma_invalidate_range(vaddr.into(), len);
     }
 }
 
