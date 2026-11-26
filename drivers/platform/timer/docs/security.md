@@ -38,6 +38,7 @@ identity or permission checks; access is through privileged kernel code.
 | ARM interrupt properties to `timer_irq_from_device_tree` | Parses complete 12-byte entries, accepts type 0 or 1, and adds the corresponding SPI or PPI base. Names use valid UTF-8 entries, with positional fallback. The parser does not validate the resulting ID against controller capacity. |
 | ARM `clock-frequency` to `timer_frequency_from_device_tree` | Accepts a 4- or 8-byte big-endian value. Missing or malformed properties yield `None`, so `init` reads `CNTFRQ_EL0`. `init` rejects zero IRQs, zero frequency, and frequency above `u32::MAX` Hz. |
 | Platform timebase to RISC-V `init` | `kplat-riscv64` reads `/cpus` `timebase-frequency` (4 or 8 bytes); a missing, malformed, or zero value selects 10 MHz. `init` rejects zero IRQs, zero frequency, and frequency above `u32::MAX` Hz. |
+| Counter frequency to `TickScale::new` | Called by `riscv_sbi::init` and by `kplat-loongarch64` with the CPUCFG-derived rate. Panics on zero or above `u32::MAX` Hz. |
 | Counter registers, LAPIC, ARM timer registers, and SBI | Register accessibility, timer availability, and interrupt routing are platform prerequisites. The RISC-V backend discards SBI return values. |
 
 There are no user pointers, DMA buffers, file contents, network payloads, or
