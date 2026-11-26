@@ -361,7 +361,8 @@ pub enum ClkNodeDesc {
         offset_bytes: usize,
         /// LSB position of the field.
         shift: u8,
-        /// Field width in bits (`1..32`).
+        /// Field width in bits (`1..32`); any other value is rejected with
+        /// [`ClkError::InvalidValue`] when the descriptor is built.
         width: u8,
         /// Optional explicit divider-value table.
         table: Option<&'static [crate::DivTableEntry]>,
@@ -439,7 +440,8 @@ pub struct GateDesc {
 /// # Failure atomicity
 ///
 /// Duplicate names/indices and bad descriptors (invalid fixed-factor, divider
-/// width) are rejected before any global state is touched. If a node's
+/// width, mux parent count) are rejected with an error (`ClkError::BadState` or
+/// `ClkError::InvalidValue`) before any global state is touched. If a node's
 /// `build()` (init/recalc) or the resolve/refresh pass fails partway, the
 /// batch is rolled back out of the global clock list before returning the
 /// error, so no unreachable-but-listed nodes are left for
@@ -594,35 +596,41 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
             mask,
             table,
             flags,
-        } => Mux::into_ops(reg.clone(), *offset_bytes, *shift, *mask, *table, *flags),
+        } => Mux::into_ops(reg.clone(), *offset_bytes, *shift, *mask, *table, *flags)?,
         ClkNodeDesc::Divider {
             offset_bytes,
             shift,
             width,
             table,
             flags,
-        } => Divider::into_ops(reg.clone(), *offset_bytes, *shift, *width, *table, *flags),
+        } => Divider::into_ops(reg.clone(), *offset_bytes, *shift, *width, *table, *flags)?,
         ClkNodeDesc::Composite { mux, div, gate } => {
-            let m = mux.as_ref().map(|d| {
-                Mux::into_ops(
-                    reg.clone(),
-                    d.offset_bytes,
-                    d.shift,
-                    d.mask,
-                    d.table,
-                    d.flags,
-                )
-            });
-            let dv = div.as_ref().map(|d| {
-                Divider::into_ops(
-                    reg.clone(),
-                    d.offset_bytes,
-                    d.shift,
-                    d.width,
-                    d.table,
-                    d.flags,
-                )
-            });
+            let m = mux
+                .as_ref()
+                .map(|d| {
+                    Mux::into_ops(
+                        reg.clone(),
+                        d.offset_bytes,
+                        d.shift,
+                        d.mask,
+                        d.table,
+                        d.flags,
+                    )
+                })
+                .transpose()?;
+            let dv = div
+                .as_ref()
+                .map(|d| {
+                    Divider::into_ops(
+                        reg.clone(),
+                        d.offset_bytes,
+                        d.shift,
+                        d.width,
+                        d.table,
+                        d.flags,
+                    )
+                })
+                .transpose()?;
             let g = gate
                 .as_ref()
                 .map(|d| Gate::into_ops(reg.clone(), d.offset_bytes, d.bit, d.flags));

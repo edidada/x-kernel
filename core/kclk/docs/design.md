@@ -430,27 +430,27 @@ use kclk::{ClkBuilder, ClkFlags, ClkTable, Divider, DividerFlags, FixedRate, Gat
 // reports it to the registry, so consumers resolve `clocks` phandles to it.
 static CCU: ClkTable = ClkTable::new(0x1 /* controller phandle */);
 
-pub fn init_ccu(ccu_vaddr: usize) {
+pub fn init_ccu(ccu_vaddr: usize) -> kclk::ClkResult<()> {
     // SAFETY: `ccu_vaddr` is a live, word-aligned mapping from memspace::iomap_device.
     let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(ccu_vaddr) });
 
     // Root oscillator.
-    let osc24m = ClkBuilder::new("osc24m", FixedRate::new(24_000_000).into_ops())
-        .build()
-        .expect("osc24m");
+    let osc24m = ClkBuilder::new("osc24m", FixedRate::new(24_000_000).into_ops()).build()?;
     CCU.register(0, "osc24m", osc24m.clone());
 
     // Fixed ×50 PLL on top of the crystal.
-    let pll = ClkBuilder::new("pll1200", FixedFactor::new(50, 1).unwrap().into_ops())
+    let pll = ClkBuilder::new("pll1200", FixedFactor::new(50, 1)?.into_ops())
         .parent(osc24m)
-        .build()
-        .expect("pll1200");
+        .build()?;
     CCU.register(1, "pll1200", pll.clone());
 
     // A UART clock: zero-based divider (bits[7:4], raw 0 = ÷1) + gate
     // (bit 11), one parent. DividerFlags semantics match Linux:
     // `ONE_BASED` sets `divider = raw` (CLK_DIVIDER_ONE_BASED); the
-    // default is zero-based, `divider = raw + 1`.
+    // default is zero-based, `divider = raw + 1`. Every basic-type
+    // constructor validates its register description and returns
+    // `ClkError::InvalidValue` for a width or parent count the framework
+    // cannot represent, so a malformed description never panics.
     let uart = ClkBuilder::new(
         "uart_clk",
         kclk::Composite::new(
@@ -462,15 +462,15 @@ pub fn init_ccu(ccu_vaddr: usize) {
                 4,
                 None,
                 DividerFlags::empty(),
-            )),
+            )?),
             Some(Gate::into_ops(reg.clone(), 0x30, 11, GateFlags::empty())),
         )
         .into_ops(),
     )
     .parent(pll)
-    .build()
-    .expect("uart_clk");
+    .build()?;
     CCU.register(5, "uart_clk", uart);
+    Ok(())
 }
 ```
 

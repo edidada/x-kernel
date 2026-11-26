@@ -109,7 +109,7 @@ behind and the node reference transfers to the caller.
 | F-02 | `set_rate` unsupported on a node without `SET_RATE_PARENT` | Rate unchanged | Driver sees `NotSupported` | 3 | Propagated as `ClkError::NotSupported` → `ResError::Unsupported`. |
 | F-03 | `set_parent` to an orphan slot | Parent unchanged | Driver sees `InvalidParent` | 3 | Rejected before any register write. |
 | F-04 | Provider not installed at lookup time | `NoProvider` returned | Consumer probe fails and the device stays unclaimed | 3 | `NoProvider` maps to a probe error at the capability-contract boundary. A deferred-probe/wake mechanism that retried the same driver is planned as a follow-up framework change. |
-| F-05 | Divider field width >= 32 | Configuration error | Probe-time panic | 2 | `1u32 << width` is undefined behavior at width >= 32; `Divider::new` asserts `width` is in `1..32` (hard `assert!`, not debug-only, so release builds fail loudly too). |
+| F-05 | Divider field width outside `1..32`, or a mux field that encodes more than 255 parents | Configuration error | Provider probe sees `ClkError::InvalidValue` | 2 | Both values describe the provider's register layout, so a bad one is a reachable input failure, not a broken internal invariant: `Divider::new` and `Mux::new` validate at construction and return `ClkError::InvalidValue` (`1u32 << width` would be undefined behavior at width >= 32, and the framework's parent index is a `u8`). `register_table` propagates the error before publishing any node. |
 
 ## Known Limitations
 

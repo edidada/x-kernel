@@ -17,6 +17,10 @@ pub enum ClkError {
     InvalidRate,
     /// The requested parent index is out of range or unmapped.
     InvalidParent,
+    /// A provider description carries a value the framework cannot represent,
+    /// such as a divider field width outside `1..32` or a mux that encodes more
+    /// parents than the `u8` parent index allows.
+    InvalidValue,
     /// The clock is busy and the operation cannot complete right now.
     Busy,
     /// The hardware driver reported a generic I/O failure.

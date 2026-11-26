@@ -78,8 +78,11 @@ impl DivTableEntry {
 impl Divider {
     /// Create a divider clock.
     ///
-    /// `width` must be in `1..32`; a width of 32 would shift a `u32` out of
-    /// range (undefined behavior) and is rejected with a debug assertion.
+    /// `width` must be in `1..32`: a width of 32 would shift a `u32` out of
+    /// range. The width comes from the provider's register description, so an
+    /// out-of-range value is a configuration error the caller can report, not
+    /// an internal invariant: it is rejected with [`ClkError::InvalidValue`]
+    /// instead of panicking.
     pub fn new(
         reg: Arc<dyn ClkRegAccess>,
         offset: usize,
@@ -87,19 +90,19 @@ impl Divider {
         width: u8,
         table: Option<&'static [DivTableEntry]>,
         flags: DividerFlags,
-    ) -> Self {
-        // Soundness: `1u32 << width` is UB at width >= 32. This is a driver
-        // configuration error, so fail hard (not debug_assert, which is
-        // compiled out of release builds where the UB would be silent).
-        assert!(width > 0 && width < 32, "divider width must be in 1..32");
-        Self {
+    ) -> ClkResult<Self> {
+        // Soundness: `1u32 << width` is undefined behavior at width >= 32.
+        if width == 0 || width >= 32 {
+            return Err(ClkError::InvalidValue);
+        }
+        Ok(Self {
             reg,
             offset,
             shift,
             width,
             table,
             flags,
-        }
+        })
     }
 
     /// Construct and upcast in one step for [`crate::ClkBuilder::new`].
@@ -110,8 +113,10 @@ impl Divider {
         width: u8,
         table: Option<&'static [DivTableEntry]>,
         flags: DividerFlags,
-    ) -> Arc<dyn ClkHwOps> {
-        Arc::new(Self::new(reg, offset, shift, width, table, flags))
+    ) -> ClkResult<Arc<dyn ClkHwOps>> {
+        Ok(Arc::new(Self::new(
+            reg, offset, shift, width, table, flags,
+        )?))
     }
 
     /// Field mask for `width` bits.

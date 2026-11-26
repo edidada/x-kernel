@@ -336,7 +336,7 @@ fn three_level_tree_caches_rates_from_leaf_to_root() {
     let reg = Arc::new(MockReg::new());
     let cpu = ClkBuilder::new(
         "cpu_div",
-        Divider::into_ops(reg, 0, 0, 3, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 3, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(pll)
     .build()
@@ -357,7 +357,7 @@ fn divider_set_rate_writes_field_and_updates_rate() {
     let reg = Arc::new(MockReg::new());
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::empty()),
+        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -390,7 +390,7 @@ fn divider_one_based_raw_is_divider() {
     let reg = Arc::new(MockReg::new());
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::ONE_BASED).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -425,7 +425,7 @@ fn divider_one_based_raw_zero_clamps_to_passthrough() {
     let reg = Arc::new(MockReg::new());
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 3, None, DividerFlags::ONE_BASED),
+        Divider::into_ops(reg, 0, 0, 3, None, DividerFlags::ONE_BASED).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -447,7 +447,7 @@ fn divider_table_uses_linux_val_div_pairs() {
     ];
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg.clone(), 0, 0, 3, Some(TABLE), DividerFlags::empty()),
+        Divider::into_ops(reg.clone(), 0, 0, 3, Some(TABLE), DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -472,7 +472,7 @@ fn divider_power_of_two_encodes_floor_log2() {
     let reg = Arc::new(MockReg::new());
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::POWER_OF_TWO),
+        Divider::into_ops(reg.clone(), 0, 0, 3, None, DividerFlags::POWER_OF_TWO).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -560,7 +560,7 @@ fn mux_table_maps_parent_index_to_register_value() {
     // Linux clk_mux table direction: table[index] = raw register value.
     // Parent 0 -> raw 0, parent 1 -> raw 2, parent 2 -> raw 3 (sparse).
     static TABLE: &[u8] = &[0, 2, 3];
-    let mux = Mux::new(reg.clone(), 0, 0, 0x3, Some(TABLE), MuxFlags::empty());
+    let mux = Mux::new(reg.clone(), 0, 0, 0x3, Some(TABLE), MuxFlags::empty()).expect("valid clock node config");
 
     // Selecting parent 1 writes raw 2.
     mux.set_parent(1).unwrap();
@@ -575,7 +575,7 @@ fn mux_table_maps_parent_index_to_register_value() {
 #[def_test(serial)]
 fn mux_selects_parent_and_reports_index() {
     let reg = Arc::new(MockReg::new());
-    let mux = Mux::new(reg.clone(), 0, 0, 0x3, None, MuxFlags::empty());
+    let mux = Mux::new(reg.clone(), 0, 0, 0x3, None, MuxFlags::empty()).expect("valid clock node config");
 
     assert_eq!(mux.num_parents(), 4);
     assert_eq!(mux.get_parent().unwrap(), 0);
@@ -607,7 +607,7 @@ fn set_parent_gate_rejects_switch_while_prepared() {
         .unwrap();
     let mux = ClkBuilder::new(
         "mux",
-        Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty()),
+        Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config"),
     )
     .flags(ClkFlags::SET_PARENT_GATE)
     .parents(alloc::vec![Some(p1), Some(p2)])
@@ -646,7 +646,7 @@ fn core_set_parent_recomputes_rate_from_new_parent() {
         0x3,
         None,
         MuxFlags::empty(),
-    ));
+    ).expect("valid clock node config"));
     let cpu = ClkBuilder::new("cpu", mux_ops)
         .parent(osc24.clone())
         .parent(osc32.clone())
@@ -737,8 +737,8 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
         .build()
         .unwrap();
 
-    let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None, MuxFlags::empty());
-    let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty());
+    let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
+    let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty()).expect("valid clock node config");
     let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::empty());
 
     let comp = ClkBuilder::new(
@@ -889,7 +889,7 @@ fn set_rate_propagates_to_parent_when_flag_set() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -897,7 +897,7 @@ fn set_rate_propagates_to_parent_when_flag_set() {
 
     // A pass-through mux carrying SET_RATE_PARENT; it has no own set_rate, so a
     // rate request must climb to the divider parent.
-    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty());
+    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
     let passthrough = ClkBuilder::new("pass", mux)
         .flags(ClkFlags::SET_RATE_PARENT)
         .parent(div.clone())
@@ -922,7 +922,7 @@ fn fixed_factor_propagates_rate_to_parent_via_flag() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -954,7 +954,7 @@ fn mux_determine_rate_selects_closest_parent() {
     let osc32 = ClkBuilder::new("osc32", FixedRate::new(32_000_000).into_ops())
         .build()
         .unwrap();
-    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty());
+    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
     let clk = ClkBuilder::new("mux", mux)
         .parent(osc24)
         .parent(osc32)
@@ -1049,7 +1049,7 @@ fn failed_child_recalc_restores_programmed_parent_rate() {
             4,
             None,
             DividerFlags::empty(),
-        ),
+        ).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -1096,7 +1096,7 @@ fn children_back_edge_tracks_selected_parent() {
         .unwrap();
     // A two-parent mux: child selects osc initially.
     let reg = Arc::new(MockReg::new());
-    let mux = Mux::into_ops(reg, 0, 0, 0x1, None, MuxFlags::empty());
+    let mux = Mux::into_ops(reg, 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
     let child = ClkBuilder::new("child", mux)
         .parent(osc.clone())
         .parent(alt.clone())
@@ -1126,7 +1126,7 @@ fn parent_rate_change_cascades_to_descendant_cache() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(osc)
     .build()
@@ -1158,7 +1158,7 @@ fn set_parent_migrates_prepare_enable_refs() {
         .build()
         .unwrap();
     let reg = Arc::new(MockReg::new());
-    let mux = Mux::into_ops(reg, 0, 0, 0x1, None, MuxFlags::empty());
+    let mux = Mux::into_ops(reg, 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
     let child = ClkBuilder::new("child", mux)
         .parent(osc.clone())
         .parent(alt.clone())
@@ -1200,7 +1200,7 @@ fn reparent_after_unprepare_still_migrates_enable_refs() {
     let alt = ClkBuilder::new("mig_alt", alt_ops.clone() as Arc<dyn ClkHwOps>)
         .build()
         .unwrap();
-    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty());
+    let mux = Mux::into_ops(Arc::new(MockReg::new()), 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
     let child = ClkBuilder::new("mig_child", mux)
         .parent(osc.clone())
         .parent(alt.clone())
@@ -1249,7 +1249,7 @@ fn set_rate_gate_rejects_while_enabled() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .flags(ClkFlags::SET_RATE_GATE)
@@ -1396,7 +1396,7 @@ fn rate_range_clamps_set_and_round() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -1425,7 +1425,7 @@ fn rate_range_aggregates_per_consumer_and_relaxes_on_drop() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -1454,7 +1454,7 @@ fn rate_range_rejects_empty_intersection() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -1532,7 +1532,7 @@ fn notifier_fires_pre_and_post_on_set_rate() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -1574,7 +1574,7 @@ fn notifier_veto_aborts_set_rate() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -1609,7 +1609,7 @@ fn notifier_unregister_stops_delivery() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -1639,7 +1639,7 @@ fn notifier_is_unregistered_when_handle_drops() {
         .unwrap();
     let div = ClkBuilder::new(
         "div",
-        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -1665,7 +1665,7 @@ fn notifier_is_unregistered_when_handle_drops() {
 fn divider_table_miss_is_bad_state_not_silent_div1() {
     static TABLE: &[DivTableEntry] = &[DivTableEntry::new(0, 1), DivTableEntry::new(1, 2)];
     let reg = Arc::new(MockReg::new());
-    let ops = Divider::new(reg.clone(), 0, 0, 3, Some(TABLE), DividerFlags::empty());
+    let ops = Divider::new(reg.clone(), 0, 0, 3, Some(TABLE), DividerFlags::empty()).expect("valid clock node config");
 
     // In-table values decode normally.
     assert_eq!(ops.recalc_rate(1_000_000_000), Ok(1_000_000_000));
@@ -1673,6 +1673,106 @@ fn divider_table_miss_is_bad_state_not_silent_div1() {
     // corrupted hardware — BadState, not silently decoded as a legal ÷1.
     reg.mem.lock()[0] = 3;
     assert_eq!(ops.recalc_rate(1_000_000_000), Err(ClkError::BadState));
+}
+
+#[def_test(serial)]
+fn divider_rejects_a_field_width_it_cannot_shift() {
+    // `1u32 << width` is undefined at 32, and a zero-width field encodes no
+    // divider at all: both are provider configuration errors reported as
+    // `InvalidValue`, never a panic.
+    for width in [0u8, 32, 255] {
+        assert_eq!(
+            Divider::new(
+                Arc::new(MockReg::new()),
+                0,
+                0,
+                width,
+                None,
+                DividerFlags::empty()
+            )
+            .err(),
+            Some(ClkError::InvalidValue),
+            "width {width} must be rejected"
+        );
+    }
+    // The whole legal range is accepted.
+    for width in [1u8, 31] {
+        assert!(Divider::new(
+            Arc::new(MockReg::new()),
+            0,
+            0,
+            width,
+            None,
+            DividerFlags::empty()
+        )
+        .is_ok());
+    }
+}
+
+#[def_test(serial)]
+fn mux_rejects_a_field_it_cannot_index() {
+    // The framework's parent index is a `u8`; a field that can encode 256 or
+    // more parents cannot be represented, so it is rejected at construction
+    // instead of silently truncating the count.
+    for mask in [0xffu32, 0x1ff, u32::MAX] {
+        assert_eq!(
+            Mux::new(
+                Arc::new(MockReg::new()),
+                0,
+                0,
+                mask,
+                None,
+                MuxFlags::empty()
+            )
+            .err(),
+            Some(ClkError::InvalidValue),
+            "mask {mask:#x} must be rejected"
+        );
+    }
+    // A representable field keeps its full parent count.
+    let mux = Mux::new(
+        Arc::new(MockReg::new()),
+        0,
+        0,
+        0x3,
+        None,
+        MuxFlags::empty(),
+    )
+    .expect("four-parent mux");
+    assert_eq!(mux.num_parents(), 4);
+}
+
+#[def_test(serial)]
+fn register_table_rejects_bad_divider_width_before_publishing() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static TABLE: ClkTable = ClkTable::new(0x71);
+    TABLE.clear();
+    reset_providers();
+    let before = crate::clocks_len();
+
+    // A malformed static table must come back as `InvalidValue` rather than
+    // panicking during controller probe, and must publish nothing.
+    let bad_branches = [ClkBranch::new(
+        0,
+        "bad_div",
+        &[],
+        ClkFlags::empty(),
+        ClkNodeDesc::Divider {
+            offset_bytes: 0,
+            shift: 0,
+            width: 32,
+            table: None,
+            flags: DividerFlags::empty(),
+        },
+    )];
+    assert_eq!(
+        register_table(&TABLE, Arc::new(MockReg::new()), &bad_branches),
+        Err(ClkError::InvalidValue)
+    );
+    assert_eq!(crate::clocks_len(), before);
+    assert!(clk_get_by_index(0x71, 0).is_err());
+
+    reset_providers();
 }
 
 #[def_test(serial)]
@@ -1930,7 +2030,7 @@ fn same_rate_set_rate_is_a_noop_without_notify_or_hw() {
         .build()
         .unwrap();
     // Divider field reset value 0 -> zero-based ÷1 -> 1 GHz pass-through.
-    let div = Divider::into_ops(reg.clone(), 0, 0, 4, None, DividerFlags::empty());
+    let div = Divider::into_ops(reg.clone(), 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config");
     let core = ClkBuilder::new("f7_div", div).parent(root).build().unwrap();
     let notified = Arc::new(SpinNoIrq::new(0u32));
     let counter = notified.clone();
@@ -1960,7 +2060,7 @@ fn parent_notifier_fires_when_child_propagates_rate_change() {
     parent_reg.reg_write(0, 1); // raw 1 → ÷2
     let parent = ClkBuilder::new(
         "f6_pll",
-        Divider::into_ops(parent_reg, 0, 0, 4, None, DividerFlags::empty()),
+        Divider::into_ops(parent_reg, 0, 0, 4, None, DividerFlags::empty()).expect("valid clock node config"),
     )
     .parent(root)
     .build()
@@ -2015,7 +2115,7 @@ fn no_reparent_mux_propagates_instead_of_switching() {
             4,
             None,
             DividerFlags::empty(),
-        ),
+        ).expect("valid clock node config"),
     )
     .parent(root)
     .flags(ClkFlags::SET_RATE_PARENT)
@@ -2023,7 +2123,7 @@ fn no_reparent_mux_propagates_instead_of_switching() {
     .unwrap();
 
     let reg = Arc::new(MockReg::new());
-    let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None, MuxFlags::empty());
+    let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
     let mux_clk = ClkBuilder::new("f8_mux", mux)
         .parents(vec![Some(osc), Some(pll)])
         .flags(ClkFlags::SET_RATE_PARENT | ClkFlags::NO_REPARENT)
@@ -2056,7 +2156,7 @@ fn hiword_divider_writes_masked_word_and_read_only_rejects() {
         .unwrap();
     let div = ClkBuilder::new(
         "f5_div",
-        Divider::into_ops(reg.clone(), 0, 0, 5, None, DividerFlags::HIWORD_MASK),
+        Divider::into_ops(reg.clone(), 0, 0, 5, None, DividerFlags::HIWORD_MASK).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -2082,7 +2182,7 @@ fn hiword_divider_writes_masked_word_and_read_only_rejects() {
             5,
             None,
             DividerFlags::HIWORD_MASK | DividerFlags::READ_ONLY,
-        ),
+        ).expect("valid clock node config"),
     )
     .parent(parent)
     .build()

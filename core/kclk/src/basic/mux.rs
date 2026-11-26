@@ -39,6 +39,9 @@ pub struct Mux {
     mask: u32,
     table: Option<&'static [u8]>,
     flags: MuxFlags,
+    /// Parents this mux can encode, validated at construction because the
+    /// framework's parent index is a `u8`.
+    num_parents: u8,
 }
 
 impl Mux {
@@ -46,6 +49,12 @@ impl Mux {
     ///
     /// `mask` is the *unshifted* field mask (e.g. `0x7` for a 3-bit field); it
     /// is applied after `>> shift`.
+    ///
+    /// The number of parents follows from the table length or the field mask.
+    /// More than 255 parents cannot be addressed by the framework's `u8` parent
+    /// index, so that configuration is rejected with
+    /// [`ClkError::InvalidValue`] (a truncated count would silently make the
+    /// high parents unreachable).
     pub fn new(
         reg: Arc<dyn ClkRegAccess>,
         offset: usize,
@@ -53,15 +62,22 @@ impl Mux {
         mask: u32,
         table: Option<&'static [u8]>,
         flags: MuxFlags,
-    ) -> Self {
-        Self {
+    ) -> ClkResult<Self> {
+        // `mask + 1` overflows for a full-width field, so widen before adding.
+        let count = match table {
+            Some(table) => table.len() as u64,
+            None => u64::from(mask) + 1,
+        };
+        let num_parents = u8::try_from(count).map_err(|_| ClkError::InvalidValue)?;
+        Ok(Self {
             reg,
             offset,
             shift,
             mask,
             table,
             flags,
-        }
+            num_parents,
+        })
     }
 
     /// Construct and upcast in one step for [`crate::ClkBuilder::new`].
@@ -72,8 +88,8 @@ impl Mux {
         mask: u32,
         table: Option<&'static [u8]>,
         flags: MuxFlags,
-    ) -> Arc<dyn ClkHwOps> {
-        Arc::new(Self::new(reg, offset, shift, mask, table, flags))
+    ) -> ClkResult<Arc<dyn ClkHwOps>> {
+        Ok(Arc::new(Self::new(reg, offset, shift, mask, table, flags)?))
     }
 
     /// Read the raw register field value.
@@ -111,21 +127,7 @@ impl Mux {
 
 impl ClkHwOps for Mux {
     fn num_parents(&self) -> u8 {
-        let count = match self.table {
-            Some(table) => table.len(),
-            None => (self.mask + 1) as usize,
-        };
-        // The framework's parent index is a `u8`; a field that can encode
-        // more than 255 parents cannot be represented. This is a driver
-        // configuration error, so fail loudly at construction-time query
-        // (matching Divider's width assert) rather than silently truncating —
-        // a truncated count would make high parents unreachable with no
-        // diagnostic.
-        assert!(
-            count <= u8::MAX as usize,
-            "mux encodes {count} parents; the framework address limit is 255"
-        );
-        count as u8
+        self.num_parents
     }
 
     fn get_parent(&self) -> ClkResult<u8> {
