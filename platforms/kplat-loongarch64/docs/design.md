@@ -16,7 +16,7 @@ LoongArch machines (QEMU virt-class platforms).
   `activate_local_interrupts` (timer enablement after handler installation).
 - Clock: the architectural stable counter (`Time::read`, `TCFG`
   registers) exposed as the `CounterSourceIf` / `ClockEventIf` providers,
-  with a once-computed `NANOS_PER_TICK` conversion.
+  with a once-computed `timer_driver::tick_scale::TickScale` conversion.
 - Interrupts: the `kirq::IntrManagerIf` provider mapping logical IRQs to
   the LoongArch hierarchy — local timer interrupt 11, EIOINTC line 3,
   and external lines routed through EIOINTC + PCH PIC with range
@@ -266,9 +266,13 @@ admission; no second online/prepared mask is added.
   either controller is touched: the PCH PIC's 64 lines are the binding
   constraint, and out-of-range numbers are logged and rejected rather
   than truncated or remapped.
-- The clock conversion (`NANOS_PER_TICK`) is computed once from the
-  counter frequency and reused; per-CPU setup only programs `TCFG` and
-  enables the timer line.
+- The clock conversion (`TICK_SCALE`, a shared `TickScale`) is computed
+  once from the counter frequency and reused, so a frequency that does not
+  divide 1 GHz keeps its fractional rate; a zero frequency or one above
+  `u32::MAX` Hz panics in `early_init`. Event programming rounds the
+  interval up to whole ticks before the `MIN_TIMER_TICKS` alignment, so a
+  sub-tick remainder cannot fire early. Per-CPU setup only programs `TCFG`
+  and enables the timer line.
 - `notify_cpu` and `set_prio` in the LoongArch `IntrManagerIf` are
   `todo!()` placeholders — this platform has no priority routing or
   IPI-based interrupt steering wired into `kirq` yet.
@@ -277,7 +281,7 @@ admission; no second online/prepared mask is added.
 
 ClockEventIf::restore_local_timer disables TCFG, selects one-shot mode and clears
 the initial value, then restores timer IRQ delivery without enabling a
-countdown. It does not initialize NANOS_PER_TICK or reset the stable counter.
+countdown. It does not initialize TICK_SCALE or reset the stable counter.
 PM first restores CPU/controller access and IRQ routing with local IRQs masked;
 software deadline arbitration happens later after timekeeping is ready.
 

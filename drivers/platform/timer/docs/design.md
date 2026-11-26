@@ -22,6 +22,7 @@ Wall-clock maintenance belongs to `ktime`.
 | `src/resume_counter.rs` | Private ARM counter state and test mounts. |
 | `src/resume_notifications.rs` | Per-CPU atomic recovery requests and test mounts. |
 | `src/riscv_sbi.rs` | RISC-V time counter and SBI timer events. |
+| `src/tick_scale.rs` | Architecture-neutral `TickScale` tick and nanosecond conversion, also used by `kplat-loongarch64`. |
 | `src/x86_lapic_tsc.rs` | TSC frequency discovery and elapsed-time conversion, with LAPIC one-shot events. |
 
 ```text
@@ -132,10 +133,15 @@ ARM accepts an optional frequency override and otherwise reads `CNTFRQ_EL0`.
 The selected frequency must be nonzero and fit in `u32` Hz. Two immutable ratios
 convert between counter ticks and nanoseconds.
 
-RISC-V uses an integer scale of `1_000_000_000 / frequency_hz` nanoseconds per
-tick. A frequency that does not divide 1 GHz loses fractional precision, and a
-frequency above 1 GHz produces a zero scale. The platform must choose a usable
-timebase; `init` checks only that the frequency and IRQ are nonzero.
+RISC-V converts through a `TickScale`, which applies the same nonzero and `u32`
+Hz checks; `init` panics on a violation. LoongArch platform code uses the same
+type for its stable counter. Clock reads multiply by an `int_ratio::Ratio` of
+1e9 / frequency, whose relative error stays below 2^-30, so a frequency that
+does not divide 1 GHz, such as 24 MHz or 19.2 MHz, keeps its fractional rate.
+Nanosecond-to-tick conversion is exact: whole seconds and the sub-second
+remainder are scaled separately so every product fits in `u64`, and the result
+saturates at `u64::MAX`. The inverse `Ratio` is not used there because its
+32-bit shift limit leaves too few significant bits for low-frequency counters.
 
 ## Clock events and idle repair
 
@@ -154,8 +160,10 @@ deadline uses interval 0; disarming clears the enable bit. Long x86 and ARM dead
 therefore generate an earlier interrupt, at which software must recheck and
 rearm the remaining deadline.
 
-RISC-V passes an absolute tick deadline to `sbi_rt::set_timer`. Disarming writes
-`u64::MAX`. The backend does not inspect the SBI return value.
+RISC-V rounds the interval up to whole ticks, at least one, and passes the
+saturating absolute tick deadline to `sbi_rt::set_timer`, so a sub-tick
+remainder cannot fire before the deadline. Disarming writes `u64::MAX`. The
+backend does not inspect the SBI return value.
 
 With `arm-timer-resume-fixup`, every ARM clock read samples a shared counter
 state under an IRQ-safe spinlock. The register is read after an ISB while holding
@@ -181,9 +189,9 @@ counter lock. Other backends report no idle repair.
 ## Concurrency and lifetime
 
 Atomic frequency, IRQ, mode, and origin fields hold boot configuration.
-ARM and x86 conversion ratios use `klazy::Once`. The boot sequence establishes
-when these values become usable; relaxed atomic accesses alone do not publish
-the complete configuration as one transaction.
+ARM and x86 conversion ratios and the RISC-V `TickScale` use `klazy::Once`.
+The boot sequence establishes when these values become usable; relaxed atomic
+accesses alone do not publish the complete configuration as one transaction.
 
 ARM raw sampling and logical tick accounting use one `SpinNoIrq` critical
 section, accessed from task and maskable IRQ contexts. It contains a register
@@ -217,17 +225,19 @@ remain unchanged. There are no serial or user flags.
 | File under `ut-tests/` | Cases | Gate beyond `cfg(unittest)` |
 | --- | --- | --- |
 | `lib.rs` | 1 | None |
+| `tick_scale.rs` | 5 | None |
 | `arm_generic.rs` | 4 | AArch64 |
 | `resume_notifications.rs` | 6 | AArch64; available even without resume fixup |
 | `resume_counter.rs` | 11 | AArch64 and `arm-timer-resume-fixup` |
 | `x86_lapic_tsc.rs` | 4 | x86_64 |
 
-Across all gates there are 26 cases: AArch64 selects 11 by default or 22 with
-`KFEAT_ARM_TIMER_RESUME_FIXUP=y`; x86_64 selects 5 and RISC-V64 selects 1.
+Across all gates there are 31 cases: AArch64 selects 16 by default or 27 with
+`KFEAT_ARM_TIMER_RESUME_FIXUP=y`; x86_64 selects 10, and RISC-V64 and
+LoongArch64 select 6.
 Resume fixup depends on `!KFEAT_NMI`; disable NMI before enabling this option
 and verify the resolved `.config` after `make olddefconfig`.
-There is no LoongArch backend or dependency from `kplat-loongarch64`; if the
-crate is linked on that target, only the single common case is available.
+There is no LoongArch backend; `kplat-loongarch64` depends on the crate only for
+`TickScale`, so that target runs the common and `tick_scale.rs` cases.
 `vmm` changes production timer selection but adds no test-selection gate.
 Use the configured kernel guest unittest workflow (`UNITTEST=y`).
 
@@ -235,7 +245,7 @@ The resume helpers have one set of cases in `ut-tests/resume_counter.rs`
 (11 cases) and `ut-tests/resume_notifications.rs` (6 cases). These kernel UTs
 retain all assertions from the former host copies; there is no separate host
 suite or runner to maintain. With AArch64 resume fixup enabled and NMI disabled,
-`make unittest UNITTEST_CRATE=timer_driver` runs all 22 selected cases, including
+`make unittest UNITTEST_CRATE=timer_driver` runs all 27 selected cases, including
 these 17 resume cases.
 
 The x86 unit tests in `ut-tests/x86_lapic_tsc.rs` exercise frequency-source ordering,

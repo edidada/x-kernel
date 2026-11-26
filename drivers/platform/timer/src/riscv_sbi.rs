@@ -4,14 +4,15 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use klazy::Once;
 use ktime_types::Frequency;
 use riscv::register::time;
 
-use crate::TimerSource;
+use crate::{TimerSource, tick_scale::TickScale};
 
 static TIMER_IRQ: AtomicUsize = AtomicUsize::new(0);
 static TIMER_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
-static NANOS_PER_TICK: AtomicU64 = AtomicU64::new(0);
+static TICK_SCALE: Once<TickScale> = Once::new();
 
 #[kiface::provide]
 impl khal::time::CounterSourceIf {
@@ -87,19 +88,14 @@ impl TimerConfig {
 ///
 /// # Panics
 ///
-/// Panics for a zero IRQ or a zero frequency.
+/// Panics for a zero IRQ, a zero frequency, or a frequency that does not
+/// fit in `u32` Hz.
 pub fn init(config: TimerConfig) {
     assert!(config.irq != 0, "RISC-V SBI timer IRQ must be non-zero");
-    assert!(
-        !config.frequency.is_zero(),
-        "RISC-V SBI timer frequency must be non-zero"
-    );
+    let scale = TickScale::new(config.frequency);
     TIMER_IRQ.store(config.irq, Ordering::Relaxed);
     TIMER_FREQ_HZ.store(config.frequency.as_hz(), Ordering::Relaxed);
-    NANOS_PER_TICK.store(
-        ktime_types::NANOS_PER_SEC / config.frequency.as_hz(),
-        Ordering::Relaxed,
-    );
+    TICK_SCALE.call_once(|| scale);
 }
 
 /// Enables supervisor timer interrupts on the current hart; event
@@ -119,13 +115,25 @@ fn read_timer_ticks_raw() -> u64 {
 }
 
 #[inline]
+fn tick_scale() -> &'static TickScale {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: SBI timer initialization installs the \
+                  conversion scale before publishing clock and timer operations"
+    )]
+    TICK_SCALE
+        .get()
+        .expect("RISC-V SBI timer conversion scale is not initialized")
+}
+
+#[inline]
 fn ticks_to_nanos(ticks: u64) -> u64 {
-    ticks * NANOS_PER_TICK.load(Ordering::Relaxed)
+    tick_scale().ticks_to_nanos(ticks)
 }
 
 #[inline]
 fn nanos_to_ticks(nanos: u64) -> u64 {
-    nanos / NANOS_PER_TICK.load(Ordering::Relaxed)
+    tick_scale().nanos_to_ticks(nanos)
 }
 
 #[inline]
@@ -142,7 +150,10 @@ fn interrupt_id() -> usize {
 
 fn arm_timer_after(interval: ktime_types::TimeSpan) {
     // SBI takes an absolute hardware deadline, never a logical clock value.
-    let ticks = nanos_to_ticks(interval.as_nanos_u64_saturating()).max(1);
+    // Rounding up keeps a sub-tick remainder from firing before the deadline.
+    let ticks = tick_scale()
+        .nanos_to_ticks_ceil(interval.as_nanos_u64_saturating())
+        .max(1);
     sbi_rt::set_timer(read_timer_ticks_raw().saturating_add(ticks));
 }
 
