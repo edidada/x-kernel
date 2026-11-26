@@ -76,8 +76,12 @@ uses current suppression and confirmed route availability, not
 
 The first successfully published action establishes an otherwise-absent
 `requested` policy. Ordinary `IrqAffinity::Any` uses
-`kcpu_id_map::present_mask()`; fixed `IrqAffinity::Cpu(n)` uses `{n}`. Source-
-managed PerCpu/NMI/MSI/no-flow sources do not receive an ordinary default.
+`runtime/default_affinity.rs`, whose initial value is
+`kcpu_id_map::present_mask()`; future registrations consume the current global
+default. Fixed `IrqAffinity::Cpu(n)` uses `{n}`. Source-managed
+PerCpu/NMI/MSI/no-flow sources do not receive an ordinary default. The default
+is initialized lazily on the registration control path; it never migrates an
+existing Line or changes `requested`/`effective`.
 The value is computed before publication and committed only after action
 publication succeeds; a rejected/configured-failing registration leaves no
 policy or history. Explicitly established requested values are retained.
@@ -85,7 +89,9 @@ policy or history. Explicitly established requested values are retained.
 The four boot entries call `init_boot_cpu_id_map` before primary kernel/IRQ
 initialization. If the map is unexpectedly unavailable, ordinary Any
 registration fails with `IrqDescError::NotReady` before action/history/policy
-publication. No procfs read or user setter initializes it.
+publication. A default write before the map is ready fails with
+`DefaultSmpAffinityError::NotReady`; no procfs read or user setter initializes
+the CPU map.
 
 `IrqAffinity::Cpu(n)` is range-checked against the compile-time logical CPU
 bound before constructing a mask; an impossible descriptor returns

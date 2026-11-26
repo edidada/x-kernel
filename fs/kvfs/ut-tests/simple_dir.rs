@@ -859,6 +859,39 @@ impl SparseDirSource for SparseTestSource {
     }
 }
 
+fn chained_static_sparse_fs(
+    static_entries: &'static [(&'static str, &'static str)],
+    sparse_entries: &[(u64, &'static str)],
+) -> (Path, Arc<SparseTestSource>) {
+    let source = Arc::new(SparseTestSource::new());
+    let source_builder = source.clone();
+    let sparse_entries = sparse_entries.to_vec();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, move |fs| {
+        *source_builder.fs.lock() = Some(fs.clone());
+        let mut static_side = DirMapping::new();
+        for (name, content) in static_entries {
+            static_side.add_file(
+                *name,
+                SimpleFile::new_regular(fs.clone(), move || Ok(*content)),
+            );
+        }
+        for (index, (key, name)) in sparse_entries.into_iter().enumerate() {
+            if index == 0 {
+                source_builder.insert(key, name);
+            } else {
+                source_builder.insert_existing(key, name);
+            }
+        }
+        let sparse_side = SparseDirAdapter {
+            source: source_builder.clone(),
+        };
+        let chained = static_side.chain(sparse_side);
+        SimpleDir::new_maker(fs, Arc::new(chained))
+    })
+    .unwrap();
+    (Mount::new_root(&super_block).root_path(), source)
+}
+
 fn sparse_fs(entries: &[(u64, &str)]) -> (Path, Arc<SparseTestSource>) {
     let source = Arc::new(SparseTestSource::new());
     let source_builder = source.clone();
@@ -911,6 +944,127 @@ fn read_single(file: &VfsFile) -> Vec<(String, u64)> {
     let mut ctx = DirContext::new(file.position(), &mut sink);
     file.iterate_dir(&mut ctx).unwrap();
     entries
+}
+
+#[def_test]
+fn chained_static_entries_precede_sparse_entries() {
+    let (root, source) =
+        chained_static_sparse_fs(&[("static", "content")], &[(1, "one"), (2, "two")]);
+    let file = crate::dentry_open(root, 0, kcred::initial_cred()).unwrap();
+    let entries = read_one(&file);
+    assert_eq!(
+        entries,
+        [
+            (".".to_owned(), 1),
+            ("..".to_owned(), 2),
+            ("static".to_owned(), 3),
+            ("one".to_owned(), 4),
+            ("two".to_owned(), 5),
+        ]
+    );
+    assert_eq!(source.first_calls.load(Ordering::Acquire), 1);
+    assert_eq!(source.next_calls.load(Ordering::Acquire), 2);
+}
+
+#[def_test]
+fn chained_static_emit_rejection_does_not_query_sparse() {
+    let (root, source) = chained_static_sparse_fs(
+        &[("static", "content")],
+        &[(1, "one"), (2, "two")],
+    );
+    let file = crate::dentry_open(root, 0, kcred::initial_cred()).unwrap();
+    let mut seen = Vec::new();
+    let mut sink = |name: &str, _, _, _| {
+        if name == "static" {
+            false
+        } else {
+            seen.push(name.to_owned());
+            true
+        }
+    };
+    let mut ctx = DirContext::new(0, &mut sink);
+    assert_eq!(file.iterate_dir(&mut ctx), Ok(2));
+    assert_eq!(seen, [".", ".."]);
+    assert_eq!(file.position(), 2);
+    assert_eq!(source.name_calls.load(Ordering::Acquire), 0);
+
+    assert_eq!(
+        read_one(&file),
+        [
+            ("static".to_owned(), 3),
+            ("one".to_owned(), 4),
+            ("two".to_owned(), 5),
+        ]
+    );
+}
+
+#[def_test]
+fn chained_sparse_raw_zero_key_is_enumerated_after_static_names() {
+    let (root, _source) = chained_static_sparse_fs(&[("static", "content")], &[(0, "zero")]);
+    let file = crate::dentry_open(root, 0, kcred::initial_cred()).unwrap();
+    assert_eq!(
+        read_one(&file),
+        [
+            (".".to_owned(), 1),
+            ("..".to_owned(), 2),
+            ("static".to_owned(), 3),
+            ("zero".to_owned(), 4),
+        ]
+    );
+}
+
+#[def_test]
+fn chained_static_and_sparse_short_reads_rewind_and_skip() {
+    let (root, source) =
+        chained_static_sparse_fs(&[("static", "content")], &[(1, "one"), (2, "two")]);
+    let file = crate::dentry_open(root, 0, kcred::initial_cred()).unwrap();
+
+    assert_eq!(read_single(&file), [(".".to_owned(), 1)]);
+    assert_eq!(read_single(&file), [("..".to_owned(), 2)]);
+    assert_eq!(read_single(&file), [("static".to_owned(), 3)]);
+    assert_eq!(file.llseek(0, crate::file::SEEK_SET), Ok(0));
+    assert_eq!(read_one(&file).len(), 5);
+
+    *source.missing_lookup.lock() = Some(1);
+    assert_eq!(file.llseek(0, crate::file::SEEK_SET), Ok(0));
+    let entries = read_one(&file);
+    assert_eq!(
+        entries,
+        [
+            (".".to_owned(), 1),
+            ("..".to_owned(), 2),
+            ("static".to_owned(), 3),
+            ("two".to_owned(), 4),
+        ]
+    );
+}
+
+#[def_test]
+fn chained_static_and_sparse_names_resolve_from_both_sides() {
+    let (root, _source) = chained_static_sparse_fs(&[("static", "content")], &[(1, "one")]);
+    assert_eq!(
+        root.dentry().lookup("static").unwrap().name_snapshot(),
+        "static"
+    );
+    assert_eq!(root.dentry().lookup("one").unwrap().name_snapshot(), "one");
+    assert!(matches!(
+        root.dentry().lookup("missing"),
+        Err(VfsError::NotFound)
+    ));
+}
+
+#[def_test]
+fn two_sparse_sides_are_rejected() {
+    let source = Arc::new(SparseTestSource::new());
+    let chained = SparseDirAdapter {
+        source: source.clone(),
+    }
+    .chain(SparseDirAdapter { source });
+    assert_eq!(chained.sparse_source().err(), Some(VfsError::InvalidData));
+    assert_eq!(
+        chained.child_names().err(),
+        Some(VfsError::OperationNotSupported)
+    );
 }
 
 #[def_test]

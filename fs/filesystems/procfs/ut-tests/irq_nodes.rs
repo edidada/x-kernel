@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use kerrno::LinuxError;
@@ -97,6 +97,110 @@ fn irq_root() -> (alloc::sync::Arc<kvfs::SuperBlock>, alloc::sync::Arc<VfsFile>)
         )
         .unwrap();
     (fs, dir)
+}
+
+struct DefaultAffinityGuard;
+
+impl Drop for DefaultAffinityGuard {
+    fn drop(&mut self) {
+        if let Some(present) = kcpu_id_map::present_mask() {
+            let _ = kirq::set_default_smp_affinity(&present);
+        }
+    }
+}
+
+fn default_affinity_guard() -> DefaultAffinityGuard {
+    if let Some(present) = kcpu_id_map::present_mask() {
+        let _ = kirq::set_default_smp_affinity(&present);
+    }
+    DefaultAffinityGuard
+}
+
+fn default_file(root: &VfsFile) -> Arc<VfsFile> {
+    open_at(root, "default_smp_affinity", OpenFlags::READ_WRITE)
+}
+
+#[def_test(serial)]
+fn default_smp_affinity_exists_without_lines_and_is_writable() {
+    let _guard = default_affinity_guard();
+    let (_fs, root) = irq_root();
+    let file = default_file(&root);
+    assert_eq!(
+        file.path().getattr().unwrap().mode.permission().bits(),
+        0o644
+    );
+    assert!(
+        read_entries(&root)
+            .iter()
+            .any(|(name, ..)| name == "default_smp_affinity")
+    );
+
+    let present = kcpu_id_map::present_mask().expect("present mask");
+    let mut buf = [0u8; 128];
+    let mut pos = 0;
+    let len = file.read_from(&mut buf, &mut pos).unwrap();
+    let expected = expected_bitmap(present);
+    assert_eq!(&buf[..len], expected.as_bytes());
+}
+
+#[def_test(serial)]
+fn default_smp_affinity_write_readback_and_atomic_bad_value() {
+    let _guard = default_affinity_guard();
+    let (_fs, root) = irq_root();
+    let file = default_file(&root);
+    let before = {
+        let mut buf = [0u8; 128];
+        let mut pos = 0;
+        let len = file.read_from(&mut buf, &mut pos).unwrap();
+        buf[..len].to_vec()
+    };
+
+    let replacement = cpu_mask(&[0]);
+    let text = expected_bitmap(replacement);
+    assert_eq!(file.write(text.as_bytes()), Ok(text.len()));
+    let mut buf = [0u8; 128];
+    let mut pos = 0;
+    let len = file.read_from(&mut buf, &mut pos).unwrap();
+    assert_eq!(&buf[..len], text.as_bytes());
+
+    assert_eq!(
+        file.write(b"not-a-cpumask\n"),
+        Err(VfsError::from(LinuxError::EINVAL))
+    );
+    let mut pos = 0;
+    let len = file.read_from(&mut buf, &mut pos).unwrap();
+    assert_eq!(&buf[..len], text.as_bytes());
+    assert_ne!(before.as_slice(), text.as_bytes());
+}
+
+#[def_test(serial)]
+fn default_smp_affinity_partial_read_rewinds() {
+    let _guard = default_affinity_guard();
+    let (_fs, root) = irq_root();
+    let file = default_file(&root);
+    let mut first = [0u8; 1];
+    let mut pos = 0;
+    assert_eq!(file.read_from(&mut first, &mut pos), Ok(1));
+    assert_eq!(file.llseek(0, 0), Ok(0));
+    let mut all = [0u8; 128];
+    let mut pos = 0;
+    let len = file.read_from(&mut all, &mut pos).unwrap();
+    assert!(len > 1);
+}
+
+#[def_test(serial)]
+fn default_smp_affinity_coexists_with_line_directories() {
+    let _guard = default_affinity_guard();
+    let line = SyntheticLine::new(IrqDesc::from_virq(0x7180));
+    let (_fs, root) = irq_root();
+    let names: Vec<_> = read_entries(&root)
+        .into_iter()
+        .map(|(name, ..)| name)
+        .collect();
+    assert!(names.iter().any(|name| name == "default_smp_affinity"));
+    assert!(names.iter().any(|name| name == &format!("{}", line.virq())));
+    assert!(open_at_result(&root, "default_smp_affinity", OpenFlags::empty()).is_ok());
+    drop(line);
 }
 
 #[def_test(serial)]

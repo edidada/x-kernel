@@ -13,6 +13,7 @@
 pub(crate) mod action;
 mod action_set;
 pub(crate) mod affinity;
+pub(crate) mod default_affinity;
 pub(crate) mod dispatch;
 pub(crate) mod entry;
 pub(crate) mod handle;
@@ -25,3 +26,6 @@ pub(crate) mod retirement;
 pub(crate) mod state;
 mod stats;
 mod unhandled;
+
+#[cfg(unittest)]
+unittest::path_mod_test!(tests_default_affinity, "../../ut-tests/default_affinity.rs");

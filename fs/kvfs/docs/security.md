@@ -230,8 +230,10 @@ dentry caching because the source has no invalidation contract in this version;
 fresh pathname lookups must re-consult the source. A sink rejection keeps the
 pending key and does not advance the cursor. A seek past EOF preserves the
 requested position rather than silently clamping it. Source locks must not span
-the sink callback, and sparse does not support `ChainedDirOps` composition in
-this version.
+the sink callback. `ChainedDirOps` may combine one sparse side with one static
+side; two sparse sides are rejected as `InvalidData` by `validate_open`/
+`sparse_source`, and any sparse side keeps `child_names` at
+`OperationNotSupported`.
 
 ## External Boundaries / Attack Surface
 

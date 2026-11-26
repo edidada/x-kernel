@@ -2,6 +2,13 @@
 
 ## Runtime Routing Boundary
 
+`runtime/default_affinity.rs` holds the sole global default mask behind a
+registered static spinlock. Registration reads it only in the initial-policy
+control path. The public write requires sleepable task context, rejects empty
+and not-present masks with an error that leaves the old value unchanged, and
+never walks Lines or calls the trusted routing setter. Per-Line snapshots and
+the deferred/effective contracts are unchanged.
+
 This analysis includes `model/affinity.rs`, `backend/affinity.rs` and
 `runtime/affinity.rs`, plus the Line and management admission checks they use.
 Routing updates validate sleepable context before acquiring management exclusion;
@@ -71,7 +78,10 @@ An ordinary first action may establish a requested policy only after the CPU
 present map is ready. `present_mask()` is present, not ready; it does not write
 hardware. If the map is unavailable, registration returns `NotReady` before
 publishing an action or history. Fixed owner affinity is independent of that
-default. No procfs read or user setter supplies the initial policy.
+default. The procfs user setter `set_default_smp_affinity()` can supply the
+value consumed by future initial policies, but only after the sleepable-context,
+non-empty, and all-present checks pass; it never mutates an existing Line or its
+requested/effective snapshot.
 
 Action-history publication is a separate core fact: successful regular/shared/
 NMI publication sets it, failures do not, and action removal does not clear it.

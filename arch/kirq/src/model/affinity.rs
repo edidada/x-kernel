@@ -53,3 +53,16 @@ pub enum IrqAffinityError {
     /// Disable the faulted source before retrying its routing transaction.
     RecoveryRequiresDisable,
 }
+
+/// Failure of a global default-affinity update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DefaultSmpAffinityError {
+    /// The runtime CPU map needed to validate the default is not ready.
+    NotReady,
+    /// The replacement mask is empty.
+    Empty,
+    /// The replacement mask names a logical CPU that is not present.
+    NotPresent { cpu: usize },
+    /// The operation requires sleepable task context.
+    InvalidContext { operation: &'static str },
+}

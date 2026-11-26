@@ -104,7 +104,7 @@ pub use seq_file::{
 };
 pub use simple_dir::{
     ChainedDirOps, DirMaker, DirMapping, IntoDirMappingEntry, SimpleDir, SimpleDirEntry,
-    SimpleDirLookup, SimpleDirOps, SparseDirSource, new_sparse_dir_inode,
+    SimpleDirLookup, SimpleDirOps, SparseDirSource, new_sparse_dir_inode, new_sparse_dir_ops,
 };
 pub use simple_file::{CommandFile, SimpleFile, SimpleFileOperation, SimpleFileOps};
 pub use simple_fs::{SimpleFs, SimpleFsNode};

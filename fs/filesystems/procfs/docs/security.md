@@ -52,6 +52,13 @@ limitation remains documented and is not claimed as an OOM-safe boundary.
 
 ## IRQ affinity boundary
 
+`/proc/irq/default_smp_affinity` is a 0644 SeqFile backed by KIRQ's global
+default. The procfs write path parses the bitmap and calls the checked KIRQ
+setter; it holds no shadow mask and does not enumerate or migrate Lines. Empty
+and not-present masks fail with EINVAL without changing the old value. The
+static file is chained ahead of the sparse Line source; the sparse cursor owns
+the single f_pos and samples the static prefix once.
+
 `/proc/irq` combines a per-superblock stable `IrqNamespace` with KIRQ-owned
 identity and policy. The root source uses the common sparse `SimpleDir` adapter
 and KIRQ's `next_irq_line`; it publishes only Lines with action history, has no

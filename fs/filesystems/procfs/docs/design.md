@@ -97,13 +97,23 @@ and forced observation-error propagation.
 
 ## IRQ affinity view
 
-`/proc/irq` is a non-cacheable sparse `SimpleDir` rooted in a per-superblock
-`IrqNamespace`. The sparse source walks `next_irq_line` and publishes only
+`/proc/irq` is a non-cacheable `SimpleDir` formed by
+`static(default_smp_affinity).chain(sparse RootSource)` and rooted in a
+per-superblock `IrqNamespace`. The static default file is created lazily and
+retained by the namespace; the sparse side walks `next_irq_line` and publishes only
 current Lines whose KIRQ `has_action_history` is true. It has no fixed 4096-name
 or 64 KiB name cap; names come from the same sparse Virq walk and are formatted
 as canonical decimal. Enumeration is deliberately weak: insert/remove between
 getdents calls can shift or repeat ordinal results. The root source does not
 retain a Line handle.
+
+`/proc/irq/default_smp_affinity` is a 0644 bitmap file over KIRQ's global
+default. It is not tied to a Line, and its write path calls
+`kirq::set_default_smp_affinity`; only future ordinary `IrqAffinity::Any`
+registrations consume the new value. Existing requested/effective snapshots are
+never migrated. The file exists even with no Line directories, and the static
+prefix is sampled once by the chained sparse cursor; two sparse sides are
+rejected as `InvalidData`.
 
 `IrqNamespace` is owned by the root source and holds strong `LineRecord`s for
 stable metadata. Each record owns the stable Line directory, four stable file

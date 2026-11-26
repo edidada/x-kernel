@@ -21,10 +21,11 @@ use kirq::{IrqLineHandle, IrqLineRetirementObserver, lookup_irq_line, next_irq_l
 use ksync::Mutex;
 use kvfs::{
     DirMapping, NodePermission, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFs,
-    SparseDirSource, VfsError, VfsInode, VfsResult, new_sparse_dir_inode,
+    SparseDirSource, VfsError, VfsInode, VfsResult, new_sparse_dir_ops,
 };
 
 use super::{
+    default_affinity::{DEFAULT_SMP_AFFINITY_FILE, new_inode as new_default_affinity_inode},
     error,
     file::{AFFINITY_FILE_COUNT, AffinityFileKind, new_affinity_file_inode},
 };
@@ -36,6 +37,7 @@ const DIRECTORY_MODE: NodePermission = NodePermission::from_bits_truncate(0o555)
 pub(crate) struct IrqNamespace {
     fs: Arc<SimpleFs>,
     records: Mutex<BTreeMap<usize, Arc<LineRecord>>>,
+    default_affinity: Arc<Mutex<Option<Arc<VfsInode>>>>,
 }
 
 struct LineRecord {
@@ -76,7 +78,12 @@ impl IrqNamespace {
         Self {
             fs,
             records: Mutex::new(BTreeMap::new()),
+            default_affinity: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn default_affinity_slot(&self) -> Arc<Mutex<Option<Arc<VfsInode>>>> {
+        self.default_affinity.clone()
     }
 
     fn ensure_record(self: &Arc<Self>, virq: usize) -> VfsResult<Arc<LineRecord>> {
@@ -328,11 +335,22 @@ impl RootSource {
 
 pub(crate) fn new_root_inode(fs: Arc<SimpleFs>) -> Arc<VfsInode> {
     let namespace = Arc::new(IrqNamespace::new(fs.clone()));
-    let namespace_for_source = namespace.clone();
-    let root = Arc::new(RootSource {
-        namespace: namespace_for_source,
+    let slot = namespace.default_affinity_slot();
+    let default_fs = fs.clone();
+    let mut static_side = DirMapping::new();
+    static_side.add_child(DEFAULT_SMP_AFFINITY_FILE, move |lookup, name| {
+        let inode = {
+            let mut slot = slot.lock();
+            if slot.is_none() {
+                *slot = Some(new_default_affinity_inode(default_fs.clone())?);
+            }
+            slot.as_ref().ok_or(VfsError::NoMemory)?.clone()
+        };
+        Ok(lookup.file_from_inode(name, inode))
     });
-    new_sparse_dir_inode(fs, root, DIRECTORY_MODE, 0, 0)
+    let sparse_side = new_sparse_dir_ops(Arc::new(RootSource { namespace }));
+    let chained = static_side.chain(sparse_side);
+    SimpleDir::new_inode_with_owner(fs, Arc::new(chained), DIRECTORY_MODE, 0, 0)
 }
 
 fn virq_name(virq: usize) -> VfsResult<String> {

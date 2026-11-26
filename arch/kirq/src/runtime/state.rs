@@ -927,7 +927,7 @@ impl IrqStateDesc {
     /// succeeds. Explicit requested values and source-managed defaults are
     /// retained/left unknown.
     pub(super) fn prepare_initial_affinity_policy(&self) -> Result<Option<KCpuMask>, IrqDescError> {
-        self.prepare_initial_affinity_policy_with(kcpu_id_map::present_mask())
+        self.prepare_initial_affinity_policy_with(super::default_affinity::default_smp_affinity())
     }
 
     pub(super) fn prepare_initial_affinity_policy_with(

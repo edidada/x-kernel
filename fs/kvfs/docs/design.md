@@ -143,8 +143,16 @@ Snapshot-construction errors and other lookup failures still propagate.
 `SimpleDirOps::sparse_source()` is a default-`None` opt-in. A source implements
 `SparseDirSource` (first/next key, canonical name, current object by key/name,
 and path lookup by name). `new_sparse_dir_inode()` wraps it in a private adapter;
-`child_names()` on that adapter is intentionally `OperationNotSupported`, and the
-first version does not compose sparse with `ChainedDirOps`.
+`new_sparse_dir_ops()` exposes the composable `SimpleDirOps` form. One sparse
+side may be chained with one static side through `ChainedDirOps::new()`; two
+sparse sides are rejected as `InvalidData`, and any sparse side keeps
+`child_names()` at `OperationNotSupported`.
+
+The chained form wraps the static side and sparse source in
+`CombinedSparseSource`. Its `static_names: Mutex<Option<Vec<String>>>` caches the
+static name snapshot once per source; the mutex protects that cache and is not
+held across a sink callback. Static names are not encoded in the sparse `u64`
+key space, so a raw key such as `u64::MAX` remains valid.
 
 The per-open `SparseDirCursor` is installed in the open file's private data by
 `SimpleDirFileOperations::open()` and is owned by the same `VfsFile` as f_pos, so

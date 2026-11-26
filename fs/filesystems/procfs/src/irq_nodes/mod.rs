@@ -7,6 +7,7 @@
 //! Names and text presentation live here; KIRQ retains Line identity, owner
 //! policy and the admitted routing transaction.
 
+pub(crate) mod default_affinity;
 pub(crate) mod dir;
 mod error;
 pub(crate) mod file;

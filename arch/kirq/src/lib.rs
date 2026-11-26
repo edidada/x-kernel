@@ -94,7 +94,7 @@ pub use domain::{
 };
 pub(crate) use model::desc;
 pub use model::{
-    affinity::{IrqAffinityError, IrqAffinitySnapshot},
+    affinity::{DefaultSmpAffinityError, IrqAffinityError, IrqAffinitySnapshot},
     desc::{
         GIC_ROOT_DOMAIN, Hwirq, IO_APIC_DOMAIN, IRQ_EVENT_SOURCES, IrqAffinity, IrqController,
         IrqDesc, IrqDescError, IrqDomainId, IrqEvent, IrqEventSource, IrqFlags, IrqHandler,
@@ -111,6 +111,7 @@ pub(crate) use runtime::{action, state};
 pub use runtime::{
     action::IrqActionToken,
     affinity::{irq_affinity, set_irq_affinity},
+    default_affinity::{default_smp_affinity, set_default_smp_affinity},
     entry::{generic_handle_irq, generic_handle_nmi, handle_irq, handle_nmi},
     handle::{IrqLineHandle, lookup_irq_line, next_irq_line},
     manager::{
