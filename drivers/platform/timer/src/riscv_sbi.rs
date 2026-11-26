@@ -81,6 +81,16 @@ impl TimerConfig {
             source: TimerSource::PlatformStatic,
         }
     }
+
+    /// Builds the timer descriptor for one IRQ line and a counter frequency
+    /// read from the device tree.
+    pub const fn device_tree(irq: usize, frequency: Frequency) -> Self {
+        Self {
+            irq,
+            frequency,
+            source: TimerSource::DeviceTree,
+        }
+    }
 }
 
 /// Initializes the SBI timer backend: validates the IRQ and frequency

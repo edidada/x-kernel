@@ -22,7 +22,7 @@ Wall-clock maintenance belongs to `ktime`.
 | `src/resume_counter.rs` | Private ARM counter state and test mounts. |
 | `src/resume_notifications.rs` | Per-CPU atomic recovery requests and test mounts. |
 | `src/riscv_sbi.rs` | RISC-V time counter and SBI timer events. |
-| `src/tick_scale.rs` | Architecture-neutral `TickScale` tick and nanosecond conversion, also used by `kplat-loongarch64`. |
+| `src/tick_scale.rs` | Tick and nanosecond conversion shared by RISC-V and LoongArch. |
 | `src/x86_lapic_tsc.rs` | TSC frequency discovery and elapsed-time conversion, with LAPIC one-shot events. |
 
 ```text
@@ -71,9 +71,11 @@ counter directly; the virtual timer subtracts the counter value captured at
 initialization. The `vmm` feature selects EL2 physical-timer writes and assumes
 that the platform has established the required EL2 execution environment.
 
-On RISC-V, `init` installs the platform timebase and IRQ. `init_percpu` requests
-an immediately expired SBI event on the calling hart. The platform supplies
-supervisor access to the counter and SBI timer service and arranges IRQ delivery.
+On RISC-V, `init` installs the platform timebase and IRQ; `kplat-riscv64` takes
+the timebase from the device-tree `/cpus` `timebase-frequency` property and
+falls back to 10 MHz. `init_percpu` requests an immediately expired SBI event on
+the calling hart. The platform supplies supervisor access to the counter and SBI
+timer service and arranges IRQ delivery.
 
 Initialized clock reads and event programming are non-sleeping and can run in
 interrupt context. Event operations act on the current CPU. ARM resume repair
@@ -133,15 +135,9 @@ ARM accepts an optional frequency override and otherwise reads `CNTFRQ_EL0`.
 The selected frequency must be nonzero and fit in `u32` Hz. Two immutable ratios
 convert between counter ticks and nanoseconds.
 
-RISC-V converts through a `TickScale`, which applies the same nonzero and `u32`
-Hz checks; `init` panics on a violation. LoongArch platform code uses the same
-type for its stable counter. Clock reads multiply by an `int_ratio::Ratio` of
-1e9 / frequency, whose relative error stays below 2^-30, so a frequency that
-does not divide 1 GHz, such as 24 MHz or 19.2 MHz, keeps its fractional rate.
-Nanosecond-to-tick conversion is exact: whole seconds and the sub-second
-remainder are scaled separately so every product fits in `u64`, and the result
-saturates at `u64::MAX`. The inverse `Ratio` is not used there because its
-32-bit shift limit leaves too few significant bits for low-frequency counters.
+RISC-V, and LoongArch platform code, convert through `TickScale`, with the
+same frequency limits. Tick-to-nanosecond conversion uses a ratio; the reverse
+conversion is exact and saturates at `u64::MAX`.
 
 ## Clock events and idle repair
 
@@ -160,10 +156,9 @@ deadline uses interval 0; disarming clears the enable bit. Long x86 and ARM dead
 therefore generate an earlier interrupt, at which software must recheck and
 rearm the remaining deadline.
 
-RISC-V rounds the interval up to whole ticks, at least one, and passes the
-saturating absolute tick deadline to `sbi_rt::set_timer`, so a sub-tick
-remainder cannot fire before the deadline. Disarming writes `u64::MAX`. The
-backend does not inspect the SBI return value.
+RISC-V rounds the interval up to whole ticks and passes an absolute tick
+deadline to `sbi_rt::set_timer`. Disarming writes `u64::MAX`. The backend does
+not inspect the SBI return value.
 
 With `arm-timer-resume-fixup`, every ARM clock read samples a shared counter
 state under an IRQ-safe spinlock. The register is read after an ISB while holding
@@ -236,8 +231,7 @@ Across all gates there are 31 cases: AArch64 selects 16 by default or 27 with
 LoongArch64 select 6.
 Resume fixup depends on `!KFEAT_NMI`; disable NMI before enabling this option
 and verify the resolved `.config` after `make olddefconfig`.
-There is no LoongArch backend; `kplat-loongarch64` depends on the crate only for
-`TickScale`, so that target runs the common and `tick_scale.rs` cases.
+LoongArch has no backend here; `kplat-loongarch64` uses only `TickScale`.
 `vmm` changes production timer selection but adds no test-selection gate.
 Use the configured kernel guest unittest workflow (`UNITTEST=y`).
 
