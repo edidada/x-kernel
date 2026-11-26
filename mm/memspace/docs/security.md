@@ -382,3 +382,12 @@ runnable during rollback. Logical slot and physical backing destruction require
 owning-MM teardown/exclusion; dropping a runtime is not proof of remote access
 retirement for arbitrary live aliases. Tests check actual allocation lifetime,
 logical-slot sharing, managed source conflict, and final cleanup separately.
+
+## mprotect write restoration
+
+A writable private VMA does not authorize a writable PTE until its anonymous
+backing is exclusive. `mprotect` keeps present private PTEs write-protected so
+fork snapshots cannot be modified through a later permission upgrade. Only the
+page-granular COW fault path may restore WRITE. The regression test performs a
+real PTE-permission check before simulating a user write, so it also fails when
+the write wrongly bypasses the fault path.

@@ -638,3 +638,78 @@ fn unconfirmed_range_retirement_removes_slots_without_error_or_premature_cow_reu
         assert_eq!(kalloc::global_allocator().usages().get(UsageKind::VirtMem), baseline);
     }
 }
+
+#[def_test]
+fn private_fork_mprotect_restores_write_without_changing_child_snapshot() {
+    let start = VirtAddr::from_usize(0x60_0000);
+    let range = VirtAddrRange::from_start_size(start, PAGE_SIZE_4K);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let parent = PrivateBackend::new(start, PageSize::Size4K);
+    let mut parent_pt = PageTable::try_new().unwrap();
+    let write = FaultContext::new(start, PageFaultFlags::WRITE);
+    BackendOps::handle_fault(&parent, write, flags, &mut parent_pt.modify()).unwrap();
+    fill_frame_prefix(parent_pt.query(start).unwrap().0, 0x11, 64);
+
+    let child = PrivateBackend {
+        start,
+        object_start: 0,
+        size: PageSize::Size4K,
+        object: parent.object.fork_child(),
+        object_view: None,
+    };
+    let mut child_pt = PageTable::try_new().unwrap();
+    clone_private_object_pages_for_fork(
+        &parent.object,
+        &child.object,
+        0,
+        PAGE_SIZE_4K,
+        PrivateForkMaterialize {
+            runtime_start: start,
+            object_base: 0,
+            cow_flags: flags - MappingFlags::WRITE,
+            page_size: PageSize::Size4K,
+        },
+        &mut parent_pt.modify(),
+        &mut child_pt.modify(),
+    )
+    .unwrap();
+    {
+        let mut pgtbl = parent_pt.modify();
+        for requested in [MappingFlags::READ, flags] {
+            let effective =
+                BackendOps::on_protect(&parent, range, requested, &mut pgtbl).unwrap();
+            pgtbl
+                .protect_region(start, PAGE_SIZE_4K, effective)
+                .unwrap();
+            pgtbl.finish();
+        }
+    }
+    // Drive the fault only when a user write would hit a read-only PTE.
+    if !parent_pt
+        .query(start)
+        .unwrap()
+        .1
+        .contains(MappingFlags::WRITE)
+    {
+        BackendOps::handle_fault(&parent, write, flags, &mut parent_pt.modify()).unwrap();
+    }
+    fill_frame_prefix(parent_pt.query(start).unwrap().0, 0x22, 64);
+    assert_frame_prefix(child_pt.query(start).unwrap().0, 0x11, 64);
+    if !child_pt
+        .query(start)
+        .unwrap()
+        .1
+        .contains(MappingFlags::WRITE)
+    {
+        BackendOps::handle_fault(&child, write, flags, &mut child_pt.modify()).unwrap();
+    }
+    fill_frame_prefix(child_pt.query(start).unwrap().0, 0x33, 64);
+    assert_frame_prefix(parent_pt.query(start).unwrap().0, 0x22, 64);
+    assert_frame_prefix(child_pt.query(start).unwrap().0, 0x33, 64);
+    assert_ne!(
+        parent_pt.query(start).unwrap().0,
+        child_pt.query(start).unwrap().0
+    );
+    BackendOps::unmap(&parent, range, &mut parent_pt.modify()).unwrap();
+    BackendOps::unmap(&child, range, &mut child_pt.modify()).unwrap();
+}

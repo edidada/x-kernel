@@ -590,3 +590,15 @@ pair. Test fixtures own PageRef values too; tests of externally owned linear
 mappings borrow physical addresses while retaining those owners. The separate
 page-table storage adapter names its PA transfers `alloc_frame_raw` and
 `dealloc_frame_raw`, keeping raw ownership explicit.
+
+## Private mprotect and COW
+
+`PrivateBackend::on_protect` removes WRITE from the effective present-PTE
+permissions, while `MmSpace::protect` retains the requested VMA permissions.
+A range can mix exclusive and fork-shared anonymous pages, so restoring WRITE
+at range scope cannot establish exclusivity. The next permitted write uses the
+existing page-fault path: exclusive object pages regain WRITE without copying;
+shared pages obtain a private frame before publication. This deliberately costs
+one protection fault per present exclusive page after write restoration. It
+avoids a new range scan or per-page object lookup under the MM lock. File-private
+runtimes retain their existing equivalent policy.

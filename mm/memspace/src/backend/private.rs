@@ -217,6 +217,17 @@ impl BackendOps for PrivateBackend {
         Ok(())
     }
 
+    fn on_protect(
+        &self,
+        _range: VirtAddrRange,
+        new_flags: MappingFlags,
+        _pgtbl: &mut PageTableMut,
+    ) -> KResult<MappingFlags> {
+        // VMA permissions authorize writes; only a page fault can establish
+        // exclusivity for each page in a mixed exclusive/fork-shared range.
+        Ok(new_flags - MappingFlags::WRITE)
+    }
+
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult {
         let object_start = self.object_offset_for(range.start)?;
         unmap_private_object_range(&self.object, object_start, range, self.size, pgtbl)
