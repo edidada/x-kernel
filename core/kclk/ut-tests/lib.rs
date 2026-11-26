@@ -1084,6 +1084,18 @@ fn failed_child_recalc_restores_programmed_parent_rate() {
     .parent(root)
     .build()
     .unwrap();
+    // The parent's subscribers must see *both* programming steps: the change
+    // the child asked for, and the restore that undoes it after the child's
+    // recalc failed. Otherwise their last-seen rate stays at the abandoned
+    // value while hardware is back at the old one.
+    let events: Arc<SpinNoIrq<Vec<(Rate, Rate)>>> = Arc::new(SpinNoIrq::new(Vec::new()));
+    let sink = events.clone();
+    parent.add_notifier(Arc::new(move |event| {
+        if let ClkEvent::PostRateChange { old, new } = *event {
+            sink.lock().push((old, new));
+        }
+        NotifierResult::Proceed
+    }));
     let child = ClkBuilder::new(
         "txn_rate_child",
         Arc::new(RejectChangedParentOps {
@@ -1098,6 +1110,14 @@ fn failed_child_recalc_restores_programmed_parent_rate() {
     assert_eq!(child.set_rate(250_000_000), Err(ClkError::Io));
     assert_eq!(parent.get_rate(), 1_000_000_000);
     assert_eq!(child.get_rate(), 1_000_000_000);
+    let seen = events.lock();
+    assert_eq!(
+        seen.as_slice(),
+        &[
+            (1_000_000_000, 250_000_000),
+            (250_000_000, 1_000_000_000),
+        ]
+    );
 }
 
 #[def_test(serial)]

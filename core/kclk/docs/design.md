@@ -480,7 +480,7 @@ pub fn init_ccu(ccu_vaddr: usize) -> kclk::ClkResult<()> {
                 None,
                 DividerFlags::empty(),
             )?),
-            Some(Gate::into_ops(reg.clone(), 0x30, 11, GateFlags::empty())),
+            Some(Gate::into_ops(reg.clone(), 0x30, 11, GateFlags::empty())?),
         )
         .into_ops(),
     )

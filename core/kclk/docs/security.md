@@ -28,8 +28,10 @@ field encoding is the controller driver's responsibility.
 
 ## Unsafe Code
 
-This crate contains no `unsafe` code: it owns no MMIO mechanism and no raw
-pointer. Register access is a trait call; the production implementation
+The crate's only `unsafe` is one `ptr::read` that moves an `Arc` out of a
+`ManuallyDrop<Self>` (see the second half of this section); it owns no MMIO
+mechanism and no MMIO raw pointer. Register access is a trait call; the
+production implementation
 (`IoMapClkReg` in the X-Kernel provider adapter) wraps `driver_os_api`'s
 `IoMap`, which is where the volatile loads/stores, the alignment and
 bounds checks, and the mapping lifetime live. What this crate contributes is
@@ -136,8 +138,9 @@ behind and the node reference transfers to the caller.
 - Confirm every `ClkRegAccess` implementation is built from a device mapping
   (the adapter's `IoMapClkReg` over `IoMap`), not from a hand-passed address, and
   that accessors which know their region size report it through `window_bytes`.
-- Confirm no `unsafe` reappears in this crate: register access belongs to the
-  host adapter's implementation.
+- Confirm the only `unsafe` in this crate stays the `ManuallyDrop` move in
+  `ClkHandle::into_core`, and that register access stays in the host adapter's
+  implementation.
 - Confirm a controller driver keeps all bit fields within a 32-bit word and
   validates `width`/`shift` against its register layout.
 - Confirm new `ClkHwOps` impls do not re-enter the framework (no nested

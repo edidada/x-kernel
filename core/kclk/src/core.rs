@@ -951,11 +951,33 @@ impl ClkCore {
         match self.ops.recalc_rate(actual) {
             Ok(rate) => Ok(rate),
             // Restore the upstream transaction before reporting an aborted
-            // change to this node's consumer.
-            Err(error) => match parent.set_rate_locked(old) {
-                Ok(restored) if restored == old => Err(error),
-                Ok(_) | Err(_) => Err(ClkError::BadState),
-            },
+            // change to this node's consumer. The parent's subscribers were
+            // already told it runs at `actual` (its `PostRateChange` fired
+            // before this validation), so the restore is a second
+            // reprogramming of the parent and they must observe it too;
+            // otherwise their last-seen rate stays `actual` while hardware and
+            // the cached rate are back at `old`. A subscriber that vetoes the
+            // repair leaves no consistent state to report, hence `BadState`.
+            Err(error) => {
+                if !parent.notify_pre(actual, old) {
+                    parent.notify_aborted(actual, old);
+                    return Err(ClkError::BadState);
+                }
+                match parent.set_rate_locked(old) {
+                    Ok(restored) => {
+                        parent.notify_post(actual, restored);
+                        if restored == old {
+                            Err(error)
+                        } else {
+                            Err(ClkError::BadState)
+                        }
+                    }
+                    Err(_) => {
+                        parent.notify_aborted(actual, old);
+                        Err(ClkError::BadState)
+                    }
+                }
+            }
         }
     }
 
