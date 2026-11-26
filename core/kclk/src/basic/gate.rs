@@ -34,11 +34,11 @@ bitflags! {
 /// A clock whose only effect is to enable/disable a single register bit.
 ///
 /// Rate is passed through unchanged from the selected parent. The bit lives in
-/// a 32-bit word at `offset` within the register window; `bit_idx` selects the
-/// bit position (0–31).
+/// a 32-bit word at `offset_bytes` (a byte offset) within the register window;
+/// `bit_idx` selects the bit position (0–31).
 pub struct Gate {
     reg: Arc<dyn ClkRegAccess>,
-    offset: usize,
+    offset_bytes: usize,
     bit_idx: u8,
     flags: GateFlags,
 }
@@ -46,12 +46,18 @@ pub struct Gate {
 impl Gate {
     /// Create a gate clock.
     ///
+    /// `offset_bytes` is a byte offset into the controller's register window.
     /// `bit_idx` must be < 32; the provider of [`ClkRegAccess`] is responsible
     /// for the window being mapped and word-aligned.
-    pub fn new(reg: Arc<dyn ClkRegAccess>, offset: usize, bit_idx: u8, flags: GateFlags) -> Self {
+    pub fn new(
+        reg: Arc<dyn ClkRegAccess>,
+        offset_bytes: usize,
+        bit_idx: u8,
+        flags: GateFlags,
+    ) -> Self {
         Self {
             reg,
-            offset,
+            offset_bytes,
             bit_idx,
             flags,
         }
@@ -60,11 +66,11 @@ impl Gate {
     /// Construct and upcast in one step for [`crate::ClkBuilder::new`].
     pub fn into_ops(
         reg: Arc<dyn ClkRegAccess>,
-        offset: usize,
+        offset_bytes: usize,
         bit_idx: u8,
         flags: GateFlags,
     ) -> Arc<dyn ClkHwOps> {
-        Arc::new(Self::new(reg, offset, bit_idx, flags))
+        Arc::new(Self::new(reg, offset_bytes, bit_idx, flags))
     }
 
     fn mask(&self) -> u32 {
@@ -91,10 +97,10 @@ impl Gate {
     fn write_gate(&self, enabled: bool) {
         if self.hiword() {
             let value = (self.mask() << 16) | self.enable_value(enabled);
-            self.reg.reg_write(self.offset, value);
+            self.reg.reg_write(self.offset_bytes, value);
         } else {
             self.reg
-                .reg_modify(self.offset, self.mask(), self.enable_value(enabled));
+                .reg_modify(self.offset_bytes, self.mask(), self.enable_value(enabled));
         }
     }
 }
@@ -110,7 +116,7 @@ impl ClkHwOps for Gate {
     }
 
     fn is_enabled(&self) -> ClkResult<bool> {
-        let bit = (self.reg.reg_read(self.offset) >> self.bit_idx) & 1;
+        let bit = (self.reg.reg_read(self.offset_bytes) >> self.bit_idx) & 1;
         let clock_on = if self.flags.contains(GateFlags::SET_TO_DISABLE) {
             bit == 0
         } else {

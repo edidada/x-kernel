@@ -43,13 +43,14 @@ bitflags! {
 
 /// A clock that derives its rate by dividing the parent rate.
 ///
-/// The divider field occupies `width` bits at `shift` within the word at
-/// `offset`. When a `table` is given, it lists the explicit divider values for
-/// each register value (sparse or non-monotonic dividers); otherwise dividers
-/// are linear, optionally power-of-two.
+/// The divider field occupies `width` bits at `shift` within the 32-bit word at
+/// `offset_bytes`, a byte offset into the controller's register window. When a
+/// `table` is given, it lists the explicit divider values for each register
+/// value (sparse or non-monotonic dividers); otherwise dividers are linear,
+/// optionally power-of-two.
 pub struct Divider {
     reg: Arc<dyn ClkRegAccess>,
-    offset: usize,
+    offset_bytes: usize,
     shift: u8,
     width: u8,
     /// Linux-style `(register value, divider)` pairs; `val` entries are
@@ -78,6 +79,7 @@ impl DivTableEntry {
 impl Divider {
     /// Create a divider clock.
     ///
+    /// `offset_bytes` is a byte offset into the controller's register window.
     /// `width` must be in `1..32`: a width of 32 would shift a `u32` out of
     /// range. The width comes from the provider's register description, so an
     /// out-of-range value is a configuration error the caller can report, not
@@ -85,7 +87,7 @@ impl Divider {
     /// instead of panicking.
     pub fn new(
         reg: Arc<dyn ClkRegAccess>,
-        offset: usize,
+        offset_bytes: usize,
         shift: u8,
         width: u8,
         table: Option<&'static [DivTableEntry]>,
@@ -97,7 +99,7 @@ impl Divider {
         }
         Ok(Self {
             reg,
-            offset,
+            offset_bytes,
             shift,
             width,
             table,
@@ -108,14 +110,19 @@ impl Divider {
     /// Construct and upcast in one step for [`crate::ClkBuilder::new`].
     pub fn into_ops(
         reg: Arc<dyn ClkRegAccess>,
-        offset: usize,
+        offset_bytes: usize,
         shift: u8,
         width: u8,
         table: Option<&'static [DivTableEntry]>,
         flags: DividerFlags,
     ) -> ClkResult<Arc<dyn ClkHwOps>> {
         Ok(Arc::new(Self::new(
-            reg, offset, shift, width, table, flags,
+            reg,
+            offset_bytes,
+            shift,
+            width,
+            table,
+            flags,
         )?))
     }
 
@@ -150,7 +157,7 @@ impl Divider {
 
     /// Read the raw register field value.
     fn raw(&self) -> u32 {
-        (self.reg.reg_read(self.offset) >> self.shift) & self.field_mask()
+        (self.reg.reg_read(self.offset_bytes) >> self.shift) & self.field_mask()
     }
 
     /// Whether to use the hiword-mask atomic write (single `reg_write`) instead
@@ -165,10 +172,10 @@ impl Divider {
         let field = (raw & self.field_mask()) << self.shift;
         if self.hiword() {
             let mask = self.field_mask() << (self.shift + 16);
-            self.reg.reg_write(self.offset, mask | field);
+            self.reg.reg_write(self.offset_bytes, mask | field);
         } else {
             self.reg
-                .reg_modify(self.offset, self.field_mask() << self.shift, field);
+                .reg_modify(self.offset_bytes, self.field_mask() << self.shift, field);
         }
     }
 

@@ -27,14 +27,15 @@ bitflags! {
 
 /// A clock that picks one of `N` parents using a bit field in a register.
 ///
-/// The field occupies `width` bits at `shift` within the word at `offset`.
+/// The field occupies `width` bits at `shift` within the word at `offset_bytes`
+/// (a byte offset into the controller's register window).
 /// When a `table` is given it maps *parent index → register value*
 /// (`table[index] = raw`, matching Linux's `clk_mux` table direction), so
 /// sparse or reordered hardware encodings list only the parents they use;
 /// otherwise the register value is the parent index directly.
 pub struct Mux {
     reg: Arc<dyn ClkRegAccess>,
-    offset: usize,
+    offset_bytes: usize,
     shift: u8,
     mask: u32,
     table: Option<&'static [u8]>,
@@ -47,6 +48,7 @@ pub struct Mux {
 impl Mux {
     /// Create a mux.
     ///
+    /// `offset_bytes` is a byte offset into the controller's register window.
     /// `mask` is the *unshifted* field mask (e.g. `0x7` for a 3-bit field); it
     /// is applied after `>> shift`.
     ///
@@ -57,7 +59,7 @@ impl Mux {
     /// high parents unreachable).
     pub fn new(
         reg: Arc<dyn ClkRegAccess>,
-        offset: usize,
+        offset_bytes: usize,
         shift: u8,
         mask: u32,
         table: Option<&'static [u8]>,
@@ -71,7 +73,7 @@ impl Mux {
         let num_parents = u8::try_from(count).map_err(|_| ClkError::InvalidValue)?;
         Ok(Self {
             reg,
-            offset,
+            offset_bytes,
             shift,
             mask,
             table,
@@ -83,18 +85,25 @@ impl Mux {
     /// Construct and upcast in one step for [`crate::ClkBuilder::new`].
     pub fn into_ops(
         reg: Arc<dyn ClkRegAccess>,
-        offset: usize,
+        offset_bytes: usize,
         shift: u8,
         mask: u32,
         table: Option<&'static [u8]>,
         flags: MuxFlags,
     ) -> ClkResult<Arc<dyn ClkHwOps>> {
-        Ok(Arc::new(Self::new(reg, offset, shift, mask, table, flags)?))
+        Ok(Arc::new(Self::new(
+            reg,
+            offset_bytes,
+            shift,
+            mask,
+            table,
+            flags,
+        )?))
     }
 
     /// Read the raw register field value.
     fn raw(&self) -> u32 {
-        (self.reg.reg_read(self.offset) >> self.shift) & self.mask
+        (self.reg.reg_read(self.offset_bytes) >> self.shift) & self.mask
     }
 
     /// Translate a register value to a parent index.
@@ -142,10 +151,10 @@ impl ClkHwOps for Mux {
             // Atomic hiword write: the upper half carries the write-enable
             // mask, so other fields in this word are untouched in one store.
             let mask = self.mask << (self.shift + 16);
-            self.reg.reg_write(self.offset, mask | field);
+            self.reg.reg_write(self.offset_bytes, mask | field);
         } else {
             self.reg
-                .reg_modify(self.offset, self.mask << self.shift, field);
+                .reg_modify(self.offset_bytes, self.mask << self.shift, field);
         }
         Ok(())
     }
