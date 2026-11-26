@@ -162,11 +162,16 @@ impl From<IxgbeNetBuf> for NetBufHandle {
         // In ixgbe, `raw_ptr` is the pool entry, `buf_ptr` is the payload ptr, `len` is payload len
         // to avoid too many dynamic memory allocation.
         let buf_ptr = buf_ref.packet_mut().as_mut_ptr();
-        Self::new(
-            NonNull::new(buf_ref.pool_entry() as *mut u8).unwrap(),
-            NonNull::new(buf_ptr).unwrap(),
-            buf_ref.packet_len(),
-        )
+        // SAFETY: `buf_ptr`/`packet_len()` describe the payload inside the live
+        // ixgbe pool entry, and `pool_entry()` is the owner pointer consumed by
+        // `ixgbe_ptr_to_buf` when reconstructing the buffer.
+        unsafe {
+            Self::new(
+                NonNull::new(buf_ref.pool_entry() as *mut u8).unwrap(),
+                NonNull::new(buf_ptr).unwrap(),
+                buf_ref.packet_len(),
+            )
+        }
     }
 }
 

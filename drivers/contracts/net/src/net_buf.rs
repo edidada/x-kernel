@@ -21,7 +21,19 @@ pub struct NetBufHandle {
 
 impl NetBufHandle {
     /// Create a new [`NetBufHandle`].
-    pub fn new(owner_ptr: NonNull<u8>, data_ptr: NonNull<u8>, data_len: usize) -> Self {
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - `data_ptr` points to `data_len` bytes that are valid, initialized,
+    ///   and exclusively owned by this handle for as long as the handle is
+    ///   alive or until it is consumed.
+    /// - `owner_ptr` is the original ownership pointer that the producing
+    ///   driver can recover through [`NetBuf::from_handle`] or its own
+    ///   equivalent reconstruction path, and it remains valid until consumed.
+    /// - The handle is not duplicated in a way that creates aliased mutable
+    ///   access through [`Self::data_mut`] or double-consumption.
+    pub unsafe fn new(owner_ptr: NonNull<u8>, data_ptr: NonNull<u8>, data_len: usize) -> Self {
         Self {
             owner_ptr,
             data_ptr,
@@ -46,14 +58,17 @@ impl NetBufHandle {
 
     /// Return the payload as `&[u8]`.
     pub fn data(&self) -> &[u8] {
-        // SAFETY: `data_ptr` points at `data_len` bytes owned by the handle for
-        // the duration of this borrow.
+        // SAFETY: `NetBufHandle::new` requires `data_ptr` to point at
+        // `data_len` valid, initialized bytes owned by this handle for the
+        // duration of the borrow, and shared access is sound for `&self`.
         unsafe { core::slice::from_raw_parts(self.data_ptr.as_ptr() as *const u8, self.data_len) }
     }
 
     /// Return the payload as `&mut [u8]`.
     pub fn data_mut(&mut self) -> &mut [u8] {
-        // SAFETY: `data_ptr` points at `data_len` bytes owned exclusively by this handle.
+        // SAFETY: `NetBufHandle::new` requires `data_ptr` to point at
+        // `data_len` valid, initialized bytes exclusively owned by this handle.
+        // `&mut self` prevents aliased mutable access through this handle.
         unsafe { core::slice::from_raw_parts_mut(self.data_ptr.as_ptr(), self.data_len) }
     }
 }
@@ -200,7 +215,11 @@ impl NetBuf {
         let data_ptr = NonNull::from(self.payload_mut()).cast();
         let data_len = self.payload_len;
         let object_ptr = NonNull::from(Box::leak(self)).cast();
-        NetBufHandle::new(object_ptr, data_ptr, data_len)
+        // SAFETY: `object_ptr` comes from `Box::leak` of this live `NetBuf`,
+        // and `data_ptr`/`data_len` describe the payload slice inside that same
+        // allocation. Ownership is transferred to the returned handle and must
+        // be consumed exactly once via `NetBuf::from_handle`.
+        unsafe { NetBufHandle::new(object_ptr, data_ptr, data_len) }
     }
 
     /// Restore [`NetBuf`] from a handle.

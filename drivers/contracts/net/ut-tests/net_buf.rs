@@ -22,7 +22,9 @@ fn test_netbuf_boundary_conditions() {
     let valid_sizes = [0, 1, 512, 1024, MIN_BUFFER_LEN];
     for &size in &valid_sizes {
         if size <= test_data.len() {
-            let handle = NetBufHandle::new(owner_ptr, data_ptr, size);
+            // SAFETY: pointers and length come from `test_data`, which outlives
+            // the handle and is not aliased mutably through this handle.
+            let handle = unsafe { NetBufHandle::new(owner_ptr, data_ptr, size) };
             assert_eq!(handle.len(), size);
             assert_eq!(handle.is_empty(), size == 0);
             assert_eq!(handle.data().len(), size);
@@ -30,7 +32,9 @@ fn test_netbuf_boundary_conditions() {
     }
 
     // Test boundary behavior with zero-length buffer
-    let zero_handle = NetBufHandle::new(owner_ptr, data_ptr, 0);
+    // SAFETY: pointers come from `test_data`, which outlives the handle; the
+    // zero length means no payload bytes are read or written.
+    let zero_handle = unsafe { NetBufHandle::new(owner_ptr, data_ptr, 0) };
     assert!(zero_handle.is_empty());
     assert_eq!(zero_handle.len(), 0);
     assert!(zero_handle.data().is_empty());
@@ -39,7 +43,9 @@ fn test_netbuf_boundary_conditions() {
     let mut data = vec![0u8; 100];
     let owner_ptr = NonNull::new(data.as_mut_ptr()).unwrap();
     let data_ptr = NonNull::new(data.as_mut_ptr()).unwrap();
-    let mut handle = NetBufHandle::new(owner_ptr, data_ptr, data.len());
+    // SAFETY: pointers and length come from `data`, which outlives the handle
+    // and is exclusively accessed through the handle during this test.
+    let mut handle = unsafe { NetBufHandle::new(owner_ptr, data_ptr, data.len()) };
 
     // Fill with test pattern
     let pattern = 0xAB;

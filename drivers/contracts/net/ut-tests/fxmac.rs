@@ -39,11 +39,14 @@ fn test_fxmac_queue_management() {
         .map(|data| {
             owners.push(data.clone());
             let ptr = owners.last_mut().unwrap().as_mut_ptr();
-            NetBufHandle::new(
-                NonNull::new(ptr as *mut u8).unwrap(),
-                NonNull::new(ptr as *mut u8).unwrap(),
-                data.len(),
-            )
+            // SAFETY: test-owned buffer outlives the handle; dormant mock case.
+            unsafe {
+                NetBufHandle::new(
+                    NonNull::new(ptr as *mut u8).unwrap(),
+                    NonNull::new(ptr as *mut u8).unwrap(),
+                    data.len(),
+                )
+            }
         })
         .collect();
 
@@ -73,11 +76,14 @@ fn test_fxmac_queue_management() {
         let data = vec![(200 + i) as u8; 60]; // Minimum Ethernet frame
         owners.push(data.clone());
         let ptr = owners.last_mut().unwrap().as_mut_ptr();
-        let handle = NetBufHandle::new(
-            NonNull::new(ptr as *mut u8).unwrap(),
-            NonNull::new(ptr as *mut u8).unwrap(),
-            data.len(),
-        );
+        // SAFETY: test-owned buffer outlives the handle; dormant mock case.
+        let handle = unsafe {
+            NetBufHandle::new(
+                NonNull::new(ptr as *mut u8).unwrap(),
+                NonNull::new(ptr as *mut u8).unwrap(),
+                data.len(),
+            )
+        };
         rx_queue.push_back(handle);
     }
 
@@ -123,11 +129,14 @@ fn test_fxmac_network_frame_validation() {
 
         // Create NetBufHandle for frame
         let ptr = frame_data.as_mut_ptr();
-        let handle = NetBufHandle::new(
-            NonNull::new(ptr as *mut u8).unwrap(),
-            NonNull::new(ptr as *mut u8).unwrap(),
-            frame_data.len(),
-        );
+        // SAFETY: test-owned buffer outlives the handle; dormant mock case.
+        let handle = unsafe {
+            NetBufHandle::new(
+                NonNull::new(ptr as *mut u8).unwrap(),
+                NonNull::new(ptr as *mut u8).unwrap(),
+                frame_data.len(),
+            )
+        };
 
         // Validate frame properties
         assert_eq!(handle.len(), frame_size);
@@ -163,11 +172,14 @@ fn test_fxmac_network_frame_validation() {
     for invalid_size in invalid_sizes {
         let mut frame_data = vec![0u8; invalid_size];
         let ptr = frame_data.as_mut_ptr();
-        let handle = NetBufHandle::new(
-            NonNull::new(ptr as *mut u8).unwrap(),
-            NonNull::new(ptr as *mut u8).unwrap(),
-            invalid_size,
-        );
+        // SAFETY: test-owned buffer outlives the handle; dormant mock case.
+        let handle = unsafe {
+            NetBufHandle::new(
+                NonNull::new(ptr as *mut u8).unwrap(),
+                NonNull::new(ptr as *mut u8).unwrap(),
+                invalid_size,
+            )
+        };
 
         // These should still create valid handles, but represent invalid Ethernet frames
         assert_eq!(handle.len(), invalid_size);

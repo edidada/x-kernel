@@ -164,6 +164,11 @@ error type is defined. Documented failure results:
   `NetBuf::from_handle` (`# Safety`) rather than paid for on every packet.
 - Header/payload split inside one buffer: protocols prepend or strip headers
   without copying the payload, and `frame()` exposes the contiguous view.
+- Raw `NetBufHandle` construction is `unsafe`: descriptor rings need plain
+  pointers, but safe code must not be able to forge handles and then obtain
+  `&[u8]`/`&mut [u8]` from arbitrary memory. Drivers construct handles in
+  `unsafe` blocks with local `SAFETY` justifications; `into_handle` and
+  `from_handle` remain the symmetric owned-buffer conversion path.
 - Contract-only crate: hardware knowledge stays in driver crates; keeping the
   dormant `fxmac`/`ixgbe` sources here is historical and they compile only if
   their module declarations and features are re-enabled.

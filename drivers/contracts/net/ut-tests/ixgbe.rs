@@ -80,11 +80,14 @@ fn test_ixgbe_queue_size_validation() {
         let data = vec![(i % 256) as u8; 1514];
         owners.push(data.clone());
         let ptr = owners.last_mut().unwrap().as_mut_ptr();
-        let handle = NetBufHandle::new(
-            NonNull::new(ptr as *mut u8).unwrap(),
-            NonNull::new(ptr as *mut u8).unwrap(),
-            data.len(),
-        );
+        // SAFETY: test-owned buffer outlives the handle; dormant mock case.
+        let handle = unsafe {
+            NetBufHandle::new(
+                NonNull::new(ptr as *mut u8).unwrap(),
+                NonNull::new(ptr as *mut u8).unwrap(),
+                data.len(),
+            )
+        };
         rx_queue.push_back(handle);
     }
 

@@ -112,11 +112,16 @@ impl NetDevice for FXmacNic {
                         let mut buf = Box::new(payload);
                         let buf_ptr = buf.as_mut_ptr();
                         let buf_len = buf.len();
-                        let rx_buf = NetBufHandle::new(
-                            NonNull::new(Box::into_raw(buf) as *mut u8).unwrap(),
-                            NonNull::new(buf_ptr).unwrap(),
-                            buf_len,
-                        );
+                        // SAFETY: `buf_ptr`/`buf_len` describe the leaked `Vec<u8>`
+                        // payload, and the owner pointer is the same allocation
+                        // reconstructed in `recycle_rx`/`send`.
+                        let rx_buf = unsafe {
+                            NetBufHandle::new(
+                                NonNull::new(Box::into_raw(buf) as *mut u8).unwrap(),
+                                NonNull::new(buf_ptr).unwrap(),
+                                buf_len,
+                            )
+                        };
 
                         rx_buffer_queue.push_back(rx_buf);
                     }
@@ -144,11 +149,16 @@ impl NetDevice for FXmacNic {
         let mut tx_buf = Box::new(alloc::vec![0; size]);
         let tx_buf_ptr = tx_buf.as_mut_ptr();
 
-        Ok(NetBufHandle::new(
-            NonNull::new(Box::into_raw(tx_buf) as *mut u8).unwrap(),
-            NonNull::new(tx_buf_ptr).unwrap(),
-            size,
-        ))
+        // SAFETY: `tx_buf_ptr`/`size` describe the leaked `Vec<u8>` payload,
+        // and the owner pointer is the same allocation reconstructed by the
+        // caller through `NetBuf::from_handle` or driver-specific recovery.
+        Ok(unsafe {
+            NetBufHandle::new(
+                NonNull::new(Box::into_raw(tx_buf) as *mut u8).unwrap(),
+                NonNull::new(tx_buf_ptr).unwrap(),
+                size,
+            )
+        })
     }
 }
 

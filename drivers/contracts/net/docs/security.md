@@ -43,16 +43,22 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
   `base_ptr().add(start)` inside the pool slot. Safety: `start + len` is
   checked against the slot's `buf_len` (checked arithmetic plus
   `debug_assert`), and `&mut self` excludes concurrent mutable access.
+- `NetBufHandle::new` (`pub unsafe fn`) — constructs a handle from raw owner,
+  data pointer, and length. The `# Safety` contract requires `data_ptr` to
+  reference `data_len` valid, initialized, exclusively owned bytes for the
+  handle lifetime, and `owner_ptr` to be recoverable by the producing driver
+  path. This keeps handle forgery out of safe Rust; callers must justify the
+  invariant at the construction site.
 - `NetBufHandle::data` / `data_mut` — dereference the handle's
-  `data_ptr` for `data_len` bytes. Safety: the handle was created by
-  `into_handle` from a live `NetBuf`, so the pointer range is inside the
-  pool allocation; `&mut self` serializes access.
+  `data_ptr` for `data_len` bytes. Safety: `NetBufHandle::new` requires the
+  pointer range to be valid for the handle lifetime and exclusively owned for
+  mutable access; `&mut self` serializes mutable access through the handle.
 - `NetBuf::from_handle` (`pub unsafe fn`) — `Box::from_raw` on the
   handle's owner pointer. The `# Safety` contract: the handle must have
   been produced by `into_handle` from a live allocation and consumed
-  exactly once; forged, stale, or double-consumed handles are undefined
-  behavior. This is the one boundary a compromised driver could violate;
-  drivers are trusted kernel components.
+  exactly once; forged, stale, or already-consumed handles are undefined
+  behavior. This is a boundary a compromised or incorrect driver could
+  violate; drivers are trusted kernel components.
 
 ## Invariants
 
@@ -69,7 +75,7 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | Forged or double-consumed `NetBufHandle` | High — UB via `Box::from_raw` | A driver fabricates a handle or recycles one twice | Documented single-consumption `# Safety` contract on `from_handle`; drivers are trusted kernel components. Residual risk accepted by the driver trust model. |
+| T-01 | Forged or double-consumed `NetBufHandle` | High — UB via raw slice or `Box::from_raw` | A driver fabricates a handle or recycles one twice | `NetBufHandle::new` and `NetBuf::from_handle` are `unsafe` with `# Safety` contracts; safe code cannot forge a handle. Drivers remain trusted to satisfy the contracts. Residual risk accepted by the driver trust model. |
 | T-02 | Out-of-bounds header/payload sizing | Medium — out-of-bounds slice access | Caller sets `hdr_len + payload_len` beyond the slot | Checked arithmetic and `DriverError::InvalidInput` in `set_hdr_len`/`set_payload_len` before any slice is formed. |
 | T-03 | Device writes past its buffer into the pool | High — corruption of neighboring slots | Mis-programmed DMA on the device side | Out of scope here: drivers size DMA descriptors from slot geometry; the pool keeps one slot per buffer to bound the blast radius. Residual risk sits with the driver/device boundary. |
 | T-04 | Unbounded pool exhaustion | Low — allocation failure, no progress | All slots checked out and dropped buffers leaked | RAII drop returns slots deterministically; `alloc_buf` returns `None` instead of blocking or panicking. |
@@ -87,8 +93,9 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
 - Buffer contents are not zeroed on allocation or recycle; drivers must
   treat buffer contents as uninitialized and must not leak stale kernel
   data into transmitted frames.
-- The handle type cannot structurally prevent misuse; the safety argument
-  rests on the documented driver-side contract.
+- `NetBufHandle::new` is `unsafe`, so safe code cannot forge handles, but the
+  type still cannot structurally prevent misuse by incorrect `unsafe` driver
+  code; the safety argument rests on documented driver-side contracts.
 
 ## Test Coverage And Limits
 
