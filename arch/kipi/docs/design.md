@@ -520,15 +520,20 @@ services must not be dismantled using their own callback transport.
 ## Shootdown completion status for managed data retirement
 
 The `TlbFlushIf` provider returns `TlbFlushResult` at the internal shootdown /
-retirement boundary. `Ok(())` confirms every requested remote target's exact
-published request, including any required full retry. Local hardware invalidation
-remains synchronous and returns `()`; the architecture metadata hook performs it
-before requesting remote completion.
+retirement boundary. After `mark_all_cpus_started`, `Ok(())` confirms every
+requested remote target's exact published request, including any required full
+retry. Local hardware invalidation remains synchronous and returns `()`; the
+architecture metadata hook performs it before requesting remote completion.
 
-Before `mark_all_cpus_started`, APs may already cache kernel translations but
-cannot all acknowledge notifications. A request with a remote target therefore
-returns `NotReady`, not successful completion. A scope with no remote target
-needs no IPI and succeeds after the architecture's local invalidation.
+Before `mark_all_cpus_started`, `flush_remote_ready` routes through the local-only
+branch of `flush_with_readiness` in `src/tlb.rs`: it calls `karch::flush_tlb`
+with the requested address (`None` means the whole local TLB), sends no remote
+request regardless of the target mask, and returns `Ok(())`. This boot behavior
+requires shared kernel mappings to remain frozen from `memspace::seal_boot_mapping`
+until CPU interrupt services are ready and runtime mapping updates are enabled.
+Each AP installs the stable kernel root and flushes its own TLB before publishing
+readiness; user residency does not yet exist. Local-only success is therefore
+not permission to modify shared mappings while AP interrupt services are starting.
 
 Same-CPU nesting marks the outer request for a full retry and returns `Deferred`;
 a future outer retry is not present completion proof. The bounded give-up path
@@ -539,5 +544,11 @@ Synchronous revocation uses `PageTableMut::try_finish` and handles an error rath
 than claiming that stale access was revoked. Raw release still needs such a
 confirmed boundary until its owners are migrated.
 
-Tests cover the closed boot gate with local-only and remote scopes, nested slot
-ownership and empty remote masks without timing assertions or online-CPU mutation.
+`ut-tests/tlb_unittest.rs` exercises the same `flush_with_readiness` dispatcher
+as the production wrapper with a test-owned `AtomicBool` and local callbacks.
+Closed-gate cases require exactly one local invalidation with the original
+address, `Ok(())`, and no remote dispatch for empty, one-CPU and full masks.
+Open-gate cases require remote dispatch with the original address and mask and
+unchanged propagation of success or error. These tests never change the live
+`ALL_CPUS_STARTED`, CPU topology or shootdown slots. Existing tests separately
+cover runtime gate publication, nested slots and empty remote masks.

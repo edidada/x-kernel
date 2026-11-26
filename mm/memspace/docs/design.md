@@ -470,14 +470,10 @@ drop releases it. This keeps file-owned pages alive across `close(fd)` until
 ## DMA Mapping Capability
 
 memspace directly implements kiface-mm-api DmaMappingIf. The caller selects Coherent
-or Normal mode, not arbitrary flags. The provider updates the kernel page table
-under the existing kernel layout lock and returns `Some(DmaMappingCompletion)`
-when the remote invalidation was detached. The caller completes it after
-releasing its own locks, because a CPU contending for the IRQ-disabled lock must
-be able to acknowledge the shootdown IPI. When deferral is not possible (a user
-page table, a fresh-map fence, or a pending managed retirement) the provider
-returns `None` and the page-table guard's drop completes the flush in place as
-before.
+or Normal mode, not arbitrary flags. The provider serializes protection with
+the kernel address-space mutex. Its protection path confirms required invalidation
+through `try_finish` while retaining the kernel task mutex, then returns
+`Ok(None)` through the existing optional completion interface.
 Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
 allocation and quiesces device access before restoration. Allocation, platform
 sharing, rollback and device-cache synchronization are outside this capability.
@@ -485,13 +481,14 @@ sharing, rollback and device-cache synchronization are outside this capability.
 ## IO Mapping
 
 `iomap_device` registers a device region and maps it in the kernel I/O window;
-`iounmap` drops the last reference and removes the mapping. Both use the
-deferred variants (`MmSpace::map_linear_deferred` / `unmap_linear_deferred`):
-the page-table update happens under `kernel_layout()` and `DEVICE_REGISTRY`,
-both locks are released, and only then is the remote TLB invalidation completed.
-A CPU that contends for either IRQ-disabled lock therefore stays able to
-acknowledge the shootdown. Ranges that contain a managed runtime fall back to
-the in-place path, whose invalidation completion must run under the lock.
+`iounmap` drops the last reference and removes the mapping. The task-context
+kernel address-space mutex serializes VA selection, PTE edits, synchronous
+completion and registry publication/removal. Registry spinlocks cover only
+metadata accesses and end before mapping changes. `try_finish` checks the
+required invalidation before publication. A PTE or completion error retains its
+VA reservation and any retiring registry reference for retry.
+Only raw linear VMAs enter this path; managed mappings keep their ordinary
+address-space ownership and invalidation protocol.
 
 ## MMIO Error Conversion
 
@@ -546,6 +543,30 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## Kernel mapping execution context
+
+`KernelLayout` serializes runtime readers, PTE edits and synchronous TLB completion
+with one `Mutex<MmSpace>`. Its public read guard cannot mutate the address space.
+The task mutex leaves IRQs enabled, including for contending readers, so targets
+can acknowledge a shootdown while the initiator retains the mutex. IRQ/NMI code
+must not acquire this mutex; the immutable cached root serves AP and IRQ readers.
+
+Early interrupt-controller and MMIO setup precede the scheduler and therefore
+cannot acquire a task-owned mutex. The existing `seal_boot_mapping()` boundary
+moves the boot address space from its single-CPU `SpinNoPreempt<Option<MmSpace>>`
+into the task mutex before AP startup. Boot serialization excludes task
+preemption without masking IRQs; IRQ/AP root readers use the cache and never
+contend for it. The boot slot remains empty thereafter;
+there is no runtime PTE spinlock or detached completion batch. This handoff uses
+safe ownership transfer and introduces no additional boot-admission flags.
+Admission reopens for sleepable tasks after all CPU interrupt services are ready.
+Runtime IRQ/BH/preemption-excluded mapping access is rejected.
+
+MMIO final release marks the registry entry Retiring; PTE errors keep its
+identity/VA reserved and lookup skips it. Registry spinlock guards end before
+mapping work. The kernel task mutex covers VA selection, TLB completion and
+registry publication/removal. Partial map failure keeps its reserved VA/backing.
 
 ## Anonymous object and mapping holds
 

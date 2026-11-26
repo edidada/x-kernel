@@ -285,7 +285,7 @@ Callers:
 
 ### 3. VirtIoHalImpl — Unsafe Trait Implementation
 
-Location: `src/driver_registry/virtio/glue.rs:279`
+Location: [src/driver_registry/virtio/glue.rs](../src/driver_registry/virtio/glue.rs), `unsafe impl VirtIoHal for VirtIoHalImpl`.
 
 ```rust
 unsafe impl VirtIoHal for VirtIoHalImpl { ... }
@@ -303,7 +303,7 @@ Individual operations:
 
 #### 3a. `dma_alloc`
 
-Location: `src/driver_registry/virtio/glue.rs:274,281`
+Location: [src/driver_registry/virtio/glue.rs](../src/driver_registry/virtio/glue.rs), `VirtIoHalImpl::dma_alloc`.
 
 - Constructs `DmaSpec::new(pages * PAGE_SIZE_4K, PAGE_SIZE_4K)` before
   calling `resource_provider().alloc_coherent`.
@@ -314,14 +314,14 @@ Location: `src/driver_registry/virtio/glue.rs:274,281`
 
 #### 3b. `dma_dealloc`
 
-Location: `src/driver_registry/virtio/glue.rs:308,309`
+Location: [src/driver_registry/virtio/glue.rs](../src/driver_registry/virtio/glue.rs), `VirtIoHalImpl::dma_dealloc`.
 
 - Uses the same `DmaSpec` as allocation: `pages * PAGE_SIZE_4K` bytes aligned to `PAGE_SIZE_4K`.
 - Reconstructs `DmaAllocation` from `paddr` and `vaddr` before calling `resource_provider().free_coherent`.
 
 #### 3c. `mmio_phys_to_virt`
 
-Location: `src/driver_registry/virtio/glue.rs:318`
+Location: [src/driver_registry/virtio/glue.rs](../src/driver_registry/virtio/glue.rs), `VirtIoHalImpl::mmio_phys_to_virt`.
 
 ```rust
 unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
@@ -336,7 +336,7 @@ unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
 
 #### 3d. `share`
 
-Location: `src/driver_registry/virtio/glue.rs:356,361`
+Location: [src/driver_registry/virtio/glue.rs](../src/driver_registry/virtio/glue.rs), `VirtIoHalImpl::share`.
 
 ```rust
 unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection, ...) -> PhysAddr {
@@ -353,7 +353,7 @@ unsafe fn share(buffer: NonNull<[u8]>, direction: BufferDirection, ...) -> PhysA
 
 #### 3e. `unshare`
 
-Location: `src/driver_registry/virtio/glue.rs:371,387`
+Location: [src/driver_registry/virtio/glue.rs](../src/driver_registry/virtio/glue.rs), `VirtIoHalImpl::unshare`.
 
 ```rust
 unsafe fn unshare(paddr: PhysAddr, buffer: NonNull<[u8]>, direction: BufferDirection, ...) {
@@ -826,6 +826,13 @@ spurious wakes only trigger another check. The driver must call IRQ-safe
 The provider retains neither the predicate nor DMA storage. Invalid context and
 preparation failures do not establish a device fault. Once the predicate is invoked,
 scoped registration and wakeup are allocation-free and cannot return registration errors.
+
+## Discovery mapping context
+
+DeviceManager's backend serialization is a sleepable task mutex. Enumeration,
+rescan and orderly bus teardown must not run from IRQ/BH or preemption-excluded
+scopes. Bus MMIO preparation may wait for TLB completion with ordinary IRQs
+serviceable; no backend-manager spinlock is held across that wait.
 
 ## MMIO test fixture lifetime
 

@@ -801,7 +801,7 @@ not allocate from the heap.
 
 ## Concurrency Model
 
-- `DeviceManager::bus_mgr` uses `SpinNoPreempt`: bus enumeration, rescan,
+- `DeviceManager::bus_mgr` uses a sleepable `Mutex`: bus enumeration, rescan,
   quiesce, and remove run in process context with mutual exclusion.
 - `EnumerationContext` has no interior locking: it is a single-threaded
   bridge between bus backends and probe, filled only inside the `bus_mgr`
@@ -1013,3 +1013,15 @@ Discovery descriptors, including those without runtime device objects, are
 checked for PCI display-class devices before bound participants are captured.
 These devices are rejected even if unbound: firmware VGA option-ROM
 recovery is not implemented. The supported QEMU profile requires `-vga none`.
+
+## Discovery mapping context
+
+Bus enumeration/rescan prepares MMIO mappings and may wait for confirmed TLB
+publication. DeviceManager serializes its backends with a task mutex, without
+holding a preemption-disable spinlock across those operations. The manager's
+entry points require sleepable task context; IRQ handlers never enumerate buses.
+The MM owner retains its task mutex through publication with IRQs enabled.
+
+`DeviceManager` requires `ksync::Mutex` for bus enumeration and resource mapping
+in every driver configuration. `ksync` is an unconditional dependency, including
+console/RNG-only builds without `block` or `unittest-threads` features.

@@ -304,7 +304,10 @@ pub fn event_enable_state(subsystem: &str, event: &str) -> Option<String> {
     })
 }
 
-/// Update an event's enable state using the first byte of the user input.
+/// Updates an event's enable state using the first byte of the user input.
+///
+/// Requires sleepable task context after kernel mappings enter runtime mode:
+/// static-key patching changes text permissions through the kernel MM mutex.
 pub fn write_event_enable(subsystem: &str, event: &str, data: &[u8]) -> bool {
     let Some(enable) = data
         .iter()
@@ -335,6 +338,28 @@ pub fn event_format(subsystem: &str, event: &str) -> Option<String> {
 /// Read an event's numeric ID.
 pub fn event_id(subsystem: &str, event: &str) -> Option<String> {
     with_event(subsystem, event, |event| event.id_file().read())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum TextPatchError<E> {
+    EnableWrite(E),
+    Restore(E),
+}
+
+fn with_writable_text<E>(
+    old_flags: MappingFlags,
+    mut protect: impl FnMut(MappingFlags) -> Result<(), E>,
+    patch: impl FnOnce(),
+) -> Result<(), TextPatchError<E>> {
+    let writable = protect(old_flags | MappingFlags::WRITE);
+    if writable.is_ok() {
+        patch();
+    }
+    // A protection error can follow PTE changes. Restoration is required even
+    // when enabling WRITE failed, and its failure takes precedence over skipping
+    // the patch because execution cannot safely resume with unconfirmed protection.
+    protect(old_flags).map_err(TextPatchError::Restore)?;
+    writable.map_err(TextPatchError::EnableWrite)
 }
 
 pub struct Kops;
@@ -381,33 +406,45 @@ impl KernelTraceOps for Kops {
             vma.flags()
         };
 
-        // static-keys patches instructions in kernel text, which is normally RX.
-        // Temporarily add WRITE permission for the touched page range.
-        {
-            let mut layout = memspace::kernel_layout().lock();
-            if layout
-                .protect(start_va, span, old_flags | MappingFlags::WRITE)
-                .is_err()
-            {
-                return;
+        let result = with_writable_text(
+            old_flags,
+            |flags| memspace::kernel_layout().protect(start_va, span, flags),
+            || {
+                // SAFETY: the static-key caller selects a live kernel text
+                // range. with_writable_text invokes this closure only after
+                // WRITE protection and its TLB invalidation succeed. The source
+                // and destination ranges do not overlap.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len())
+                };
+            },
+        );
+        match result {
+            Ok(()) => karch::flush_icache_range(VirtAddr::from(addr), data.len()),
+            Err(TextPatchError::EnableWrite(error)) => {
+                log::warn!(
+                    "ktracing: skipped kernel text patch at {addr:#x}: {error:?}; original \
+                     protection restored"
+                );
+            }
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): \
+                          KernelTraceOps::write_kernel_text has no error-return channel; stop on \
+                          unconfirmed text protection until the TLB completion contract is \
+                          strengthened"
+            )]
+            Err(TextPatchError::Restore(error)) => {
+                panic!(
+                    "ktracing: failed to restore kernel text protection at {start:#x}, \
+                     size={span:#x}: {error:?}"
+                );
             }
         }
-
-        // SAFETY: the destination range is the kernel text range selected by
-        // the static-key patching caller. The page range has been temporarily
-        // made writable above, and the source/destination ranges do not
-        // overlap.
-        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr.cast::<u8>(), data.len()) };
-
-        {
-            let mut layout = memspace::kernel_layout().lock();
-            // Patched text cannot be rolled back; restoring protection is best effort.
-            let _ = layout.protect(start_va, span, old_flags);
-        }
-
-        karch::flush_icache_range(VirtAddr::from(addr), data.len());
     }
 }
 
 #[cfg(feature = "smp")]
 unittest::path_mod_test!(ktracing_unittest, "../ut-tests/ktracing_unittest.rs");
+
+unittest::path_mod_test!(tests_text_patch, "../ut-tests/text_patch.rs");

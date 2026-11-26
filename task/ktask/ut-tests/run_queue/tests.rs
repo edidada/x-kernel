@@ -307,23 +307,40 @@ mod tests_wake_affinity {
         SOFTIRQ_WAKE_SYNC_SEEN.store(wake_carries_sync(), Ordering::Release);
     }
 
+    fn record_wake_sync_and_leave_pending() {
+        record_wake_sync_from_softirq();
+        raise_softirq(SoftirqVec::Block);
+    }
+
     #[def_test(serial)]
     fn wake_sync_hint_dropped_in_softirq() {
         let _wake_gate = begin_softirq_test();
         // Keep IRQ tails and migration out of the raise-to-drain window.
         let _irqs_off = NoPreemptIrqSave::new();
-        SOFTIRQ_WAKE_SYNC_SEEN.store(true, Ordering::Release);
-        SOFTIRQ_SERVING_SEEN.store(false, Ordering::Release);
-        let _action =
-            ScopedSoftirqAction::install(SoftirqVec::Block, record_wake_sync_from_softirq);
+        for (action, leaves_pending) in [
+            (record_wake_sync_from_softirq as fn(), false),
+            (record_wake_sync_and_leave_pending as fn(), true),
+        ] {
+            SOFTIRQ_WAKE_SYNC_SEEN.store(true, Ordering::Release);
+            SOFTIRQ_SERVING_SEEN.store(false, Ordering::Release);
+            // Drop clears the synthetic pending bit before restoring the action.
+            let _action = ScopedSoftirqAction::install(SoftirqVec::Block, action);
 
-        let ran = crate::with_wake_sync(|| {
-            raise_softirq(SoftirqVec::Block);
-            kirq::softirq::run_pending_softirqs()
-        });
-        assert_eq!(ran, SoftirqRunResult::Ran);
-        assert!(SOFTIRQ_SERVING_SEEN.load(Ordering::Acquire));
-        assert!(!SOFTIRQ_WAKE_SYNC_SEEN.load(Ordering::Acquire));
+            let ran = crate::with_wake_sync(|| {
+                raise_softirq(SoftirqVec::Block);
+                kirq::softirq::run_pending_softirqs()
+            });
+            // The runner may execute this action, then defer unrelated work raised
+            // while its batch enables IRQs. Callback observations prove the contract;
+            // draining every softirq before returning is not part of this wake test.
+            assert!(matches!(ran, SoftirqRunResult::Ran | SoftirqRunResult::Deferred));
+            if leaves_pending {
+                // Re-raising our vector makes the deferred case deterministic.
+                assert_eq!(ran, SoftirqRunResult::Deferred);
+            }
+            assert!(SOFTIRQ_SERVING_SEEN.load(Ordering::Acquire));
+            assert!(!SOFTIRQ_WAKE_SYNC_SEEN.load(Ordering::Acquire));
+        }
     }
 
     #[def_test]

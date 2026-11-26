@@ -286,6 +286,10 @@ A CPU-pinned test pauses the shared test admission transaction after its final
 sample under the partition lock, then resumes it only after a remote flush publishes
 the cutoff. It covers first/last partition visits, repeated color reuse, old-work
 drain and exclusion of later submissions without adding production hooks or state.
+This fixture runs in the serial phase: its producer temporarily masks IRQs while
+waiting for the pinned flusher. Parallel MM tests could otherwise occupy that
+flusher's CPU waiting for a TLB ACK from the paused producer, preventing either
+side from progressing. All fixture tasks are joined before parallel tests start.
 
 ## Delayed Placement Primitives
 

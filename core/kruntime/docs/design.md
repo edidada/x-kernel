@@ -468,7 +468,8 @@ late-init thread (Internal, PID-less):
         -> [pmu] enable_irq
         -> INITED_CPUS += 1 (release AP service initialization)
         -> wait until is_init_ok() (all AP services prepared)
-        -> [smp] mark_all_cpus_started (enable TLB shootdowns)
+    -> memspace::enable_runtime_mapping (task/IRQ-on mapping admission)
+    -> kdma::init_streaming_pool (prepare backing before drivers)
     -> krcu::init_service, kworkng::runtime::init
     -> khal::console::prepare_input (optional IRQ input, polled fallback)
     -> [fs] init_device_discovery
@@ -718,3 +719,26 @@ System suspend/resume coordination belongs to `core/kpm`, independently of
 runtime bring-up. See `../../kpm/docs/design.md` for the transaction, platform
 contract and cooperative task-freezing sequence. Runtime does not own PM
 admission or expose a compatibility PM module.
+
+## Synchronous TLB completion during CPU startup
+
+`memspace::seal_boot_mapping()` closes shared kernel mapping changes before AP
+startup. Each AP installs the stable kernel root and performs a full local
+invalidation through `init_memory_management_secondary()`. User processes and
+drivers have not started, so no remote address-space invalidation is required
+while AP interrupt services are unavailable.
+
+After every CPU completes its interrupt services, the primary calls
+`kipi::tlb::mark_all_cpus_started()` before reopening runtime kernel mapping
+updates. The transport completes bootstrap flushes locally, then targets all
+requested CPUs after this barrier. Boot rendezvous loops need no shootdown
+polling. The startup probe verifies that kernel mapping mutations are rejected
+before the service barrier; runtime tests cover remote completion.
+
+## DMA and kernel mapping readiness
+
+Before AP startup, sealing closes mapping admission and transfers the boot
+address space into its task mutex. Runtime mapping updates open after CPU
+services are ready; IRQ readers use the cached kernel root. The host then prepares streaming DMA
+backing before publishing drivers. Failed preparation leaves IRQ streaming
+unavailable; a sleepable task can retry outside DMA metadata locks.

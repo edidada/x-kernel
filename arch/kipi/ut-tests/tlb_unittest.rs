@@ -2,23 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::{assert, def_test};
+use core::cell::Cell;
+
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-
-struct AllCpusStartedGuard(bool);
-
-impl AllCpusStartedGuard {
-    fn save() -> Self {
-        Self(ALL_CPUS_STARTED.load(Ordering::Acquire))
-    }
-}
-
-impl Drop for AllCpusStartedGuard {
-    fn drop(&mut self) {
-        ALL_CPUS_STARTED.store(self.0, Ordering::Release);
-    }
-}
 
 fn reset_request_state() {
     for pending_epoch in &PENDING_EPOCH_BY_CPU {
@@ -56,32 +44,83 @@ fn test_handle_shootdown_no_pending() {
 }
 
 #[def_test(serial)]
-fn test_mark_all_cpus_started_gate() {
-    let _all_cpus_started_guard = AllCpusStartedGuard::save();
-    reset_request_state();
-    ALL_CPUS_STARTED.store(false, Ordering::Release);
-    let mut targets = KCpuMask::new();
-    targets.set(this_cpu_id().as_usize(), true);
-    assert_eq!(TlbFlushIf::flush_process_mask(None, targets), Ok(()));
-    let mut has_remote = false;
-    for_each_present_logical_cpu(|_, cpu, _| {
-        if cpu != this_cpu_id() {
-            targets.set(cpu.as_usize(), true);
-            has_remote = true;
-        }
-    });
-    if has_remote {
-        assert_eq!(
-            TlbFlushIf::flush_process_mask(None, targets),
-            Err(TlbFlushError::NotReady)
-        );
-        assert_eq!(
-            TlbFlushIf::flush_all_cpus(None),
-            Err(TlbFlushError::NotReady)
-        );
-    }
-    mark_all_cpus_started();
+fn remote_shootdown_is_enabled_before_the_tests_run() {
     assert!(ALL_CPUS_STARTED.load(Ordering::Acquire));
+    assert_eq!(TlbFlushIf::flush_all_cpus(None), Ok(()));
+}
+
+#[def_test]
+fn closed_shootdown_gate_flushes_locally_without_remote_dispatch() {
+    let are_cpus_started = AtomicBool::new(false);
+    let mut one_target = KCpuMask::new();
+    one_target.set(0, true);
+    let mut all_targets = KCpuMask::new();
+    for cpu in 0..kbuild_config::NR_CPUS {
+        all_targets.set(cpu, true);
+    }
+
+    // Synthetic scopes never contact these CPUs. Cover both whole-TLB and
+    // address-specific invalidation without closing the live system's gate.
+    for target_mask in [KCpuMask::new(), one_target, all_targets] {
+        for vaddr in [None, Some(VirtAddr::from(0x4000))] {
+            let local_calls = Cell::new(0);
+            let local_address = Cell::new(None);
+            let remote_calls = Cell::new(0);
+            let result = flush_with_readiness(
+                &are_cpus_started,
+                vaddr,
+                target_mask,
+                |address| {
+                    local_calls.set(local_calls.get() + 1);
+                    local_address.set(Some(address));
+                },
+                |_, _| {
+                    remote_calls.set(remote_calls.get() + 1);
+                    Err(TlbFlushError::NotReady)
+                },
+            );
+            assert_eq!(result, Ok(()));
+            assert_eq!(local_calls.get(), 1);
+            assert_eq!(local_address.get(), Some(vaddr));
+            assert_eq!(remote_calls.get(), 0);
+            assert!(!are_cpus_started.load(Ordering::Acquire));
+        }
+    }
+}
+
+#[def_test]
+fn open_shootdown_gate_preserves_remote_scope_and_result() {
+    let are_cpus_started = AtomicBool::new(true);
+    let mut target_mask = KCpuMask::new();
+    target_mask.set(0, true);
+    for expected in [
+        Ok(()),
+        Err(TlbFlushError::NotReady),
+        Err(TlbFlushError::Deferred),
+        Err(TlbFlushError::TimedOut),
+    ] {
+        for vaddr in [None, Some(VirtAddr::from(0x8000))] {
+            let local_calls = Cell::new(0);
+            let remote_calls = Cell::new(0);
+            let remote_scope = Cell::new(None);
+            let result = flush_with_readiness(
+                &are_cpus_started,
+                vaddr,
+                target_mask,
+                |_| local_calls.set(local_calls.get() + 1),
+                |address, targets| {
+                    remote_calls.set(remote_calls.get() + 1);
+                    remote_scope.set(Some((address, targets)));
+                    expected
+                },
+            );
+            assert_eq!(result, expected);
+            assert_eq!(local_calls.get(), 0);
+            assert_eq!(remote_calls.get(), 1);
+            assert_eq!(remote_scope.get(), Some((vaddr, target_mask)));
+            assert!(are_cpus_started.load(Ordering::Acquire));
+        }
+    }
 }
 
 #[def_test(serial)]

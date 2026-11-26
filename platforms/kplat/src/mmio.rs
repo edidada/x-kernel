@@ -12,7 +12,9 @@ pub trait PlatformMmioIf {
     /// runtime device mapping for it.
     ///
     /// This hook runs in normal kernel context while `iomap_device()` is
-    /// building a persistent mapping, not from interrupt context.
+    /// building a persistent mapping, not from interrupt context. The caller
+    /// retains kernel mapping serialization; do not acquire the kernel address
+    /// space lock or re-enter mapping APIs from this hook.
     fn prepare(pa: usize, size: usize) -> kerrno::KResult {
         Ok(())
     }

@@ -54,3 +54,26 @@ The default simple-file permissions remain unchanged. Process descriptor
 limits constrain open handles, not aggregate snapshot bytes; permission and
 memory-budget policy are separate from observation consistency. Sharing a
 cloned snapshot Arc retains one generation without allocating another buffer.
+
+## Kernel text protection
+
+Static-key text patching requires sleepable task context after runtime kernel
+mapping admission. The current control path is the procfs event-enable write;
+scheduler/IRQ capture does not patch text. One kernel address-space mutex covers
+PTE edits and synchronous TLB completion. Early boot and IRQ/NMI callers must
+not invoke this control operation; IRQ root reads use the cached root.
+
+`Kops::write_kernel_text` (`src/lib.rs`) confines its unsafe byte copy to the
+closure passed to `with_writable_text`. The static-key caller supplies the live
+kernel text destination and a non-overlapping source slice; the helper invokes
+the copy only after WRITE protection and its TLB invalidation complete. Both successful and failed WRITE transitions attempt
+to restore the original protection: an error may follow partial PTE changes.
+If WRITE enablement fails but restoration succeeds, the patch is skipped and a
+warning records the failure. The callback returns no error to `ktracepoint`, so
+the control write cannot report this skipped patch to its caller. If restoring
+the original protection fails, the callback terminates through the kernel panic
+path instead of resuming with unconfirmed text protection. This is a per-site
+`CG-021` exception until the synchronous TLB completion contract is strengthened.
+Successful patches flush the instruction cache after protection is restored.
+The regression tests in `ut-tests/text_patch.rs` inject protection failures into
+the local transaction without changing live text or global TLB service state.

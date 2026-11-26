@@ -693,6 +693,12 @@ transport; the timer-side probe only reads the atomic readiness hint. Pending
 input is consumed only through normal `read_event`. False-positive wakes are
 harmless because callers drain and recheck.
 
+The device-scoped DMA backend separates contexts by operation: streaming
+map/unmap and metadata remain non-sleeping under the RNG IRQ-safe request lock;
+coherent queue construction and final destruction follow the provider's task
+context contract. A host must retain its device owner through IRQ drain before
+final queue destruction. Inline RNG completion releases only streaming mappings.
+
 ## Block PM reset boundary
 
 Host integration must exclude producers and serialize PM against removal.

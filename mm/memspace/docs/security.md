@@ -264,14 +264,12 @@ must not trigger the callback, so PTEs that may still be visible are always prot
 ## DMA Mapping Capability
 
 memspace directly implements kiface-mm-api DmaMappingIf. The caller selects Coherent
-or Normal mode, not arbitrary flags. The provider updates the kernel page table
-under the existing kernel layout lock and returns `Some(DmaMappingCompletion)`
-when the remote invalidation was detached. The caller completes it after
-releasing its own locks, because a CPU contending for the IRQ-disabled lock must
-be able to acknowledge the shootdown IPI. When deferral is not possible (a user
-page table, a fresh-map fence, or a pending managed retirement) the provider
-returns `None` and the page-table guard's drop completes the flush in place as
-before.
+or Normal mode, not arbitrary flags. The provider serializes protection with
+one kernel `Mutex<MmSpace>` through PTE changes and synchronous `finish`.
+Acquisition and completion leave IRQs enabled, so a contending task can still
+acknowledge shootdowns. IRQ/NMI code uses the cached root instead of this mutex. A required target that does not ACK keeps completion
+waiting. Range or preparation errors can follow partial PTE changes; the caller
+must retain the backing and must not treat it as reusable.
 Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
 allocation and quiesces device access before restoration. Allocation, platform
 sharing, rollback and device-cache synchronization are outside this capability.
@@ -327,28 +325,21 @@ cannot free memory that user PTEs still reference. The io_uring ring mapping is
 the current producer; dropping the owner early is a user-triggerable physical
 use-after-free and information leak.
 
-## IO Mapping Invalidation Ordering
+## Kernel mapping serialization and completion
 
-Kernel IO-window updates (`iomap_device` / `iounmap`) defer the remote TLB
-invalidation until after `kernel_layout()` and `DEVICE_REGISTRY` are released.
-A CPU that needs either IRQ-disabled lock spins with interrupts disabled and
-cannot acknowledge a shootdown, so completing the invalidation under those
-locks would stall the initiator until its bounded give-up. Ranges containing a
-managed runtime fall back to the in-place path, whose completion runs under the
-lock by design.
+One kernel task mutex serializes readers, PTE changes and synchronous completion.
+MMIO registry and DMA metadata spinlocks must end before mapping work. A target
+must never wait IRQ-off for a lock retained by a shootdown initiator. Raw linear
+backing remains caller-owned; the read guard cannot bypass update admission.
 
-A deferred completion can still fail: both callers log the error and keep the
-success result, because the PTE update and the VMA/registry change are already
-published and cannot be rolled back into a coherent state. A failure therefore
-leaves a stale remote translation for a device window after `iounmap`, or hides
-the new mapping from a remote CPU after `iomap_device`.
-`DeferredKernelTlbFlush::complete()` first retries a scoped or partial shootdown
-as a full-TLB invalidation, so reaching this state requires the IPI path itself
-to be broken; the in-place path previously dropped the same failure inside
-`PageTableMut::Drop`. The blast radius is bounded by the driver contract that
-device access is quiesced before `iounmap`, and the logged error is the only
-observable signal. This residual risk is accepted: the callers have no failure
-channel that can undo a published mapping.
+Before AP startup, sealing transfers ownership from the boot-only spinlock into
+the task mutex while holding the boot guard, which excludes preemption without
+masking IRQs. IRQ handlers never acquire the boot lock. The slot is empty afterward;
+IRQ and AP root reads use the immutable cache. No raw access bypasses the mutex.
+
+PTE errors may leave partial changes: retain backing/VA and any Retiring MMIO
+release identity. Retiring entries cannot be acquired as live mappings. Runtime
+metadata access and mutations require sleepable task context before locking.
 
 ## Anonymous physical lifetime and COW sharing
 

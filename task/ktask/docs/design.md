@@ -1277,6 +1277,12 @@ ordinary IRQ before worker submission, without inline Task destruction.
     and a failed `peer_preempts_curr` must not clear the sync mark, or a
     later remote slice-expire pick / IPI probe would miss the buddy.
     Account + PLACE + nomination must finish under one scheduler lock.
+  - The softirq wake-hint regression observes the installed callback running
+    in softirq context with the task's hint suppressed. It accepts `Ran` or
+    `Deferred` from the runner: a batch enables IRQs and can leave unrelated
+    work pending after this callback. A self-re-raising action deterministically
+    exercises `Deferred`, and its scoped fixture clears pending work on exit.
+    A missing callback still fails the test.
   - `TaskInner::interrupt()` uses `with_wake_sync` for `interrupt_waker`
     (the signal sender often blocks next). If the target is on a CPU, kick
     that CPU: local `need_resched` under `preempt`, remote IPI (`smp`

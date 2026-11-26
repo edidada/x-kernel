@@ -15,6 +15,7 @@ description = "Runtime library of X-kernel"
 # krcu-core and capability APIs supply observations for cfg(unittest) RCU
 # integration fixtures; kmutex supplies their independent serialization lock.
 # kcompletion and kiface-task-wait-api supply IRQ lifecycle test handshakes.
+# kdma supplies concurrent DMA/TLB integration regression coverage.
 # kalloc-types supplies prepared owners in path-mounted RCU tests and benchmarks.
 ignored = ["kalloc-types", "kfinalize", "irq_driver", "of", "krcu-core", "kiface-irq-context-api", "kmutex", "kiface-time-api", "kiface-task-api", "kcompletion", "kiface-task-wait-api"]
 
@@ -57,6 +58,7 @@ pmu = []
 nmi = []
 
 [dependencies]
+kdma.workspace = true
 kalloc-types.workspace = true
 kiface-task-api.workspace = true
 kiface-time-api.workspace = true

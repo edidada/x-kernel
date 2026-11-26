@@ -6,11 +6,12 @@ memspace owns the mapping lock, range validation and flag selection. kdma
 owns allocation, device quiescence and platform sharing. No runtime adapter,
 page allocator or page-table implementation is part of this API.
 
-`set_mode` returns a `DmaMappingCompletion` when the provider detaches the
-kernel invalidation from the page-table lock. memspace creates it; the caller
-(kdma) owns it and must call `complete()` after releasing every lock held around
-the mode change, because a CPU that needs such a lock spins with interrupts
-disabled and cannot acknowledge the TLB shootdown. `complete()` reports whether
-the invalidation completed; dropping the value still attempts it but cannot
-report the result. `None` means the provider completed the invalidation in place
-(user page table, fresh-map fence, or a pending managed retirement).
+`set_mode` retains its optional `DmaMappingCompletion` result. The memspace
+provider completes its PTE changes and required TLB invalidation while holding
+the kernel task mutex, then returns `None`. Runtime calls require sleepable task
+context. kdma invokes the provider without holding its IRQ-safe allocator lock.
+
+A provider that returns a completion still requires the caller to run
+`complete()` outside its IRQ-safe locks and check its result before publishing
+or recycling the range. Errors can follow partial PTE changes; the caller
+retains the allocation. The completion interface remains unchanged.

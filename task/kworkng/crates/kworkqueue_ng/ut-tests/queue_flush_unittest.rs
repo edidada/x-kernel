@@ -251,7 +251,9 @@ fn flush_visits_all_partitions_after_common_cutoff() {
 /// # Panics
 /// Panics on incorrect CPU placement, premature flush return, inclusion of later
 /// work, failed drain or leaked Queue ownership.
-#[def_test]
+// The fixture pauses CPU1 with IRQs disabled until CPU0 publishes the cutoff.
+// Keep parallel tests from occupying CPU0 while waiting for CPU1's TLB ACK.
+#[def_test(serial)]
 fn remote_sample_before_cutoff_commits_after_publication() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;

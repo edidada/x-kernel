@@ -307,7 +307,10 @@ task joins. Its test-only admission pause spins under the partition guard while
 another explicitly pinned CPU publishes the cutoff; it never parks under that
 guard and skips when fewer than two CPUs boot. The handshake begins only after
 flush's self-wait preflight releases partition locks. This validates a controlled
-cross-CPU schedule, not exhaustive concurrency or allocator behavior.
+cross-CPU schedule, not exhaustive concurrency or allocator behavior. It runs
+serially with respect to other unit tests so a parallel shootdown cannot pin the
+flusher's CPU while waiting for the IRQ-masked producer. Producer and flusher
+joins end the artificial pause before the harness starts parallel MM tests.
 
 Disabling self-wait-check compiles out callback identity storage and entry/exit
 checks, but not context validation or cleanup accounting. Direct self-waits then

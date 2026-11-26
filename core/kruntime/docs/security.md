@@ -456,3 +456,26 @@ quiescence or memory reclamation safety for dynamic device mappings.
 System PM admission, platform trust and rollback are owned by `kpm`, not the
 runtime startup layer. See `../../kpm/docs/security.md`. Runtime initialization
 still establishes the scheduler, time and IRQ prerequisites required by PM.
+
+## TLB completion through boot rendezvous
+
+Shared kernel mapping mutation is closed before AP startup and reopened only
+after every CPU can acknowledge shootdown. Each AP flushes locally when it
+installs the stable kernel root. User processes start after the service barrier,
+so no user address space can have remote residency during bootstrap. These
+ordering requirements allow local-only bootstrap completion without ignoring
+any stale remote translation. Boot waits therefore need no shootdown polling.
+
+The primary publishes remote-shootdown readiness after the CPU-service
+rendezvous and before runtime mapping admission. Kernel mapping operations
+reject non-sleepable contexts before acquiring the task mutex. They check
+`try_finish()` and retain backing and VA reservations on invalidation failure.
+The transport keeps its existing failure policy.
+
+## DMA and kernel mapping readiness
+
+Before AP startup, sealing closes mapping admission and transfers the boot
+address space into its task mutex. Runtime mapping updates open after CPU
+services are ready; IRQ readers use the cached kernel root. The host then prepares streaming DMA
+backing before publishing drivers. Failed preparation leaves IRQ streaming
+unavailable; a sleepable task can retry outside DMA metadata locks.

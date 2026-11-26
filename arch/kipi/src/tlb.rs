@@ -47,6 +47,9 @@ use page_table::{TlbFlushError, TlbFlushIf, TlbFlushResult};
 /// Gate: shootdown IPIs are only sent after all APs are running.
 static ALL_CPUS_STARTED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unittest)]
+static BEFORE_ACK_HOOK: AtomicUsize = AtomicUsize::new(0);
+
 /// Monotonic sequence allocator per initiator CPU.
 static REQUEST_SLOTS: [ShootdownRequestSlot; kbuild_config::NR_CPUS] =
     [const { ShootdownRequestSlot::new() }; kbuild_config::NR_CPUS];
@@ -344,8 +347,8 @@ impl Drop for ActiveShootdownSlot<'_> {
 
 /// Mark that all secondary CPUs have entered the runtime.
 ///
-/// Must be called exactly once from the primary CPU after
-/// `start_secondary_cpus()` returns. Before this point `kipi` suppresses TLB
+/// Must be called exactly once from the primary CPU after every present CPU's
+/// IPI and interrupt services are ready. Before this point `kipi` suppresses TLB
 /// shootdown IPIs because not every target CPU is guaranteed to be able to
 /// receive and acknowledge them.
 pub fn mark_all_cpus_started() {
@@ -364,16 +367,29 @@ impl TlbFlushIf {
 }
 
 fn flush_remote_ready(vaddr: Option<VirtAddr>, target_mask: KCpuMask) -> TlbFlushResult {
-    // APs can already hold translations before all interrupt services are ready.
-    // A closed boot gate therefore cannot confirm a nonempty remote scope.
-    if !ALL_CPUS_STARTED.load(Ordering::Acquire) {
-        let local_cpu = this_cpu_id();
-        if target_mask.iter_logical().any(|cpu| cpu != local_cpu) {
-            return Err(TlbFlushError::NotReady);
-        }
+    flush_with_readiness(
+        &ALL_CPUS_STARTED,
+        vaddr,
+        target_mask,
+        karch::flush_tlb,
+        flush_remote,
+    )
+}
+
+fn flush_with_readiness(
+    are_cpus_started: &AtomicBool,
+    vaddr: Option<VirtAddr>,
+    target_mask: KCpuMask,
+    flush_local: impl FnOnce(Option<VirtAddr>),
+    flush_targets: impl FnOnce(Option<VirtAddr>, KCpuMask) -> TlbFlushResult,
+) -> TlbFlushResult {
+    // Shared mappings stay frozen throughout AP startup. Each AP flushes when
+    // installing the stable runtime root, before user residency can exist.
+    if !are_cpus_started.load(Ordering::Acquire) {
+        flush_local(vaddr);
         return Ok(());
     }
-    flush_remote(vaddr, target_mask)
+    flush_targets(vaddr, target_mask)
 }
 
 fn all_present_cpu_mask() -> KCpuMask {
@@ -571,6 +587,8 @@ pub fn handle_shootdown() {
             karch::flush_tlb(None);
         }
 
+        #[cfg(unittest)]
+        run_before_ack_hook_for_test();
         request_slot.ack(cpu, request.seq());
     });
 
@@ -578,6 +596,32 @@ pub fn handle_shootdown() {
     // arrives during the scan, it will raise the epoch again and force another
     // scan on the next IPI instead of being accidentally absorbed here.
     set_last_handled_pending_epoch(pending_epoch);
+}
+
+/// Runs a serial integration test with a scoped hook before remote ACKs.
+/// The hook must obey the IRQ-safe shootdown-handler contract. The previous
+/// hook is restored on scope exit; this does not drain in-flight handlers.
+#[cfg(unittest)]
+pub fn with_before_ack_hook_for_test<R>(hook: fn(), operation: impl FnOnce() -> R) -> R {
+    struct RestoreHook(usize);
+    impl Drop for RestoreHook {
+        fn drop(&mut self) {
+            BEFORE_ACK_HOOK.store(self.0, Ordering::Release);
+        }
+    }
+    let _restore = RestoreHook(BEFORE_ACK_HOOK.swap(hook as usize, Ordering::AcqRel));
+    operation()
+}
+
+#[cfg(unittest)]
+fn run_before_ack_hook_for_test() {
+    let hook = BEFORE_ACK_HOOK.load(Ordering::Acquire);
+    if hook != 0 {
+        // SAFETY: only with_before_ack_hook_for_test stores static function
+        // pointers or zero; restoring a prior hook cannot invalidate a pointer.
+        let hook = unsafe { core::mem::transmute::<usize, fn()>(hook) };
+        hook();
+    }
 }
 
 /// Test helper: trigger a TLB shootdown directly through the kiface facade.
