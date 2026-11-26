@@ -22,9 +22,13 @@ use crate::DeviceDescId;
 
 /// A fixed, bounded diagnostic reason for a deferred probe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DeferReason {
+pub enum DeferReason {
     /// A driver explicitly reported that an external dependency is not ready.
     Dependency,
+    /// The supplier began exiting; the waiter was cancelled.
+    SupplierUnbinding,
+    /// The supplier was removed; the waiter reached its terminal diagnosis.
+    SupplierRemoved,
 }
 
 /// One queued deferred-probe request.
@@ -33,6 +37,7 @@ struct RequestNode {
     request: u64,
     reason: DeferReason,
     candidate: u64,
+    supplier: Option<crate::SupplierRef>,
     link: LinkedListLink,
 }
 
@@ -199,6 +204,29 @@ impl State {
         None
     }
 
+    fn remove_supplier(&mut self, supplier: &crate::SupplierRef) -> RequestList {
+        let mut removed = RequestList::new(RequestAdapter::NEW);
+        for list in [&mut self.pending, &mut self.active] {
+            let mut cursor = list.cursor_mut();
+            cursor.move_next();
+            while !cursor.is_null() {
+                let matches = cursor.get().is_some_and(|node| {
+                    node.supplier
+                        .as_ref()
+                        .is_some_and(|current| current.device_id() == supplier.device_id())
+                });
+                if matches {
+                    if let Some(node) = cursor.remove() {
+                        removed.push_back(node);
+                    }
+                } else {
+                    cursor.move_next();
+                }
+            }
+        }
+        removed
+    }
+
     fn install(&mut self, executor: Arc<dyn DeferredExecutor>) -> Option<bool> {
         if self.executor.is_some() {
             return None;
@@ -227,6 +255,11 @@ impl State {
 
 static_lock! {
     static STATE: SpinNoPreempt<State> = SpinNoPreempt::new(State::new());
+}
+#[cfg(unittest)]
+static_lock! {
+    static LAST_CANCEL: SpinNoPreempt<Option<(crate::DeviceId, DeferReason)>> =
+        SpinNoPreempt::new(None);
 }
 
 #[cfg(unittest)]
@@ -469,9 +502,16 @@ pub(crate) fn commit_deferred(
     attempt: AttemptToken,
     reason: DeferReason,
     candidate: u64,
+    supplier: Option<crate::SupplierRef>,
 ) -> Result<u64, DriverError> {
     let request = {
         let mut state = STATE.lock();
+        if supplier
+            .as_ref()
+            .is_some_and(|supplier| supplier.is_unregistered())
+        {
+            return Err(DriverError::ResourceBusy);
+        }
         state.alloc_request()?
     };
     let node = KBox::new(RequestNode {
@@ -479,11 +519,18 @@ pub(crate) fn commit_deferred(
         request,
         reason,
         candidate,
+        supplier: supplier.clone(),
         link: LinkedListLink::new(),
     })
     .map_err(|_| DriverError::NoMemory)?;
 
     let mut state = STATE.lock();
+    if supplier
+        .as_ref()
+        .is_some_and(|supplier| supplier.is_unregistered())
+    {
+        return Err(DriverError::ResourceBusy);
+    }
     let mut old = None;
     match attempt.mode {
         AttemptMode::Explicit => {}
@@ -525,6 +572,30 @@ pub(crate) fn commit_deferred(
     Ok(request)
 }
 
+/// Cancel every waiter targeting a supplier that is exiting.
+pub(crate) fn cancel_for_supplier(supplier: &crate::SupplierRef, reason: DeferReason) -> usize {
+    #[cfg(not(unittest))]
+    let _ = reason;
+    let removed = {
+        let mut state = STATE.lock();
+        #[cfg(unittest)]
+        {
+            *LAST_CANCEL.lock() = Some((supplier.device_id(), reason));
+        }
+        state.remove_supplier(supplier)
+    };
+    let count = removed.iter().count();
+    // Unlink is complete; node destruction happens after F is released.
+    drop(removed);
+    count
+}
+
+/// Last supplier-exit cancellation diagnosis, for deterministic tests.
+#[cfg(unittest)]
+pub fn last_cancel() -> Option<(crate::DeviceId, DeferReason)> {
+    *LAST_CANCEL.lock()
+}
+
 /// Cancel every pending/active request and claimed identity for one descriptor.
 pub(crate) fn cancel_waits(desc: DeviceDescId) {
     #[cfg(unittest)]
@@ -544,14 +615,20 @@ pub(crate) fn cancel_waits(desc: DeviceDescId) {
 /// Finish a claimed request only if it is still the current claim.
 pub(crate) fn finish_claimed(desc: DeviceDescId, request: u64) {
     let mut state = STATE.lock();
-    if state.claimed == Some(Claimed { desc, request }) {
+    if state
+        .claimed
+        .is_some_and(|claimed| claimed.desc == desc && claimed.request == request)
+    {
         state.claimed = None;
     }
 }
 
 /// Whether `request` is still the worker's current claim.
 pub(crate) fn is_claimed(desc: DeviceDescId, request: u64) -> bool {
-    STATE.lock().claimed == Some(Claimed { desc, request })
+    STATE
+        .lock()
+        .claimed
+        .is_some_and(|claimed| claimed.desc == desc && claimed.request == request)
 }
 
 /// Remove the next active request and publish it as the current claim.
@@ -624,6 +701,7 @@ pub fn backlog_contract_for_test() -> bool {
         request,
         reason: DeferReason::Dependency,
         candidate: 1,
+        supplier: None,
         link: LinkedListLink::new(),
     }) else {
         return false;
@@ -654,6 +732,7 @@ pub fn promote_order_for_test() -> bool {
             request,
             reason: DeferReason::Dependency,
             candidate: request,
+            supplier: None,
             link: LinkedListLink::new(),
         })
         .ok()

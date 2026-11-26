@@ -968,3 +968,34 @@ impl Drop for DeviceUse {
         self.binding.release_use();
     }
 }
+
+/// Strong, controlled handle to a supplier device object.
+///
+/// The handle keeps the stable object alive across probe/exit ordering, but
+/// does not grant hardware access: dependency activation still checks the
+/// exact current binding generation and Active state.
+#[derive(Clone)]
+pub struct SupplierRef {
+    device: Arc<DeviceObject>,
+    binding: Option<crate::BindingRef>,
+}
+
+impl SupplierRef {
+    pub(crate) fn new(device: Arc<DeviceObject>) -> Self {
+        let binding = device.binding_ref();
+        Self { device, binding }
+    }
+
+    /// Stable device identity, for diagnostics and internal indexing.
+    pub fn device_id(&self) -> crate::DeviceId {
+        self.device.id()
+    }
+
+    pub(crate) fn binding_ref(&self) -> Option<crate::BindingRef> {
+        self.binding.clone()
+    }
+
+    pub(crate) fn is_unregistered(&self) -> bool {
+        !self.device.is_registered()
+    }
+}

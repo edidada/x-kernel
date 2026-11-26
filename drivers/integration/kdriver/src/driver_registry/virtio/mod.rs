@@ -265,6 +265,16 @@ fn activate_virtio_pci(
 
     let _ = segment; // segment 0 only for now
 
+    // ECAM access is a real dependency on the PCI host bridge: the endpoint
+    // must not probe while the bridge is exiting and must be unbound first if
+    // the bridge is removed.
+    if let Some(bridge) = ctx.parent_supplier() {
+        match ctx.add_dependency(bridge)? {
+            kdevice::DependencyResult::Ready => {}
+            kdevice::DependencyResult::Waiting => return Err(DriverError::Deferred),
+        }
+    }
+
     // Re-open the bus to get a `PciRoot` for `probe_pci_device`. The ECAM
     // mapping is idempotent (`memspace::iomap_device` returns the cached
     // mapping) and `configure_pci_device_if_needed` is a no-op because BAR

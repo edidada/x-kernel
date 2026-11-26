@@ -9,7 +9,7 @@
 //! the raw-pointer marker makes it neither `Send` nor `Sync`.
 
 use alloc::sync::Arc;
-use core::marker::PhantomData;
+use core::{cell::RefCell, marker::PhantomData};
 
 use kmutex::MutexGuard;
 
@@ -77,6 +77,7 @@ impl<'a> ContextPermit<'a> {
 pub struct ProbeContext<'a> {
     device: Arc<DeviceObject>,
     binding: BindingRef,
+    dependency_supplier: RefCell<Option<crate::SupplierRef>>,
     _permit: &'a ContextPermit<'a>,
     _not_send_sync: PhantomData<*mut ()>,
 }
@@ -90,6 +91,7 @@ impl<'a> ProbeContext<'a> {
         Self {
             device,
             binding,
+            dependency_supplier: RefCell::new(None),
             _permit: permit,
             _not_send_sync: PhantomData,
         }
@@ -103,6 +105,31 @@ impl<'a> ProbeContext<'a> {
     /// Exact binding instance owned by this probe.
     pub fn binding(&self) -> &BindingRef {
         &self.binding
+    }
+
+    /// Declare an explicit dependency on a supplier device.
+    ///
+    /// `Waiting` means the supplier exists but has no active binding yet; the
+    /// driver must return `DriverError::Deferred`.
+    pub fn add_dependency(
+        &self,
+        supplier: crate::SupplierRef,
+    ) -> DriverResult<super::super::lifecycle::dependency::DependencyResult> {
+        let result = super::super::lifecycle::dependency::add(self, supplier.clone())?;
+        if result == super::super::lifecycle::dependency::DependencyResult::Waiting {
+            *self.dependency_supplier.borrow_mut() = Some(supplier);
+        }
+        Ok(result)
+    }
+
+    /// Parent device as a controlled supplier handle, if the parent remains
+    /// registered and addressable.
+    pub fn parent_supplier(&self) -> Option<crate::SupplierRef> {
+        self.device().parent().and_then(crate::lookup_supplier_ref)
+    }
+
+    pub(crate) fn dependency_supplier(&self) -> Option<crate::SupplierRef> {
+        self.dependency_supplier.borrow().clone()
     }
 
     /// Install probe-owned Data into this exact binding.

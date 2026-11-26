@@ -109,7 +109,7 @@ pub use device::{
         PlatformIdentity, TransportInfo,
     },
     handles::{BusHandle, DeviceCore, DriverCore},
-    object::{DeviceObject, DeviceUse},
+    object::{DeviceObject, DeviceUse, SupplierRef},
     resource::{
         DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion, ResourceDesc, ResourceSet,
     },
@@ -130,6 +130,9 @@ pub use driver::{
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 #[cfg(unittest)]
 #[doc(hidden)]
+pub use lifecycle::deferred::last_cancel as last_deferred_cancel_for_tests;
+#[cfg(unittest)]
+#[doc(hidden)]
 pub use lifecycle::deferred::test_hooks as deferred_test_hooks;
 #[doc(hidden)]
 pub use lifecycle::deferred::{
@@ -145,11 +148,25 @@ pub use lifecycle::deferred::{
     reset_for_tests as reset_deferred_for_tests,
 };
 #[cfg(unittest)]
+#[doc(hidden)]
+pub use lifecycle::dependency::reset_for_tests as reset_dependency_for_tests;
+#[cfg(unittest)]
+#[doc(hidden)]
+pub use lifecycle::dependency::test_hooks as dependency_test_hooks;
+#[cfg(unittest)]
+#[doc(hidden)]
+pub use lifecycle::dependency::{
+    edge_count_for_tests as dependency_edge_count_for_tests,
+    forget_consumer_for_tests as forget_dependency_consumer_for_tests,
+};
+#[cfg(unittest)]
 pub use lifecycle::dispatch::dispatch_device_event_for_tests;
 #[cfg(unittest)]
 pub use lifecycle::test_hooks;
 pub use lifecycle::{
     ActiveDeviceAdoption, ProbeOutcome, adopt_active_device, attach_device_parent,
+    deferred::DeferReason as DeferredCancelReason,
+    dependency::DependencyResult,
     detach_device_parent, device_desc_add,
     dispatch::{subscribe_device_event_kind, subscribe_device_removed},
     event::{DeviceEvent, DeviceEventKind},
@@ -157,6 +174,12 @@ pub use lifecycle::{
     unregister_device_desc,
 };
 pub(crate) use registry::device_registry;
+/// Look up a controlled supplier handle. This is a transition bridge for
+/// existing ID-based callers; new probe code should use `parent_supplier` or a
+/// handle it already owns.
+pub fn lookup_supplier_ref(id: crate::DeviceId) -> Option<SupplierRef> {
+    find_device(id).map(SupplierRef::new)
+}
 pub use registry::{
     bus_infos_snapshot, device_descs_snapshot, device_records_snapshot, driver_infos_snapshot,
     find_bus, find_bus_by_name, find_device, find_device_desc, find_driver, find_driver_by_name,

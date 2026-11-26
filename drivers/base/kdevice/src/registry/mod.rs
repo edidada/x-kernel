@@ -491,6 +491,8 @@ pub fn register_bus_type(bus_type: Arc<BusTypeObject>) {
 
 /// Find a device object by ID.
 pub fn find_device(id: DeviceId) -> Option<Arc<DeviceObject>> {
+    #[cfg(unittest)]
+    crate::lifecycle::dependency::assert_registry_lookup_allowed();
     device_registry().find_device(id)
 }
 

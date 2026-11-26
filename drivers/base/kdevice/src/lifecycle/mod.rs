@@ -6,6 +6,7 @@
 //! device objects.
 
 pub(crate) mod deferred;
+pub(crate) mod dependency;
 pub(crate) mod dispatch;
 pub(crate) mod event;
 pub(crate) mod subscribers;
@@ -449,6 +450,7 @@ fn probe_desc_round(
 
     let mut probed = false;
     let mut deferred_candidate = None;
+    let mut deferred_supplier = None;
     for driver in drivers {
         if matches!(
             bus_type.match_desc(driver.as_ref(), &desc),
@@ -509,12 +511,15 @@ fn probe_desc_round(
                 if let Some(bus) = &bus_instance {
                     bus.record_probe_deferred();
                 }
-                retire_failed_binding(device.as_ref());
+                let supplier = probe_ctx.dependency_supplier();
                 if deferred_candidate.is_none() {
                     deferred_candidate = Some(driver.id().raw());
+                    deferred_supplier = supplier;
                 }
-                // Probe-time deferral is a failed candidate: keep scanning so
-                // a later matching driver can still bind this descriptor.
+                dependency::probe_failed(probe_ctx.binding());
+                // Deferred must fully retire before retry; the DORMANT waiter
+                // will be recreated at round end from stable identities only.
+                retire_failed_binding(device.as_ref());
                 continue;
             }
             Err(error) => {
@@ -528,10 +533,35 @@ fn probe_desc_round(
                 if let Some(bus) = &bus_instance {
                     bus.record_probe_failure();
                 }
+                dependency::probe_failed(probe_ctx.binding());
                 retire_failed_binding(device.as_ref());
                 continue;
             }
         };
+
+        match dependency::probe_succeeded(probe_ctx.binding()) {
+            dependency::DependencyOutcome::Activated => {}
+            dependency::DependencyOutcome::Deferred(supplier) => {
+                retire_failed_binding(device.as_ref());
+                requeue_desc(desc.id());
+                let request = match deferred::commit_deferred(
+                    attempt,
+                    deferred::DeferReason::Dependency,
+                    driver.id().raw(),
+                    Some(supplier.clone()),
+                ) {
+                    Ok(request) => request,
+                    Err(DriverError::ResourceBusy) => return Ok(ProbeOutcome::Deferred),
+                    Err(error) => return Err(error),
+                };
+                let _ = request;
+                match dependency::remember_waiter(desc.device_id(), supplier) {
+                    Ok(()) | Err(DriverError::ResourceBusy) => {}
+                    Err(error) => return Err(error),
+                }
+                return Ok(ProbeOutcome::Deferred);
+            }
+        }
 
         if let Err(error) = probe_ctx.install_data(data) {
             recover_failed_data_install(desc.id(), &device, driver.as_ref(), permit, error);
@@ -577,7 +607,23 @@ fn probe_desc_round(
             desc.id(),
             deferred::test_hooks::CommitPause::BeforeCommit,
         );
-        deferred::commit_deferred(attempt, deferred::DeferReason::Dependency, candidate)?;
+        let request = match deferred::commit_deferred(
+            attempt,
+            deferred::DeferReason::Dependency,
+            candidate,
+            deferred_supplier.clone(),
+        ) {
+            Ok(request) => request,
+            Err(DriverError::ResourceBusy) => return Ok(ProbeOutcome::Deferred),
+            Err(error) => return Err(error),
+        };
+        let _ = request;
+        if let Some(supplier) = deferred_supplier {
+            match dependency::remember_waiter(desc.device_id(), supplier) {
+                Ok(()) | Err(DriverError::ResourceBusy) => {}
+                Err(error) => return Err(error),
+            }
+        }
         return Ok(ProbeOutcome::Deferred);
     }
     Ok(if probed {
@@ -727,6 +773,7 @@ pub(crate) fn retry_deferred_request(
                 Some(desc) => {
                     let attempt = deferred::begin_worker(id, request);
                     if device_registry().mark_device_desc_probing(id).is_none() {
+                        log::error!("deferred retry descriptor {:?} was not Pending", id);
                         return Err(DriverError::BadState);
                     }
                     probe_desc_round(desc, ProbeCandidates::BusType, &permit, attempt)
@@ -1046,6 +1093,61 @@ fn remove_device_from_index(
     }
 }
 
+fn prepare_supplier_exit(device_id: DeviceId) -> Result<bool, DriverError> {
+    let supplier_binding =
+        crate::lookup_supplier_ref(device_id).and_then(|supplier| supplier.binding_ref());
+    let mut any = true;
+    loop {
+        let consumers = dependency::begin_supplier_exit(device_id);
+        if let Some(supplier) = crate::lookup_supplier_ref(device_id) {
+            deferred::cancel_for_supplier(&supplier, deferred::DeferReason::SupplierUnbinding);
+        }
+        #[cfg(unittest)]
+        dependency::test_hooks::pause_before_unbind(device_id);
+        if consumers.iter().all(Option::is_none) {
+            return Ok(any);
+        }
+        any = true;
+        for consumer in consumers.into_iter().flatten() {
+            let Some(device) = crate::find_device(consumer) else {
+                dependency::forget_consumer(consumer);
+                continue;
+            };
+            match remove_device_managed(consumer) {
+                Ok(()) => {}
+                Err(DriverError::InvalidInput) => {
+                    // Wait for an in-flight probe (Matched/Bound) instead of
+                    // treating it as vanished; only terminal states lose edges.
+                    if matches!(
+                        device.state(),
+                        crate::DeviceState::Discovered | crate::DeviceState::Removed
+                    ) {
+                        dependency::forget_consumer(consumer);
+                    }
+                }
+                Err(error) => {
+                    if matches!(
+                        device.state(),
+                        crate::DeviceState::Discovered | crate::DeviceState::Removed
+                    ) {
+                        dependency::forget_consumer(consumer);
+                        continue;
+                    }
+                    dependency::rollback_supplier_exit(device_id, supplier_binding.clone());
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+fn complete_supplier_exit(device_id: DeviceId, supplier: Option<crate::SupplierRef>) {
+    dependency::finish_supplier_exit(device_id);
+    if let Some(supplier) = &supplier {
+        deferred::cancel_for_supplier(supplier, deferred::DeferReason::SupplierRemoved);
+    }
+}
+
 /// Unregister a discovery descriptor and tear down any device bound from it.
 ///
 /// Unlike [`remove_device_managed`], this function removes the descriptor's
@@ -1070,6 +1172,28 @@ fn remove_device_from_index(
 /// invariant did not hold; when it is reported after the commit point the
 /// device has still been torn down and must not be treated as usable.
 pub fn unregister_device_desc(id: DeviceDescId) -> Result<(), DriverError> {
+    let supplier = device_registry()
+        .find_device_desc(id)
+        .map(|desc| desc.device_id());
+    let supplier_ref = supplier.and_then(crate::lookup_supplier_ref);
+    let prepared = match supplier {
+        Some(device_id) => prepare_supplier_exit(device_id)?,
+        None => false,
+    };
+    let result = unregister_device_desc_inner(id);
+    if prepared && let Some(supplier_id) = supplier {
+        match &result {
+            Ok(()) => complete_supplier_exit(supplier_id, supplier_ref.clone()),
+            Err(_) => dependency::rollback_supplier_exit(
+                supplier_id,
+                crate::lookup_supplier_ref(supplier_id).and_then(|s| s.binding_ref()),
+            ),
+        }
+    }
+    result
+}
+
+fn unregister_device_desc_inner(id: DeviceDescId) -> Result<(), DriverError> {
     let binding = device_registry()
         .binding_for_desc(id)
         .ok_or(DriverError::InvalidInput)?;
@@ -1215,6 +1339,10 @@ fn remove_bound_device_locked(
         }
     }
 
+    if let Some(current) = device.binding_ref() {
+        dependency::consumer_unbind(&current);
+    }
+
     // `begin_removing` is the single commit point: it atomically claims the
     // binding for removal (or fails with `ResourceBusy` if another remove is
     // already in flight or references are outstanding). It must run after the
@@ -1295,6 +1423,22 @@ fn remove_bound_device_locked(
 /// device are still outstanding. The caller may retry later; no eventual
 /// completion is guaranteed.
 pub fn remove_device_managed(id: DeviceId) -> Result<(), DriverError> {
+    let supplier_ref = crate::lookup_supplier_ref(id);
+    let prepared = prepare_supplier_exit(id)?;
+    let result = remove_device_managed_inner(id);
+    if prepared {
+        match &result {
+            Ok(()) => complete_supplier_exit(id, supplier_ref.clone()),
+            Err(_) => dependency::rollback_supplier_exit(
+                id,
+                crate::lookup_supplier_ref(id).and_then(|s| s.binding_ref()),
+            ),
+        }
+    }
+    result
+}
+
+fn remove_device_managed_inner(id: DeviceId) -> Result<(), DriverError> {
     // Locate the unique descriptor backing this device before waiting. Zero or
     // multiple descriptors mean the 1:1 invariant is broken; do not touch the
     // device in that case.

@@ -515,3 +515,19 @@ remove-error handling are unchanged.
 - Internal Data-slot corruption or inability to prove a stopped binding enters
   a per-site fatal invariant before resources are released. Ordinary
   driver/bus remove errors are post-stop cleanup reports and are logged.
+
+## Dependency ledger lock and ownership (M2-S1)
+
+- `lifecycle::dependency::LEDGER` is `SpinNoPreempt`; it is never taken from IRQ
+  context and never nests registry or descriptor binding locks.
+- `add_dependency` receives a strong `SupplierRef` but still checks the captured
+  binding generation and `Active` state before creating an editable edge.
+- `EXITING` blocks new edges during supplier exit. `begin_supplier_exit` marks
+  edges and collects consumers; `finish_supplier_exit` removes edges only after
+  the supplier commit point.
+- The ledger lock does no allocation and no `Arc`/`DeviceObject` drop. Edges are
+  removed in place into a local fixed array and dropped after the lock is
+  released; `remember_waiter` reports `NoMemory` on slot exhaustion.
+- A cfg(unittest) assertion rejects registry lookup while the ledger lock is
+  held. The test-only drop-window hook parks after unlinking, before dropping,
+  to prove unrelated edges remain visible.

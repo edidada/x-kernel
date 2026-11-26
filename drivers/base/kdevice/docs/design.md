@@ -97,6 +97,8 @@ drivers/base/kdevice/
     │   │                         #   remove_device_managed, parent attach/detach
     │   ├── deferred.rs           # pending/active deferred queues, trigger
     │   │                         #   sequence, claimed request, executor handoff
+    │   ├── dependency.rs         # explicit supplier edges, exit restart,
+    │   │                         #   fixed-slot ledger and diagnostics
     │   ├── binding_hooks.rs      # cfg(unittest) pause/ownership seams
     │   ├── dispatch.rs           # event distribution and state transition notify
     │   ├── event.rs              # DeviceEvent, DeviceEventKind
@@ -1050,3 +1052,24 @@ type mismatch as `ErasedCallError::TypeMismatch`; only lifecycle classifies it
 as a fatal internal invariant. Ordinary driver/bus `Err` values are post-stop
 cleanup reports and never authorize releasing resources without the stop
 postcondition.
+
+## Explicit dependency exit (M2-S1)
+
+`lifecycle::dependency` owns the only consumer→supplier edge ledger. Probe code
+declares an edge through `ProbeContext::add_dependency(SupplierRef)`; the handle
+keeps the stable `DeviceObject` alive but grants no hardware authority. Edge
+activation compares the exact binding generation, so a handle captured before a
+rebind is rejected with `InvalidInput`.
+
+Edges start `DORMANT` (supplier unbound), move to `CONSUMER_PROBE`, then `ACTIVE`.
+Supplier exit installs `EXITING` and `SUPPLIER_UNBIND` for every edge before any
+consumer lock is taken, then runs a restart loop that force-removes every
+`ACTIVE`/`CONSUMER_PROBE` consumer. `finish` and the terminal `SupplierRemoved`
+waiter cancellation run only after the supplier removal commits. `DORMANT` edges
+never retain a binding token or an `Arc` for a rolled-back probe attempt.
+
+The ledger uses 64 preallocated slots; `add_dependency` returns `NoMemory` when
+they are exhausted rather than silently dropping a dependency. Removal takes
+matching slots under the ledger lock but drops the nodes after releasing it.
+Lock order is descriptor binding → ledger; the ledger never takes registry,
+descriptor, or deferred locks while held.

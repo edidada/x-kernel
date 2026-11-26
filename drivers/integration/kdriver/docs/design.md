@@ -1025,3 +1025,11 @@ The MM owner retains its task mutex through publication with IRQs enabled.
 `DeviceManager` requires `ksync::Mutex` for bus enumeration and resource mapping
 in every driver configuration. `ksync` is an unconditional dependency, including
 console/RNG-only builds without `block` or `unittest-threads` features.
+## PCI ECAM dependency exit (M2-S1)
+
+An endpoint's virtio PCI activation declares its PCI host bridge as an explicit
+supplier before opening ECAM. `ProbeContext::parent_supplier()` supplies the
+controlled handle; no raw parent ID is consumed by the driver. Bridge removal
+marks the edge `SUPPLIER_UNBIND`, unbinds the endpoint, and only then releases
+the bridge. Endpoint probe returns `Deferred` if the bridge is exiting or not
+yet bound.
