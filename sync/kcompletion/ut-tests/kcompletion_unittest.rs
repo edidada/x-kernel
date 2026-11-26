@@ -188,3 +188,17 @@ fn predicate_reentry_and_spurious_wakes_reenroll() {
     assert_eq!(wake.0.load(Ordering::Relaxed), 4);
     assert_eq!(queue.notify_all(), 0);
 }
+
+#[def_test]
+fn cancellation_retires_stack_waiter_and_preserves_later_token() {
+    let completion = Completion::new();
+    let wake = Counter(AtomicUsize::new(0));
+    // SAFETY: stack/source/wake outlive this wait and both callbacks return.
+    let completed = unsafe {
+        completion.wait_with_cancel(&wake, || panic!("cancelled wait parked"), || true)
+    };
+    assert!(!completed);
+    assert_eq!(completion.complete(), 0);
+    assert!(completion.try_wait());
+    assert_eq!(wake.0.load(Ordering::Relaxed), 0);
+}

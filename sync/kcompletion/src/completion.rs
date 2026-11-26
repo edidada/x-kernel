@@ -208,25 +208,53 @@ impl Completion {
     ///
     /// # Panics
     /// Propagates a panic from `park` after unregistering the stack waiter.
-    pub unsafe fn wait_with<W: SyncWake>(&self, wake: &W, mut park: impl FnMut()) {
+    pub unsafe fn wait_with<W: SyncWake>(&self, wake: &W, park: impl FnMut()) {
+        // SAFETY: this preserves the caller's stack/source/wake lifetime contract;
+        // the cancellation callback neither borrows external storage nor exits.
+        unsafe { self.wait_with_cancel(wake, park, || false) };
+    }
+
+    /// Waits for a token, or returns false when the host requests cancellation.
+    ///
+    /// A token available at the start of an iteration takes precedence over
+    /// cancellation. The cancellation predicate runs after enrollment and outside
+    /// the source lock; it must not sleep. The host must wake the parker when
+    /// cancellation becomes pending and close its check/park race. Cancellation
+    /// removes the stack registration before returning and consumes no token.
+    ///
+    /// # Safety
+    /// The stack, completion and borrowed wake storage must satisfy the lifetime
+    /// contract of [`Self::wait_with`] across both callbacks, including any path
+    /// that bypasses Rust cleanup. The parker must latch early notifications.
+    ///
+    /// # Panics
+    /// Propagates callback panics after unregistering when unwinding is supported.
+    pub unsafe fn wait_with_cancel<W: SyncWake>(
+        &self,
+        wake: &W,
+        mut park: impl FnMut(),
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> bool {
         with_waiter(&self.state, wake, |node| {
             loop {
                 {
                     let mut state = self.state.lock();
                     if state.try_wait() {
-                        return;
+                        return true;
                     }
                     if !node.links.is_linked() {
-                        // SAFETY: with_waiter pins this node and retains shared-only
-                        // access until locked cleanup removes it. The node belongs
-                        // only to this list, and the lock serializes link checks.
+                        // SAFETY: with_waiter pins and retains this private node
+                        // until locked cleanup; only this source can link it.
                         let entry = unsafe { UnsafeRef::from_raw(node) };
                         state.waiters.push_back(entry);
                     }
                 }
+                if is_cancelled() {
+                    return false;
+                }
                 park();
             }
-        });
+        })
     }
 }
 
@@ -321,11 +349,11 @@ impl Default for WaitQueue {
     }
 }
 
-fn with_waiter<W: SyncWake>(
+fn with_waiter<W: SyncWake, R>(
     state: &SpinNoIrq<CompletionState>,
     wake: &W,
-    wait: impl FnOnce(&WaitNode),
-) {
+    wait: impl FnOnce(&WaitNode) -> R,
+) -> R {
     let node = pin!(WaitNode {
         links: LinkedListLink::new(),
         data: NonNull::from(wake).cast(),
@@ -337,7 +365,7 @@ fn with_waiter<W: SyncWake>(
         node: node.as_ref().get_ref(),
         _wake: wake,
     };
-    wait(registration.node);
+    wait(registration.node)
 }
 
 struct Registration<'a> {

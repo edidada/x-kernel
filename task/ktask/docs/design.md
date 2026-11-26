@@ -1855,3 +1855,13 @@ freezer snapshots these explicitly tagged tasks, never their names.
 
 The reset-aware acquire entry requires sleepable task context on the boot CPU
 with a prepared platform transaction and hotplug excluded throughout join.
+
+## Killable synchronous completion
+
+`CompletionWait::wait_killable` uses the existing completion stack waiter and
+shared park latch, with `TaskState::BlockedKillable`. Ordinary signals stay
+pending; the user runtime's `fatal_signal_pending` permits SIGKILL cancellation.
+The scheduler rechecks that predicate after publishing the blocked state, so a
+signal that observed the task running cannot strand it. Completion/cancellation
+returns remove the stack registration. All allocation-bearing handle preparation
+precedes child publication in the vfork caller; the wait itself allocates nothing.

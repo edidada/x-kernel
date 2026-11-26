@@ -148,3 +148,13 @@ The intrusive-collections migration passed build and Clippy, 755 related
 AArch64 kernel tests, 13 host tests and 13 Miri tests. Existing allocation probes
 still report zero allocations/frees in their measured wait/notify intervals.
 Local logs: `/tmp/completion-intrusive-{build,clippy,ut,host,miri}.log`.
+
+## Cancellable completion waits
+
+`Completion::wait_with_cancel` extends the same private stack enrollment used by
+`wait_with`. An available token wins at each locked check. Otherwise the waiter
+enrolls, releases the source lock, checks the host cancellation predicate, and
+parks. Cancellation returns false after normal registration cleanup; it neither
+consumes a token nor leaves a callback pointing at retired stack storage. The
+host owns cancellation publication, notification and the final check/park race.
+`wait_with` delegates with a predicate that never cancels.

@@ -83,3 +83,11 @@ the source. Timeout/cancellation and forced task teardown are not implemented.
 - Predicate evaluation follows enrollment and runs outside the source lock.
 - Reinit cannot abandon old waiters; deferred wake does not republish state.
 - No future change exposes a forgettable registration or detached stack list.
+
+## Cancellation boundary
+
+Cancellation predicates run outside the source lock and must not sleep. The
+unsafe host lifetime contract covers both cancellation and park callbacks,
+including paths that bypass Rust cleanup. A cancellation return unlinks the
+private node under the same lock that serializes notification. Later completion
+therefore cannot call a notifier borrowed from the returned wait.

@@ -1038,3 +1038,14 @@ Stop callback excludes softirq execution. PM restores them before CPU release
 without acquiring locks retained by the daemon. In `src/stop_machine.rs`,
 the pinned Stop thread owns the CPU rendezvous and runs its callbacks with
 interrupts disabled. Recovery must not acquire resources held by that thread.
+
+## Killable completion cancellation
+
+The host wrapper retains its task and kernel-stack owner throughout
+`Completion::wait_with_cancel` and uses only returning, non-sleeping cancellation
+checks. `Interrupted` means an unblockable termination request remains pending;
+a syscall caller must commit fatal exit before returning to user mode, even if
+a sibling dequeues shared pending state in the meantime. Ordinary
+signals must not cancel an operation whose dependent child still uses shared
+user memory. Both wake latching and the scheduler's post-publication fatal check
+are required to close the notification/park race.

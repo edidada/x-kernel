@@ -78,3 +78,13 @@ Logs: `/tmp/completion-validation-{clippy,ut,host}.log` and
   lifecycles are allocation-free.
 - Hardware liveness, arbitrary tracing filters, forced nonunwinding task exit,
   unsupported reset races, timeout and interruptible waits are not certified.
+
+## Cancellable completion regression coverage
+
+The host suite additionally checks cancellation after enrollment, removal of
+the stack waiter before a later notification, preservation of a later token,
+source reentry from the unlocked cancellation predicate, and completion-token
+precedence. The cancellation path is measured at zero allocations/deallocations.
+Guest `ktask` coverage exercises a real blocked-killable task: ordinary signals
+leave it blocked until completion; SIGKILL wakes it and unregisters the waiter.
+These tests complement the existing scheduler post-publication kill check.

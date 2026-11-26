@@ -366,3 +366,61 @@ fn signals_select_wait_policy_and_events_wake_every_policy() {
         assert_eq!(exit_code, 0);
     }
 }
+
+#[def_test(serial)]
+fn killable_completion_defers_ordinary_signals_and_unlinks_on_sigkill() {
+    use kalloc_types::KBox;
+
+    struct SignalRuntime {
+        killed: Arc<AtomicBool>,
+        parked: Arc<Completion>,
+    }
+    impl crate::UserTaskRuntime for SignalRuntime {
+        fn fatal_signal_pending(&self) -> bool {
+            self.killed.load(Ordering::Acquire)
+        }
+        fn on_leave(&self) {
+            if crate::current().state() == TaskState::BlockedKillable {
+                self.parked.complete();
+            }
+        }
+        fn as_any(&self) -> &dyn core::any::Any { self }
+    }
+
+    for is_fatal in [false, true] {
+        let completion = Arc::new(Completion::new());
+        let parked = Arc::new(Completion::new());
+        let killed = Arc::new(AtomicBool::new(false));
+        let result = Arc::new(AtomicBool::new(false));
+        let task = crate::prepare_task(crate::TaskInner::new_user(
+            crate::PreparedTaskEntry::new({
+                let completion = completion.clone();
+                let result = result.clone();
+                move || {
+                    let wait = CompletionWait::prepare().unwrap();
+                    result.store(
+                        wait.wait_killable(&completion) == Err(KError::Interrupted),
+                        Ordering::Release,
+                    );
+                }
+            }).unwrap(),
+            "killable-completion".into(),
+            kidentity::allocate_root_pid_handle().unwrap(),
+            KBox::new(SignalRuntime {
+                killed: killed.clone(),
+                parked: parked.clone(),
+            }).unwrap(),
+        ));
+        crate::activate_task(&task);
+        CompletionWait::prepare().unwrap().wait(&parked);
+        killed.store(is_fatal, Ordering::Release);
+        crate::signal_task(&task);
+        if !is_fatal {
+            assert_eq!(task.state(), TaskState::BlockedKillable);
+            completion.complete();
+        }
+        assert_eq!(task.join(), 0);
+        assert_eq!(result.load(Ordering::Acquire), is_fatal);
+        assert_eq!(completion.complete(), 0, "wait registration must be gone");
+    }
+}

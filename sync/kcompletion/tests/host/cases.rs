@@ -603,3 +603,39 @@ fn completion_publishes_payload_without_an_external_release() {
         assert_eq!(waiter.join().unwrap(), 0xc0ffee);
     });
 }
+
+#[test]
+fn cancellation_unlinks_waiter_without_allocating_or_consuming_a_token() {
+    let completion = Completion::new();
+    let wake = Counter::default();
+    let cancelled = core::cell::Cell::new(false);
+    let mut completed = true;
+    let counts = measure(|| {
+        // SAFETY: source, notifier and stack remain live; callbacks return
+        // normally and simulate a cancellation wake without actually parking.
+        completed = unsafe {
+            completion.wait_with_cancel(&wake, || cancelled.set(true), || {
+                // The callback may inspect the source: its lock must be released.
+                assert!(!completion.is_completed());
+                cancelled.get()
+            })
+        };
+    });
+    assert_eq!(counts, (0, 0));
+    assert!(!completed);
+    assert_eq!(completion.complete(), 0, "cancelled node must be unlinked");
+    assert!(completion.try_wait(), "cancellation must not consume a token");
+    assert_eq!(wake.0.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn completion_token_precedes_pending_cancellation() {
+    let completion = Completion::new();
+    let wake = Counter::default();
+    completion.complete();
+    // SAFETY: all borrowed storage outlives the scoped, nonparking wait.
+    assert!(unsafe {
+        completion.wait_with_cancel(&wake, || panic!("ready wait parked"), || true)
+    });
+    assert!(!completion.try_wait());
+}

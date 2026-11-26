@@ -137,7 +137,10 @@ impl CompletionWait {
         crate::park::park_task_unless(&self.wake.woke, state, stop, on_block)
     }
 
-    /// Captures the current task without allocating.
+    /// Captures the current task and prepares its shared notification latch.
+    ///
+    /// Latch allocation follows the kernel's infallible Arc OOM policy. Prepare
+    /// the handle before committing an operation that cannot fail afterwards.
     ///
     /// # Errors
     /// Returns [`KError::InvalidInput`] unless a non-idle current task exists
@@ -171,6 +174,47 @@ impl CompletionWait {
         // across switches; even a non-unwinding exit cannot free that stack
         // without dropping this ref. Normal return/unwind unlinks the waiter.
         unsafe { completion.wait_with(&self.wake, || crate::park::park_task(&self.wake.woke)) };
+    }
+
+    /// Waits for completion, allowing only an unblockable termination request.
+    ///
+    /// Ordinary signals remain pending. Registration and every subsequent park
+    /// allocate nothing; prepare this handle before publishing an operation that
+    /// cannot fail afterwards. Pending termination is rechecked after publishing
+    /// the killable task state, closing the signal check/park race.
+    ///
+    /// # Errors
+    /// Returns [`KError::Interrupted`] after unlinking the waiter when the user
+    /// runtime reports pending termination. The caller must commit fatal exit
+    /// before any return to user mode, even if shared pending state disappears.
+    ///
+    /// # Panics
+    /// Panics if called outside the preparing task or sleepable context.
+    pub fn wait_killable(&self, completion: &Completion) -> KResult<()> {
+        self.validate_context();
+        // SAFETY: this handle retains the task and kernel stack across both
+        // callbacks. Neither callback exits the task; scoped cleanup unlinks
+        // before returning, including cancellation. Both park checks use the
+        // same fatal-signal predicate and the shared wake latch.
+        let completed = unsafe {
+            completion.wait_with_cancel(
+                &self.wake,
+                || {
+                    crate::park::park_task_unless(
+                        &self.wake.woke,
+                        TaskState::BlockedKillable,
+                        || self.is_killed(),
+                        || {},
+                    );
+                },
+                || self.is_killed(),
+            )
+        };
+        if completed {
+            Ok(())
+        } else {
+            Err(KError::Interrupted)
+        }
     }
 
     /// Waits until `ready` returns true, with allocation-free registration.
