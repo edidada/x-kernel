@@ -536,7 +536,13 @@ pub fn do_exit_worker() {
 /// the execing thread kills it on purpose and must survive the sweep. A target
 /// that instead reaches `exit_group(2)` goes through [`do_exit`] and still
 /// records the genuine group exit, so the exec aborts.
-pub(crate) fn do_exit_from_signal(exit_code: i32) {
+///
+/// Call in the current user thread's sleepable context after committing a fatal
+/// signal action, including SIGKILL cancellation of a dependent operation. The
+/// signal need not remain queued: a sibling may already have dequeued shared
+/// pending state. This performs teardown and returns to the kernel continuation;
+/// the caller must not access user memory or resume user execution afterwards.
+pub fn do_exit_from_signal(exit_code: i32) {
     do_exit_inner(exit_code, true, true, true);
 }
 

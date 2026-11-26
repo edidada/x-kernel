@@ -833,3 +833,15 @@ steps are not enclosed in a transient admission retry.
 The captured image stays live across file persistence, while memspace drops its
 mutex for the runtime hook and repeats VMA lookup after each synchronous range.
 No process-binding lock or new sync request state spans that wait.
+
+## vfork old-MM completion
+
+A newly prepared `Thread` may own one `Arc<kcompletion::Completion>`, installed
+through an exclusive borrow before task publication. Successful
+`replace_current_address_space` consumes it after activating the new root and
+releasing the displaced binding; a failed precheck leaves it pending.
+`finish_thread_exit` consumes it after robust-list/clear-tid cleanup and membership
+retirement, when no old-user access or user return is permitted. Notification
+runs after releasing the thread's completion-slot mutex. Repeated completion is
+a no-op. Separate ownership allows SIGKILL to end the parent's wait before the
+child reaches either boundary.

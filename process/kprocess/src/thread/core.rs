@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering
 
 use kalloc_types::{AllocFlags, KBox};
 use kcgroup::{Cgroup, TaskCharge, TaskMembership};
+use kcompletion::Completion;
 use kcred::Cred;
 use kerrno::KResult;
 use ksignal::{SignalStack, api::ThreadSignalManager};
@@ -174,6 +175,7 @@ pub struct Thread {
     files: kresources::TaskFiles,
     // Installed once before membership retirement; released only with Thread.
     exit_address_space: SpinNoIrq<Option<ExitAddressSpace>>,
+    vfork_done: Mutex<Option<Arc<Completion>>>,
     real_cred: RwLock<Arc<Cred>>,
     cred: RwLock<Arc<Cred>>,
     clear_child_tid: AtomicUsize,
@@ -320,6 +322,7 @@ impl Thread {
                 runtime,
                 files,
                 exit_address_space: SpinNoIrq::new(None),
+                vfork_done: Mutex::new(None),
                 real_cred: RwLock::new(cred.clone()),
                 cred: RwLock::new(cred),
                 clear_child_tid: AtomicUsize::new(0),
@@ -503,6 +506,28 @@ impl Thread {
     /// Returns the thread-local seccomp filter state.
     pub fn seccomp(&self) -> &super::SeccompContext {
         &self.seccomp
+    }
+
+    /// Installs the parent's completion before publishing this vfork child.
+    ///
+    /// The exclusive borrow confines installation to clone preparation. Exec or
+    /// exit consumes the completion only after all old-user accesses have ended.
+    /// Shared ownership permits the parent to die before the child releases MM.
+    /// Requires sleepable task context without locks forbidding sleep.
+    ///
+    /// # Panics
+    /// Panics if this thread already owns a vfork completion.
+    pub fn install_vfork_completion(&mut self, completion: Arc<Completion>) {
+        let mut pending = self.vfork_done.lock();
+        assert!(pending.is_none(), "vfork completion is installed once");
+        *pending = Some(completion);
+    }
+
+    pub(crate) fn complete_vfork(&self) {
+        let completion = self.vfork_done.lock().take();
+        if let Some(completion) = completion {
+            completion.complete_all();
+        }
     }
 
     /// Returns the `clear_child_tid` user pointer for this thread.

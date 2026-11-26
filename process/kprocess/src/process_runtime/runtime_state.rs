@@ -272,6 +272,7 @@ pub unsafe fn replace_current_address_space(
         displaced
     };
     drop(displaced);
+    thread.complete_vfork();
     Ok(())
 }
 

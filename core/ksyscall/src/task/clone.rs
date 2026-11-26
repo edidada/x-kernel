@@ -222,16 +222,6 @@ impl CloneRequest {
         prepare_entry: impl FnOnce(UserContext, usize) -> KResult<ktask::PreparedTaskEntry>,
         prepare_network: impl FnOnce() -> KResult<knet::netns::PreparedStack>,
     ) -> KResult<isize> {
-        if self.flags.contains(CloneFlags::VFORK) {
-            // TODO: Implement Linux vfork semantics: keep the mm shared, block
-            // the parent until the child successfully execs or exits, and wake
-            // it after the child has detached from the shared mm. execve
-            // currently modifies its process mm in place, so sharing it here
-            // would let the child replace the parent's address space.
-            debug!("do_clone: CLONE_VFORK uses private-mm fallback");
-            self.flags.remove(CloneFlags::VM);
-        }
-
         debug!(
             "do_clone <= flags: {:?}, exit_signal: {}, stack: {:#x}, ptid: {:#x}, ctid: {:#x}, \
              tls: {:#x}, pidfd: {:#x}",
@@ -379,7 +369,14 @@ impl CloneRequest {
             network_stack.install(child_process.net_ns()?.as_ref());
         }
         let page_table_root = prepared.page_table_root();
-        let (thr, task_number) = prepared.into_parts();
+        let (mut thr, task_number) = prepared.into_parts();
+        let vfork_wait = if self.flags.contains(CloneFlags::VFORK) {
+            let wait = super::vfork::VforkWait::prepare()?;
+            thr.install_vfork_completion(wait.completion());
+            Some(wait)
+        } else {
+            None
+        };
         // Linux reports the new task's number in the forking process's active
         // PID namespace (pid_nr_ns): the leader number for a process fork,
         // the thread's own TID for a thread clone. The projection uses the
@@ -480,6 +477,9 @@ impl CloneRequest {
             Ok(())
         })?;
 
+        if let Some(wait) = vfork_wait {
+            wait.wait();
+        }
         Ok(tid as _)
     }
 

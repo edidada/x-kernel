@@ -55,8 +55,8 @@ pub use dynamic_ta::spawn_dynamic_ta;
 pub use dynamic_ta_stub::spawn_dynamic_ta;
 pub use init_process::spawn_init_process;
 pub use runtime::{
-    check_signals, do_exit, do_exit_worker, exec_de_thread, new_user_task, prepare_user_entry,
-    raise_current_thread_fault, raise_signal_fatal,
+    check_signals, do_exit, do_exit_from_signal, do_exit_worker, exec_de_thread, new_user_task,
+    prepare_user_entry, raise_current_thread_fault, raise_signal_fatal,
 };
 #[cfg(unittest)]
 pub use runtime::{

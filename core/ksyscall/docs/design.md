@@ -852,3 +852,18 @@ Order of operations and failure handling:
 
 The return value is the number of bytes copied (`isize`), so `dmesg`,
 `dmesg -c` and `dmesg -r` work unchanged.
+
+## vfork suspension and MM sharing
+
+`CloneFlags::VM` selects shared address-space ownership even with VFORK. The
+clone path prepares `VforkWait` and installs the child's completion before
+publishing the task. It waits only after publication and parent-TID/pidfd
+commit succeed; failures abort the unpublished child without entering the wait.
+The existing exec path constructs and activates a fresh MM, so the child's exec
+cannot replace the parent's binding.
+
+The parent uses a killable synchronous completion wait. Caught, ignored and
+default-fatal ordinary signals remain pending until MM release. Only SIGKILL
+ends the wait early; after unlinking, the caller commits the existing signal-exit
+transition, preserving de-thread sibling termination semantics. No user signal
+frame is built while the child can still use the parent's stack.

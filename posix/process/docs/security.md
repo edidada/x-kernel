@@ -214,3 +214,12 @@ still opens an interval until the exit sample is published. Contenders recheck
 the flag under the same bucket lock, so exit cannot miss a newly adopted state. The sweep does not access another
 process's user mapping; the acquiring waiter repairs OWNER_DIED through its own
 address. Robust-list faults remain best effort and do not skip the PI sweep.
+
+## Committed fatal exit
+
+`do_exit_from_signal` requires the current user task in sleepable context and a
+committed fatal action. It does not re-read a mutable pending queue or signal
+disposition. Callers must stop user-memory access and user return after teardown,
+even though the function returns to its kernel continuation. This permits vfork
+cancellation to remain safe if a sibling concurrently consumes shared pending
+SIGKILL, while retaining the exec sweep's exception to group-exit marking.

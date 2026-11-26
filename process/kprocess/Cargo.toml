@@ -28,6 +28,7 @@ kerrno.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 klazy.workspace = true
+kcompletion.workspace = true
 kpoll.workspace = true
 kidentity.workspace = true
 kresources.workspace = true

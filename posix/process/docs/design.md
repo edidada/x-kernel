@@ -273,3 +273,10 @@ After robust-list marking, `do_exit` publishes the Thread exit flag and calls
 but never passed to ordinary wake. Kernel ownership is handed off independently
 of user mappings; each waiter repairs its word before returning to userspace.
 The exit flag and bucket-locked adoption check prevent attachment after sweep.
+
+## Fatal operation cancellation
+
+`do_exit_from_signal` is also the vfork caller's committed SIGKILL cancellation
+transition. It records signal death and preserves the exec de-thread sweep
+exemption. A later pending-signal scan is insufficient because another thread
+may have dequeued a shared SIGKILL after the cancellation predicate observed it.

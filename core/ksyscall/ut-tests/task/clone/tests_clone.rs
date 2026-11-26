@@ -38,6 +38,7 @@ fn entry_allocation_failure_precedes_process_and_thread_preparation() {
     let context = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
     for flags in [
         CloneFlags::empty(),
+        CloneFlags::VM | CloneFlags::VFORK,
         CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND,
     ] {
         let called = core::cell::Cell::new(false);
@@ -274,4 +275,102 @@ fn test_clone_rejects_newuser_with_shared_fs() {
         LinuxError::from(req.validate_namespace_flags().unwrap_err()),
         LinuxError::EINVAL
     );
+}
+
+#[def_test(user, serial)]
+fn vfork_shares_mm_and_waits_until_child_exit_or_mm_replacement() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use kcompletion::Completion;
+    use kspin::SpinNoIrq;
+    use ktask::completion::CompletionWait;
+
+    for does_exec in [false, true] {
+        let parent_task = ktask::current().clone();
+        let process = current_user_thread().process().clone();
+        let parent_mm_id = process.mm_id().unwrap();
+        let returned = Arc::new(AtomicBool::new(false));
+        let observed_wait = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(AtomicBool::new(false));
+        let child_task = Arc::new(SpinNoIrq::new(None::<ktask::KtaskRef>));
+        let release = Arc::new(Completion::new());
+        let coordinator = ktask::spawn({
+            let returned = returned.clone();
+            let observed_wait = observed_wait.clone();
+            let release = release.clone();
+            move || {
+                while !returned.load(Ordering::Acquire)
+                    && parent_task.state() != ktask::TaskState::BlockedKillable
+                {
+                    ktask::yield_now();
+                }
+                observed_wait.store(
+                    parent_task.state() == ktask::TaskState::BlockedKillable,
+                    Ordering::Release,
+                );
+                release.complete_all();
+            }
+        });
+        let mut request = CloneRequest::new();
+        request.set_flags(CloneFlags::VM | CloneFlags::VFORK);
+        let context = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+        let result = request.do_clone_with_entry(&context, {
+            let shared = shared.clone();
+            let child_task = child_task.clone();
+            move |_, _| {
+                ktask::PreparedTaskEntry::new(move || {
+                    let thread = current_user_thread();
+                    *child_task.lock() = Some(ktask::current().clone());
+                    shared.store(
+                        thread.process().mm_id().unwrap() == parent_mm_id,
+                        Ordering::Release,
+                    );
+                    CompletionWait::prepare().unwrap().wait(&release);
+                    if does_exec {
+                        let new_mm = memspace::MmSpace::new_user_empty().unwrap();
+                        // SAFETY: this is the sole published child thread, with
+                        // kernel-only test state and no old user/context borrows.
+                        // It resets old registrations and exits after the swap.
+                        unsafe { kprocess::replace_current_address_space(new_mm, false) }.unwrap();
+                        thread.set_clear_child_tid(0);
+                        thread.set_robust_list_head(0);
+                        thread.signal_manager().set_stack(ksignal::SignalStack::default());
+                    }
+                    posix_process::do_exit(0, false);
+                })
+            }
+        });
+        returned.store(true, Ordering::Release);
+        assert_eq!(coordinator.join(), 0);
+        let tid = result.unwrap();
+        let task = child_task.lock().take().unwrap();
+        assert_eq!(task.join(), 0);
+        assert!(shared.load(Ordering::Acquire), "vfork must retain CLONE_VM");
+        assert!(observed_wait.load(Ordering::Acquire), "parent returned before MM release");
+        assert_eq!(process.mm_id().unwrap(), parent_mm_id, "child exec changed parent MM");
+        let child = process.children().iter().find(|child| child.pid() == tid as u32).cloned();
+        if let Some(child) = child {
+            kprocess::wait_reap::assert_reap_zombie_process(&child);
+        }
+    }
+}
+
+#[def_test(user, serial)]
+fn vfork_parent_tid_failure_does_not_publish_a_runnable_child() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    let process = current_user_thread().process().clone();
+    let children: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
+    let ran = Arc::new(AtomicBool::new(false));
+    let mut request = CloneRequest::new();
+    request.set_flags(CloneFlags::VM | CloneFlags::VFORK | CloneFlags::PARENT_SETTID);
+    let context = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+    let result = request.do_clone_with_entry(&context, {
+        let ran = ran.clone();
+        move |_, _| ktask::PreparedTaskEntry::new(move || { ran.store(true, Ordering::Release); })
+    });
+    assert!(result.is_err());
+    assert!(!ran.load(Ordering::Acquire));
+    let after: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
+    assert_eq!(after, children);
 }

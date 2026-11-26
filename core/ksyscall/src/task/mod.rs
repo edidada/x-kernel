@@ -30,6 +30,7 @@ mod seccomp;
 mod signal;
 mod thread;
 mod umask;
+mod vfork;
 mod wait;
 
 unittest::path_mod_test!(

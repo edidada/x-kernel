@@ -8,7 +8,8 @@ use ksignal::{ChildExitInfo, ChildExitSignalInfo, SigchldChildExitSignalInfo, Si
 use ktask::KtaskRef;
 
 use crate::{
-    Process, ProcessExitPublication, process::exit::ReparentedZombie, process_signals, wait_reap,
+    AsThread, Process, ProcessExitPublication, process::exit::ReparentedZombie, process_signals,
+    wait_reap,
 };
 
 /// Removes an exiting thread and reserves process cleanup for the last member.
@@ -38,7 +39,11 @@ pub fn finish_thread_exit(
     exit_code: i32,
     record_status: bool,
 ) -> bool {
-    process.exit_thread(task, exit_code, record_status)
+    let is_last_thread = process.exit_thread(task, exit_code, record_status);
+    // The caller has finished robust-list/clear-tid accesses and must never
+    // return to user mode. The captured structural MM pin retains its root.
+    task.as_thread().complete_vfork();
+    is_last_thread
 }
 
 /// Marks the process thread group as group-exited.

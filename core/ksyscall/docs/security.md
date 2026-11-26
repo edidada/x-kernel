@@ -502,3 +502,14 @@ the common `do_sys_poll` path rejects counts above current
 provider caps the hard limit at Linux's `sysctl_nr_open` default. Zero count
 never accesses a NULL descriptor pointer; invalid `ppoll` timeout or mask
 inputs are checked before array admission.
+
+## vfork wait boundary
+
+The wait's handle and shared completion are prepared before child publication,
+so no later registration-allocation failure can resume a live parent sharing
+its child's stack. Child exec/exit releases the parent's wait at the kprocess
+old-MM boundary. SIGKILL interruption unlinks the stack waiter, then commits
+the existing signal-exit transition before returning from clone. A sibling
+may consume shared SIGKILL pending state, so cancellation must commit exit
+instead of relying on a later pending-signal scan. The child retains its own
+completion reference until release even if the parent exits first.

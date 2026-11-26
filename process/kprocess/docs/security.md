@@ -457,3 +457,14 @@ steps are not enclosed in a transient admission retry.
 Shared-mapping sync retains the captured `MmUserHandle` and must enter without
 MM/provider locks from sleepable task context. File persistence runs outside the
 MM mutex; process exit/exec cannot retarget or tear down that captured MM user.
+
+## vfork parent resumption
+
+Only clone preparation installs a completion, once, before the child can run.
+Exec failure before MM exchange must not notify it. Successful exchange and
+thread exit notify only after the child has stopped accessing the old user
+image. A structural MM pin may survive exit without authorizing further user
+access; remaining shared-MM users retain their own live-MM ownership. Taking the
+slot before notification prevents duplicate completion and avoids a completion
+lock nested under the slot mutex. The Arc remains valid if the waiting parent
+dies first.
