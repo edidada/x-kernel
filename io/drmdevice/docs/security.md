@@ -171,7 +171,7 @@ lock and never after it. A task wait parks outside all of them.
 |----|--------|--------|---------|------------------|
 | T-01 | Malformed ioctl pointer or count | High — kernel memory corruption or disclosure | Hostile DRM UAPI payload | Typed user copies, bounds checks, and object-table lookup. |
 | T-02 | Arithmetic overflow in buffer geometry | Medium — undersized allocation or denial of service | Crafted dimensions or pitches | Creation handlers validate dimensions, formats, and sizes before allocation. |
-| T-03 | Mapped buffer freed too early | High — use-after-free and kernel memory corruption | Remove framebuffer while mmap survives | `retained_pages` keeps backing pages alive. |
+| T-03 | Mapped buffer freed too early | High — use-after-free and kernel memory corruption | Remove framebuffer while mmap survives | The VMA holds its own reference to the mapped GEM object (the linear backend's keep-alive) until teardown; the reference is cloned by `fork` and dropped by munmap, execve or exit. |
 | T-04 | Open fd targets a newly registered display | High — operations affect the wrong display and corrupt visible device state | Hot-unplug followed by card-index reuse | Each `DrmDevice` owns one concrete class handle and returns `ENODEV` after removal; both minors of the card share it. |
 | T-05 | Event queue exhausts memory | Medium — unbounded kernel-memory growth and service denial | Repeated event-producing ioctls | Queue length is capped at `MAX_EVENTS`. |
 | T-06 | Reuse or cross-master use of a DRM magic token | Medium — unauthorized client authentication | Forged, replayed, or stale AUTH_MAGIC request | Tokens live in one master registry, require its active owner, are single-use, and are removed on file close or master change. |

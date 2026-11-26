@@ -20,8 +20,9 @@ pub use asid::{
 };
 pub use barrier::dsb_ishst;
 pub use cache::{
-    clean_dcache_line_to_poc, clean_dcache_range_to_poc, dma_read_barrier, flush_icache_all,
-    flush_icache_all_local, flush_icache_range, flush_icache_remote,
+    clean_dcache_line_to_poc, clean_dcache_range_to_poc, dma_clean_range, dma_invalidate_range,
+    dma_read_barrier, flush_icache_all, flush_icache_all_local, flush_icache_range,
+    flush_icache_remote, invalidate_dcache_range_to_poc,
 };
 pub use cpu::{idle_wait, stop_cpu};
 pub use fp::enable_fp;

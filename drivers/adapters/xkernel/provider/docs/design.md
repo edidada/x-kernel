@@ -11,7 +11,10 @@ cleanup ordering.
 
 - MmioOp forwards mapping acquisitions and releases to memspace.
 - MmioClaimOp keeps a process-wide table of exclusive physical MMIO ranges.
-- DmaOp preserves the mainline kdma coherent and streaming adapter.
+- DmaOp preserves the mainline kdma coherent and streaming adapter, selects
+  the cacheable allocation path for `DmaCoherency::Manual`, and implements
+  `flush_cache`/`invalidate_cache` with `karch::dma_clean_range` /
+  `dma_invalidate_range`. `Host` keeps the non-cacheable coherent contract.
 - DeviceDma binds one resolved DmaInfo to kdma: coherent allocations must fit
   the window and mask over their full page-rounded span, and streaming
   mappings are translated with a guard that retains the native release token.

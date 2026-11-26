@@ -6,7 +6,7 @@ This analysis covers the entire crate: `src/lib.rs` (public unsafe API
 and address translation), `src/dma.rs` (`DmaAllocator`, mapping
 bookkeeping, `kiface_mm_api::DmaMappingIf`), and `src/bounce_pool.rs` (the TLSF-backed
 coherent pool). No modules are excluded; the private modules are reachable
-only through the four public unsafe entry points audited below.
+only through the six public unsafe entry points audited below.
 
 ## Trust Model
 
@@ -21,9 +21,12 @@ temporary grants are confined to the bounce pool.
 ## External Boundaries
 
 - **Device-visible memory**: bus addresses returned by
-  `allocate_dma_memory` (coherent regions) and `map_dma_buffer`
-  (bounce copies). Devices are allowed to DMA exactly those ranges;
-  the `# Safety` contracts put enforcement on callers.
+  `allocate_dma_memory` (coherent regions), `allocate_dma_memory_cacheable`
+  (cacheable regions) and `map_dma_buffer` (bounce copies). Devices are
+  allowed to DMA exactly those ranges; the `# Safety` contracts put
+  enforcement on callers. The cacheable form deliberately skips the
+  non-cacheable re-protection, so its caller also owns clean/invalidate
+  maintenance.
 - **The bounce pool**: a 1024-page coherent region sub-allocated by
   TLSF. Driver buffers are never directly device-visible on the mapping
   path, bounding the blast radius of a mis-programmed device to the
@@ -39,35 +42,44 @@ temporary grants are confined to the bounce pool.
 
 ### External Input Entries
 
-All raw-pointer inputs enter through exactly four public unsafe functions
+All external inputs enter through exactly six public unsafe functions
 in `src/lib.rs`; every parameter is kernel-caller supplied (there are no
 device callbacks, user pointers, or network/file inputs in this crate):
 
 | Entry | Pointer-bearing parameters | Source | Checked properties and failure results |
 |---|---|---|---|
 | `allocate_dma_memory(layout)` | none (size/align only) | driver, at probe/init | page allocation, flag update, platform `prepare` must succeed → `AllocError::NoMemory` |
-| `deallocate_dma_memory(dma, layout)` | `DmaInfo.cpu_addr: NonNull<u8>` | returned by a prior `allocate_dma_memory` | exact-once, layout must match; mismatched frees detected and skipped under `dma-trace` |
+| `allocate_dma_memory_cacheable(layout)` | none (size/align only) | driver sharing memory with userspace | page allocation and platform `prepare` must succeed → `AllocError::NoMemory`; caller owns cache maintenance |
+| `deallocate_dma_memory(dma, layout)` | `DmaInfo.cpu_addr: NonNull<u8>` | returned by a prior allocation | exact-once, layout must match; mismatched frees detected and skipped under `dma-trace` |
 | `map_dma_buffer(buffer, direction)` | `buffer: NonNull<[u8]>` | driver-owned kernel buffer (TX/RX staging) | non-zero length; bus address not already active → `AllocError::InvalidInput`; pool capacity → `AllocError::NoMemory` |
 | `unmap_dma_buffer(dma_addr, buffer, direction)` | `dma_addr: DmaBusAddress`, `buffer: NonNull<[u8]>` | must match a prior `map_dma_buffer` result | mapping must be active and length must match — panics otherwise |
+| `cancel_dma_mapping(dma_addr, len)` | none (bus address and length only) | must match a prior unpublished `map_dma_buffer` result | mapping must be active and length must match — panics otherwise; the device must never have received the address |
 
 A production call site exercising `allocate_dma_memory` /
-`deallocate_dma_memory` is the driver OS API provider adapter
-`drivers/adapters/xkernel/provider/src/dma.rs`
+`allocate_dma_memory_cacheable` / `deallocate_dma_memory` is the driver
+OS API provider adapter `drivers/adapters/xkernel/provider/src/dma.rs`
 (`alloc_coherent` / `free_coherent`), which drivers reach through the
-`driver_os_api` `DmaOp` contract (for example `CoherentMem`).
+`driver_os_api` `DmaOp` contract (for example `CoherentMem`). It selects
+the cacheable entry for `DmaCoherency::Manual` and the coherent default
+otherwise.
 
 Devices never pass pointers into this crate; they only read/write the
 ranges the drivers granted (see Threat T-02).
 
 ## Unsafe Code
 
-Concentrated in five public unsafe functions plus internal forwardings,
+Concentrated in six public unsafe functions plus internal forwardings,
 each with `# Safety` sections and `SAFETY:` comments:
 
 - `allocate_dma_memory(layout)` — hands out coherent, device-reachable
   memory. Caller obligations: deallocate exactly once with the same
   layout, never forge or offset the CPU address, expose the bus address
   only to devices permitted to DMA it.
+- `allocate_dma_memory_cacheable(layout)` — hands out cacheable,
+  device-reachable memory with the same ownership, CPU-address and
+  device-admission obligations, plus cache maintenance: clean before a
+  device reads and invalidate before the CPU reads device writes. The
+  callee performs no maintenance and cannot restrict device access.
 - `deallocate_dma_memory(dma, layout)` — matching release; the layout
   must match the allocation.
 - `map_dma_buffer(buffer, direction)` — stages the buffer through the

@@ -31,9 +31,11 @@ arch/karch    cache-maintenance instructions
 io/kdma       DMA memory capability: contiguous pages, bus address,
               cacheability, bounce mappings
       ▲
-io/dmabuf     this crate: the sharing object and its descriptor
-      ▲                                ▲
-io/drmdevice  (exports GEM buffers)    a heap exporter, when it lands
+io/dmabuf     this crate: the sharing object, its descriptor, and
+      ▲       the cacheable heap exporter (`heap` feature)
+      │
+      ├── io/drmdevice     (exports GEM buffers)
+      └── io/dmabuf::heap  (exports heap buffers)
 ```
 
 The split is by ownership domain, not by filename:
@@ -60,8 +62,10 @@ contract and driver crates must stay OS-neutral and must not implement
   address is attachment-independent; `begin/end_cpu_access` do nothing for a
   coherent buffer; `poll_state` reports a ready descriptor and `register_poll`
   arms nothing; `access_fence` has no fence to record; `sync_file_ioctl` answers
-  `OperationNotSupported`. A heap buffer therefore implements five methods and
-  is correct; a GPU buffer overrides the ones its hardware needs.
+  `OperationNotSupported`. A coherent heap buffer therefore implements five
+  methods and is correct; the cacheable heap exporter additionally overrides
+  `begin/end_cpu_access`, and a GPU buffer overrides the ones its hardware
+  needs.
 - **`DmaBufAttachment`** names the export and the importer. An exporter with
   per-importer state (an IOMMU window, an address-space mapping) overrides
   `attach`/`detach`/`map`; the default attachment is a capacity-free token that
@@ -109,6 +113,39 @@ The descriptor classifies the request and calls the object; it never touches a
 cache itself. An exporter that allocated coherent (uncached) memory leaves the
 defaults in place.
 
+## Heap exporter
+
+The `heap` feature adds the allocation half of the dma-buf ABI:
+
+```text
+open("/dev/dma_heap/system") → DMA_HEAP_IOCTL_ALLOC → dma-buf descriptor
+mmap()/lseek()/DMA_BUF_IOCTL_SYNC on that descriptor
+```
+
+`heap::alloc` allocates a physically contiguous, **cacheable** run through
+`kdma` and returns a `HeapBuffer` implementing `DmaBuf`. The descriptor,
+`mmap`, `lseek` and the ioctls are the same ones every other exporter uses;
+`devfs` owns the `/dev/dma_heap/{system,cma}` nodes and only selects the heap
+name.
+
+A request is rounded up to a whole page before it becomes the buffer's length,
+as `dma_heap_buffer_alloc` does. `lseek(SEEK_END)`, `mmap` and `SYNC` therefore
+speak about one length, and a sub-page request cannot expose a mapped tail that
+`SYNC` never reaches. The full page-rounded allocation is zeroed and cleaned to
+the Point of Coherency before the object is published, so userspace cannot
+observe a previous owner's data and a later invalidation cannot revive it.
+
+The fd's access mode comes from `fd_flags`: the descriptor is created with
+`new_file_with_mode`. `READ` is always advertised because the VFS requires it
+for any `mmap` of a regular file, and the access mode only gates `WRITE`, so an
+`O_RDONLY` heap fd cannot establish a `MAP_SHARED | PROT_WRITE` mapping while
+an `O_WRONLY` heap fd remains mappable. `O_CLOEXEC` is applied when the
+descriptor is installed.
+
+`system` and `cma` name the same allocator: the kernel has one pool of
+physically contiguous DMA memory, so a separate CMA policy would be a name
+without a difference. There is no per-heap flag; `heap_flags` must be zero.
+
 ## Importer entry point
 
 `lookup(file)` reads the descriptor's `kvfs::DMA_BUF_SLOT`, so an importer
@@ -120,15 +157,17 @@ lets `PRIME_FD_TO_HANDLE` import a buffer this card did not export.
 
 | Need | Where it goes |
 |------|---------------|
-| Heap allocation ABI (`/dev/dma_heap/*`) | `heap` module in this crate (feature), over `kdma` |
+| Heap allocation ABI (`/dev/dma_heap/*`) | the `heap` module (feature) over `kdma`; `devfs` owns the nodes |
 | A portable exporter/importer | the `DmaBuf` trait moves to `drivers/contracts/dmabuf`; the descriptor stays here |
 | A second fence producer | the fence layer moves to `sync/kfence`; `sync_file_ioctl` stops being a raw-command seam |
 | IOMMU / scatter-gather | `window` becomes attachment-scoped, or `map` grows a multi-run form |
 
 ## Non-responsibilities
 
-- No allocation: the exporter allocates (`kdma` for heap buffers, `kalloc` for
-  GEM), this crate only shares it.
+- The descriptor does no allocation: the exporter allocates (`kdma` for heap
+  buffers, `kalloc` for GEM), this crate only shares it. The optional `heap`
+  module is the one exporter that lives here, because it is the generic
+  allocation ABI rather than a device driver.
 - No fence framework: exporters that have reservations bring them.
 - No per-heap policy, no IOMMU management.
 - No `fstat`-based sizing decision: the descriptor sets the anonymous inode's
@@ -145,7 +184,8 @@ lets `PRIME_FD_TO_HANDLE` import a buffer this card did not export.
 | `struct dma_buf_attachment` | `DmaBufAttachment` |
 | `dma_buf_attach` / `detach` / `map_attachment` | `DmaBuf::{attach, detach, map}` |
 | `dma_buf_ops.begin_cpu_access` / `end_cpu_access` | `DmaBuf::{begin_cpu_access, end_cpu_access}` |
-| `dma_buf_getfile` | `new_file` |
+| `dma_buf_getfile` | `new_file`, `new_file_with_mode` |
+| `dma-heap.c`, `dma_heap_allocation_data` | `heap`, `uapi::DMA_HEAP_IOCTL_ALLOC` |
 | `dma_buf_get` | `lookup` |
 | `dma_buf_ioctl`, `dma_buf_llseek`, `dma_buf_mmap_internal`, `dma_buf_poll` | `src/ioctl.rs`, `src/file.rs` |
 | `DMA_BUF_IOCTL_*` | `uapi` (numbers pinned by assertions) |

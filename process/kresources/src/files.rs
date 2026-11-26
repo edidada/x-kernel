@@ -239,6 +239,39 @@ impl TaskFiles {
         descriptor.close(owner)
     }
 
+    /// Closes `fd` only while it still names `file`.
+    ///
+    /// This is the roll-back half of installing a descriptor before a later
+    /// step that may fail (for example a copy-out to userspace). A plain
+    /// [`Self::close_file`] by number would close an unrelated file if another
+    /// task sharing this table closed the slot and reused the number in
+    /// between; comparing the open file under the table lock makes the removal
+    /// atomic with that decision, and an unrelated descriptor is left alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::NoSuchProcess` after files detachment. Propagates the
+    /// removed descriptor's VFS close/flush error; the slot stays removed even
+    /// on that error.
+    pub fn close_file_if(&self, fd: c_int, file: &Arc<VfsFile>) -> kerrno::KResult {
+        let binding = self.fd_table.read();
+        let files = binding.as_ref().ok_or(KError::NoSuchProcess)?;
+        // Pin the POSIX identity through close, without extending binding ownership.
+        let _table = files.reference();
+        let (descriptor, owner) = {
+            let mut table = files.table().write();
+            let is_same = table
+                .get(fd as usize)
+                .is_some_and(|descriptor| Arc::ptr_eq(descriptor.file(), file));
+            if !is_same {
+                return Ok(());
+            }
+            (table.file_close_fd_locked(fd)?, table.lock_owner())
+        };
+        drop(binding);
+        descriptor.close(owner)
+    }
+
     /// Returns whether the given descriptor is marked close-on-exec.
     ///
     /// # Errors

@@ -80,6 +80,10 @@ Repeated exit is harmless. Fork and unsharing reject `None` with
   under the table lock together with its POSIX lock owner, then run descriptor close outside both table and owner
   locks. Single close returns its flush error; batch cleanup ignores each error
   and continues.
+- `close_file_if` removes a slot only while it still names the expected open
+  file, under the same table lock. It is the rollback path for a descriptor
+  installed before a later step that may fail; a plain close by number could
+  close an unrelated file after another task reused the number.
 - `unshare_fd_table` keeps a sole-owned table or clones a shared table while
   retaining the open-file `Arc`s. It swaps the owner under the outer write lock
   and drops the old owner after unlocking.

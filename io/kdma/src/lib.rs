@@ -134,6 +134,36 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
     DmaAllocator::alloc_coherent_pages(layout)
 }
 
+/// Allocates contiguous DMA memory whose CPU mapping stays **cacheable**.
+///
+/// Same pages and bus address as [`allocate_dma_memory`], minus the
+/// non-cacheable re-protection. Use this when the buffer has to be shared with
+/// userspace as ordinary memory — a dma-buf from the heap, for instance — and
+/// the caller performs cache maintenance explicitly.
+///
+/// # Errors
+///
+/// Same as [`allocate_dma_memory`].
+///
+/// # Safety
+///
+/// The caller must free the returned allocation exactly once with
+/// [`deallocate_dma_memory`] using the same `layout`, must clean the buffer
+/// before any device reads it and invalidate it before reading what a device
+/// wrote, and must only expose the bus address to devices allowed to DMA it.
+#[track_caller]
+pub unsafe fn allocate_dma_memory_cacheable(layout: Layout) -> AllocResult<DmaInfo> {
+    // SAFETY: the safe-typed `Layout` establishes size and alignment validity.
+    // The remaining preconditions are this unsafe function's own contract and
+    // are established by its caller: release the returned allocation exactly
+    // once with this same layout, clean before a device reads and invalidate
+    // before the CPU reads device writes, and expose the bus address only to
+    // devices permitted to DMA that range. The callee allocates the pages and
+    // leaves their Normal mapping in place; it performs no cache maintenance
+    // and cannot restrict which devices receive the address.
+    unsafe { DmaAllocator::alloc_dma_pages_cacheable(layout) }
+}
+
 /// Frees coherent memory previously allocated.
 ///
 /// This function releases the memory block that was previously allocated and

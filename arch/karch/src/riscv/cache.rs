@@ -54,3 +54,19 @@ pub fn flush_icache_range(_start: VirtAddr, _size: usize) {
 /// executes `dbar 0`.
 #[inline]
 pub fn dma_read_barrier() {}
+
+/// Cleans `[start, start + size)` so a non-coherent device observes this CPU's
+/// writes.
+///
+/// The RISC-V platforms in this configuration are cache-coherent for
+/// device DMA, so there is nothing to clean. The explicit no-op keeps
+/// device-buffer call sites portable, exactly like [`dma_read_barrier`].
+#[inline]
+pub fn dma_clean_range(_start: VirtAddr, _size: usize) {}
+
+/// Invalidates `[start, start + size)` so the CPU observes a non-coherent
+/// device's writes.
+///
+/// Same reasoning as [`dma_clean_range`].
+#[inline]
+pub fn dma_invalidate_range(_start: VirtAddr, _size: usize) {}

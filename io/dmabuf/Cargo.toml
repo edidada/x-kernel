@@ -11,10 +11,17 @@ documentation.workspace = true
 keywords = ["x-kernel", "dma", "buffer", "uapi"]
 categories.workspace = true
 
+[features]
+# The `/dev/dma_heap/*` exporter over `kdma`: a cacheable buffer whose
+# coherence the CPU maintains explicitly through DMA_BUF_IOCTL_SYNC.
+heap = ["dep:karch", "dep:kdma"]
+
 [dependencies]
 anon_inodefs.workspace = true
 bytemuck.workspace = true
+karch = { workspace = true, optional = true }
 kcred.workspace = true
+kdma = { workspace = true, optional = true }
 kerrno.workspace = true
 kpoll.workspace = true
 kvfs.workspace = true

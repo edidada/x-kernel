@@ -18,6 +18,8 @@ pub(crate) fn builder(fs: Arc<SimpleFs>, console: Arc<ktty::tty::NTtyDriver>) ->
     nodes::rtc::add_root_entries(&mut root, fs.clone());
     nodes::fb::add_root_entries(&mut root, fs.clone());
     nodes::dri::add_root_entries(&mut root, fs.clone());
+    #[cfg(feature = "dma-heap")]
+    nodes::dma_heap::add_root_entries(&mut root, fs.clone());
     nodes::tty_nodes::add_root_entries(&mut root, fs.clone(), console);
     nodes::r#loop::init_devices();
     nodes::shm::add_root_entries(&mut root, fs.clone());

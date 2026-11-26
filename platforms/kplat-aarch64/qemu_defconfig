@@ -14,6 +14,8 @@ KERNEL_STACK_SIZE=0x40000
 # KFEAT_ALLOC_BUDDY is not set
 # KFEAT_ALLOC_TLSF is not set
 # KFEAT_DICE is not set
+# dma-buf heap: the NPU runtime's buffer source, exercised by dmatest.
+KFEAT_DMA_HEAP=y
 # Weston graphics requires the virtio GPU and input drivers.
 KFEAT_DRIVER_VIRTIO_GPU=y
 KFEAT_DRIVER_VIRTIO_INPUT=y

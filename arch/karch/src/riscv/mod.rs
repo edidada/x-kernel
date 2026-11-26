@@ -12,8 +12,8 @@ mod tlb;
 mod trap;
 
 pub use cache::{
-    dma_read_barrier, flush_icache_all, flush_icache_all_local, flush_icache_range,
-    flush_icache_remote,
+    dma_clean_range, dma_invalidate_range, dma_read_barrier, flush_icache_all,
+    flush_icache_all_local, flush_icache_range, flush_icache_remote,
 };
 pub use cpu::{idle_wait, stop_cpu};
 #[expect(

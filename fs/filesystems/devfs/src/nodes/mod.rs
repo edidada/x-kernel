@@ -5,6 +5,8 @@
 //! devfs device node definitions.
 
 pub(crate) mod cpu_dma_latency;
+#[cfg(feature = "dma-heap")]
+pub(crate) mod dma_heap;
 pub(crate) mod dri;
 pub(crate) mod dtb;
 pub(crate) mod fb;

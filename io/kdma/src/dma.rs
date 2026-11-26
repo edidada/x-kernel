@@ -25,6 +25,21 @@ static_lock! {
     pub(crate) static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocator::new());
 }
 
+/// Whether a newly allocated DMA buffer gets a non-cacheable CPU mapping.
+///
+/// The device side is identical either way — the bus address is the same
+/// physical range. Only the CPU's view differs, and with it who owns cache
+/// maintenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CachePolicy {
+    /// Re-protect the pages `UNCACHED | SHARED`, so the CPU and a
+    /// non-snooping device agree without any explicit maintenance.
+    NonCacheable,
+    /// Keep the linear map's Normal cacheable attributes. Requires the caller
+    /// to clean before the device reads and invalidate before the CPU reads.
+    Cacheable,
+}
+
 pub(crate) struct DmaAllocator {
     /// Detached kernel invalidations produced by mode changes while this
     /// allocator was locked. The public wrappers drain them after unlocking.
@@ -89,6 +104,34 @@ impl DmaAllocator {
     /// platform preparation succeed. No allocator lock spans the shootdown.
     #[track_caller]
     pub(crate) fn alloc_coherent_pages(layout: Layout) -> AllocResult<DmaInfo> {
+        Self::alloc_dma_pages(layout, CachePolicy::NonCacheable)
+    }
+
+    /// Allocate the same contiguous pages as [`Self::alloc_coherent_pages`],
+    /// but leave their CPU mapping cacheable.
+    ///
+    /// The buffer keeps the linear map's Normal attributes instead of being
+    /// re-protected as uncached, so it can be shared with userspace as
+    /// ordinary memory (a dma-buf handed out by the heap). Nothing about the
+    /// device side changes: the bus address is the same physical range.
+    ///
+    /// The caller takes on cache maintenance — see `DmaOp::flush_cache` /
+    /// `DmaOp::invalidate_cache`. A device that is *not* cache-coherent will
+    /// silently read stale data if that maintenance is skipped.
+    ///
+    /// # Safety
+    ///
+    /// The caller must free the returned allocation exactly once with the same
+    /// `layout`, must clean the buffer before any device reads it and
+    /// invalidate it before reading what a device wrote, and must only expose
+    /// the bus address to devices allowed to DMA that range.
+    #[track_caller]
+    pub(crate) unsafe fn alloc_dma_pages_cacheable(layout: Layout) -> AllocResult<DmaInfo> {
+        Self::alloc_dma_pages(layout, CachePolicy::Cacheable)
+    }
+
+    #[track_caller]
+    fn alloc_dma_pages(layout: Layout, policy: CachePolicy) -> AllocResult<DmaInfo> {
         let num_pages = layout_pages(&layout);
         let vaddr_raw = global_allocator().alloc_dma_pages(
             num_pages,
@@ -96,12 +139,14 @@ impl DmaAllocator {
             UsageKind::Dma,
         )?;
         let vaddr = va!(vaddr_raw);
-        let mapping = Self::update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent);
-        if let Err(error) = confirm_mapping(mapping) {
-            // The platform has not seen these pages. Attempt a normal-mode
-            // restore; a second failure leaves them out of circulation.
-            Self::restore_and_release(vaddr_raw, num_pages);
-            return Err(error);
+        if policy == CachePolicy::NonCacheable {
+            let mapping = Self::update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent);
+            if let Err(error) = confirm_mapping(mapping) {
+                // The platform has not seen these pages. Attempt a normal-mode
+                // restore; a second failure leaves them out of circulation.
+                Self::restore_and_release(vaddr_raw, num_pages);
+                return Err(error);
+            }
         }
         let mut allocator = ALLOCATOR.lock();
         allocator.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;

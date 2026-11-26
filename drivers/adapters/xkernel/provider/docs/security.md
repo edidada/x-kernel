@@ -8,6 +8,44 @@ global provider or stop hardware. The caller must stop device DMA and interrupt
 generation before resource cleanup and obey the original allocation/token
 pairing contracts.
 
+## DMA allocation
+
+`alloc_coherent` selects the host's cacheable allocation path when the caller
+asked for `DmaCoherency::Manual`. Those pages stay cacheable and are shared
+with userspace; the provider performs no cache maintenance. A caller that
+skips `flush_cache` before a device reads, or `invalidate_cache` before
+reading device writes, observes stale data — a correctness failure, not a
+crash. `Host` remains the default and keeps the non-cacheable mapping
+contract. Both allocation paths share one deallocation, which restores the
+Normal mapping and is a no-op for the cacheable one.
+
+### Unsafe allocation boundary
+
+`alloc_coherent` makes one unsafe call per `DmaCoherency` arm into `kdma`
+(`allocate_dma_memory`, or `allocate_dma_memory_cacheable` for `Manual`). The
+preconditions and the code or contract that establishes each are:
+
+- **Valid layout**: `layout` is built by
+  `Layout::from_size_align(spec.len, spec.align)` in the same function and
+  rejected with `InvalidResource` on failure, so the allocator receives a
+  valid, non-zero layout;
+- **Exclusive ownership**: the returned pages are owned exclusively by the
+  `CoherentMem` handle that receives the `DmaAllocation`;
+  `free_coherent` reconstructs the same layout from `alloc.spec` and calls
+  `deallocate_dma_memory` exactly once when that handle drops;
+- **Manual cache maintenance**: `DmaCoherency::Manual` assigns the
+  requesting driver responsibility for `flush_cache` before any device
+  reads and `invalidate_cache` before reading device writes. The provider
+  performs no maintenance; `Host` allocations stay non-cacheable and keep
+  the coherent contract;
+- **Bus-address exposure**: the address leaves this provider only inside the
+  `DmaAllocation` returned to the requesting driver. That driver is trusted
+  kernel code and owns device admission, so the address never reaches an
+  unprivileged caller through this API.
+
+The same requirements are restated in `allocate_dma_memory_cacheable`'s
+rustdoc; this section records them for the provider's unsafe boundary.
+
 ## IRQ teardown
 
 IRQ resources must refer to descriptors prepared by mapping, MSI-X allocation

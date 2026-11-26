@@ -1,0 +1,21 @@
+[package]
+name = "dmatest"
+description = "dma-buf / dma-heap acceptance test"
+enabled = true
+order = 50
+
+[prepare]
+env = [
+  "CC=aarch64-linux-musl-gcc",
+]
+commands = [
+  "aarch64-linux-musl-gcc -static -O2 -Wall -Wextra -o dmatest dmatest.c",
+]
+
+# The Debian rootfs uses a merged-usr layout — `/bin` is a symlink to
+# `/usr/bin`, and the installer writes through the real directory. Installing
+# here still gives `/bin/dmatest`, which is how it is invoked.
+[[install]]
+src = "dmatest"
+dest = "/usr/bin/dmatest"
+mode = "0755"

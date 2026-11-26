@@ -1856,10 +1856,15 @@ struct RecordingMmapMapper {
     offset_bytes: usize,
     range: Option<PhysAddrRange>,
     requested_length: Option<usize>,
+    keep_alive: Option<Arc<dyn core::any::Any + Send + Sync>>,
 }
 
-impl MmapMapper for RecordingMmapMapper {
-    fn map_physical(&mut self, range: PhysAddrRange) -> VfsResult<()> {
+impl RecordingMmapMapper {
+    fn record(
+        &mut self,
+        range: PhysAddrRange,
+        keep_alive: Option<Arc<dyn core::any::Any + Send + Sync>>,
+    ) -> VfsResult<()> {
         if self
             .requested_length
             .is_some_and(|length| range.size() < length)
@@ -1867,7 +1872,22 @@ impl MmapMapper for RecordingMmapMapper {
             return Err(VfsError::InvalidInput);
         }
         self.range = Some(range);
+        self.keep_alive = keep_alive;
         Ok(())
+    }
+}
+
+impl MmapMapper for RecordingMmapMapper {
+    fn map_physical(&mut self, range: PhysAddrRange) -> VfsResult<()> {
+        self.record(range, None)
+    }
+
+    fn map_physical_owned(
+        &mut self,
+        range: PhysAddrRange,
+        owner: Arc<dyn core::any::Any + Send + Sync>,
+    ) -> VfsResult<()> {
+        self.record(range, Some(owner))
     }
 
     fn map_file_backed(&mut self) -> VfsResult<()> {
@@ -1901,26 +1921,31 @@ fn drm_mmap_retains_exact_backing_after_handle_and_object_destruction() {
         offset_bytes: offset_bytes as usize,
         range: None,
         requested_length: None,
+        keep_alive: None,
     };
     state.handles.lock().insert(handle, object.clone());
     minor.mmap(&file, &mut mapper).unwrap();
     assert_eq!(mapper.range.unwrap().size(), 3 * PAGE_SIZE_4K);
 
-    // The mapping, not the handle, is what the card keeps: the retention table
-    // names the mapped object by the mapping's offset.
-    let retained = dev
-        .retained_mapping(offset_bytes)
-        .expect("mmap must retain the object");
+    // The mapping, not the handle, is what keeps the object: the VMA owns one
+    // reference to the mapped GEM object.
+    let retained = mapper
+        .keep_alive
+        .as_ref()
+        .expect("mmap must retain the object")
+        .clone()
+        .downcast::<GemObject>()
+        .expect("the keep-alive is the mapped GEM object");
     assert!(Arc::ptr_eq(&retained, &object));
     drop(retained);
     assert_eq!(backend.destroyed(), 0);
 
     // The handle and the test's own reference go away. Whatever else still
-    // names the object, the mapping's retention must keep the pages alive.
+    // names the object, the mapping's keep-alive must keep the pages alive.
     drop(state.take_handle(handle).unwrap());
     drop(object);
     assert!(
-        dev.retained_mapping(offset_bytes).is_some(),
+        mapper.keep_alive.is_some(),
         "the mapping keeps the object after every other owner is gone"
     );
     let retained = backing.upgrade().expect("mmap must retain GEM backing");
@@ -1931,6 +1956,7 @@ fn drm_mmap_retains_exact_backing_after_handle_and_object_destruction() {
     drop(minor);
     drop(file);
     drop(state);
+    drop(mapper);
     drop(dev);
     assert!(backing.upgrade().is_none());
     assert_eq!(
@@ -1954,6 +1980,7 @@ fn oversized_drm_mmap_does_not_retain_gem_backing() {
         range: None,
         // The GEM object backs three pages; ask the mapper for four.
         requested_length: Some(4 * PAGE_SIZE_4K),
+        keep_alive: None,
     };
     state.handles.lock().insert(handle, object.clone());
     assert!(matches!(
@@ -1961,6 +1988,7 @@ fn oversized_drm_mmap_does_not_retain_gem_backing() {
         Err(VfsError::InvalidInput)
     ));
     assert!(mapper.range.is_none());
+    assert!(mapper.keep_alive.is_none());
 
     drop(state.take_handle(handle).unwrap());
     drop(object);

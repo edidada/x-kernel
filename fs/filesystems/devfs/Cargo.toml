@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
+dma-heap = ["dep:dmabuf", "dmabuf/heap"]
 input = ["kclass/input", "dep:inputdev"]
 serial = ["kclass/char", "dep:console_driver"]
 memtrack = ["kalloc/tracking", "dep:gimli"]
@@ -18,6 +19,7 @@ dice = ["dep:dice_driver", "dep:tee_crypto"]
 vmm = ["dep:kvmm-api"]
 
 [dependencies]
+dmabuf = { workspace = true, optional = true }
 kalloc-types.workspace = true
 memaddr.workspace = true
 pagecache.workspace = true

@@ -64,3 +64,20 @@ pub fn dma_read_barrier() {
     // memory accesses; it has no addressing or privilege side-effects.
     unsafe { asm!("dbar 0") };
 }
+
+/// Cleans `[start, start + size)` so a non-coherent device observes this CPU's
+/// writes.
+///
+/// The LoongArch64 platforms in this configuration are cache-coherent for
+/// device DMA — only store ordering needed attention, which is what
+/// [`dma_read_barrier`] provides. The explicit no-op keeps device-buffer
+/// call sites portable.
+#[inline]
+pub fn dma_clean_range(_start: VirtAddr, _size: usize) {}
+
+/// Invalidates `[start, start + size)` so the CPU observes a non-coherent
+/// device's writes.
+///
+/// Same reasoning as [`dma_clean_range`].
+#[inline]
+pub fn dma_invalidate_range(_start: VirtAddr, _size: usize) {}

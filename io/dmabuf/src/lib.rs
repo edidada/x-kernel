@@ -79,8 +79,9 @@
 //!
 //! # Extension points
 //!
-//! * `heap` (follow-up): a cacheable exporter over `kdma`, plus the
-//!   `/dev/dma_heap` allocation ABI.
+//! * [`heap`] (feature `heap`): the cacheable exporter over `kdma` and the
+//!   `/dev/dma_heap` allocation ABI. `devfs` owns the device nodes; this
+//!   module owns the buffer object and the ioctl numbers.
 //! * Fences: exporters that keep a reservation implement
 //!   [`DmaBuf::poll_state`], [`DmaBuf::register_poll`] and
 //!   [`DmaBuf::sync_file_ioctl`]. Exporters without fences inherit correct
@@ -99,11 +100,13 @@
 extern crate alloc;
 
 mod file;
+#[cfg(feature = "heap")]
+pub mod heap;
 mod ioctl;
 mod object;
 pub mod uapi;
 
-pub use file::{lookup, new_file};
+pub use file::{lookup, new_file, new_file_with_mode};
 pub use object::{
     CpuAccess, DmaBuf, DmaBufAttachment, ExportId, FenceRef, ImporterId, MappedWindow, SharedDmaBuf,
 };

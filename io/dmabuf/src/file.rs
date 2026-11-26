@@ -39,15 +39,37 @@ impl DmaBufDescriptor {
     }
 }
 
-/// Creates the descriptor one export is shared through.
+/// Creates the descriptor one export is shared through with read-write access.
 ///
 /// The caller installs the returned file in a descriptor table; this crate
-/// does not know which process that is.
+/// does not know which process that is. Exporters that hand out an fd with a
+/// caller-chosen access mode (`/dev/dma_heap/*`'s `fd_flags`) use
+/// [`new_file_with_mode`].
 ///
 /// # Errors
 ///
 /// Forwards anonymous-inode file creation failures.
 pub fn new_file(object: SharedDmaBuf, cred: Arc<Cred>) -> VfsResult<Arc<VfsFile>> {
+    new_file_with_mode(object, cred, OpenFlags::READ_WRITE)
+}
+
+/// Creates the descriptor with the access mode `open_flags` names.
+///
+/// `READ` and `LSEEK` are always present: the VFS requires read access for any
+/// `mmap` of a regular file, and a client sizes the buffer with
+/// `lseek(SEEK_END)`. The caller's access mode then decides `WRITE`, so an
+/// `O_RDONLY` dma-buf descriptor cannot establish a
+/// `MAP_SHARED | PROT_WRITE` mapping, while an `O_WRONLY` descriptor remains
+/// mappable instead of failing every `mmap` for lack of `READ`.
+///
+/// # Errors
+///
+/// Forwards anonymous-inode file creation failures.
+pub fn new_file_with_mode(
+    object: SharedDmaBuf,
+    cred: Arc<Cred>,
+    open_flags: OpenFlags,
+) -> VfsResult<Arc<VfsFile>> {
     let descriptor = DmaBufDescriptor::new(object);
     let file = AnonInodeFs::global().get_file(
         descriptor.object.exporter_name(),
@@ -57,8 +79,11 @@ pub fn new_file(object: SharedDmaBuf, cred: Arc<Cred>) -> VfsResult<Arc<VfsFile>
         // client sizes a buffer with `lseek(SEEK_END)` before mapping it, and
         // `VfsFile::llseek` refuses the syscall with ESPIPE when the open mode
         // lacks the flag, before this file's `llseek` op is ever reached.
-        FMode::READ | FMode::WRITE | FMode::LSEEK,
-        OpenFlags::READ_WRITE,
+        // `READ` is unconditional because `validate_file_mapping_access`
+        // requires it for every file mapping, including a write-only one; the
+        // access mode only gates `WRITE` below.
+        FMode::READ | FMode::from_open_flags(open_flags) | FMode::LSEEK,
+        open_flags,
         cred,
     )?;
     // `dma_buf_getfile` sets `inode->i_size`, so `stat` and `SEEK_END` agree.

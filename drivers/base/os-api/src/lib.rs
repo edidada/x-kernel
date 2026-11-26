@@ -32,8 +32,8 @@ pub type ReleaseHook = Arc<dyn Fn() + Send + Sync>;
 
 pub use claim::{MmioClaim, MmioClaimOp, MmioClaimToken};
 pub use dma::{
-    CoherentArray, CoherentBox, CoherentMem, DeviceDma, DmaAllocation, DmaDirection, DmaInfo,
-    DmaMapping, DmaOp, DmaSpec, DmaWindow, StreamingMapping,
+    CoherentArray, CoherentBox, CoherentMem, DeviceDma, DmaAllocation, DmaCoherency, DmaDirection,
+    DmaInfo, DmaMapping, DmaOp, DmaSpec, DmaWindow, StreamingMapping,
 };
 pub use error::{ResError, ResResult};
 pub use irq::{

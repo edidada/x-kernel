@@ -135,6 +135,10 @@ input = ["dep:inputdev", "kruntime/input", "devfs/input"]
 # Character device class infrastructure.
 char = ["kruntime/char", "devfs/serial"]
 
+# DMA buffer sharing (/dev/dma_heap); the NPU driver's runtime allocates
+# through it.
+dma_heap = ["devfs/dma-heap"]
+
 # Real Time Clock (RTC) Driver.
 rtc = ["kruntime/rtc"]
 

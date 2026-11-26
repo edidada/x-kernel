@@ -140,6 +140,11 @@ validated private range with `copy_nonoverlapping` under MM/COW exclusion.
   the page table and requires sleepable context outside spinlocks, after CPUs
   stop using that root. Cloning cannot resurrect active users of a torn-down MM.
   An exiting thread's pin does not authorize further access to user memory.
+- A linear mapping of backing memory owned elsewhere (a dma-buf or GEM object)
+  must pass its owner through `MmapMapper::map_physical_owned`. The VMA owns
+  that `Arc`, so every teardown path — munmap, execve, exit and each per-fork
+  clone — releases exactly one reference, keeping the backing alive for every
+  remaining mapping.
 
 ## Thread Safety
 

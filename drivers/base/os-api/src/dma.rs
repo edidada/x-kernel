@@ -235,21 +235,54 @@ pub struct DmaSpec {
     pub align: usize,
     /// Transfer direction, used by streaming mappings and cache sync.
     pub direction: DmaDirection,
+    /// Who is responsible for CPU/device coherence.
+    pub coherency: DmaCoherency,
+}
+
+/// How CPU/device coherence for an allocation is achieved.
+///
+/// The device-visible range is the same either way; what differs is the CPU
+/// mapping the host installs, and with it who owns cache maintenance.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DmaCoherency {
+    /// The host guarantees coherence: it installs a non-cacheable CPU mapping
+    /// (or the bus snoops). Neither side performs explicit maintenance.
+    ///
+    /// This is `dma_alloc_coherent` semantics, and the default.
+    #[default]
+    Host,
+    /// The caller guarantees coherence. The host keeps ordinary cacheable
+    /// pages, so the buffer can be shared with userspace as normal memory — a
+    /// dma-buf from the heap, for instance.
+    ///
+    /// The caller must then clean the range
+    /// ([`DmaOp::flush_cache`]) before a device reads it, and invalidate it
+    /// ([`DmaOp::invalidate_cache`]) before reading what a device wrote. A
+    /// non-coherent device silently reads stale data if the clean is skipped.
+    Manual,
 }
 
 impl DmaSpec {
-    /// Construct a spec with [`DmaDirection::Bidirectional`] (legacy default).
+    /// Construct a spec with [`DmaDirection::Bidirectional`] (legacy default)
+    /// and [`DmaCoherency::Host`].
     pub const fn new(len: usize, align: usize) -> Self {
         Self {
             len,
             align,
             direction: DmaDirection::Bidirectional,
+            coherency: DmaCoherency::Host,
         }
     }
 
     /// Builder: override the transfer direction.
     pub const fn with_direction(mut self, d: DmaDirection) -> Self {
         self.direction = d;
+        self
+    }
+
+    /// Builder: override who owns cache maintenance.
+    pub const fn with_coherency(mut self, c: DmaCoherency) -> Self {
+        self.coherency = c;
         self
     }
 }

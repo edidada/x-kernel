@@ -16,11 +16,11 @@ use core::{
 
 use kcred::initial_cred;
 use kpoll::IoEvents;
-use kvfs::{MmapMapper, VfsError};
+use kvfs::{FMode, MmapMapper, OpenFlags, VfsError};
 use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange};
 use unittest::{assert, assert_eq, def_test};
 
-use super::{DmaBufDescriptor, lookup, new_file};
+use super::{DmaBufDescriptor, lookup, new_file, new_file_with_mode};
 use crate::{
     object::{DmaBuf, ExportId, MappedWindow},
     uapi::DMA_BUF_IOCTL_EXPORT_SYNC_FILE,
@@ -236,4 +236,30 @@ fn mapping_longer_than_the_remaining_window_is_refused() {
         Err(VfsError::InvalidInput)
     ));
     assert!(oversized.range.is_none());
+}
+/// `READ` is always advertised because the VFS requires it for any `mmap` of
+/// a regular file; the access mode still decides `WRITE`, so the shared-mapping
+/// write check cannot be bypassed with `O_RDONLY`.
+#[def_test]
+fn descriptor_mode_follows_the_requested_access_mode() {
+    let cases = [
+        (OpenFlags::empty(), FMode::READ),
+        (OpenFlags::WRITE_ONLY, FMode::READ | FMode::WRITE),
+        (OpenFlags::READ_WRITE, FMode::READ | FMode::WRITE),
+    ];
+    for (open_flags, expected) in cases {
+        let object = StubBuf::new(PAGE_SIZE_4K);
+        let file = new_file_with_mode(object, initial_cred(), open_flags)
+            .expect("a descriptor must be created");
+        let mode = file.mode();
+        assert_eq!(mode.contains(FMode::READ), expected.contains(FMode::READ));
+        assert_eq!(mode.contains(FMode::WRITE), expected.contains(FMode::WRITE));
+        assert!(
+            mode.contains(FMode::LSEEK),
+            "a dma-buf descriptor must allow seeking"
+        );
+    }
+    let plain = StubBuf::new(PAGE_SIZE_4K);
+    let file = new_file(plain, initial_cred()).expect("a descriptor must be created");
+    assert!(file.mode().contains(FMode::READ | FMode::WRITE));
 }

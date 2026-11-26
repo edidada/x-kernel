@@ -930,9 +930,11 @@ impl FileOperations for KvmVcpuFops {
             return Err(VfsError::InvalidInput);
         }
         let vcpu = KvmVcpuFile::from_file(file)?;
-        mapper.map_physical(PhysAddrRange::from_start_size(
-            vcpu.run_page.phys_addr(),
-            KVM_RUN_MMAP_SIZE,
-        ))
+        // The run page is owned by the vCPU, which the open file owns. The
+        // mapping must keep it alive after the descriptor is closed, so the
+        // VMA takes one reference to the same vCPU.
+        let range = PhysAddrRange::from_start_size(vcpu.run_page.phys_addr(), KVM_RUN_MMAP_SIZE);
+        let keep_alive: Arc<dyn core::any::Any + Send + Sync> = vcpu;
+        mapper.map_physical_owned(range, keep_alive)
     }
 }

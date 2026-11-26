@@ -297,6 +297,8 @@ impl DeviceFileOps for FrameBuffer {
             .filter(|size| *size > 0)
             .ok_or(VfsError::InvalidInput)?;
         let start = paddr.add_checked(offset).ok_or(VfsError::InvalidInput)?;
+        // The framebuffer's memory is claimed at boot and outlives every
+        // mapping of it, so there is nothing to keep alive.
         mapper.map_physical(PhysAddrRange::from_start_size(start, size))
     }
 

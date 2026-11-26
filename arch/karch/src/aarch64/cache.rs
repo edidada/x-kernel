@@ -83,8 +83,9 @@ pub fn flush_icache_range(start: VirtAddr, size: usize) {
 #[inline]
 pub fn clean_dcache_line_to_poc(vaddr: VirtAddr) {
     let line_vaddr = vaddr.as_usize() & !(CACHE_LINE - 1);
-    // SAFETY: `dc cvac` cleans the cache line containing `line_vaddr` to the
-    // Point of Coherency. The address is aligned to a cache-line boundary, and
+    // SAFETY: the caller passes `vaddr` from a live, mapped kernel range
+    // (boot/firmware state it owns). Aligning down to a cache-line boundary
+    // stays in the same mapped page, so `dc cvac` addresses a mapped VA.
     // `dsb sy` waits for completion before the caller releases another
     // observer, such as a secondary CPU running with the MMU off.
     unsafe { asm!("dc cvac, {0:x}; dsb sy", in(reg) line_vaddr) };
@@ -97,12 +98,48 @@ pub fn clean_dcache_range_to_poc(start: VirtAddr, size: usize) {
     let addr = start.as_usize() & !(CACHE_LINE - 1);
     let end = (start.as_usize() + size + CACHE_LINE - 1) & !(CACHE_LINE - 1);
     for va in (addr..end).step_by(CACHE_LINE) {
-        // SAFETY: `dc cvac` is issued for each cache line covering the
-        // requested range so MMU-off or non-coherent readers observe the
-        // current CPU's writes from PoC.
+        // SAFETY: the caller passes a live, mapped kernel range (for example
+        // the buffer owned by `DmaBuf::sync`, whose range is clamped to the
+        // allocation, or by a `DmaOp::flush_cache` caller). Cache-line
+        // rounding only extends into the same mapped pages, so every `va`
+        // here is mapped and `dc cvac` cannot fault. It makes MMU-off or
+        // non-coherent readers observe this CPU's writes from PoC.
         unsafe { asm!("dc cvac, {0:x}", in(reg) va) };
     }
     // SAFETY: `dsb sy` waits until all preceding clean operations reach PoC.
+    unsafe { asm!("dsb sy") };
+}
+
+/// Invalidates every data cache line covering `[start, start + size)` to the
+/// Point of Coherency.
+///
+/// The counterpart of [`clean_dcache_range_to_poc`], for the other DMA
+/// direction: discards this CPU's copy so a later read observes what a
+/// non-coherent device wrote.
+///
+/// # Caller contract
+///
+/// `dc ivac` drops dirty lines *without* writing them back. Invalidating a
+/// range this CPU has written since its last clean silently loses those
+/// writes, so a bidirectional buffer must be cleaned before it is
+/// invalidated. Ranges that the device is known not to have written are
+/// better cleaned alone.
+#[inline]
+pub fn invalidate_dcache_range_to_poc(start: VirtAddr, size: usize) {
+    let addr = start.as_usize() & !(CACHE_LINE - 1);
+    let end = (start.as_usize() + size + CACHE_LINE - 1) & !(CACHE_LINE - 1);
+    for va in (addr..end).step_by(CACHE_LINE) {
+        // SAFETY: the caller passes a live, mapped kernel range (for example
+        // the buffer owned by `DmaBuf::sync`, whose range is clamped to the
+        // allocation, or by a `DmaOp::invalidate_cache` caller). Cache-line
+        // rounding only extends into the same mapped pages, so every `va`
+        // here is mapped and `dc ivac` cannot fault. It discards this CPU's
+        // copy so the next read misses to PoC; the dirty-line hazard is the
+        // caller contract documented above.
+        unsafe { asm!("dc ivac, {0:x}", in(reg) va) };
+    }
+    // SAFETY: `dsb sy` waits until all preceding invalidations have completed
+    // before the caller reads the range.
     unsafe { asm!("dsb sy") };
 }
 
@@ -112,5 +149,33 @@ pub fn clean_dcache_range_to_poc(start: VirtAddr, size: usize) {
 /// DMA, so no barrier is required. The explicit no-op keeps driver call sites
 /// portable across architectures — the LoongArch64 implementation executes
 /// `dbar 0`.
+///
+/// This says nothing about a *non-coherent* master such as the RK3588 NPU:
+/// there the ordering guarantee comes from the clean in
+/// [`dma_clean_range`] and its trailing `dsb sy`.
 #[inline]
 pub fn dma_read_barrier() {}
+
+/// Cleans `[start, start + size)` so a non-coherent device observes this CPU's
+/// writes.
+///
+/// The architecture-neutral spelling of [`clean_dcache_range_to_poc`], for
+/// callers that only care about the DMA direction — device-buffer code, which
+/// should not have to know whether the host maintains caches at all. On a
+/// coherent architecture this is a no-op, exactly like [`dma_read_barrier`].
+#[inline]
+pub fn dma_clean_range(start: VirtAddr, size: usize) {
+    clean_dcache_range_to_poc(start, size);
+}
+
+/// Invalidates `[start, start + size)` so the CPU observes a non-coherent
+/// device's writes.
+///
+/// The counterpart of [`dma_clean_range`], and inherits its architecture
+/// neutrality. The dirty-line hazard documented on
+/// [`invalidate_dcache_range_to_poc`] applies unchanged: clean before
+/// invalidating a range this CPU has written.
+#[inline]
+pub fn dma_invalidate_range(start: VirtAddr, size: usize) {
+    invalidate_dcache_range_to_poc(start, size);
+}

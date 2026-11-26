@@ -10,10 +10,11 @@ before that buffer is released; no boxed-slice conversion is needed.
 devices can read and write, maps existing CPU buffers into temporary DMA
 transactions through a pooled coherent bounce area, and defines the bus
 address type and physical↔bus conversion shared by all DMA-capable
-drivers. It exposes two flat unsafe entry pairs —
-`allocate_dma_memory`/`deallocate_dma_memory` and
-`map_dma_buffer`/`unmap_dma_buffer` and consumes the MM-owned `kiface_mm_api::DmaMappingIf` capability for mapping
-attribute transitions.
+drivers. It exposes flat unsafe entry points —
+`allocate_dma_memory`/`allocate_dma_memory_cacheable`/`deallocate_dma_memory`
+and `map_dma_buffer`/`unmap_dma_buffer`/`cancel_dma_mapping` — and consumes
+the MM-owned `kiface_mm_api::DmaMappingIf` capability for mapping attribute
+transitions.
 
 ## Responsibilities
 
@@ -23,6 +24,13 @@ attribute transitions.
   `kiface_mm_api::DmaMappingIf::set_mode`, and registers the range with the platform
   (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
   steps.
+- Cacheable allocation: `allocate_dma_memory_cacheable(layout)` allocates the
+  same pages and bus address but leaves the linear map's Normal attributes in
+  place, so the buffer can be shared with userspace as ordinary memory (a
+  dma-buf from the heap). The caller then owns cache maintenance: clean before
+  a device reads, invalidate before the CPU reads what a device wrote. The
+  shared deallocation path restores Normal mode, which is a no-op for this
+  path.
 - Temporary mappings: `map_dma_buffer(buffer, direction)` stages the
   buffer through the coherent bounce pool (copy-in for every direction,
   including `DeviceToDriver`), tracks the mapping in `active_mappings` keyed
@@ -52,9 +60,11 @@ attribute transitions.
 
 - No IOMMU management: bus addresses are direct physical+offset values;
   IOVA translation and IOMMU programming are out of scope.
-- No cache maintenance beyond the chosen mapping attributes: coherence is
-  achieved with `UNCACHED` mappings plus fences, not architecture cache
-  flush calls.
+- No cache maintenance beyond the chosen mapping attributes: coherent
+  allocations use `UNCACHED` mappings plus fences. `kdma` never issues
+  architecture cache-flush calls itself; a caller that chooses the cacheable
+  path owns that maintenance explicitly (the `DmaOp` provider exposes it as
+  `flush_cache`/`invalidate_cache`).
 - No streaming scatter-gather: `map_dma_buffer` handles one contiguous
   slice per mapping; descriptors chaining multiple buffers live in
   drivers.
@@ -78,8 +88,13 @@ io/kdma/
 
 ```text
 allocate_dma_memory(layout)
-  -> allocate DMA pages and set UNCACHED|SHARED mapping
-  -> confirm detached TLB invalidation
+  -> alloc_dma_pages (CachePolicy::NonCacheable)
+  -> set UNCACHED|SHARED mapping, confirm detached TLB invalidation
+  -> lock allocator, prepare platform DMA, publish DmaInfo
+
+allocate_dma_memory_cacheable(layout)
+  -> alloc_dma_pages (CachePolicy::Cacheable)
+  -> keep the linear map Normal; the caller owns clean/invalidate
   -> lock allocator, prepare platform DMA, publish DmaInfo
 
 map_dma_buffer(buf, dir)
@@ -160,13 +175,17 @@ map_dma_buffer(buf, dir)
 
 ## Unsafe Code
 
-All unsafe surface is concentrated in five public functions and their
+All unsafe surface is concentrated in six public functions and their
 internal forwardings, each with `# Safety` sections and matching
 `SAFETY:` comments:
 
 - `allocate_dma_memory` / `deallocate_dma_memory` — exact-once free with
   identical layout; no forged or offset CPU addresses; bus addresses only
   to permitted devices.
+- `allocate_dma_memory_cacheable` — the same exact-once free,
+  CPU-address and device-admission rules, plus caller-owned cache
+  maintenance: clean before a device reads and invalidate before the CPU
+  reads what the device wrote.
 - `map_dma_buffer` / `unmap_dma_buffer` — buffer stays live and
   exclusively owned between the calls; device access stops before
   unmap; exact-once unmap with the matching address and length.

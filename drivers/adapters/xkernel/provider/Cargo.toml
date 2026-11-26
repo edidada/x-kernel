@@ -18,6 +18,7 @@ kcompletion.workspace = true
 ktask.workspace = true
 fwnode = { workspace = true }
 kalloc = { workspace = true }
+karch = { workspace = true }
 kdma = { workspace = true }
 kirq = { workspace = true }
 khal = { workspace = true }

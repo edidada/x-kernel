@@ -115,11 +115,12 @@ impl DeviceFileOps for DrmMinor {
                 .ok_or(VfsError::InvalidInput)?,
         );
         let range = PhysAddrRange::from_start_size(phys, size_bytes - within as usize);
-        // Retain only after the mapper accepts the range: the retention table
-        // lives for the device's lifetime, so retaining before a failed mmap
-        // (for example an over-long request) would pin the GEM backing forever.
-        mapper.map_physical(range)?;
-        device.retain_mapping(offset_bytes, object.clone());
+        // The GEM object rides with the mapping instead of a side table: the
+        // VMA holds one reference and releases it on munmap, execve or exit.
+        // Retaining it only after the mapper accepts the range keeps a failed
+        // mmap (for example an over-long request) from pinning the backing.
+        let keep_alive: Arc<dyn core::any::Any + Send + Sync> = object;
+        mapper.map_physical_owned(range, keep_alive)?;
         Ok(())
     }
 

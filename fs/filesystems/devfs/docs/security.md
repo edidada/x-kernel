@@ -112,6 +112,29 @@ selection, queue discard, enqueue, read, and detach; no global clock is changed.
 A clock-change loss marker alone is hidden from both read and poll until an
 actual synchronization report arrives. A peer open's queue is never cleared.
 
+The `/dev/dma_heap/{system,cma}` nodes accept only `DMA_HEAP_IOCTL_ALLOC`. The
+request's output `fd` and heap-private `heap_flags` fields must both be zero,
+`fd_flags` may contain only an access mode (`O_RDONLY`, `O_WRONLY` or `O_RDWR`)
+plus `O_CLOEXEC`, and the `u64` length must fit `usize`; each failure is
+`EINVAL` before any allocation. The accepted access mode becomes the dma-buf
+descriptor's `FMode`: `READ` is always present because every file `mmap`
+requires it, and the mode gates `WRITE`, so a read-only heap fd cannot
+establish a shared writable mapping while a write-only fd remains mappable. The
+argument is read with a typed user copy: an unreadable argument is
+`EFAULT` before the allocation, and if the output copy fails after the
+descriptor is installed, `TaskFiles::close_file_if` removes it only while the slot
+still names that file, so a number another task already reused is left alone. A
+rollback that itself fails is logged at `warn`, because the descriptor and its
+DMA allocation then stay leaked for the process lifetime.
+Any other ioctl command returns `EINVAL`, matching Linux's command-table bound,
+and is logged at debug level because unprivileged callers may probe it.
+
+The allocation ioctl requires a current process thread. It reads that thread's
+subjective credential, allocates contiguous DMA pages (and may sleep), and
+installs the descriptor in its descriptor table. IRQ and softirq context must
+not reach it, and neither may a caller holding a spinlock or an
+IRQ-disable/preempt-disable guard.
+
 ## Unsafe code and FFI inventory
 
 The crate contains two unsafe memory operations, one unsafe timer start, and

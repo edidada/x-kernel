@@ -6,7 +6,9 @@
 
 use core::{alloc::Layout, ptr::NonNull};
 
-use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult};
+use driver_os_api::{
+    DmaAllocation, DmaCoherency, DmaDirection, DmaMapping, DmaOp, DmaSpec, ResError, ResResult,
+};
 
 use crate::XKernelResourceProvider;
 
@@ -14,10 +16,18 @@ impl DmaOp for XKernelResourceProvider {
     fn alloc_coherent(&self, spec: DmaSpec) -> ResResult<DmaAllocation> {
         let layout =
             Layout::from_size_align(spec.len, spec.align).map_err(|_| ResError::InvalidResource)?;
-        // SAFETY: `layout` is a valid non-zero layout and the returned buffer is
-        // owned exclusively by the `CoherentMem` handle that wraps this
-        // allocation until it is freed via `free_coherent`.
-        let info = unsafe { kdma::allocate_dma_memory(layout) }.map_err(|_| ResError::NoMemory)?;
+        // Both allocation paths share one deallocation: `deallocate_dma_memory`
+        // restores the Normal mapping, which is a no-op for the cacheable one.
+        let info = match spec.coherency {
+            // SAFETY: `layout` is a valid non-zero layout and the returned
+            // buffer is owned exclusively by the `CoherentMem` handle that
+            // wraps this allocation until it is freed via `free_coherent`.
+            DmaCoherency::Host => unsafe { kdma::allocate_dma_memory(layout) },
+            // SAFETY: the same ownership contract as the coherent path; the
+            // caller owns cache maintenance for these pages.
+            DmaCoherency::Manual => unsafe { kdma::allocate_dma_memory_cacheable(layout) },
+        }
+        .map_err(|_| ResError::NoMemory)?;
         Ok(DmaAllocation {
             cpu_addr: info.cpu_addr.as_ptr() as usize,
             bus_addr: info.bus_addr.as_u64(),
@@ -90,6 +100,31 @@ impl DmaOp for XKernelResourceProvider {
                 map_dma_direction(mapping.direction),
             );
         }
+    }
+
+    // `sync_for_device` / `sync_for_cpu` keep their default no-ops: this host
+    // implements `map_streaming` with a bounce buffer, and `kdma::map_dma_buffer`
+    // / `unmap_dma_buffer` already copy across the (uncached) bounce allocation
+    // in the direction-appropriate half. Adding cache maintenance here would
+    // operate on the caller's buffer, which the device never sees.
+    //
+    // `flush_cache` / `invalidate_cache` are the other case: a buffer that is
+    // handed to the device *by physical address* with no bounce in between —
+    // a dma-buf from the heap, for instance. Those pages are cacheable and
+    // shared with userspace, so the maintenance is real.
+
+    fn flush_cache(&self, addr: NonNull<u8>, len: usize) {
+        if len == 0 {
+            return;
+        }
+        karch::dma_clean_range(memaddr::VirtAddr::from(addr.as_ptr() as usize), len);
+    }
+
+    fn invalidate_cache(&self, addr: NonNull<u8>, len: usize) {
+        if len == 0 {
+            return;
+        }
+        karch::dma_invalidate_range(memaddr::VirtAddr::from(addr.as_ptr() as usize), len);
     }
 }
 

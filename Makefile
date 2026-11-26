@@ -108,6 +108,10 @@ RAMDISK_IMG ?= $(CURDIR)/ramdisk.img
 RAMDISK_IMG_SIZE ?= 8
 RAMDISK_IMG_FS ?= ext4
 RAMDISK_ROOTFS ?= $(DISK_IMG)
+# Extra host files baked into the ramdisk, as space-separated "hostpath:/guest/path"
+# pairs. Used to carry test programs onto a board whose kernel has no storage
+# driver yet: make ramdisk_img RAMDISK_EXTRA="/path/dmatest:/usr/bin/dmatest"
+RAMDISK_EXTRA ?=
 ROOTFS_URL ?= https://gitee.com/openkylin/x-kernel-image/releases/download/rootfs
 ROOTFS_VARIANT ?= debian-openrc
 
@@ -354,16 +358,31 @@ ramdisk_img:
 	if [ "$(RAMDISK_IMG_FS)" = ext4 ] && [ -f "$(RAMDISK_ROOTFS)" ]; then \
 		staging="$(TARGET_DIR)/ramdisk-staging"; \
 		rm -rf "$$staging"; \
-		mkdir -p "$$staging/bin" "$$staging/lib" "$$staging/root" "$$staging/tmp" \
-			"$$staging/proc" "$$staging/sys" "$$staging/dev" "$$staging/etc"; \
+		mkdir -p "$$staging/bin" "$$staging/sbin" "$$staging/usr/bin" "$$staging/lib" \
+			"$$staging/root" "$$staging/tmp" "$$staging/proc" "$$staging/sys" \
+			"$$staging/dev" "$$staging/etc"; \
 		loader="ld-musl-$$arch.so.1"; \
 		debugfs -R "dump /bin/busybox $$staging/bin/busybox" "$(RAMDISK_ROOTFS)" >/dev/null 2>&1; \
-		debugfs -R "dump /lib/$$loader $$staging/lib/$$loader" "$(RAMDISK_ROOTFS)" >/dev/null 2>&1; \
-		chmod 0755 "$$staging/bin/busybox" "$$staging/lib/$$loader"; \
+		chmod 0755 "$$staging/bin/busybox"; \
 		ln -s busybox "$$staging/bin/sh"; \
-		ln -s "$$loader" "$$staging/lib/libc.musl-$$arch.so.1"; \
 		for app in env ls cat mount umount mkdir rmdir uname ps dmesg cp mv rm echo pwd; do \
 			ln -s busybox "$$staging/bin/$$app"; \
+		done; \
+		debugfs -R "dump /lib/$$loader $$staging/lib/$$loader" "$(RAMDISK_ROOTFS)" >/dev/null 2>&1 || true; \
+		if [ -f "$$staging/lib/$$loader" ]; then \
+			chmod 0755 "$$staging/lib/$$loader"; \
+			ln -s "$$loader" "$$staging/lib/libc.musl-$$arch.so.1"; \
+		else \
+			rm -f "$$staging/lib/$$loader"; \
+			echo "ramdisk: busybox is static — no loader needed"; \
+		fi; \
+		for spec in $(RAMDISK_EXTRA); do \
+			src=$${spec%%:*}; dst=$${spec#*:}; \
+			case "$$dst" in /*) ;; *) echo "RAMDISK_EXTRA dest must be absolute: $$spec" >&2; exit 1;; esac; \
+			mkdir -p "$$staging$$(dirname $$dst)"; \
+			cp "$$src" "$$staging$$dst"; \
+			chmod 0755 "$$staging$$dst"; \
+			echo "ramdisk: +$$dst"; \
 		done; \
 	fi; \
 	dd if=/dev/zero of="$(RAMDISK_IMG)" bs=1M count="$(RAMDISK_IMG_SIZE)" >/dev/null 2>&1; \

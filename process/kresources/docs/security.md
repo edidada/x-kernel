@@ -47,6 +47,7 @@ boundary. Failure returns no old value and leaves the stored pair intact.
 | T-03 | Access after task files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; temporary table references preserve storage but do not delay descriptor cleanup; snapshots of individual files remain usable. |
 | T-04 | Reentrant filesystem deadlock | Medium | A close callback reacquires process resources | Removal precedes close and releases owner/table locks; callers of raw table APIs must preserve this ordering. |
 | T-05 | Stale old limit returned after concurrent replacement | Medium | A caller composes separate snapshot and setter operations | `update_rlimit_and_get_old` performs validation, snapshot and replacement under one write guard; standalone reads followed by setters remain separate operations. |
+| T-06 | Rollback closes a descriptor another task reused | Medium | An installer rolls back a failed copy-out after the number was closed and reused | `close_file_if` compares the open file under the table lock and removes the slot only while it still names that file; an unrelated descriptor is left installed. |
 
 ## Failure modes and effects (FMEA)
 

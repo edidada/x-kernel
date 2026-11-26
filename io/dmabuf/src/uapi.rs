@@ -46,6 +46,8 @@ const fn iowr<T>(ty: u8, nr: u8) -> u32 {
 
 /// The dma-buf command type (`DMA_BUF_BASE`, `'b'`).
 const DMA_BUF_BASE: u8 = b'b';
+/// The dma-heap command type (`DMA_HEAP_BASE`, `'H'`).
+const DMA_HEAP_BASE: u8 = b'H';
 
 // ---------------------------------------------------------------------------
 // Structures
@@ -81,6 +83,25 @@ pub struct DmaBufImportSyncFile {
     pub fd: i32,
 }
 
+/// `struct dma_heap_allocation_data` — the argument of
+/// [`DMA_HEAP_IOCTL_ALLOC`].
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub struct DmaHeapAllocationData {
+    /// [in] Requested length in bytes.
+    pub len: u64,
+    /// [out] The dma-buf descriptor.
+    pub fd: u32,
+    /// [in] Access mode and `O_CLOEXEC` for the new descriptor.
+    ///
+    /// `O_RDONLY` is zero, so a zero-filled request is a legitimate
+    /// read-only allocation rather than an invalid one.
+    pub fd_flags: u32,
+    /// [in] Heap-private flags. This allocator defines none, so a set bit
+    /// describes a request it cannot honour.
+    pub heap_flags: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -105,16 +126,25 @@ pub const DMA_BUF_IOCTL_EXPORT_SYNC_FILE: u32 = iowr::<DmaBufExportSyncFile>(DMA
 /// `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`: record a sync_file's fence.
 pub const DMA_BUF_IOCTL_IMPORT_SYNC_FILE: u32 = iow::<DmaBufImportSyncFile>(DMA_BUF_BASE, 0x3);
 
+/// `DMA_HEAP_IOCTL_ALLOC`: allocate a buffer from a heap node.
+///
+/// The one `_IOWR` dma-heap command: the kernel writes the new descriptor
+/// number back into the argument, so the request must be readable and
+/// writable.
+pub const DMA_HEAP_IOCTL_ALLOC: u32 = iowr::<DmaHeapAllocationData>(DMA_HEAP_BASE, 0x0);
+
 // The numbers are the ABI. Pinning them here makes a layout or encoding
 // mistake a compile error instead of a silently different command.
 const _: () = assert!(core::mem::size_of::<DmaBufSync>() == 8);
 const _: () = assert!(core::mem::size_of::<DmaBufExportSyncFile>() == 8);
 const _: () = assert!(core::mem::size_of::<DmaBufImportSyncFile>() == 8);
+const _: () = assert!(core::mem::size_of::<DmaHeapAllocationData>() == 24);
 const _: () = assert!(DMA_BUF_IOCTL_SYNC == 0x4008_6200);
 const _: () = assert!(DMA_BUF_IOCTL_SET_NAME == 0x4008_6201);
 const _: () = assert!(DMA_BUF_IOCTL_SET_NAME_U32 == 0x4004_6201);
 const _: () = assert!(DMA_BUF_IOCTL_EXPORT_SYNC_FILE == 0xc008_6202);
 const _: () = assert!(DMA_BUF_IOCTL_IMPORT_SYNC_FILE == 0x4008_6203);
+const _: () = assert!(DMA_HEAP_IOCTL_ALLOC == 0xc018_4800);
 
 // ---------------------------------------------------------------------------
 // Flags

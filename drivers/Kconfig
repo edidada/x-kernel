@@ -162,6 +162,15 @@ config KFEAT_CHAR
     help
       Enable runtime character device support. This covers devices that are
       exposed after early boot handoff or through the unified driver pipeline.
+
+config KFEAT_DMA_HEAP
+    bool "DMA buffer sharing (/dev/dma_heap)"
+    default y
+    help
+      Enable the dma-buf heap exporters at /dev/dma_heap/{system,cma}.
+      Device runtimes (the RKNN runtime, for one) allocate their buffers
+      here; the buffers are shared with userspace as ordinary cacheable
+      memory and synchronised explicitly through DMA_BUF_IOCTL_SYNC.
 endmenu   # Device Drivers Features
 
 endmenu # Drivers Basic Configuration

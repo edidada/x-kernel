@@ -95,7 +95,6 @@ pub struct DrmDevice {
     pub(crate) legacy_mode: Mutex<Option<(BlobId, Arc<Blob>)>>,
     /// Called when a refresh observes a host display change.
     hotplug: Mutex<Option<HotplugSink>>,
-    retained_pages: Mutex<BTreeMap<u64, Arc<GemObject>>>,
     next_dumb: AtomicU32,
     /// The next 3D context id (`virtgpu` handles).
     next_context: AtomicU32,
@@ -145,7 +144,6 @@ impl DrmDevice {
             in_formats: Mutex::new(None),
             legacy_mode: Mutex::new(None),
             hotplug: Mutex::new(None),
-            retained_pages: Mutex::new(BTreeMap::new()),
             next_dumb: AtomicU32::new(FIRST_DUMB_HANDLE),
             next_context: AtomicU32::new(FIRST_CONTEXT_ID),
             object_names: Mutex::new(ObjectNames::default()),
@@ -525,22 +523,6 @@ impl DrmDevice {
                 event.commit_with(CRTC_ID, flip.user_data, tick.sequence, tick.timestamp);
             }
         }
-    }
-
-    /// The retained object at `offset`, if the mapping still holds it.
-    #[cfg(unittest)]
-    pub(crate) fn retained_mapping(&self, offset_bytes: u64) -> Option<Arc<GemObject>> {
-        self.retained_pages.lock().get(&offset_bytes).cloned()
-    }
-
-    /// Keeps the pages of a mapped dumb buffer alive, keyed by its mmap offset
-    /// in bytes (the key the mapping interface reports).
-    pub(crate) fn retain_mapping(&self, offset_bytes: u64, object: Arc<GemObject>) {
-        // The object is what keeps the memory alive: an owned object keeps its
-        // allocation, an imported one keeps the export that lent it. The
-        // table stores it as itself, so the mapping and the object share one
-        // reference count.
-        self.retained_pages.lock().insert(offset_bytes, object);
     }
 }
 

@@ -44,6 +44,10 @@ adapts input and display class handles to VFS file operations.
 
 - Create `/dev/input/eventN`, `/dev/dri/cardN` and `/dev/dri/renderD{128+N}`
   from `kdevice::DeviceNode` events.
+- Create the static `/dev/dma_heap/{system,cma}` heap nodes when the
+  `dma-heap` feature (selected by `KFEAT_DMA_HEAP`) is enabled. They hand out
+  dma-buf descriptors through `DMA_HEAP_IOCTL_ALLOC`; the two names share one
+  allocator (see the `dmabuf` crate's `heap` module).
 - Register and unregister the assigned character-device numbers with KVFS.
 - Resolve dynamic directory enumeration and lookup to the current file-object
   projection.
@@ -67,6 +71,7 @@ fs/filesystems/devfs/src/
 ├── content.rs         # memory-backed regular files for writable directories
 ├── root.rs            # root directory assembly
 └── nodes/
+    ├── dma_heap.rs    # /dev/dma_heap/{system,cma} dma-buf exporters
     ├── dri.rs         # dynamic /dev/dri directory
     ├── event.rs       # dynamic /dev/input directory and evdev operations
     └── shm.rs         # /dev/shm directory entry
@@ -186,6 +191,10 @@ The optional Cargo feature `input` enables `kclass/input` and `inputdev`; the to
 `kfeat/input` feature selects it through `devfs/input`. When enabled, devfs can
 adapt input node assignments to `EventDev`. Display support is unconditional
 through `kclass/display`, so DRM primary nodes remain available independently.
+
+The optional `dma-heap` feature pulls in `dmabuf` with its `heap` exporter; the
+top-level `KFEAT_DMA_HEAP` selects it through `kfeat`/`devfs`, and it is what
+installs the `/dev/dma_heap/{system,cma}` nodes.
 
 `devfs` depends on `kdevice`, `kclass` and `kdevice_uevent`. The last one is
 how a DRM card publishes the Linux `change`/`HOTPLUG=1` notification when the

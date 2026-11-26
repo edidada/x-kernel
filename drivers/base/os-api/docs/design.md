@@ -29,6 +29,13 @@ carrying the native release hook, so a translated bus address cannot lose its
 reverse mapping. Hosts that cannot implement the window or coherency policy
 return Unsupported.
 
+DmaSpec::coherency records who owns cache maintenance. Host is the default and
+the `dma_alloc_coherent` shape: the host installs a non-cacheable CPU mapping
+or the bus snoops, so no explicit maintenance is needed. Manual keeps ordinary
+cacheable pages so the buffer can be shared with userspace as normal memory (a
+dma-buf from the heap); the caller must then use the provider's `flush_cache`
+and `invalidate_cache` operations around device access.
+
 ## Ownership and context
 IoMap retains its mapping/provider, CoherentMem its exact allocation/provider,
 CpuBuffer its original Layout/provider, and DevIrq its resource/action token.
