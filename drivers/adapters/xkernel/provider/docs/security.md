@@ -8,6 +8,18 @@ global provider or stop hardware. The caller must stop device DMA and interrupt
 generation before resource cleanup and obey the original allocation/token
 pairing contracts.
 
+## Clock register access
+
+`IoMapClkReg` is the only clock-facing path to device registers. It holds an
+`IoMap`, so every register read/write is bounds-checked against the mapped
+region and rejected when misaligned, the accesses carry the mapping's
+acquire/release fences, and the mapping is released when the last clock node
+holding the `Arc` goes away. The adapter reports `region.size` through
+`window_bytes`, which is what lets the clock framework reject a table entry that
+would reach past the mapping instead of faulting at first access. A window that
+is mapped too small is therefore a probe-time `ClkError::InvalidValue`, not
+memory corruption.
+
 ## DMA allocation
 
 `alloc_coherent` selects the host's cacheable allocation path when the caller

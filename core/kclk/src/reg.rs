@@ -6,18 +6,20 @@
 //!
 //! Register-backed basic types ([`crate::basic::Gate`], [`crate::basic::Mux`],
 //! [`crate::basic::Divider`]) read and write control fields in a register
-//! window. To stay free of any host MMIO mechanism, they talk to the window
-//! through the [`ClkRegAccess`] trait. Production uses [`MmioClkReg`] (volatile
-//! loads/stores over a mapped virtual address); tests inject an array-backed
-//! mock so register field math can be exercised without real hardware.
+//! window. They reach the window only through the [`ClkRegAccess`] trait: this
+//! crate owns no MMIO mechanism of its own. The host adapter supplies the
+//! production accessor (a validated mapping in the driver layer), and tests
+//! inject an array-backed mock so register field math can be exercised without
+//! hardware.
 
-use core::ptr;
+use crate::{ClkError, ClkResult};
 
 /// Read/write a clock's control register window.
 ///
 /// Offsets are byte offsets from the window base and must be word-aligned and
-/// within the window; the implementation is responsible for the access width
-/// and ordering.
+/// within the window. Constructors reject a descriptor the accessor cannot
+/// legally serve (see [`window_bytes`](Self::window_bytes)), so implementations
+/// may treat an in-range offset as an established caller invariant.
 pub trait ClkRegAccess: Send + Sync {
     /// Read the 32-bit word at `offset`.
     fn reg_read(&self, offset: usize) -> u32;
@@ -31,74 +33,34 @@ pub trait ClkRegAccess: Send + Sync {
         let value = (self.reg_read(offset) & !mask) | (set & mask);
         self.reg_write(offset, value);
     }
+
+    /// Size in bytes of the register window this accessor can reach, when the
+    /// implementation knows it.
+    ///
+    /// Node constructors reject a descriptor whose register word
+    /// (`offset_bytes .. offset_bytes + 4`) leaves this window, so a malformed
+    /// table fails with [`ClkError::InvalidValue`] during registration instead
+    /// of touching memory the mapping does not cover. `None` means the window
+    /// is not expressible here (test doubles, [`NullClkReg`]) and the offset is
+    /// not bounds-checked.
+    fn window_bytes(&self) -> Option<usize> {
+        None
+    }
 }
 
-/// MMIO register window backed by a mapped virtual address.
+/// Reject a register-word access this accessor cannot legally serve.
 ///
-/// The window is treated as process-global and stable for the clock tree's
-/// lifetime, so sharing it across CPUs is sound. The pointer is non-zero and
-/// word-aligned by construction (the caller of [`new`](Self::new) guarantees
-/// both).
-pub struct MmioClkReg {
-    base: *mut u8,
-}
-
-// SAFETY: MMIO register windows are mapped once at boot, are process-global,
-// and never move. Volatile loads/stores are safe from any CPU because the
-// device register semantics tolerate concurrent reads and the framework
-// serializes writes per clock node.
-unsafe impl Send for MmioClkReg {}
-// SAFETY: same rationale as `Send`; the window has no per-thread affinity.
-unsafe impl Sync for MmioClkReg {}
-
-impl MmioClkReg {
-    /// Wrap a mapped MMIO virtual base.
-    ///
-    /// # Safety
-    ///
-    /// `base` must be a non-zero, word-aligned, mapped, live-for-the-node's-
-    /// lifetime MMIO virtual address — the caller (typically the controller
-    /// driver, from `memspace::iomap_device`/`devm_iomap`) owns that guarantee.
-    /// An invalid base makes every subsequent `reg_read`/`reg_write` undefined
-    /// behavior, so the constructor is `unsafe` to make the contract explicit
-    /// at every call site.
-    pub unsafe fn new(base: usize) -> Self {
-        debug_assert!(
-            base != 0 && base.is_multiple_of(4),
-            "clk register base misaligned"
-        );
-        Self {
-            base: base as *mut u8,
-        }
+/// `offset_bytes` reaches the basic-type constructors from provider tables and
+/// public constructors, so a value that is unaligned or outside the window is a
+/// reachable configuration error: report it as [`ClkError::InvalidValue`]
+/// rather than letting a correct-looking safe access fault.
+pub(crate) fn check_word_access(reg: &dyn ClkRegAccess, offset_bytes: usize) -> ClkResult {
+    if !offset_bytes.is_multiple_of(4) {
+        return Err(ClkError::InvalidValue);
     }
-}
-
-impl ClkRegAccess for MmioClkReg {
-    fn reg_read(&self, offset: usize) -> u32 {
-        // SAFETY: `offset` is a constant from the controller driver's
-        // register map (the gate/mux/divider field descriptors built at
-        // registration), so it stays within the window `new` was given and
-        // is 4-byte aligned; `new`'s caller guaranteed `base` is non-zero,
-        // word-aligned, mapped and live for the clock tree's lifetime. With
-        // both established, `base.add(offset)` stays inside the mapped
-        // window and is correctly aligned for a `u32` read.
-        let addr = unsafe { self.base.add(offset) };
-        // SAFETY: `addr` points inside the mapped window; volatile prevents
-        // the compiler from eliding or reordering the device read.
-        unsafe { ptr::read_volatile(addr as *const u32) }
-    }
-
-    fn reg_write(&self, offset: usize, value: u32) {
-        // SAFETY: `offset` is a constant from the controller driver's
-        // register map — in-window and 4-byte aligned for the window `new`
-        // was given — and `base` is non-zero, word-aligned, mapped and live
-        // (established by `new`'s caller). With both established,
-        // `base.add(offset)` stays inside the mapped window and is correctly
-        // aligned for a `u32` store.
-        let addr = unsafe { self.base.add(offset) };
-        // SAFETY: the volatile store orders the device write so it is
-        // not combined with neighboring stores.
-        unsafe { ptr::write_volatile(addr as *mut u32, value) }
+    match reg.window_bytes() {
+        Some(window) if offset_bytes.saturating_add(4) > window => Err(ClkError::InvalidValue),
+        _ => Ok(()),
     }
 }
 

@@ -70,7 +70,7 @@ pub use provider::{
     ClkLookup, ProviderId, clk_get_by_index, clk_get_by_name, provider_installed, register_provider,
 };
 pub use rate::{ClkRateRequest, Rate, RoundResult};
-pub use reg::{ClkRegAccess, MmioClkReg, NullClkReg};
+pub use reg::{ClkRegAccess, NullClkReg};
 pub use table::{
     ClkBranch, ClkNodeDesc, DividerDesc, GateDesc, MuxDesc, ParentRef, register_table,
 };

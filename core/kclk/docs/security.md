@@ -16,9 +16,9 @@ field encoding is the controller driver's responsibility.
 ## External Boundaries
 
 - **Firmware register base addresses** are consumed by the controller driver to
-  build an `MmioClkReg`. The framework receives an already-mapped virtual
-  address; mapping validity is owned by the controller driver's own
-  devm-managed MMIO mapping.
+  establish an MMIO mapping. This crate never sees an address: it receives a
+  `ClkRegAccess` and reads registers through it. Mapping validity and teardown
+  are owned by the host adapter and the driver's devm-managed mapping.
 - **MMIO register contents** are read by `Gate`, `Mux`, and `Divider` through
   `ClkRegAccess`. They are treated as untrusted integers; field extraction never
   indexes out of bounds.
@@ -28,13 +28,18 @@ field encoding is the controller driver's responsibility.
 
 ## Unsafe Code
 
-`MmioClkReg` holds a raw `*mut u8` and performs volatile loads/stores. Its
-safety contract is documented on `MmioClkReg::new`:
+This crate contains no `unsafe` code: it owns no MMIO mechanism and no raw
+pointer. Register access is a trait call; the production implementation
+(`IoMapClkReg` in the X-Kernel provider adapter) wraps `driver_os_api`'s
+`IoMap`, which is where the volatile loads/stores, the alignment and
+bounds checks, and the mapping lifetime live. What this crate contributes is
+the *contract* those accesses are validated against:
 
-- the caller guarantees `base` is a valid, word-aligned, mapped MMIO window;
-- the window remains live for the lifetime of every clock node sharing it;
-- `Send`/`Sync` are implemented because MMIO windows are process-global and
-  never move. The framework serializes the *sleepable* write paths
+- every node constructor checks `offset_bytes` is word-aligned and that its
+  register word stays inside `ClkRegAccess::window_bytes()` when the accessor
+  reports one, so a malformed table is rejected with `ClkError::InvalidValue`
+  instead of reaching memory the mapping does not cover;
+- the framework serializes the *sleepable* write paths
   (`set_rate`/`set_parent`/`prepare`) under `CLK_LOCK`; atomic
   `enable`/`disable` callbacks run under `CLK_ENABLE_LOCK` and only flip a gate
   bit. Topology migration nests the locks in that order. See the *Known
@@ -93,7 +98,7 @@ behind and the node reference transfers to the caller.
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | Invalid MMIO base passed to `MmioClkReg` | High | Controller driver hands a wrong/unmapped address | Safety contract is documented on `new`; the controller driver (and `memspace` mapping it supplies) owns validity. Residual risk is the caller's. |
+| T-01 | Invalid MMIO base behind a `ClkRegAccess` | High | Controller driver hands an unmapped or wrong address | The adapter stores a validated `IoMap` instead of an address: mapping success, region size and unmap are the host's, and every access is bounds- and alignment-checked there. Residual risk is the host mapping it supplies. |
 | T-02 | Out-of-range parent index | Medium | Firmware or driver requests parent `N` beyond the table | `ClkCore::set_parent` returns `InvalidParent` without touching hardware. |
 | T-03 | Zero or huge decoded divider | Medium | Register field decodes to 0, or a divider that would overflow | `rate_for` passes through on 0; `closest_div`/`div_to_raw` clamp the `POWER_OF_TWO` exponent to the field mask, capped at 31 so the decoded `u32` divider stays representable; `FixedFactor::scale` rejects overflow with `InvalidRate`. |
 | T-04 | Concurrent rate change on a sibling | Low | Two probes reprogram overlapping subtrees | Serialized by the global `CLK_LOCK`; only one sleepable mutation runs at a time across the whole tree. |
@@ -121,13 +126,18 @@ behind and the node reference transfers to the caller.
 - The slow-operation lock is a sleepable mutex, so `prepare`/`unprepare` and
   `set_rate` provider callbacks may block. `enable`/`disable`, `set_parent`,
   reparent-time recalculation, and otherwise lock-free callbacks must not sleep.
-- `MmioClkReg` correctness depends on the caller's mapping; the crate cannot
-  verify it.
+- Register-window validation is only as good as `window_bytes`: an accessor that
+  returns `None` (test doubles, `NullClkReg`) leaves descriptors unchecked, and
+  the framework cannot verify the *contents* of a window an accessor does
+  report.
 
 ## Audit Checklist
 
-- Confirm every `MmioClkReg::new` receives an address returned by the device
-  mapper (`memspace::iomap_device` / `devm_iomap`).
+- Confirm every `ClkRegAccess` implementation is built from a device mapping
+  (the adapter's `IoMapClkReg` over `IoMap`), not from a hand-passed address, and
+  that accessors which know their region size report it through `window_bytes`.
+- Confirm no `unsafe` reappears in this crate: register access belongs to the
+  host adapter's implementation.
 - Confirm a controller driver keeps all bit fields within a 32-bit word and
   validates `width`/`shift` against its register layout.
 - Confirm new `ClkHwOps` impls do not re-enter the framework (no nested

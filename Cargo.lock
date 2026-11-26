@@ -1313,6 +1313,7 @@ dependencies = [
  "irq-driver",
  "kalloc",
  "karch",
+ "kclk",
  "kcompletion",
  "kdma",
  "khal",

@@ -48,7 +48,8 @@ pub struct Mux {
 impl Mux {
     /// Create a mux.
     ///
-    /// `offset_bytes` is a byte offset into the controller's register window.
+    /// `offset_bytes` is a byte offset into the controller's register window;
+    /// it must be word-aligned and inside the window the accessor reports.
     /// `mask` is the *unshifted* field mask (e.g. `0x7` for a 3-bit field); it
     /// is applied after `>> shift`.
     ///
@@ -65,6 +66,7 @@ impl Mux {
         table: Option<&'static [u8]>,
         flags: MuxFlags,
     ) -> ClkResult<Self> {
+        crate::reg::check_word_access(&*reg, offset_bytes)?;
         // `mask + 1` overflows for a full-width field, so widen before adding.
         let count = match table {
             Some(table) => table.len() as u64,
@@ -132,6 +134,18 @@ impl Mux {
             None => Ok(u32::from(index)),
         }
     }
+
+    /// Whether to use the hiword-mask atomic write (single `reg_write`) instead
+    /// of a read-modify-write. The hiword convention needs the field within the
+    /// low 16 bits so the write mask (`field << 16`) stays in the upper half.
+    ///
+    /// A zero mask selects a single parent with no bit in the word: there is no
+    /// field to place in either half, so the atomic form never applies.
+    fn hiword(&self) -> bool {
+        self.mask != 0
+            && self.flags.contains(MuxFlags::HIWORD_MASK)
+            && self.shift as u32 + (31 - self.mask.leading_zeros()) < 16
+    }
 }
 
 impl ClkHwOps for Mux {
@@ -146,8 +160,7 @@ impl ClkHwOps for Mux {
     fn set_parent(&self, index: u8) -> ClkResult {
         let raw = self.index_to_raw(index)?;
         let field = (raw & self.mask) << self.shift;
-        if self.flags.contains(MuxFlags::HIWORD_MASK) && self.shift as u32 + self.mask.ilog2() < 16
-        {
+        if self.hiword() {
             // Atomic hiword write: the upper half carries the write-enable
             // mask, so other fields in this word are untouched in one store.
             let mask = self.mask << (self.shift + 16);

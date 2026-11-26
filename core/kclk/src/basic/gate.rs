@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 
 use bitflags::bitflags;
 
-use crate::{ClkHwOps, ClkRegAccess, ClkResult, Rate, RoundResult};
+use crate::{ClkError, ClkHwOps, ClkRegAccess, ClkResult, Rate, RoundResult};
 
 bitflags! {
     /// Policy bits for a [`Gate`]. Semantics match Linux's `CLK_GATE_*`
@@ -46,21 +46,28 @@ pub struct Gate {
 impl Gate {
     /// Create a gate clock.
     ///
-    /// `offset_bytes` is a byte offset into the controller's register window.
-    /// `bit_idx` must be < 32; the provider of [`ClkRegAccess`] is responsible
-    /// for the window being mapped and word-aligned.
+    /// `offset_bytes` is a byte offset into the controller's register window;
+    /// it must be word-aligned and inside the window the accessor reports.
+    /// `bit_idx` must be < 32. Both come from the provider's register
+    /// description, so a bad value is a reachable configuration error and is
+    /// rejected with [`ClkError::InvalidValue`] instead of panicking or
+    /// corrupting an unrelated register field.
     pub fn new(
         reg: Arc<dyn ClkRegAccess>,
         offset_bytes: usize,
         bit_idx: u8,
         flags: GateFlags,
-    ) -> Self {
-        Self {
+    ) -> ClkResult<Self> {
+        crate::reg::check_word_access(&*reg, offset_bytes)?;
+        if bit_idx >= 32 {
+            return Err(ClkError::InvalidValue);
+        }
+        Ok(Self {
             reg,
             offset_bytes,
             bit_idx,
             flags,
-        }
+        })
     }
 
     /// Construct and upcast in one step for [`crate::ClkBuilder::new`].
@@ -69,8 +76,8 @@ impl Gate {
         offset_bytes: usize,
         bit_idx: u8,
         flags: GateFlags,
-    ) -> Arc<dyn ClkHwOps> {
-        Arc::new(Self::new(reg, offset_bytes, bit_idx, flags))
+    ) -> ClkResult<Arc<dyn ClkHwOps>> {
+        Ok(Arc::new(Self::new(reg, offset_bytes, bit_idx, flags)?))
     }
 
     fn mask(&self) -> u32 {

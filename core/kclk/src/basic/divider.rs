@@ -79,7 +79,8 @@ impl DivTableEntry {
 impl Divider {
     /// Create a divider clock.
     ///
-    /// `offset_bytes` is a byte offset into the controller's register window.
+    /// `offset_bytes` is a byte offset into the controller's register window;
+    /// it must be word-aligned and inside the window the accessor reports.
     /// `width` must be in `1..32`: a width of 32 would shift a `u32` out of
     /// range. The width comes from the provider's register description, so an
     /// out-of-range value is a configuration error the caller can report, not
@@ -93,6 +94,7 @@ impl Divider {
         table: Option<&'static [DivTableEntry]>,
         flags: DividerFlags,
     ) -> ClkResult<Self> {
+        crate::reg::check_word_access(&*reg, offset_bytes)?;
         // Soundness: `1u32 << width` is undefined behavior at width >= 32.
         if width == 0 || width >= 32 {
             return Err(ClkError::InvalidValue);

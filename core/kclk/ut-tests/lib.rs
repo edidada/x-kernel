@@ -49,6 +49,36 @@ impl ClkRegAccess for MockReg {
     }
 }
 
+/// Mock accessor that also reports a register-window size, so a test can assert
+/// that a descriptor outside the mapping is rejected at construction.
+struct BoundedReg {
+    mem: SpinNoIrq<[u32; 8]>,
+    window_bytes: usize,
+}
+
+impl BoundedReg {
+    fn new(window_bytes: usize) -> Self {
+        Self {
+            mem: SpinNoIrq::new([0u32; 8]),
+            window_bytes,
+        }
+    }
+}
+
+impl ClkRegAccess for BoundedReg {
+    fn reg_read(&self, offset: usize) -> u32 {
+        self.mem.lock()[offset / 4]
+    }
+
+    fn reg_write(&self, offset: usize, value: u32) {
+        self.mem.lock()[offset / 4] = value;
+    }
+
+    fn window_bytes(&self) -> Option<usize> {
+        Some(self.window_bytes)
+    }
+}
+
 /// Records how many times each gate op fires, to assert reference-counted
 /// propagation up the parent tree.
 #[derive(Default)]
@@ -513,7 +543,7 @@ fn divider_power_of_two_encodes_floor_log2() {
 #[def_test(serial)]
 fn gate_enable_writes_bit_and_reports_state() {
     let reg = Arc::new(MockReg::new());
-    let gate = Gate::new(reg.clone(), 0, 5, GateFlags::empty());
+    let gate = Gate::new(reg.clone(), 0, 5, GateFlags::empty()).expect("valid clock node config");
 
     assert_eq!(gate.is_enabled().unwrap(), false);
     gate.enable().unwrap();
@@ -530,7 +560,7 @@ fn gate_inverted_polarity_clears_bit_to_enable() {
     let reg = Arc::new(MockReg::new());
     // SET_TO_DISABLE (Linux CLK_GATE_SET_TO_DISABLE): the bit is an
     // "is_disabled" flag, so enabling clears it.
-    let gate = Gate::new(reg.clone(), 0, 2, GateFlags::SET_TO_DISABLE);
+    let gate = Gate::new(reg.clone(), 0, 2, GateFlags::SET_TO_DISABLE).expect("valid clock node config");
 
     reg.mem.lock()[0] = 1 << 2; // initially disabled
     assert_eq!(gate.is_enabled().unwrap(), false);
@@ -543,7 +573,7 @@ fn gate_inverted_polarity_clears_bit_to_enable() {
 fn gate_default_polarity_sets_bit_to_enable_linux_default() {
     let reg = Arc::new(MockReg::new());
     // Default (no flags) matches Linux's gate default: writing 1 enables.
-    let gate = Gate::new(reg.clone(), 0, 3, GateFlags::empty());
+    let gate = Gate::new(reg.clone(), 0, 3, GateFlags::empty()).expect("valid clock node config");
 
     gate.enable().unwrap();
     assert_eq!(reg.word(0), 1 << 3);
@@ -739,7 +769,7 @@ fn composite_dispatches_rate_and_gate_to_sub_nodes() {
 
     let mux = Mux::into_ops(reg.clone(), 0, 0, 0x1, None, MuxFlags::empty()).expect("valid clock node config");
     let div = Divider::into_ops(reg.clone(), 0, 4, 2, None, DividerFlags::empty()).expect("valid clock node config");
-    let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::empty());
+    let gate = Gate::into_ops(reg.clone(), 0, 8, GateFlags::empty()).expect("valid clock node config");
 
     let comp = ClkBuilder::new(
         "comp",
@@ -1272,7 +1302,7 @@ fn hiword_mask_gate_writes_atomic_single_word() {
         0,
         5,
         GateFlags::empty() | GateFlags::HIWORD_MASK,
-    );
+    ).expect("valid clock node config");
 
     gate.enable().unwrap();
     // mask = 1<<5 = 0x20; value = 0x20; written = 0x20<<16 | 0x20 = 0x200020.
@@ -1292,7 +1322,7 @@ fn clk_disable_unused_gates_idle_and_skips_critical_and_ignored() {
     reg.mem.lock()[0] = 1; // bootloader left the gate on
     let idle = ClkBuilder::new(
         "idle",
-        Gate::into_ops(reg.clone(), 0, 0, GateFlags::empty()),
+        Gate::into_ops(reg.clone(), 0, 0, GateFlags::empty()).expect("valid clock node config"),
     )
     .build()
     .unwrap();
@@ -1305,7 +1335,7 @@ fn clk_disable_unused_gates_idle_and_skips_critical_and_ignored() {
     reg2.mem.lock()[0] = 1;
     let _critical = ClkBuilder::new(
         "crit",
-        Gate::into_ops(reg2.clone(), 0, 0, GateFlags::empty()),
+        Gate::into_ops(reg2.clone(), 0, 0, GateFlags::empty()).expect("valid clock node config"),
     )
     .flags(ClkFlags::IS_CRITICAL)
     .build()
@@ -1317,7 +1347,7 @@ fn clk_disable_unused_gates_idle_and_skips_critical_and_ignored() {
     reg3.mem.lock()[0] = 1;
     let _ignored = ClkBuilder::new(
         "ignored",
-        Gate::into_ops(reg3.clone(), 0, 0, GateFlags::empty()),
+        Gate::into_ops(reg3.clone(), 0, 0, GateFlags::empty()).expect("valid clock node config"),
     )
     .flags(ClkFlags::IGNORE_UNUSED)
     .build()
@@ -1365,7 +1395,7 @@ fn consumer_handle_prepare_enable_through_provider() {
         .unwrap();
     let gate = ClkBuilder::new(
         "uart_clk",
-        Gate::into_ops(reg.clone(), 0, 3, GateFlags::empty()),
+        Gate::into_ops(reg.clone(), 0, 3, GateFlags::empty()).expect("valid clock node config"),
     )
     .parent(parent)
     .build()
@@ -1771,6 +1801,68 @@ fn register_table_rejects_bad_divider_width_before_publishing() {
     );
     assert_eq!(crate::clocks_len(), before);
     assert!(clk_get_by_index(0x71, 0).is_err());
+
+    reset_providers();
+}
+
+#[def_test(serial)]
+fn register_descriptors_outside_the_mapped_window_are_rejected() {
+    // A descriptor whose register word leaves the accessor's window, or that is
+    // not word-aligned, is a configuration error: report it at construction
+    // instead of touching memory the mapping does not cover.
+    let reg: Arc<dyn ClkRegAccess> = Arc::new(BoundedReg::new(16));
+    for offset in [16usize, 0x100, 2] {
+        assert_eq!(
+            Gate::new(reg.clone(), offset, 0, GateFlags::empty()).err(),
+            Some(ClkError::InvalidValue),
+            "gate offset {offset:#x} must be rejected"
+        );
+        assert_eq!(
+            Divider::new(reg.clone(), offset, 0, 4, None, DividerFlags::empty()).err(),
+            Some(ClkError::InvalidValue),
+            "divider offset {offset:#x} must be rejected"
+        );
+        assert_eq!(
+            Mux::new(reg.clone(), offset, 0, 0x3, None, MuxFlags::empty()).err(),
+            Some(ClkError::InvalidValue),
+            "mux offset {offset:#x} must be rejected"
+        );
+    }
+    // The last whole word of the window stays legal...
+    assert!(Gate::new(reg.clone(), 12, 0, GateFlags::empty()).is_ok());
+    // ...and a bit position a `u32` word cannot address does not.
+    assert_eq!(
+        Gate::new(reg, 0, 32, GateFlags::empty()).err(),
+        Some(ClkError::InvalidValue)
+    );
+}
+
+#[def_test(serial)]
+fn register_table_rejects_a_descriptor_outside_the_window() {
+    let _serial = PROVIDER_SERIAL.lock();
+    static TABLE: ClkTable = ClkTable::new(0x72);
+    TABLE.clear();
+    reset_providers();
+    let before = crate::clocks_len();
+
+    let reg: Arc<dyn ClkRegAccess> = Arc::new(BoundedReg::new(16));
+    let bad_branches = [ClkBranch::new(
+        0,
+        "past_end",
+        &[],
+        ClkFlags::empty(),
+        ClkNodeDesc::Gate {
+            offset_bytes: 16,
+            bit: 0,
+            flags: GateFlags::empty(),
+        },
+    )];
+    assert_eq!(
+        register_table(&TABLE, reg, &bad_branches),
+        Err(ClkError::InvalidValue)
+    );
+    assert_eq!(crate::clocks_len(), before);
+    assert!(clk_get_by_index(0x72, 0).is_err());
 
     reset_providers();
 }

@@ -589,7 +589,7 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
             offset_bytes,
             bit,
             flags,
-        } => Gate::into_ops(reg.clone(), *offset_bytes, *bit, *flags),
+        } => Gate::into_ops(reg.clone(), *offset_bytes, *bit, *flags)?,
         ClkNodeDesc::Mux {
             offset_bytes,
             shift,
@@ -633,7 +633,8 @@ fn build_ops(node: &ClkNodeDesc, reg: &Arc<dyn ClkRegAccess>) -> ClkResult<Arc<d
                 .transpose()?;
             let g = gate
                 .as_ref()
-                .map(|d| Gate::into_ops(reg.clone(), d.offset_bytes, d.bit, d.flags));
+                .map(|d| Gate::into_ops(reg.clone(), d.offset_bytes, d.bit, d.flags))
+                .transpose()?;
             Composite::new(m, dv, g).into_ops()
         }
         ClkNodeDesc::Custom { ops } => ops.clone(),

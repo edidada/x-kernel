@@ -93,7 +93,7 @@ and provider/consumer integration evolves independently of the core.
 | `src/handle.rs` | `ClkHandle`, the consumer-side reference. |
 | `src/provider.rs` | `ClkLookup` trait + global provider *list* keyed by `ProviderId` (`register_provider`, `clk_get_by_*`). |
 | `src/lookup.rs` | `ClkTable`, a ready name- and index-keyed `ClkLookup`. |
-| `src/reg.rs` | `ClkRegAccess` trait + `MmioClkReg` default impl. |
+| `src/reg.rs` | `ClkRegAccess` trait (register access, with an optional window bound) + `NullClkReg`; the MMIO implementation lives in the host adapter. |
 | `src/event.rs` | `ClkEvent`, `NotifierResult`, and the `ClkNotifier` subscriber type. |
 | `src/basic/*` | Reusable clock types. |
 | `src/flags.rs` | `ClkFlags` policy bits (`SET_RATE_PARENT`, `IS_CRITICAL`, ...). |
@@ -363,8 +363,13 @@ calling the hardware op once when the count reaches zero.
   dispatching through `Arc<dyn ClkHwOps>` is simpler than a token table, and the
   capability-contract layer needs no concrete framework type.
 - **Register access behind `ClkRegAccess`.** Basic types that touch registers
-  (gate/mux/divider) never depend on a host MMIO mechanism; `MmioClkReg` is one
-  default impl, and tests inject an array-backed mock.
+  (gate/mux/divider) never depend on a host MMIO mechanism: this crate owns none.
+  The host supplies the accessor (`IoMapClkReg` in the X-Kernel provider adapter,
+  built over the validated `driver_os_api::mmio::IoMap`), tests inject an array-backed
+  mock, and `NullClkReg` serves purely computational nodes. Implementations that
+  know their window report it through `window_bytes()`, and node constructors
+  reject a descriptor that would read or write outside it (see "Register
+  windows" below).
 - **`RATE` is `u64` Hz**, matching Linux's `unsigned long`.
 - **Two global locks, mirroring Linux.** `CLK_LOCK` (a sleepable
   `ksync::Mutex`) serializes the slow mutations — `prepare`/`unprepare`/
@@ -404,19 +409,32 @@ with non-standard encoding.
 
 ### Step 2 — map the controller's register window
 
-Acquire the controller's MMIO base the same way any driver does, then wrap it in
-`MmioClkReg` (a `ClkRegAccess`). Each node is described by an `offset` within the
-window plus a bit field, so a controller shares one `Arc<dyn ClkRegAccess>`
-across all its nodes:
+Acquire the controller's MMIO window the same way any driver does, and wrap the
+resulting `IoMap` in the host adapter's `ClkRegAccess` implementation. Each node
+is described by a byte `offset_bytes` within the window plus a bit field, so a
+controller shares one `Arc<dyn ClkRegAccess>` across all its nodes:
 
 ```rust
 use alloc::sync::Arc;
-use kclk::{ClkRegAccess, MmioClkReg};
+use driver_os_api::IoMap;
+use driver_os_api_xkernel::IoMapClkReg;
+use kclk::ClkRegAccess;
 
-// `base` is the virtual address returned by memspace::iomap_device / devm_iomap.
-// SAFETY: `ccu_vaddr` is a live, word-aligned mapping from memspace::iomap_device.
-let reg: Arc<dyn ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(ccu_vaddr) });
+// `map_with` bounds-checks and align-checks every access, and reports the
+// region size as the register window the clock framework validates against.
+let map = IoMap::map_with(&XKernelResourceProvider, region, "ccu")?;
+let reg: Arc<dyn ClkRegAccess> = Arc::new(IoMapClkReg::new(map));
 ```
+
+### Register windows
+
+`ClkRegAccess::window_bytes` reports the size of the window an accessor can
+reach, and every node constructor (`Gate`, `Mux`, `Divider`) rejects a
+descriptor whose word (`offset_bytes .. offset_bytes + 4`) leaves it, or that is
+not word-aligned, with `ClkError::InvalidValue`. A table-authoring mistake is
+therefore reported by `register_table` during probe instead of faulting on the
+first access. Accessors that cannot express a window (test doubles,
+`NullClkReg`) return `None` and keep their descriptors unchecked.
 
 ### Step 3 — build the tree bottom-up with `ClkBuilder`
 
@@ -431,8 +449,7 @@ use kclk::{ClkBuilder, ClkFlags, ClkTable, Divider, DividerFlags, FixedRate, Gat
 static CCU: ClkTable = ClkTable::new(0x1 /* controller phandle */);
 
 pub fn init_ccu(ccu_vaddr: usize) -> kclk::ClkResult<()> {
-    // SAFETY: `ccu_vaddr` is a live, word-aligned mapping from memspace::iomap_device.
-    let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(ccu_vaddr) });
+    let reg: Arc<dyn kclk::ClkRegAccess> = Arc::new(IoMapClkReg::new(ccu_map));
 
     // Root oscillator.
     let osc24m = ClkBuilder::new("osc24m", FixedRate::new(24_000_000).into_ops()).build()?;
@@ -512,8 +529,8 @@ impl DeviceDriver for FixedClockDriver {
 impl DeviceDriver for Rk3588CruDriver {
     type Data = CruData;
     fn probe_device(&self, ctx: &ProbeContext<'_>) -> DriverResult<Self::Data> {
-        let regs = /* devm-iomap the controller's register window */;
-        let reg: Arc<dyn ClkRegAccess> = Arc::new(unsafe { MmioClkReg::new(regs.as_ptr()) });
+        let map = /* devm-iomap the controller's register window */;
+        let reg: Arc<dyn ClkRegAccess> = Arc::new(IoMapClkReg::new(map));
         let ccu = build_ccu_tree(&reg)?;                    // kclk branches
         kclk::register_provider(&ccu);
         Ok(CruData { _regs: regs, _ccu: ccu })

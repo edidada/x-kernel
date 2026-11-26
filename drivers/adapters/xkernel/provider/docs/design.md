@@ -21,8 +21,14 @@ cleanup ordering.
 - CpuMemoryOp uses the fallible inherent kalloc allocator, not DMA storage.
 - IrqOp uses KIRQ shared hardirq registration and x86_64 MSI-X allocation.
 - TimeOp forwards to the host monotonic clock.
+- `IoMapClkReg` adapts a validated `IoMap` to the clock framework's
+  `ClkRegAccess`: the clock crate owns no MMIO mechanism, so this adapter is
+  where a clock controller's register window is read. It stores the mapping
+  rather than an address, so bounds, alignment and unmap come from `IoMap`, and
+  it reports the region size through `window_bytes` so node constructors reject
+  a descriptor that would reach outside the mapping.
 
-These implementations live in src/{claim,mmio,dma,device_dma,memory,irq,time}.rs.
+These implementations live in src/{claim,clk_reg,mmio,dma,device_dma,memory,irq,time}.rs.
 Kernel tests live in ut-tests and are mounted by their source modules.
 
 ## MMIO range claims
