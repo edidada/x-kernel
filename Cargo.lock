@@ -3090,8 +3090,10 @@ dependencies = [
  "kerrno",
  "kiface",
  "kiface-cpu-api",
+ "kiface-mm-api",
  "kiface-power-api",
  "kplat-macros",
+ "memaddr",
 ]
 
 [[package]]
@@ -3113,6 +3115,7 @@ dependencies = [
  "khal",
  "kiface",
  "kiface-cpu-api",
+ "kiface-mm-api",
  "kiface-task-api",
  "kipi",
  "kirq",
