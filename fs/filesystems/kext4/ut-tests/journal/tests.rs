@@ -84,7 +84,7 @@ fn revoke_journal_test_filesystem(sequence: u32) -> (Ext4SbInfo, Arc<TestDevice>
     revoke_journal_test_filesystem_with_log_blocks(sequence, 1023)
 }
 
-fn revoke_journal_test_filesystem_with_log_blocks(
+pub(super) fn revoke_journal_test_filesystem_with_log_blocks(
     sequence: u32,
     log_blocks: u32,
 ) -> (Ext4SbInfo, Arc<TestDevice>) {

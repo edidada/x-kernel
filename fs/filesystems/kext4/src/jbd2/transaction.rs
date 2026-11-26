@@ -20,6 +20,7 @@ use core::{
 
 use ksync::{Mutex, MutexGuard};
 use ktask::WaitQueue;
+use ktime_types::MonotonicInstant;
 
 use super::{
     JournalPersistedCommit, JournalSuperblock, TransactionId,
@@ -183,6 +184,7 @@ enum TransactionPhase {
 /// parallel commit object or transaction payload is created.
 pub(crate) struct RuntimeTransaction {
     id: TransactionId,
+    started_at: MonotonicInstant,
     phase: Mutex<TransactionPhase>,
 }
 
@@ -199,6 +201,7 @@ impl RuntimeTransaction {
     fn new(id: TransactionId) -> Self {
         Self {
             id,
+            started_at: ktime::realtime_and_monotonic().1,
             phase: Mutex::new(TransactionPhase::Running(RunningTransactionState::new())),
         }
     }
@@ -503,11 +506,21 @@ impl JournalTransactions {
                 .is_some_and(|last| transaction_is_same_or_older(transaction, last.id()))
     }
 
+    #[cfg(unittest)]
+    pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
+        self.begin_with_start_notification(credits, || Ok(()))
+    }
+
     /// Starts or joins the running transaction, waiting if it has been sealed.
+    /// Calls the notifier once on creation, after releasing the transaction lock.
     ///
     /// Do not nest begin while retaining a handle or a lock needed to stop one.
     /// Capacity preflight and begin require the caller's mutation exclusion.
-    pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
+    pub(crate) fn begin_with_start_notification(
+        &self,
+        credits: JournalCredits,
+        notify: impl FnOnce() -> Ext4Result<()>,
+    ) -> Ext4Result<JournalHandle<'_>> {
         self.ensure_writable()?;
         if !self.can_fit_handle(credits) {
             return Err(Ext4Error::NoSpace);
@@ -524,6 +537,7 @@ impl JournalTransactions {
             }
         };
 
+        let is_new = inner.running.is_none();
         let id = match &mut inner.running {
             Some(transaction) => {
                 transaction.with_running(|running| running.begin_handle(credits))?;
@@ -539,13 +553,18 @@ impl JournalTransactions {
             }
         };
 
-        Ok(JournalHandle {
+        drop(inner);
+        let handle = JournalHandle {
             journal: self,
             id,
             remaining_credits: credits.get(),
             has_updates: false,
             closed: false,
-        })
+        };
+        if is_new {
+            notify()?;
+        }
+        Ok(handle)
     }
 
     /// Returns this transaction after its last handle closes and its retained
@@ -600,9 +619,14 @@ impl JournalTransactions {
 
     /// Returns the current running transaction, if one exists.
     pub(crate) fn running_transaction(&self) -> Ext4Result<Option<TransactionId>> {
+        Ok(self.running_since()?.map(|(id, _)| id))
+    }
+
+    /// Snapshots the identity and original start time under one transaction lock.
+    pub(crate) fn running_since(&self) -> Ext4Result<Option<(TransactionId, MonotonicInstant)>> {
         let inner = lock(&self.inner);
         check_not_aborted(&inner)?;
-        Ok(inner.running.as_ref().map(|running| running.id()))
+        Ok(inner.running.as_ref().map(|tx| (tx.id(), tx.started_at)))
     }
 
     /// Returns whether this journal has been aborted.
@@ -928,6 +952,13 @@ impl JournalTransactions {
             }
         }
         self.finish_checkpoint(commit)
+    }
+
+    /// Observes background progress without requesting or expediting a commit.
+    #[cfg(unittest)]
+    pub(crate) fn wait_for_commit_or_abort(&self, transaction: TransactionId) {
+        self.state_waiters
+            .wait_until(|| self.is_committed(transaction) || self.is_aborted());
     }
 
     /// Waits for a committed transaction's checkpoint state.

@@ -79,7 +79,7 @@
 //! bytes remain a core-only foundation until KVFS has ACL permission and
 //! inheritance semantics. This is still not a complete
 //! Linux ext4 write mount: mmap/direct I/O coherence, freeze/unmount lifecycle
-//! hooks, a background checkpoint worker, oversized xattr, EA-inode, inline-data
+//! hooks, oversized xattr, EA-inode, inline-data
 //! write contracts, and Linux-style errseq/forced-readonly reporting remain
 //! later stages. The core R10 sync baseline can flush checkpointed metadata and
 //! device state. One mount-lifetime journal identity owns the internal mapping,
@@ -90,12 +90,9 @@
 //! violation and aborts the journal without rewinding metadata already published
 //! by this or earlier successful operations. Handles retain only credits and
 //! buffer/revoke membership and return accounting failures through explicit
-//! stop. Durable commit is separate from home-block checkpoint,
-//! while queue progress remains synchronously driven until N2 introduces
-//! background execution. Precise per-inode sync tids still require KVFS
-//! runtime-inode storage, so the current sync path conservatively commits the
-//! running transaction. The KVFS integration wires filesystem drain through
-//! `SuperBlockOperations::sync_fs`.
+//! stop. A one-shot worker commits aged transactions and checkpoints the log
+//! under space pressure. Explicit filesystem sync and final superblock shutdown
+//! synchronously drain both running transactions and pending checkpoints.
 //! Crate-internal tests keep a raw allocated-data overwrite helper for
 //! validating storage plumbing; it is not exported as an ext4 API.
 

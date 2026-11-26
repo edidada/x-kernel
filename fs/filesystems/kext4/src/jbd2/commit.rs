@@ -252,6 +252,20 @@ pub(crate) struct JournalPersistedCommit {
 }
 
 impl JournalPersistedCommit {
+    /// A quarter of the usable ring is the background reclaim watermark. The
+    /// live append head is in the newest persisted commit, including after wrap.
+    pub(crate) fn needs_background_checkpoint(
+        &self,
+        superblock: &JournalSuperblock,
+    ) -> Ext4Result<bool> {
+        let JournalStart::Block(tail) = superblock.start() else {
+            return Err(Ext4Error::InvalidJournalTransaction);
+        };
+        let capacity = usable_log_capacity(superblock)?;
+        let used = log_distance(superblock, tail, self.log.head())?;
+        Ok(capacity.saturating_sub(used) <= capacity / 4)
+    }
+
     /// Returns the logged transaction summary.
     #[cfg(unittest)]
     pub(crate) const fn log(&self) -> JournalLogCommit {

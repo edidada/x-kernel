@@ -415,6 +415,14 @@ impl Ext4SuperOperations {
                         .persist_directory_hash_policy()
                         .map_err(into_vfs_err)?;
                 }
+                // Install last: failed mounts must never leave a notifier able to
+                // touch a released device. Read-only mounts can later remount writable.
+                let state = ext4_private(super_block)?.write(super_block);
+                if let Some(journal) = &state.journal {
+                    journal
+                        .start_worker(super_block, crate::journal::JOURNAL_COMMIT_INTERVAL)
+                        .map_err(into_vfs_err)?;
+                }
                 Ok(root)
             },
         )
@@ -623,12 +631,22 @@ impl SuperBlockOperations for Ext4SuperOperations {
     }
 
     fn put_super(&self, super_block: &SuperBlock) -> VfsResult<()> {
+        let ext4 = ext4_private(super_block)?;
+        let worker = ext4
+            .write(super_block)
+            .journal
+            .as_ref()
+            .and_then(|journal| journal.detach_worker());
+        // A claimed callback may be waiting for the mount write guard.
+        let worker_result = worker
+            .map_or(Ok(()), |worker| worker.shutdown())
+            .map_err(into_vfs_err);
         let quota_result = Self::deactivate_internal_quotas(super_block);
-        let filesystem_result = ext4_private(super_block)?
+        let filesystem_result = ext4
             .write(super_block)
             .sync_filesystem()
             .map_err(into_vfs_err);
-        quota_result.and(filesystem_result)
+        worker_result.and(quota_result).and(filesystem_result)
     }
 
     fn timestamp_limits(&self, super_block: &SuperBlock) -> kvfs::TimestampLimits {

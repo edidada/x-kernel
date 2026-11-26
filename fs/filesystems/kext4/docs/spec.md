@@ -114,10 +114,10 @@ confidence 和 method limits。对比使用固定的 KExt4 历史基线，不保
 | 瓶颈 | 当前实现 | 为什么必须先改 |
 | --- | --- | --- |
 | mount-wide metadata 串行化 | 唯一 `Ext4SbInfo` 作为 `s_fs_info` 置于 `RwLock` 中；delalloc aggregate 已有独立 reservation mutex | journal、allocator 和不同 inode 的 metadata mutation 仍无法完全并行；只读与 reservation 路径可共享进入 |
-| commit batching 仍为同步驱动 | 普通 mutation 可共享 mount-wide running transaction；真实 outstanding credits、日志空间和显式 sync 可触发 commit | 尚无基于时间的 age trigger 和后台 commit worker，低负载 transaction 仍依赖后续操作或显式 sync 推进 |
-| checkpoint 仍由调用者驱动 | mutation 返回后可保留 pending checkpoint，`syncfs`/unmount 或 journal-space pressure 同步推进 | 没有后台 writeback/checkpoint，home-block 脏状态和尾部回收仍会阻塞触发者 |
-| journal 提交仍受同步 block API 限制 | N2.1 已把连续 journal blocks 聚合为不超过 128 KiB 的请求，并复用 journal-superblock image、去除 commit 后的重复 flush | 请求数量已降低，但每个 batch 仍在调用栈中同步完成；没有多请求 in-flight、后台 commit/checkpoint 或驱动 completion |
-| durability 等待仍为同步基线 | runtime inode 尚无 sync/datasync tid，`fsync/fdatasync` 保守提交整个 running transaction 并 flush；`syncfs` 仍推进全文件系统 | 尚无目标 transaction 等待、异步 ordered-data dependency、后台 commit/checkpoint 和 errseq，等待者仍在当前调用栈执行设备 I/O |
+| journal 仍持 mount 写锁执行 I/O | running transaction 自创建起满 5 秒可由后台提交，credits 不足和显式 sync 仍可前台提交 | 提交时长和竞争 mount 写锁的时间仍影响持久化延迟 |
+| checkpoint 与前台共享设备 | 剩余可用日志空间降至四分之一时唤醒后台回收；追加已经受阻时由提交者同步回收所需前缀 | 水位触发与前台追加可能竞争，仍须保留同步回收 |
+| journal 提交仍受同步 block API 限制 | 连续 journal blocks 聚合为不超过 128 KiB 的请求，提交由前台或后台任务执行 | 每个 batch 仍须等待设备完成 |
+| durability 等待仍受 mount 写锁限制 | inode sync 与后台共用事务状态及 ordered-data 提交屏障，`syncfs` 同步排空整个文件系统 | 前台仍可能直接执行设备 I/O |
 | PageCache writeback 基础有限 | PageCache 仍固定上限聚合 folio；core 已由 live cursor 按实际 mapping/allocation run 续订 credits，并在 journal transaction 容量不足时提交前缀后续写；失败会把已完成字节前缀反馈给 PageCache，仅保留边界 folio 与后缀为 dirty，但仍无后台 dirty control 和异步 transaction dependency | 静态全范围 credit/space plan 与“错误等于零进展”的歧义已消除；fio 吞吐、内存压力和异步完成仍不可控 |
 | KExt4 仍使用同步 I/O 适配 | 公共块层已有独立提交和完成的 Bio/Request；KExt4 的 mapped-overwrite writeback 已先提交 owned BIO 再等待，journal 与其余元数据路径仍通过 BlockDevice 同步方法等待 | 后续批量 I/O 可使用公共 Bio 接口先提交再等待，不应依赖 VirtIO 私有接口 |
 | extent/allocator 仍未完整分层 | `ExtentPath` 已承载单路径更新和均衡 split，但跨叶 truncate 回退、重复 lookup 和 scan-backed free-run cache 仍存在 | 长文件常规写不再全树重建，复杂范围操作和多 job 仍受限 |
@@ -308,11 +308,9 @@ N5 advanced I/O / common features -> N6 replacement
 
 移交 N2 的后续工作：
 
-1. 当前已完成 credits、journal-space 和 explicit-sync commit trigger；基于时间的 age trigger
-   随 background commit worker 引入，避免为同步驱动阶段提前增加 timer ownership；
+1. 已接入事务年龄、日志空间水位、credits 和显式同步触发，每个挂载的 journal 复用一个按需调度的 worker。
 2. 同步 ordered-data 基线已经完成；下一步需要 KVFS runtime inode 提供 sync/datasync tid，
-   KExt4 再接入目标 transaction 等待，并在 N2 引入异步 ordered-data dependency、后台
-   commit/checkpoint 和 errseq，使等待不再由 fsync 调用栈串行执行全部设备 I/O；
+   KExt4 再扩展目标 transaction 等待和 errseq，使等待不再由 fsync 调用栈串行执行全部设备 I/O；
 3. N1 保持同步调用，不提前引入 worker 和细粒度锁；N2 根据真实执行者分别为 journal、
    inode、metadata buffer 和 group allocator 建立锁域，不再以字段分组代替并发设计。
 
@@ -448,8 +446,8 @@ G2 退出条件：
 - AddressSpace writeback error、SuperBlock filesystem error 和 per-file errseq sample/cursor；
 - journal/checkpoint abort 后的 forced-readonly 和新写入 gate；
 - KVFS clean unmount/freeze：阻止新引用或写入，drain PageCache、inode metadata、running
-  transaction、commit/checkpoint worker 和 orphan，再 detach/freeze；当前同步 unmount
-  已保证 writeback 失败不拆 topology，仍需补引用 gate、freeze 和后台 worker 协调；
+  transaction、commit/checkpoint worker 和 orphan，再 detach/freeze。最终卸载会停止 journal worker
+  并同步排空，freeze 仍需独立的生命周期协调。
 - short copy、redirty-during-writeback、invalidate/reclaim/truncate、ENOSPC 和 retry；
 - block read/write/flush、journal persist、checkpoint、bitmap/counter、extent split 和 orphan
   故障注入；

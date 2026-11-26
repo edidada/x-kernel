@@ -504,8 +504,16 @@ orphan-file cleanup have all completed commit/checkpoint, the journal start is c
 and the final superblock state has been flushed; a failure before the cleanup is durable keeps the orphan entry or the recovery feature
 as the entry point for the next recovery, and a failure of the final state flush must also return an error to the caller.
 
-The completed N1 `MountedJournal` boundary must continue to preserve the recovery-evidence, revoke, and
-checkpoint-failure-retain invariants. The later N2 backgrounding must not swallow errors or clear pending state on the grounds that the complete N3 fault matrix is temporarily missing.
+Background commit and checkpoint use the same ordered-data barrier, recovery evidence, revoke rules
+and checkpoint retirement as explicit sync. A failed background flush, journal write or checkpoint
+aborts the mounted journal. The worker's mount guard publishes the read-only flag before releasing
+write exclusion. The first abort remains visible to future mutation and sync callers.
+
+A journal notification holds no short journal or transaction lock. The queue coalesces pending
+occurrences and can accept a successor while its callback is returning. Each callback checks current
+journal state under mount write exclusion. It holds only a weak superblock reference between runs.
+Final `put_super` removes the notifier under the mount lock, releases that lock, shuts down the
+handle and timer, and synchronously drains outstanding filesystem state before device release.
 The full linkage of the user-space sticky error/errseq and forced-readonly is to be completed in N3,
 after the background execution graph is stable.
 
@@ -536,7 +544,7 @@ or application data. The core does not log xattr values or file contents.
 - An HTree SIPHASH root can complete format classification, but encryption/casefold name-key semantics are not yet implemented; operations that need a name
   hash, such as create/unlink/rename, return `EOPNOTSUPP`.
 - KVFS unmount already synchronizes VFS and journal state before and after topology detach, but blocking new references/writes,
-  lazy unmount, freeze and background worker drain still need a final lifecycle gate.
+  lazy unmount and freeze have additional lifecycle requirements. Final superblock shutdown joins the journal worker.
 - Regular inodes have metadata transaction targets, but fsync and fdatasync do
   not yet distinguish timestamp-only and data-required metadata. Directories,
   missing targets, and unattributed mutations may still commit unrelated metadata.
@@ -720,7 +728,7 @@ device and does not advance an open file's error cursor.
 Full fsync, syncfs/unmount inode metadata writeback and linked-inode eviction stage
 pending timestamps. Data-only mapped overwrite may omit a timestamp-only transaction;
 a later full fsync must still persist timestamps with no dirty folios remaining.
-This does not weaken the data or journal flush barriers or add a background worker.
+Background journal commit observes the same data and journal flush barriers.
 
 Buffered write admission checks live immutable policy even for empty requests,
 before generic size limits, and publishes automatic timestamps only after the

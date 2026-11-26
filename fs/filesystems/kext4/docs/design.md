@@ -524,8 +524,20 @@ then drain all pending checkpoints; an ordinary mount runs the same sync path ag
 to cover new metadata produced by final inode eviction. A normal commit directly checks the running/committing slots,
 and only a retry targeting an old pending transaction scans the FIFO, so that each commit does not bear a cost proportional to the backlog length.
 
-The checkpoint worker performs two kinds of work under the journal persistence execution lock (production still holds the mount write lock): an explicit sync snapshots the entire queue and drains it; when append
-returns `JournalBusy`, it selects the shortest contiguous prefix that reaches the space target. Let `A` be the number of descriptor, metadata, revoke, and commit blocks
+Each KVFS mount with an internal journal installs a prepared one-shot `DelayedWorkHandle` on its
+`MountedJournal` after recovery and before root publication. The first handle of a transaction arms
+an age notification for five seconds. Later handles keep the original deadline. When at most one
+quarter of the usable log ring remains free, a successful append expedites the same work item.
+The watermark uses the persisted append head and the oldest live log block, accounting for wrap and
+the reserved gap. An idle mount has no recurring timer.
+
+The normal worker acquires the mount write guard, rereads the checkpoint frontier and the running
+transaction's monotonic age, drains the checkpoint FIFO under pressure, and commits an expired
+transaction. It rechecks both conditions after each operation and rearms for a younger transaction.
+A stale notification after foreground sync can therefore complete without I/O. Explicit sync also
+drains the FIFO. If append encounters `JournalBusy` before the worker obtains mount exclusion, the
+committer synchronously checkpoints the shortest contiguous prefix that meets its space target.
+Let `A` be the number of descriptor, metadata, revoke, and commit blocks
 actually needed by the current frozen transaction, `B` the worst-case journal overhead corresponding to the mounted transaction credit
 limit, and `C` the total number of usable ring blocks; the reclaim target is then `min(C - 1, A + B)` writable
 journal blocks; physical free space must be strictly greater than this target, still keeping one empty block. Each credit owns at most one
@@ -597,8 +609,7 @@ but it no longer uses the journal checkpoint cadence as a substitute for the ord
 The batch size is determined by the space target and FIFO order, and does not cross uncommitted running/committing transactions;
 revoke still suppresses writeback of old versions through the existing cache rules. After the committer finishes the prefix reclaim, it retries the append, and subsequent transactions remain in the FIFO.
 
-This keeps a space budget for the next transaction between frequent barriers that are "just enough for this append" and long synchronous waits for "draining everything",
-without adding a fixed-ratio watermark, background worker, or age trigger. A large transaction or a very small ring may still
+The synchronous fallback reserves space for the next transaction as well as the blocked append. A large transaction or a very small ring may still
 need to drain; the mount write lock still covers device I/O, and no upper bound on the latency of a single commit is provided. Whether throughput and tail latency improve must be re-measured against
 the shortest-prefix and full-drain baselines separately; the budget itself does not constitute proof of a performance gain.
 
@@ -692,10 +703,9 @@ If a clean v2 journal created by Linux has not yet declared the revoke feature, 
 feature, and only then allows transactions/checkpoints to overlap; a v1 journal has no feature bitmap and continues to fall back to a synchronous checkpoint after every
 commit. This way, the release/reuse of metadata blocks still satisfies the revoke/reuse constraints below.
 An ordinary mutation no longer unconditionally force-commits; after a successful handle is closed, its modifications stay in the running transaction, and
-credits, journal space, and explicit filesystem sync determine the commit timing in the synchronous phase.
+credit pressure, an explicit sync, or the background age deadline can commit it.
 The orphan + `i_disksize` update of truncate is still force-committed, guaranteeing that a persistent
-recovery point exists before the old block mapping is released; recovery-time orphan cleanup still completes commit/checkpoint synchronously. Time-based triggers and the background
-worker are left until after the synchronously driven state machine is stable.
+recovery point exists before the old block mapping is released; recovery-time orphan cleanup completes commit/checkpoint synchronously before worker installation.
 
 A journal that lacks the JBD2 revoke feature and cannot be upgraded still relies on a synchronous drain as its safety premise: when releasing extent/xattr
 metadata blocks, the core forgets the retired block from the current handle's metadata set, rather than generating a
@@ -1293,7 +1303,7 @@ Append and checkpoint, from selection through retirement, are protected by the s
 the FIFO prefix, the original next-transaction space budget and the ring spare rule. Home writeback and flush come first, then the tail is persisted,
 and finally retirement and space release; the unselected suffix and recovery evidence are retained. The append and synchronous drain of `PreserveDuringRecovery`
 do not release the execution right. Explicit replay/reset remains exclusive recovery before the mount identity is published,
-and does not run concurrently with normal access; this step creates no background checkpoint worker.
+and finishes before the background worker is installed.
 
 Production still retains mount mutation exclusion as well as `&mut Ext4SbInfo`. The capacity precheck/admission between `prepare_reservation` and `begin`
 still happens within the same mutation exclusion, and is not a credit ticket that can be detached from that exclusion;
@@ -1516,8 +1526,7 @@ KVFS checks each open file's independent error cursor after its filesystem callb
 Concurrent full/data-only requests keep their own metadata intent and data wait;
 an earlier caller's completed scan cannot satisfy a later caller's dirty data.
 Existing submission exclusion and truncate/close/eviction drains protect mapping
-changes. This removes request batching without adding a background commit worker
-or relaxing the current mount/persistence lock order.
+changes. Foreground fsync and background journal work use the same mount/persistence lock order.
 
 Namespace removal verifies the inode's data reclamation format before modifying directory entries. `unlink`, `rmdir`, and overwriting
 `rename` allocate an orphan-file slot when the link count drops to zero, and use the legacy list when the orphan file is full; removing an

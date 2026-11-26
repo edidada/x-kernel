@@ -25,6 +25,11 @@ use crate::{
     types::{BlockCount, FilesystemBlock},
 };
 
+mod background;
+
+pub(crate) use background::JOURNAL_COMMIT_INTERVAL;
+use background::JournalWorker;
+
 const JBD2_FEATURE_INCOMPAT_REVOKE: u32 = 0x0000_0001;
 
 fn transaction_credit_limit(superblock: &JournalSuperblock) -> Ext4Result<u32> {
@@ -63,6 +68,7 @@ struct JournalPersistence<'a> {
 
 struct MountedJournalState {
     storage: InternalJournal,
+    worker: Option<JournalWorker>,
     checkpoint_policies: BTreeMap<TransactionId, RecoveryFlagPolicy>,
 }
 
@@ -81,6 +87,7 @@ impl MountedJournal {
             persistence: Mutex::new(()),
             state: Mutex::new(MountedJournalState {
                 storage,
+                worker: None,
                 checkpoint_policies: BTreeMap::new(),
             }),
         }))
@@ -193,7 +200,15 @@ impl MountedJournal {
     }
 
     pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
-        self.transactions.begin(credits)
+        self.transactions
+            .begin_with_start_notification(credits, || {
+                if let Some(worker) = self.worker() {
+                    worker
+                        .notify_after(worker.commit_interval)
+                        .inspect_err(|&error| self.transactions.abort(error))?;
+                }
+                Ok(())
+            })
     }
 
     pub(crate) fn is_aborted(&self) -> bool {
@@ -226,9 +241,8 @@ impl Ext4SbInfo {
     /// Synchronizes filesystem-owned state with stable storage.
     ///
     /// Metadata mutations enqueue committed journal records for checkpointing.
-    /// Until a kernel background worker is wired in, `syncfs`, KVFS unmount
-    /// writeback, and journal-space pressure drive the queue. Freeze should
-    /// call the same drain path once that lifecycle hook exists in KVFS.
+    /// Explicit sync and final unmount commit and drain synchronously, including
+    /// work that a background age or space notification has yet to service.
     pub(crate) fn sync_filesystem(&mut self) -> Ext4Result<()> {
         // Unsupported writable features leave recovery evidence untouched.
         // Such mounts cannot own metadata transactions or orphan cleanup.
@@ -444,9 +458,11 @@ impl Ext4SbInfo {
             .as_ref()
             .cloned()
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?;
-        let persistence = journal.lock_persistence();
-        let result =
-            self.commit_metadata_transaction_inner(&persistence, transaction, recovery_flag_policy);
+        let result = {
+            let persistence = journal.lock_persistence();
+            self.commit_metadata_transaction_inner(&persistence, transaction, recovery_flag_policy)
+        }
+        .and_then(|()| journal.notify_space_pressure());
         result.map_err(|error| self.fail_journal_operation(error))
     }
 
@@ -1241,3 +1257,6 @@ unittest::path_mod_test!(recovery_tests, "../ut-tests/journal/recovery_tests.rs"
 
 #[cfg(unittest)]
 unittest::path_mod_test!(component_tests, "../ut-tests/journal/component_tests.rs");
+
+#[cfg(unittest)]
+unittest::path_mod_test!(background_tests, "../ut-tests/journal/background_tests.rs");
