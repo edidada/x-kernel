@@ -372,7 +372,7 @@ fn ordered_data_barrier_precedes_journal_writes_and_failure_aborts() {
             if fail_data_flush { None } else { Some(3) },
             if fail_data_flush { Some(1) } else { None },
         ));
-        filesystem.device = Arc::new(
+        filesystem.unpublished_storage().unwrap().device = Arc::new(
             FilesystemDevice::open(
                 crate::io::test_block_device(device.clone()),
                 TEST_BLOCK_SIZE,
@@ -380,7 +380,8 @@ fn ordered_data_barrier_precedes_journal_writes_and_failure_aborts() {
             )
             .unwrap(),
         );
-        filesystem.metadata_io = Ext4MetadataIo::new(filesystem.device.clone());
+        filesystem.unpublished_storage().unwrap().metadata_io =
+            Ext4MetadataIo::new(filesystem.device.clone());
         inode.set_size((TEST_BLOCK_SIZE * 2) as u64);
         let input = vec![0x8c; TEST_BLOCK_SIZE];
         for offset in [0, TEST_BLOCK_SIZE as u64] {

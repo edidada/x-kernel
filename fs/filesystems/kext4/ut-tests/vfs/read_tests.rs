@@ -27,7 +27,7 @@ use crate::{
               inode, superblock and open-file readahead policy or abort the fixture"
 )]
 pub(super) fn cached_file(
-    filesystem: Ext4SbInfo,
+    filesystem: Ext4SbInfo<'static>,
     private: Ext4Inode,
     flags: SuperBlockFlags,
     open_flags: OpenFlags,
@@ -426,7 +426,7 @@ fn fragmented_truncate_fixture(
     journal.finish_checkpoint_for_test(&commit).unwrap();
     private.set_size(expected.len() as u64);
     let device = ReadDevice::new(crate::io::test_block_device(storage));
-    filesystem.device = Arc::new(
+    filesystem.unpublished_storage().unwrap().device = Arc::new(
         FilesystemDevice::open(
             crate::io::test_block_device(device.clone()),
             block_size,
@@ -579,7 +579,7 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
     // Fail only the folio read; write-time timestamp updates must still be able
     // to read journal metadata without aborting the filesystem.
     *device.read_failure_block.lock() = Some(data_block);
-    filesystem.device = Arc::new(
+    filesystem.unpublished_storage().unwrap().device = Arc::new(
         FilesystemDevice::open(
             crate::io::test_block_device(device.clone()),
             PAGE_SIZE_4K,

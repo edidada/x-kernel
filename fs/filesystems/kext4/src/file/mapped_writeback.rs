@@ -98,7 +98,7 @@ impl Drop for PendingMappedWriteback {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Settles an overwrite prepared by `prepare_mapped_writeback`. Submission
     /// protection keeps its initialized mappings and disk size stable until
     /// completion; metadata is read live so concurrent timestamp changes survive.
@@ -110,6 +110,7 @@ impl Ext4SbInfo {
         intent: Ext4SyncIntent,
         is_open_for_write: impl Fn() -> bool,
     ) -> Ext4WritebackResult {
+        inode.note_data_completion();
         let bytes = match data {
             Ok(bytes) => bytes,
             Err(failure) if intent.requires_full_metadata() => {

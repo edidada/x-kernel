@@ -27,7 +27,7 @@ use crate::{
 
 const INODE_ALLOCATOR_METADATA_CREDITS: u32 = 4;
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     pub(crate) fn is_inode_allocated(&self, inode: InodeNumber) -> Ext4Result<bool> {
         let group = self.block_group_for_inode(inode)?;
         let geometry = self.group_geometry(group).ok_or(Ext4Error::OutOfBounds)?;

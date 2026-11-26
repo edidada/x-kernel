@@ -19,17 +19,17 @@ use crate::{
     Ext4WritebackResult, FilesystemBlock, LogicalBlock, UnsupportedKind, jbd2::JournalCredits,
 };
 
-struct PreparedRun {
-    mapping: AllocatedWriteRun,
-    partial: PartialBlockWrite,
+pub(super) struct PreparedRun {
+    pub(super) mapping: AllocatedWriteRun,
+    pub(super) partial: PartialBlockWrite,
 }
 
 /// No journal handle or mount guard crosses the data-I/O boundary. Newly
 /// allocated blocks remain unwritten until successful completion is settled.
 /// The inode submission/drain protocol protects all physical mappings.
 pub(crate) struct PreparedWriteback {
-    device: Arc<crate::io::FilesystemDevice>,
-    runs: Vec<PreparedRun>,
+    pub(super) device: Arc<crate::io::FilesystemDevice>,
+    pub(super) runs: Vec<PreparedRun>,
 }
 
 impl PreparedWriteback {
@@ -155,7 +155,7 @@ impl PreparedWriteback {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Installs unwritten extents for holes without publishing a larger disk
     /// size or initialized extents. Bounded allocation transactions can commit
     /// safely before data I/O. Caller excludes mapping removal until drain.
@@ -273,6 +273,7 @@ impl Ext4SbInfo {
         intent: Ext4SyncIntent,
         is_open_for_write: impl Fn() -> bool,
     ) -> Ext4WritebackResult {
+        inode.note_data_completion();
         let bytes = match data {
             Ok(bytes) => bytes,
             Err(failure) if intent.requires_full_metadata() => {

@@ -18,10 +18,10 @@ use crate::{
     writeback_io::MAX_INFLIGHT_BATCHES,
 };
 
-#[derive(Clone, Copy)]
 enum CompletionKind {
     Mapped,
     Ordered,
+    Direct(crate::file::DirectWritePins),
 }
 
 struct PendingMappedBatch {
@@ -36,21 +36,20 @@ struct CompletionContext {
     inode: Arc<VfsInode>,
     private: Arc<Ext4Inode>,
     super_block: Arc<SuperBlock>,
-    completion: Mutex<Option<OwnedWritebackCompletion<AddressSpace>>>,
+    batch: Mutex<Option<(OwnedWritebackCompletion<AddressSpace>, CompletionKind)>>,
     offset: u64,
-    kind: CompletionKind,
 }
 
 impl CompletionContext {
     fn finish(&self, data: Ext4WritebackResult) -> VfsResult<()> {
-        let result = self.finish_metadata(data);
+        let Some((completion, kind)) = self.batch.lock().take() else {
+            return Ok(());
+        };
+        let result = self.finish_metadata(data, kind);
         if let Err(failure) = result {
             self.record_error(into_vfs_err(failure.error()));
         }
-        let completed = match self.completion.lock().take() {
-            Some(completion) => finish_cache_batch(&self.private, self.offset, completion, result),
-            None => Ok(()),
-        };
+        let completed = finish_cache_batch(&self.private, self.offset, completion, result);
         if result.is_ok()
             && let Err(error) = completed
         {
@@ -64,11 +63,23 @@ impl CompletionContext {
         self.super_block.writeback_errors().record(error);
     }
 
-    fn finish_metadata(&self, data: Ext4WritebackResult) -> Ext4WritebackResult {
+    fn finish_metadata(
+        &self,
+        data: Ext4WritebackResult,
+        kind: CompletionKind,
+    ) -> Ext4WritebackResult {
         let ext4 = ext4_private(&self.super_block)
             .map_err(|_| crate::Ext4Error::Device(block::DriverError::BadState))?;
-        let mut state = ext4.write(&self.super_block);
-        match self.kind {
+        if matches!(kind, CompletionKind::Mapped)
+            && !self.private.has_delalloc_reservations()
+            && (self.inode.write_count() != 0 || self.private.prealloc_map().is_empty())
+        {
+            self.private.note_data_completion();
+            return data;
+        }
+        let _metadata = self.private.writeback_io().lock_metadata();
+        let mut state = ext4.writeback(&self.super_block);
+        match kind {
             CompletionKind::Mapped => state.finish_mapped_writeback(
                 &self.private,
                 self.offset,
@@ -76,6 +87,10 @@ impl CompletionContext {
                 Ext4SyncIntent::DataOnly,
                 || self.inode.write_count() != 0,
             ),
+            CompletionKind::Direct(pins) => {
+                self.private.note_data_completion();
+                state.finish_direct_writeback(&self.private, self.offset, data, &pins, None)
+            }
             CompletionKind::Ordered => state.finish_prepared_writeback(
                 &self.private,
                 self.offset,
@@ -127,38 +142,15 @@ impl WritebackPass {
         batch: WritebackBatch<'_>,
     ) -> VfsResult<()> {
         let queue = self.private.writeback_io().clone();
-        if !queue.has_capacity() {
+        // Neighboring folios can share a physical block. Prepare their partial
+        // reads only after the previous read/modify/write has settled.
+        let shares_block = self.super_block.block_size() > super::PAGE_SIZE_4K as u64;
+        if !queue.has_capacity(shares_block) {
             if control.sync_mode() == WritebackSyncMode::None {
                 control.account_skipped(batch.page_count());
                 return Err(VfsError::WouldBlock);
             }
-            queue.wait_capacity();
-        }
-        // Different cache pages can share a larger filesystem block. Keep
-        // their read/modify/write serialized until block-granular exclusion exists.
-        if !self.private.has_extents() || self.super_block.block_size() > super::PAGE_SIZE_4K as u64
-        {
-            self.drain_mapped()?;
-            queue.drain();
-            let offset = batch.offset();
-            let result = ext4_private(&self.super_block)?
-                .write(&self.super_block)
-                .writeback_ordered_at(
-                    &self.private,
-                    offset,
-                    batch.data(),
-                    self.inode.size(),
-                    Ext4SyncIntent::DataOnly,
-                    || self.inode.write_count() != 0,
-                );
-            if let Err(failure) = result {
-                let error = into_vfs_err(failure.error());
-                mapping.writeback_errors().record(error);
-                self.super_block.writeback_errors().record(error);
-            }
-            let (_, completion) = batch.into_parts();
-            let completion = mapping.retain_writeback_completion(completion)?;
-            return finish_cache_batch(&self.private, offset, completion, result);
+            queue.wait_capacity(shares_block);
         }
         let offset = batch.offset();
         let super_block = self.super_block.clone();
@@ -176,21 +168,8 @@ impl WritebackPass {
             .inspect_err(|&error| self.record_error(error))?;
         let (data, completion) = batch.into_parts();
         let completion = mapping.retain_writeback_completion(completion)?;
-        let kind = if plan.is_some() {
-            CompletionKind::Mapped
-        } else {
-            CompletionKind::Ordered
-        };
-        let context = CompletionContext {
-            inode: self.inode.clone(),
-            private: self.private.clone(),
-            super_block: self.super_block.clone(),
-            completion: Mutex::new(Some(completion)),
-            offset,
-            kind,
-        };
-        let plan = match plan {
-            Some(plan) if control.sync_mode() == WritebackSyncMode::All => {
+        let (plan, kind) = match plan {
+            Some(plan) if control.sync_mode() == WritebackSyncMode::All && !shares_block => {
                 // Earlier allocating batches may still own metadata publication.
                 // The submission guard excludes mapping removal until this local
                 // pipeline drains, so no worker is needed for these overwrites.
@@ -198,28 +177,44 @@ impl WritebackPass {
                 let io = plan
                     .submit(data)
                     .map_err(into_vfs_err)
-                    .inspect_err(|&error| context.record_error(error))?;
+                    .inspect_err(|&error| self.record_error(error))?;
+                let context = self.completion(offset, completion, CompletionKind::Mapped);
                 self.pending_mapped.push(PendingMappedBatch { io, context });
                 if self.pending_mapped.len() == MAX_INFLIGHT_BATCHES {
                     self.drain_mapped()?;
                 }
                 return Ok(());
             }
-            Some(plan) => plan.into_async(),
+            Some(plan) => (plan.into_async(), CompletionKind::Mapped),
             None => {
                 self.drain_mapped()?;
-                ext4.write(&self.super_block)
-                    .prepare_allocating_writeback(
-                        &self.private,
-                        offset,
-                        data.len(),
-                        self.inode.size(),
-                        Ext4SyncIntent::DataOnly,
-                    )
-                    .map_err(into_vfs_err)
-                    .inspect_err(|&error| context.record_error(error))?
+                let _metadata = queue.lock_metadata();
+                let mut state = ext4.writeback(&self.super_block);
+                if self.private.has_extents() {
+                    state
+                        .prepare_allocating_writeback(
+                            &self.private,
+                            offset,
+                            data.len(),
+                            self.inode.size(),
+                            Ext4SyncIntent::DataOnly,
+                        )
+                        .map(|plan| (plan, CompletionKind::Ordered))
+                } else {
+                    state
+                        .prepare_direct_writeback(
+                            &self.private,
+                            offset,
+                            data.len(),
+                            self.inode.size(),
+                        )
+                        .map(|(plan, pins)| (plan, CompletionKind::Direct(pins)))
+                }
+                .map_err(into_vfs_err)
+                .inspect_err(|&error| self.record_error(error))?
             }
         };
+        let context = self.completion(offset, completion, kind);
         plan.submit(
             data,
             &queue,
@@ -229,6 +224,21 @@ impl WritebackPass {
             |error| self.record_error(into_vfs_err(error)),
         )
         .map_err(into_vfs_err)
+    }
+
+    fn completion(
+        &self,
+        offset: u64,
+        completion: OwnedWritebackCompletion<AddressSpace>,
+        kind: CompletionKind,
+    ) -> CompletionContext {
+        CompletionContext {
+            inode: self.inode.clone(),
+            private: self.private.clone(),
+            super_block: self.super_block.clone(),
+            batch: Mutex::new(Some((completion, kind))),
+            offset,
+        }
     }
 
     fn record_error(&self, error: VfsError) {

@@ -173,7 +173,7 @@ impl ReadStorage {
 pub(crate) fn read_fixture(
     block_size: usize,
     device_block_size: usize,
-) -> (Ext4SbInfo, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
+) -> (Ext4SbInfo<'static>, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
     read_fixture_with_blocks(block_size, device_block_size, 32)
 }
 
@@ -181,7 +181,7 @@ pub(crate) fn read_fixture_with_blocks(
     block_size: usize,
     device_block_size: usize,
     block_count: usize,
-) -> (Ext4SbInfo, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
+) -> (Ext4SbInfo<'static>, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
     read_fixture_with_extents(
         block_size,
         device_block_size,
@@ -192,14 +192,15 @@ pub(crate) fn read_fixture_with_blocks(
 
 #[expect(
     clippy::unwrap_used,
-    reason = "CG-021-no-panic-on-reachable-failure: test scenario: synthetic extent layout must load successfully"
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: synthetic extent layout must \
+              load successfully"
 )]
 pub(crate) fn read_fixture_with_extents(
     block_size: usize,
     device_block_size: usize,
     block_count: usize,
     extents: &[(u32, u16, u32)],
-) -> (Ext4SbInfo, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
+) -> (Ext4SbInfo<'static>, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
     // One group, 32 inodes, three inline extents. Keep the small image
     // read-only: allocation, root-directory and journal fixtures are unrelated.
     let first_data_block = usize::from(block_size == 1024);

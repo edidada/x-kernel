@@ -9,55 +9,61 @@ use unittest::def_test;
 use super::*;
 
 #[def_test]
-fn running_barrier_preserves_dependencies_registered_during_io() {
+fn frozen_barrier_leaves_concurrent_transaction_data_pending() {
     let journal = JournalTransactions::new(TransactionId::new(10));
     let mut first = journal.begin(JournalCredits::one()).unwrap();
-    let mut second = journal.begin(JournalCredits::one()).unwrap();
     let transaction = first.id();
     first.require_ordered_data_flush().unwrap();
-    first
+    first.stop().unwrap();
+    let frozen = journal.prepare_commit(transaction).unwrap().unwrap();
+    frozen
         .flush_ordered_data(|| {
-            // A separate handle finishes another write while this barrier is in flight.
-            second.require_ordered_data_flush()
+            let mut next = journal.begin(JournalCredits::one())?;
+            next.require_ordered_data_flush()?;
+            next.stop()
         })
         .unwrap();
-    drop(first);
-    drop(second);
-    let frozen = journal.prepare_commit(transaction).unwrap().unwrap();
+    journal.finish_checkpoint_for_test(&frozen).unwrap();
+    let next = journal.running_transaction().unwrap().unwrap();
+    let frozen = journal.prepare_commit(next).unwrap().unwrap();
     assert!(frozen.has_unflushed_ordered_data().unwrap());
 }
 
 #[def_test]
-fn overlapping_barriers_do_not_move_acknowledgement_backwards() {
+fn multiple_stopped_handles_share_the_frozen_transaction_barrier() {
     let journal = JournalTransactions::new(TransactionId::new(11));
     let mut first = journal.begin(JournalCredits::one()).unwrap();
     let mut second = journal.begin(JournalCredits::one()).unwrap();
     let transaction = first.id();
     first.require_ordered_data_flush().unwrap();
-    first
-        .flush_ordered_data(|| {
-            second.require_ordered_data_flush()?;
-            second.flush_ordered_data(|| Ok(()))
-        })
-        .unwrap();
-    drop(first);
-    drop(second);
+    second.require_ordered_data_flush().unwrap();
+    first.stop().unwrap();
+    second.stop().unwrap();
     let frozen = journal.prepare_commit(transaction).unwrap().unwrap();
-    assert!(!frozen.has_unflushed_ordered_data().unwrap());
+    let mut barriers = 0;
+    for _ in 0..2 {
+        frozen
+            .flush_ordered_data(|| {
+                barriers += 1;
+                Ok(())
+            })
+            .unwrap();
+    }
+    assert_eq!(barriers, 1);
 }
 
 #[def_test]
-fn failed_running_barrier_keeps_dependency_for_commit_retry() {
+fn failed_frozen_barrier_keeps_dependency_for_retry() {
     let journal = JournalTransactions::new(TransactionId::new(12));
     let mut handle = journal.begin(JournalCredits::one()).unwrap();
     let transaction = handle.id();
     handle.require_ordered_data_flush().unwrap();
+    handle.stop().unwrap();
+    let frozen = journal.prepare_commit(transaction).unwrap().unwrap();
     assert_eq!(
-        handle.flush_ordered_data(|| Err(Ext4Error::OutOfBounds)),
+        frozen.flush_ordered_data(|| Err(Ext4Error::OutOfBounds)),
         Err(Ext4Error::OutOfBounds)
     );
-    drop(handle);
-    let frozen = journal.prepare_commit(transaction).unwrap().unwrap();
     assert!(frozen.has_unflushed_ordered_data().unwrap());
     frozen.flush_ordered_data(|| Ok(())).unwrap();
     assert!(!frozen.has_unflushed_ordered_data().unwrap());

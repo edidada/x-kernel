@@ -189,7 +189,7 @@ impl Ext4Mount {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Allocates and inserts one unwritten-extent batch in a single journal
     /// transaction.
     ///

@@ -518,7 +518,7 @@ fn order_bucket_floor(blocks: u32) -> Ext4Result<usize> {
     usize::try_from(u32::BITS - 1 - blocks.leading_zeros()).map_err(|_| Ext4Error::Overflow)
 }
 
-impl Ext4SbInfo {
+impl crate::superblock::Ext4Storage {
     pub(crate) fn reset_block_allocation_caches(&self) {
         reset_block_allocation_caches_inner(&mut lock(&self.allocator));
     }
@@ -581,7 +581,7 @@ pub(crate) fn ensure_block_group_free_cache_inner(
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Allocates the run for one write request, scanning groups in mballoc
     /// order and attaching no post-allocation state.
     ///
@@ -678,6 +678,43 @@ impl Ext4SbInfo {
         handle: &mut JournalHandle<'_>,
         after_allocated: impl FnMut(&mut AllocatorState, &BlockRunAllocation),
     ) -> Ext4Result<Ext4AllocatedRun> {
+        self.allocate_accounted(request, handle, |request, handle| {
+            self.allocate_blocks_for_write_unaccounted(request, handle, after_allocated)
+        })
+    }
+
+    pub(crate) fn claim_direct_write(
+        &self,
+        inode: &Ext4Inode,
+        logical: LogicalBlock,
+        physical: FilesystemBlock,
+        handle: &mut JournalHandle<'_>,
+    ) -> Ext4Result<()> {
+        let one = BlockCount::new(1);
+        let request = Ext4AllocationRequest::new(
+            inode,
+            logical,
+            Some(physical),
+            one,
+            one,
+            Ext4AllocationFlags::EXACT,
+        )?;
+        self.allocate_accounted(request, handle, |_, handle| {
+            self.publish_direct_write_block(physical, handle)
+                .map(|block| Ext4AllocatedRun::new(logical, one, block))
+        })
+        .map(|_| ())
+    }
+
+    fn allocate_accounted<'a>(
+        &self,
+        request: Ext4AllocationRequest<'a>,
+        handle: &mut JournalHandle<'_>,
+        allocate: impl FnOnce(
+            Ext4AllocationRequest<'a>,
+            &mut JournalHandle<'_>,
+        ) -> Ext4Result<Ext4AllocatedRun>,
+    ) -> Ext4Result<Ext4AllocatedRun> {
         let mut admitted = request;
         let reserved = |count: u32| -> Ext4Result<u64> {
             request.logical_start.map_or(Ok(0), |start| {
@@ -704,7 +741,7 @@ impl Ext4SbInfo {
                 }
             }
         };
-        let result = self.allocate_blocks_for_write_unaccounted(admitted, handle, after_allocated);
+        let result = allocate(admitted, handle);
         let mut allocation = match result {
             Ok(allocation) => allocation,
             Err(error) => {

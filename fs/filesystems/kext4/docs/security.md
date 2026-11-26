@@ -77,9 +77,14 @@ encapsulation does not relax the validation of features from an untrusted disk.
 KExt4 currently provides a complete mutation contract only for extent-backed block maps, so images lacking
 `EXT4_FEATURE_INCOMPAT_EXTENTS` fail before the mount state is published. This check prevents a valid but unsupported
 legacy indirect format from first entering a writable runtime state and then having deferred writeback turn writes that already succeeded in user space
-into asynchronous `EOPNOTSUPP`, a journal shutdown error or partial persistence. Even if the superblock enables the
-extents feature, `write_begin`/`page_mkwrite` on an individual legacy inode is rejected synchronously, before the delayed-allocation
-reservation is made and before user data is marked dirty.
+into asynchronous `EOPNOTSUPP`, a journal shutdown error or partial persistence.
+On an extents-enabled filesystem the write boundary validates a legacy
+regular inode's twelve direct slots and rejects indirect roots before dirtying data.
+A new direct block stays unreachable while BIOs are in flight. Partial writes to
+a hole zero the untouched bytes. Only the contiguous successful prefix gets bitmap
+ownership and direct pointers, under the same ordered transaction. Truncation,
+format migration and eviction must exclude submission and drain in-flight owners
+before reusing any physical block.
 
 KExt4's KVFS operation implementations trust that KVFS has already provided kernel-owned path names, dentries, inode `AddressSpace`
 (including directly held `MappingPages` storage) and file lifecycle callbacks. The KExt4 core does not directly dereference user-space pointers.
@@ -190,9 +195,10 @@ operations are located outside the boundary of this crate.
   active handles to exit; stop and abort must wake waiters. It must not wait for commit while holding its own handle or a lock the exiting side needs,
   nor nest a begin that waits for its own transaction to be unsealed. A duplicate persistence request must recognize a pending/finished
   target and must not append or retire twice; an invalid future target must fail and must not wait on an unrelated transaction.
-- The ordered-data flush of a mutable transaction may only acknowledge the dependency generation snapshotted before the barrier began; an older barrier
-  completing must not move the acknowledged watermark backwards, and a failure must not clear dependencies. After freezing no new dependencies are accepted, and commit satisfies
-  its complete ordered-data dependencies before the journal write.
+- The ordered-data barrier runs after the last handle stops and the transaction freezes.
+  A later transaction owns its own pending-data flag. Its writes cannot be acknowledged
+  by the older barrier. A failed barrier aborts the commit before recovery evidence
+  or log records are written and leaves a split writeback's prior resident disk size visible.
 - The journal persistence execution mutex serializes append, checkpoint, ring/tail and recovery flag I/O;
   short transaction/state/buffer guards must not span device I/O. No retirement before both the home and the tail persistence succeed,
   and a failure must abort before handing off execution. The first feature update and PreserveDuringRecovery take part in the same protocol;
@@ -446,7 +452,7 @@ A successful data I/O only records a persistence dependency and does not mark th
 keeps the dependency and allows a retry, for example an unwritten extent conversion that returns `NoSpace` because too few tree blocks could be allocated.
 Ordered writeback that publishes metadata must set the transaction dependency after the device I/O completes; the dependency is kept after freeze, and commit performs one device flush before
 writing any journal/recovery evidence. A flush failure must not clear the dependency and must not enter the
-checkpoint phase; it must abort the journal and report an error to the synchronous caller. This path is still serialized by the mount write lock;
+checkpoint phase; it must abort the journal and report an error to the synchronous caller. Journal persistence serializes this path;
 only after the explicit flush of a capacity restart succeeds can all current data dependencies be considered satisfied. Both the running and committing
 `flush_ordered_data` entry points internally issue a barrier first and clear afterwards, expose no standalone clear method, and do not hold the transaction's internal lock while performing I/O.
 A data-only overwrite of already-mapped blocks does not depend on new metadata; its persistence is provided by the same-device journal flush or direct
@@ -486,7 +492,7 @@ Explicit full reclaim and invalidation of the whole cache reset the cursor, and 
 There is no periodic full scan and no checkpoint-count state. The soft retention quota does not include index/frozen-image overhead and cannot guarantee a
 hard memory upper bound: pin/transaction holds, a large number of insertions in a single access, or additions faster than the scan speed can all cause overshoot;
 without subsequent accesses there is no automatic progress. There is as yet no general shrinker, capacity admission, or memory-pressure feedback.
-The space target limits the reclaim completion condition, but I/O inside the mount write lock can still take long,
+The space target limits the reclaim completion condition, but foreground checkpoint I/O can still take a long time,
 and this policy does not guarantee a latency upper bound under device failure.
 A production checkpoint entry must first obtain persisted evidence and then be enqueued under the transaction lock; missing evidence is
 a broken internal invariant and must not be skipped as a still-committing `JournalBusy` state. Before write-back, it must be confirmed that each transaction's
@@ -498,8 +504,9 @@ A commit/checkpoint failure keeps the committing or pending work and permanently
 losing metadata that has not yet reached disk; subsequent sync and mutation both observe `JournalAborted`, and an in-memory
 transaction must not be treated as durable. The journal tail may only advance past a contiguous prefix of transactions whose home-block persistence has completed;
 the journal start and the ext4 recovery
-evidence are cleared only after a batch covering all pending commits has completed. Currently inode sync
-uses the conservative semantics of committing the whole running transaction. Explicit recovery likewise may return success only after the legacy list and
+evidence are cleared only after a batch covering all pending commits has completed.
+Inode sync commits the file's tracked metadata owner. An untracked inode selects
+the latest metadata transaction conservatively. Explicit recovery likewise may return success only after the legacy list and
 orphan-file cleanup have all completed commit/checkpoint, the journal start is confirmed to be zero and the orphan file empty,
 and the final superblock state has been flushed; a failure before the cleanup is durable keeps the orphan entry or the recovery feature
 as the entry point for the next recovery, and a failure of the final state flush must also return an error to the caller.
@@ -537,16 +544,15 @@ or application data. The core does not log xattr values or file contents.
   hash, such as create/unlink/rename, return `EOPNOTSUPP`.
 - KVFS unmount already synchronizes VFS and journal state before and after topology detach, but blocking new references/writes,
   lazy unmount, freeze and background worker drain still need a final lifecycle gate.
-- Regular inodes have metadata transaction targets, but fsync and fdatasync do
-  not yet distinguish timestamp-only and data-required metadata. Directories,
-  missing targets, and unattributed mutations may still commit unrelated metadata.
+- Regular inodes track full-sync and data-required transactions independently.
+  Non-regular inodes and publications without a known owner conservatively include
+  the newest running or committing transaction.
 - When adding or extending a mutation, one must continue to prove that all expected failures can be detected before the first metadata access; if that cannot be
   done, path-local explicit unwind must be implemented, and an operation savepoint must not be restored. A missed path conservatively
   aborts the entire running transaction, preserving correctness but reducing the availability of that mount.
 - Owned data BIOs and task-context completion cover allocation, unwritten extents,
   and append. Partial initialized-block reads and metadata I/O remain synchronous;
-  background triggering, wider inode-target coverage, and mount-lock separation
-  remain future work.
+  background triggering and further separation of allocation/credit-restart I/O remain future work.
 - Birth and consume of speculative prealloc spaces are wired into the writeback path: the Hole branch consumes
   a registered space first and, only on a miss, allocates and registers the surplus inside the same allocator
   lock section; the reclaim side (close, eviction, shrink, writeback settlement), group-scan exclusion and the
@@ -634,8 +640,9 @@ delalloc reservations; retries reuse their mappings. A later preparation failure
 retains completed unwritten allocations for retry, truncate, or final cleanup,
 and submits no BIO from the failed batch. Partial unwritten buffers must be zero
 filled; partial initialized blocks use read/modify/write outside mount protection.
-Blocks larger than cache pages retain synchronous draining to prevent overlapping
-partial writes.
+Extent files with blocks larger than cache pages admit one asynchronous batch per
+inode. This serializes partial-block reads against the previous batch's data and
+unwritten conversion, including across separate writeback passes.
 
 Synchronous aligned overwrites use task-owned `BioWait`; deferred overwrites and
 allocation/conversion use the inode queue. Both use the same four-batch limit and
@@ -683,8 +690,7 @@ Regression tests cover syncfs-only retries, clean repeats, subsequent new errors
 independent file cursors, and a pending I/O failure during submission-lock wait.
 Superblock sync attempts remaining inodes, metadata, and filesystem flush after
 failure while retaining the first error and honoring filesystem abort checks.
-Transaction restart, pending-free admission, and ordered/commit barriers remain
-unchanged. A finite error generation cannot distinguish an entire 2^64 wrap cycle.
+A finite error generation cannot distinguish an entire 2^64 wrap cycle.
 
 ## Deferred automatic timestamps
 
@@ -706,12 +712,9 @@ those operations retain their locked abort checks. A buffered write that races
 abort can pass a check before publication, as with the previous locked query;
 subsequent checks reject the published abort. This adds no timestamp batching,
 precision loss, or change to the superblock read-only publication boundary.
-Mounted abort callers, including asynchronous writeback metadata completion,
-retain the mount write guard through atomic abort publication. The guard's Drop
-marks the superblock read-only before releasing mount exclusion; another write
-guard for that mount cannot overlap this publication. Any abort source moved
-outside mount protection must publish superblock read-only state at its own
-failure boundary rather than depending on a later guard drop.
+Mutation guards publish journal abort before releasing mount state. Mounted file and
+superblock sync also check the journal projection on exit and publish read-only state
+directly. The journal rejects new handles as soon as the abort becomes visible.
 
 File-range fsync waits for the requested data before filesystem persistence; an
 empty range still runs journal/device sync. Generic data wait does not flush the
@@ -741,6 +744,12 @@ abort is checked live, never cached. Empty or rejected
 requests do not modify timestamps; clipping uses the remaining representable file
 range without offset addition. These guards are released before data copy or I/O.
 
+Shared buffered admission checks the live journal and samples the filesystem
+timestamp under shared KVFS data protection. It requires a fully initialized
+extent block below the on-disk and visible EOF. A miss leaves the source
+iterator untouched for the exclusive write path. The normal write-begin hook
+still validates format and journal state before the copy.
+
 An initialized-range hit may skip mount protection at write-begin, but still checks
 journal abort and supported inode format. KVFS data/invalidate protection excludes
 truncate and fallocate, and the inode-state lock observes size, reservations and
@@ -765,8 +774,10 @@ error recording and journal abort behavior; clean metadata never implies durable
 Every file synchronization waits for its data and applies its own metadata intent
 before synchronizing the tracked transaction. Transaction progress can avoid a
 duplicate journal commit; it cannot cover data written after that commit. The
-already-committed target and no-new-transaction paths therefore retain device
-flushes. Full fsync must stage dirty timestamps even after fdatasync cleaned the
+inode's data generation advances at writeback completion. A successful barrier or
+fresh commit acknowledges the captured generation only if no later completion has
+advanced it. Failed barriers acknowledge nothing. Full fsync stages dirty timestamps
+even after fdatasync cleaned the
 PageCache. Journal abort is checked before accepting a committed target.
 
 KVFS retains per-open error cursors independently of transaction completion, so

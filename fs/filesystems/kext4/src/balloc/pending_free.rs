@@ -28,8 +28,21 @@ impl PendingBlockFrees {
     }
 
     /// Whether completing this exact transaction would release exclusions.
+    #[cfg(unittest)]
     pub(crate) fn contains_transaction(&self, transaction: TransactionId) -> bool {
         self.transactions.contains_key(&transaction)
+    }
+
+    /// Either a running or an in-progress freeing transaction can release space.
+    pub(crate) fn transaction_to_release(&self) -> Option<TransactionId> {
+        // Only the committing and running transactions can still own frees.
+        self.transactions.keys().copied().reduce(|a, b| {
+            if crate::jbd2::transaction_is_same_or_older(a, b) {
+                a
+            } else {
+                b
+            }
+        })
     }
 
     /// Register only after validating allocated bits, before publishing clears.

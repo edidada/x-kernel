@@ -3,14 +3,16 @@
 // See LICENSES for license details.
 
 use alloc::{string::String, sync::Arc};
+use core::ops::Range;
 
+use iov_iter::{IovIterSource, IovSource, iov_iter_kvec_source, iov_iter_source};
 use ktime_types::{NANOS_PER_SEC, SystemTime};
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 use crate::{
-    GetattrQueryFlags, GetattrRequestMask, NodePermission, StatFs, SuperBlockFlags,
-    SuperBlockOperations, TimestampLimits,
+    BufferedOverwriteOperations, GetattrQueryFlags, GetattrRequestMask, NodePermission, OpenFlags,
+    StatFs, SuperBlockFlags, SuperBlockOperations, TimestampLimits,
 };
 
 struct TestChrdevInode {
@@ -263,7 +265,7 @@ impl InodeOperations for TimestampPolicyOperations {
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate> {
         let inode = dentry.vfs_inode();
-        core::assert!(inode.namespace_lock.try_write().is_none());
+        core::assert!(inode.i_rwsem.try_write().is_none());
         core::assert!(inode.data_lock.try_write().is_none());
         Ok(update)
     }
@@ -296,6 +298,134 @@ fn timestamp_policy_path(flags: NodeFlags) -> Path {
 }
 
 #[def_test]
+fn ordinary_writers_share_privilege_protection_until_metadata_needs_revocation() {
+    let regular_inode = |permissions| {
+        VfsInode::new_file(
+            Arc::new(TimestampPolicyOperations),
+            VfsInodeInit::new(43, 0, Umode::new(NodeType::RegularFile, permissions)),
+        )
+    };
+    let inode = regular_inode(NodePermission::OWNER_WRITE);
+    {
+        let _first = inode.lock_unprivileged_write().unwrap();
+        let _second = inode.lock_unprivileged_write().unwrap();
+        assert!(inode.try_lock_inode_exclusive().is_none());
+    }
+    {
+        let _exclusive = inode.try_lock_inode_exclusive().unwrap();
+        inode.mark_extended_attributes();
+    }
+    assert!(inode.lock_unprivileged_write().is_none());
+    for bit in [NodePermission::SET_UID, NodePermission::SET_GID] {
+        assert!(regular_inode(bit).lock_unprivileged_write().is_none());
+    }
+}
+
+struct AdmittedOverwriteOperations {
+    admitted_range: Mutex<Option<Range<u64>>>,
+}
+
+impl InodeOperations for AdmittedOverwriteOperations {}
+
+impl FileOperations for AdmittedOverwriteOperations {
+    fn supports_write(&self) -> bool {
+        true
+    }
+
+    fn buffered_overwrite_operations(&self) -> Option<&dyn BufferedOverwriteOperations> {
+        Some(self)
+    }
+}
+
+impl BufferedOverwriteOperations for AdmittedOverwriteOperations {
+    fn can_overwrite(&self, _file: &crate::VfsFile, range: Range<u64>) -> VfsResult<bool> {
+        *self.admitted_range.lock() = Some(range);
+        Ok(true)
+    }
+}
+
+struct ShortOverwriteSource<'a> {
+    inode: &'a VfsInode,
+    bytes: IovIterSource<'a>,
+    has_shared_privilege_guard: bool,
+    has_shared_data_guard: bool,
+}
+
+impl IovSource for ShortOverwriteSource<'_> {
+    fn count(&self) -> usize {
+        self.bytes.count()
+    }
+
+    fn copy_from_iter(&mut self, dst: &mut [u8]) -> KResult<usize> {
+        self.has_shared_privilege_guard = self.inode.i_rwsem.try_write().is_none()
+            && self.inode.i_rwsem.try_read().is_some();
+        self.has_shared_data_guard =
+            self.inode.data_lock.try_write().is_none() && self.inode.data_lock.try_read().is_some();
+        // A short copy distinguishes the accepted end from the requested end.
+        let len = dst.len().min(2);
+        self.bytes.copy_from_iter(&mut dst[..len])
+    }
+}
+
+#[def_test]
+fn admitted_shared_overwrite_holds_guards_and_publishes_the_written_prefix() {
+    let operations = Arc::new(AdmittedOverwriteOperations {
+        admitted_range: Mutex::new(None),
+    });
+    let inode = VfsInode::new_file_with_flags(
+        operations.clone(),
+        NodeFlags::ALWAYS_CACHE,
+        VfsInodeInit::new(
+            43,
+            8,
+            Umode::new(NodeType::RegularFile, NodePermission::OWNER_WRITE),
+        ),
+    );
+    let super_block = crate::nullfs::new_superblock();
+    let dentry = Dentry::new_file_from_inode(inode.clone(), None, "shared-overwrite".into());
+    dentry.bind_super_block(&super_block);
+    let path = Path::new(crate::Mount::new_root(&super_block), dentry);
+    let open_writer = || {
+        crate::dentry_open(
+            path.clone(),
+            OpenFlags::WRITE_ONLY.bits(),
+            kcred::initial_cred(),
+        )
+        .unwrap()
+    };
+    let writer = open_writer();
+    let other_writer = open_writer();
+    writer.set_position(3);
+    let generation = inode.content_generation();
+    let mut source = ShortOverwriteSource {
+        inode: &inode,
+        bytes: iov_iter_kvec_source(b"abc"),
+        has_shared_privilege_guard: false,
+        has_shared_data_guard: false,
+    };
+
+    assert_eq!(writer.write_iter(&mut iov_iter_source(&mut source)), Ok(2));
+    assert_eq!(*operations.admitted_range.lock(), Some(3..6));
+    assert!(source.has_shared_privilege_guard);
+    assert!(source.has_shared_data_guard);
+    assert_eq!(source.count(), 1);
+    assert_eq!(writer.position(), 5);
+    assert_eq!(other_writer.position(), 0);
+    assert_eq!(inode.content_generation(), generation + 1);
+    assert_eq!(inode.size(), 8);
+    let mut contents = [0; 8];
+    writer
+        .mapping()
+        .with_folio(0, |folio| {
+            if let Some(folio) = folio {
+                contents.copy_from_slice(&folio.data()[..8]);
+            }
+        })
+        .unwrap();
+    assert_eq!(&contents, b"\0\0\0ab\0\0\0");
+}
+
+#[def_test]
 fn append_only_timestamp_updates_preserve_touch_authorization() {
     let path = timestamp_policy_path(NodeFlags::APPEND_ONLY);
     let owner = Cred::new(1000, 100);
@@ -324,7 +454,7 @@ fn append_only_timestamp_updates_preserve_touch_authorization() {
 fn timestamp_updates_wait_for_namespace_without_holding_data() {
     let path = timestamp_policy_path(NodeFlags::empty());
     let inode = path.inode();
-    let namespace = inode.lock_namespace_exclusive();
+    let namespace = inode.lock_inode_exclusive();
     let result = Arc::new(Mutex::new(None));
     let completed = result.clone();
     let task = ktask::spawn(move || {

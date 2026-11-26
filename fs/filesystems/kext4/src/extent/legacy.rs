@@ -112,7 +112,7 @@ pub(super) fn legacy_max_file_size(block_size: u32, has_huge_file: bool) -> Ext4
         .ok_or(Ext4Error::Overflow)
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     pub(super) fn map_legacy_blocks(
         &self,
         inode: &Ext4Inode,

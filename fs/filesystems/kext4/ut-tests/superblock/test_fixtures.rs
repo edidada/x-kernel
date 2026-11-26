@@ -21,7 +21,7 @@ use crate::{
 pub(crate) fn journal_allocator_test_filesystem(
     free_blocks: u32,
     block_bitmap_first_byte: u8,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     journal_allocator_test_filesystem_with_block_size(
         TEST_BLOCK_SIZE,
         free_blocks,
@@ -33,7 +33,7 @@ pub(crate) fn journal_allocator_test_filesystem_with_block_size(
     block_size: usize,
     free_blocks: u32,
     block_bitmap_first_byte: u8,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     let first_data_block = usize::from(block_size == 1024);
     let descriptor_block = first_data_block + 1;
     let inode_table_block = descriptor_block + 3;
@@ -88,7 +88,7 @@ pub(crate) fn journal_allocator_test_filesystem_with_block_size(
     inode_bitmap.fill(0xff);
     inode_bitmap[..4].copy_from_slice(&[0xff, 0x03, 0, 0]);
 
-    let block_device = Arc::new(TestDevice::with_block_size(image, block_size));
+    let block_device = Arc::new(TestDevice::with_block_size(image, block_size.min(TEST_BLOCK_SIZE)));
     let device: Arc<block::BlockDevice> = crate::io::test_block_device(block_device.clone());
     let filesystem_device = Arc::new(
         FilesystemDevice::open(
@@ -102,7 +102,7 @@ pub(crate) fn journal_allocator_test_filesystem_with_block_size(
     let superblock = Ext4DiskSuperblock::decode(&superblock_bytes).unwrap();
     let layout = FilesystemLayout::derive(&superblock).unwrap();
     let descriptors = [BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
-    let group_geometry = descriptors
+    let group_geometry: Vec<_> = descriptors
         .iter()
         .map(GroupGeometry::from_descriptor)
         .collect();
@@ -114,35 +114,39 @@ pub(crate) fn journal_allocator_test_filesystem_with_block_size(
         total.saturating_add(state.used_directories_count())
     });
 
-    let mut filesystem = Ext4SbInfo {
-        allocator: Mutex::new(AllocatorState {
-            free_blocks_count: superblock.on_disk_free_blocks_count(),
-            free_inodes_count: superblock.on_disk_free_inodes_count(),
-            used_directories_count,
-            last_orphan: superblock.last_orphan(),
-            needs_recovery: superblock.features().needs_recovery(),
-            has_orphan_present: superblock.features().has_orphan_present(),
-            block_free_extent_caches: vec![None; groups.len()],
-            preallocs_by_group: BTreeMap::new(),
-            preallocated_blocks: 0,
-            pending_frees: Default::default(),
-            groups,
+    let state = Ext4MountState {
+        storage: Arc::new(crate::superblock::Ext4Storage {
+            allocator: Mutex::new(AllocatorState {
+                free_blocks_count: superblock.on_disk_free_blocks_count(),
+                free_inodes_count: superblock.on_disk_free_inodes_count(),
+                used_directories_count,
+                last_orphan: superblock.last_orphan(),
+                needs_recovery: superblock.features().needs_recovery(),
+                has_orphan_present: superblock.features().has_orphan_present(),
+                block_free_extent_caches: vec![None; groups.len()],
+                preallocs_by_group: BTreeMap::new(),
+                preallocated_blocks: 0,
+                pending_frees: Default::default(),
+                direct_write_pins: Default::default(),
+                groups,
+            }),
+            group_geometry,
+            device: filesystem_device,
+            metadata_io,
+            journal: None,
+            layout,
         }),
         delalloc_reserved_blocks: Mutex::new(0),
         superblock,
-        group_geometry,
         statfs_mode: Ext4StatFsMode::Bsd,
         quota_mount_options: 0,
         bitmap_maxbytes: 0,
         hash_unsigned: 0,
-        device: filesystem_device,
-        metadata_io,
         vfs_superblock: alloc::sync::Weak::new(),
-        journal: None,
         orphan_info: None,
-        layout,
         system_zones: Vec::new(),
     };
+    let mut filesystem = Ext4SbInfo::from_state(state).unwrap();
     filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
     let zones = filesystem.build_system_zones().unwrap();
     filesystem.system_zones = zones;
@@ -177,7 +181,7 @@ pub(crate) fn install_test_journal(
     filesystem
         .write_contiguous_blocks(journal_block, 1, &journal_block_bytes)
         .unwrap();
-    filesystem.journal = Some(
+    filesystem.unpublished_storage().unwrap().journal = Some(
         MountedJournal::new(
             InternalJournal {
                 superblock: journal_superblock,
@@ -501,14 +505,14 @@ pub(crate) const TEST_FREE_INODES: u32 = 22;
 
 /// Minimal reopenable metadata for recovery tests: one group, root and journal.
 /// This is not an e2fsprogs interoperability image; unneeded inodes stay zero.
-pub(crate) fn recovery_test_filesystem() -> (Ext4SbInfo, Arc<TestDevice>) {
+pub(crate) fn recovery_test_filesystem() -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     recovery_test_filesystem_with_free_blocks(TEST_FREE_BLOCKS - 1)
 }
 
 /// Same reopenable journal fixture, with room for fragmented extent trees.
 pub(crate) fn recovery_test_filesystem_with_free_blocks(
     free_blocks: u32,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     let (filesystem, device) = journal_allocator_test_filesystem(free_blocks, 0x7f);
     drop(filesystem);
     {
@@ -557,7 +561,9 @@ pub(crate) fn recovery_test_filesystem_with_free_blocks(
     )
 }
 
-pub(crate) fn open_test_filesystem(device: Arc<block::BlockDevice>) -> Ext4Result<Ext4SbInfo> {
+pub(crate) fn open_test_filesystem(
+    device: Arc<block::BlockDevice>,
+) -> Ext4Result<Ext4SbInfo<'static>> {
     let mut filesystem = Ext4SbInfo::prepare_mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)?;
     filesystem.persist_directory_hash_policy()?;
     Ok(filesystem)
@@ -629,7 +635,7 @@ pub(crate) struct AllocatorGroupSpec {
 
 pub(crate) fn allocator_multigroup_test_filesystem(
     groups: &[AllocatorGroupSpec],
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     allocator_multigroup_test_filesystem_inner(groups, false, &[])
 }
 
@@ -641,7 +647,7 @@ pub(crate) fn allocator_multigroup_test_filesystem(
 pub(crate) fn allocator_multigroup_checksum_test_filesystem(
     groups: &[AllocatorGroupSpec],
     corrupt_block_bitmap_groups: &[u32],
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     allocator_multigroup_test_filesystem_inner(groups, true, corrupt_block_bitmap_groups)
 }
 
@@ -649,7 +655,7 @@ fn allocator_multigroup_test_filesystem_inner(
     groups: &[AllocatorGroupSpec],
     has_metadata_checksum: bool,
     corrupt_block_bitmap_groups: &[u32],
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     let group_count = u32::try_from(groups.len()).unwrap();
     let block_count = group_count * TEST_BLOCK_COUNT as u32;
     let inodes_count = group_count * 32;
@@ -718,7 +724,7 @@ fn allocator_multigroup_test_filesystem_inner(
         .iter()
         .map(|descriptor| BlockGroupDescriptor::decode(descriptor, true).unwrap())
         .collect();
-    let group_geometry = descriptors
+    let group_geometry: Vec<_> = descriptors
         .iter()
         .map(GroupGeometry::from_descriptor)
         .collect();
@@ -730,35 +736,39 @@ fn allocator_multigroup_test_filesystem_inner(
         total.saturating_add(state.used_directories_count())
     });
 
-    let mut filesystem = Ext4SbInfo {
-        allocator: Mutex::new(AllocatorState {
-            free_blocks_count: superblock.on_disk_free_blocks_count(),
-            free_inodes_count: superblock.on_disk_free_inodes_count(),
-            used_directories_count,
-            last_orphan: superblock.last_orphan(),
-            needs_recovery: superblock.features().needs_recovery(),
-            has_orphan_present: superblock.features().has_orphan_present(),
-            block_free_extent_caches: vec![None; groups.len()],
-            preallocs_by_group: BTreeMap::new(),
-            preallocated_blocks: 0,
-            pending_frees: Default::default(),
-            groups,
+    let state = Ext4MountState {
+        storage: Arc::new(crate::superblock::Ext4Storage {
+            allocator: Mutex::new(AllocatorState {
+                free_blocks_count: superblock.on_disk_free_blocks_count(),
+                free_inodes_count: superblock.on_disk_free_inodes_count(),
+                used_directories_count,
+                last_orphan: superblock.last_orphan(),
+                needs_recovery: superblock.features().needs_recovery(),
+                has_orphan_present: superblock.features().has_orphan_present(),
+                block_free_extent_caches: vec![None; groups.len()],
+                preallocs_by_group: BTreeMap::new(),
+                preallocated_blocks: 0,
+                pending_frees: Default::default(),
+                direct_write_pins: Default::default(),
+                groups,
+            }),
+            group_geometry,
+            device: filesystem_device,
+            metadata_io,
+            journal: None,
+            layout,
         }),
         delalloc_reserved_blocks: Mutex::new(0),
         superblock,
-        group_geometry,
         statfs_mode: Ext4StatFsMode::Bsd,
         quota_mount_options: 0,
         bitmap_maxbytes: 0,
         hash_unsigned: 0,
-        device: filesystem_device,
-        metadata_io,
         vfs_superblock: alloc::sync::Weak::new(),
-        journal: None,
         orphan_info: None,
-        layout,
         system_zones: Vec::new(),
     };
+    let mut filesystem = Ext4SbInfo::from_state(state).unwrap();
     filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
     let zones = filesystem.build_system_zones().unwrap();
     filesystem.system_zones = zones;
@@ -815,7 +825,7 @@ pub(crate) fn fragment_ordered_writeback_free_space(filesystem: &mut Ext4SbInfo)
 pub(crate) fn allocator_test_filesystem(
     free_blocks: u32,
     bitmap_first_byte: u8,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     allocator_test_filesystem_with_inodes(free_blocks, bitmap_first_byte, TEST_FREE_INODES, 0x03, 0)
 }
 
@@ -825,7 +835,7 @@ pub(crate) fn allocator_test_filesystem_with_inodes(
     free_inodes: u32,
     inode_bitmap_second_byte: u8,
     used_directories: u32,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     allocator_test_filesystem_with_flags(
         free_blocks,
         block_bitmap_first_byte,
@@ -843,7 +853,7 @@ pub(crate) fn allocator_test_filesystem_with_flags(
     inode_bitmap_second_byte: u8,
     used_directories: u32,
     flags: u16,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     allocator_test_filesystem_with_options(
         AllocatorGroupSpec {
             free_blocks,
@@ -864,7 +874,7 @@ pub(crate) fn allocator_test_filesystem_with_options(
     has_metadata_checksum: bool,
     corrupt_block_bitmap_checksum: bool,
     corrupt_inode_bitmap_checksum: bool,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     let mut image = vec![0; TEST_BLOCK_SIZE * TEST_BLOCK_COUNT];
     let mut superblock_bytes = allocator_superblock(spec.free_blocks, spec.free_inodes);
     if has_metadata_checksum {
@@ -907,7 +917,7 @@ pub(crate) fn allocator_test_filesystem_with_options(
     let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
     let layout = FilesystemLayout::derive(&superblock).unwrap();
     let descriptors = [BlockGroupDescriptor::decode(&descriptor, true).unwrap()];
-    let group_geometry = descriptors
+    let group_geometry: Vec<_> = descriptors
         .iter()
         .map(GroupGeometry::from_descriptor)
         .collect();
@@ -919,35 +929,39 @@ pub(crate) fn allocator_test_filesystem_with_options(
         total.saturating_add(state.used_directories_count())
     });
 
-    let mut filesystem = Ext4SbInfo {
-        allocator: Mutex::new(AllocatorState {
-            free_blocks_count: superblock.on_disk_free_blocks_count(),
-            free_inodes_count: superblock.on_disk_free_inodes_count(),
-            used_directories_count,
-            last_orphan: superblock.last_orphan(),
-            needs_recovery: superblock.features().needs_recovery(),
-            has_orphan_present: superblock.features().has_orphan_present(),
-            block_free_extent_caches: vec![None; groups.len()],
-            preallocs_by_group: BTreeMap::new(),
-            preallocated_blocks: 0,
-            pending_frees: Default::default(),
-            groups,
+    let state = Ext4MountState {
+        storage: Arc::new(crate::superblock::Ext4Storage {
+            allocator: Mutex::new(AllocatorState {
+                free_blocks_count: superblock.on_disk_free_blocks_count(),
+                free_inodes_count: superblock.on_disk_free_inodes_count(),
+                used_directories_count,
+                last_orphan: superblock.last_orphan(),
+                needs_recovery: superblock.features().needs_recovery(),
+                has_orphan_present: superblock.features().has_orphan_present(),
+                block_free_extent_caches: vec![None; groups.len()],
+                preallocs_by_group: BTreeMap::new(),
+                preallocated_blocks: 0,
+                pending_frees: Default::default(),
+                direct_write_pins: Default::default(),
+                groups,
+            }),
+            group_geometry,
+            device: filesystem_device,
+            metadata_io,
+            journal: None,
+            layout,
         }),
         delalloc_reserved_blocks: Mutex::new(0),
         superblock,
-        group_geometry,
         statfs_mode: Ext4StatFsMode::Bsd,
         quota_mount_options: 0,
         bitmap_maxbytes: 0,
         hash_unsigned: 0,
-        device: filesystem_device,
-        metadata_io,
         vfs_superblock: alloc::sync::Weak::new(),
-        journal: None,
         orphan_info: None,
-        layout,
         system_zones: Vec::new(),
     };
+    let mut filesystem = Ext4SbInfo::from_state(state).unwrap();
     filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size().unwrap();
     let zones = filesystem.build_system_zones().unwrap();
     filesystem.system_zones = zones;
@@ -1084,7 +1098,7 @@ pub(crate) fn enable_allocator_flex_bg(filesystem: &mut Ext4SbInfo, log_groups_p
     put_u32(superblock_bytes, 0x60, incompat);
     superblock_bytes[0x174] = log_groups_per_flex;
     let updated = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
-    filesystem.layout = FilesystemLayout::derive(&updated).unwrap();
+    filesystem.unpublished_storage().unwrap().layout = FilesystemLayout::derive(&updated).unwrap();
     filesystem.superblock = updated;
     filesystem
         .device
@@ -1150,7 +1164,7 @@ pub(crate) fn le_u16(bytes: &[u8], offset: usize) -> u16 {
 
 pub(crate) fn eviction_test_unlinked_inode(
     extents: &[(u64, u32)],
-) -> (Ext4SbInfo, Ext4Inode, crate::Ext4Timestamp) {
+) -> (Ext4SbInfo<'static>, Ext4Inode, crate::Ext4Timestamp) {
     eviction_test_unlinked_inode_with_initialization(
         extents,
         InodeInitialization::regular_file(0o644, 0, 0),
@@ -1160,7 +1174,7 @@ pub(crate) fn eviction_test_unlinked_inode(
 pub(crate) fn eviction_test_unlinked_inode_with_initialization(
     extents: &[(u64, u32)],
     initialization: InodeInitialization,
-) -> (Ext4SbInfo, Ext4Inode, crate::Ext4Timestamp) {
+) -> (Ext4SbInfo<'static>, Ext4Inode, crate::Ext4Timestamp) {
     let (mut filesystem, _device) = journal_allocator_test_filesystem(512, 0b0011_1111);
     install_test_internal_journal(&mut filesystem, 2000);
     let journal = JournalTransactions::new(TransactionId::new(2000));
@@ -1303,17 +1317,18 @@ pub(crate) fn install_credit_limited_journal(
     has_revoke: bool,
 ) {
     let mut bytes = test_journal_superblock_bytes_with_blocks(sequence, 1024);
+    let block_size = filesystem.layout().block_size();
+    put_be_u32(&mut bytes, 0x0c, block_size);
     if has_revoke {
         put_be_u32(&mut bytes, 4, 4);
         crate::jbd2::enable_superblock_revoke(&mut bytes).unwrap();
     }
-    let superblock =
-        JournalSuperblock::decode(&bytes, TEST_BLOCK_SIZE as u32, 1024, [0; 16]).unwrap();
+    let superblock = JournalSuperblock::decode(&bytes, block_size, 1024, [0; 16]).unwrap();
     install_test_journal(filesystem, superblock);
     crate::journal::tests::limit_transaction_credits(filesystem, credits);
 }
 
-pub(crate) fn orphan_test_filesystem() -> (Ext4SbInfo, Ext4Inode) {
+pub(crate) fn orphan_test_filesystem() -> (Ext4SbInfo<'static>, Ext4Inode) {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);
     set_allocator_feature_bits(
@@ -1324,7 +1339,7 @@ pub(crate) fn orphan_test_filesystem() -> (Ext4SbInfo, Ext4Inode) {
     (filesystem, inode)
 }
 
-pub(crate) fn checksummed_orphan_test_filesystem() -> (Ext4SbInfo, Ext4Inode) {
+pub(crate) fn checksummed_orphan_test_filesystem() -> (Ext4SbInfo<'static>, Ext4Inode) {
     let (mut filesystem, _device) = allocator_test_filesystem_with_options(
         AllocatorGroupSpec {
             free_blocks: TEST_FREE_BLOCKS,
@@ -1348,7 +1363,7 @@ pub(crate) fn checksummed_orphan_test_filesystem() -> (Ext4SbInfo, Ext4Inode) {
 }
 
 /// Reopen through the real orphan-file loader after creating its backing inode.
-pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo, Arc<TestDevice>) {
+pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     let (mut filesystem, device) = recovery_test_filesystem();
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     let mut bytes = vec![0; TEST_BLOCK_SIZE];

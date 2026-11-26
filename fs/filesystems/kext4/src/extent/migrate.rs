@@ -20,7 +20,7 @@ use crate::{
 #[cfg(unittest)]
 unittest::path_mod_test!(tests, "../../ut-tests/extent/migrate_tests.rs");
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Changes the mapping format without relocating payload blocks.
     /// KVFS has excluded buffered writers and faults, revoked mappings and
     /// drained writeback. The mount write guard excludes mapping walkers.

@@ -816,11 +816,47 @@ impl PendingInodeTimestamps {
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum InodeSyncTarget {
+    /// Resident state loaded without a pending metadata mutation.
+    Durable,
+    Transaction(Arc<RuntimeTransaction>),
+    /// A metadata publication did not supply its journal owner.
+    Untracked,
+}
+
+/// One fsync observation, captured under the inode state lock.
+pub(crate) struct InodeSyncSnapshot {
+    pub(crate) metadata: InodeSyncTarget,
+    pub(crate) generation: u64,
+    pub(crate) needs_data_barrier: bool,
+    pub(crate) needs_timestamp_staging: bool,
+}
+
+impl InodeSyncSnapshot {
+    pub(crate) fn has_durable_metadata(&self) -> bool {
+        match &self.metadata {
+            InodeSyncTarget::Durable => true,
+            InodeSyncTarget::Transaction(owner) => owner.is_committed(),
+            InodeSyncTarget::Untracked => false,
+        }
+    }
+}
+
+/// Which durability targets an inode-table publication advances.
+enum InodePublication {
+    Untracked,
+    Metadata(Arc<RuntimeTransaction>),
+    Timestamps(Arc<RuntimeTransaction>),
+}
+
 struct Ext4InodeState {
     metadata: Ext4InodeMetadata,
-    // None requires conservative mount-wide sync. A transaction identity stays
-    // meaningful even when a cold resident inode outlives journal sequence wrap.
-    sync_transaction: Option<Arc<RuntimeTransaction>>,
+    sync_target: InodeSyncTarget,
+    datasync_target: InodeSyncTarget,
+    data_generation: u64,
+    is_data_durable: bool,
+    is_disk_size_deferred: bool,
     has_dirty_atime: bool,
     has_dirty_mtime: bool,
     has_dirty_ctime: bool,
@@ -1011,7 +1047,11 @@ impl Ext4Inode {
             visible_size: AtomicU64::new(visible_size),
             state: RwLock::new(Ext4InodeState {
                 metadata,
-                sync_transaction: None,
+                sync_target: InodeSyncTarget::Untracked,
+                datasync_target: InodeSyncTarget::Untracked,
+                data_generation: 0,
+                is_data_durable: false,
+                is_disk_size_deferred: false,
                 has_dirty_atime: false,
                 has_dirty_mtime: false,
                 has_dirty_ctime: false,
@@ -1174,17 +1214,53 @@ impl Ext4Inode {
         self.with_state(|state| state.metadata.clone())
     }
 
-    /// Metadata durability target sampled under mount mutation exclusion.
-    /// Directory contents retain mount-wide sync until their journal ownership
-    /// is tracked together with the inode-table entry.
-    pub(crate) fn sync_transaction(&self) -> Option<Arc<RuntimeTransaction>> {
+    pub(crate) fn sync_target(&self, intent: crate::Ext4SyncIntent) -> InodeSyncSnapshot {
         self.with_state(|state| {
-            if self.kind == InodeKind::RegularFile {
-                state.sync_transaction.clone()
+            let target = if self.kind != InodeKind::RegularFile {
+                InodeSyncTarget::Untracked
+            } else if intent.requires_full_metadata() {
+                state.sync_target.clone()
             } else {
-                None
+                state.datasync_target.clone()
+            };
+            let generation = state.data_generation;
+            InodeSyncSnapshot {
+                metadata: target,
+                generation,
+                needs_data_barrier: self.kind != InodeKind::RegularFile || !state.is_data_durable,
+                needs_timestamp_staging: intent.requires_full_metadata()
+                    && (state.has_dirty_atime || state.has_dirty_ctime || state.has_dirty_mtime),
             }
         })
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn sync_transaction(&self) -> Option<Arc<RuntimeTransaction>> {
+        match self
+            .sync_target(crate::Ext4SyncIntent::FullMetadata)
+            .metadata
+        {
+            InodeSyncTarget::Transaction(transaction) => Some(transaction),
+            _ => None,
+        }
+    }
+
+    /// A completed BIO can still reside in a volatile device cache.
+    pub(crate) fn note_data_completion(&self) {
+        self.update_state(|state| {
+            state.data_generation = state.data_generation.saturating_add(1);
+            state.is_data_durable = false;
+        });
+    }
+
+    pub(crate) fn acknowledge_data(&self, generation: u64) {
+        self.update_state(|state| {
+            // Never acknowledge completions racing a barrier. At saturation
+            // retain the conservative barrier for every subsequent sync.
+            if state.data_generation == generation && generation != u64::MAX {
+                state.is_data_durable = true;
+            }
+        });
     }
 
     fn with_metadata<T>(&self, read: impl FnOnce(&Ext4InodeMetadata) -> T) -> T {
@@ -1201,18 +1277,23 @@ impl Ext4Inode {
         persisted: PendingInodeTimestamps,
         transaction: Option<Arc<RuntimeTransaction>>,
     ) -> Ext4Result<()> {
-        self.publish_metadata_and_quotas(metadata, persisted, transaction, None)
+        self.publish_metadata_and_quotas(
+            metadata,
+            persisted,
+            transaction.map_or(InodePublication::Untracked, InodePublication::Metadata),
+            None,
+        )
     }
 
     fn publish_metadata_and_quotas(
         &self,
         metadata: Ext4InodeMetadata,
         persisted: PendingInodeTimestamps,
-        transaction: Option<Arc<RuntimeTransaction>>,
+        publication: InodePublication,
         records: Option<[Option<kquota::DquotRef>; 3]>,
     ) -> Ext4Result<()> {
         self.update_state(|state| {
-            self.publish_metadata_state(state, metadata, None, persisted, transaction, records);
+            self.publish_metadata_state(state, metadata, None, persisted, publication, records);
         });
         Ok(())
     }
@@ -1223,13 +1304,30 @@ impl Ext4Inode {
         mut metadata: Ext4InodeMetadata,
         flags: Option<u32>,
         persisted: PendingInodeTimestamps,
-        transaction: Option<Arc<RuntimeTransaction>>,
+        publication: InodePublication,
         records: Option<[Option<kquota::DquotRef>; 3]>,
     ) {
         // Publication without an owner invalidates older sync evidence.
         // Xattr/recovery paths can therefore retain conservative sync until
         // they explicitly provide the transaction covering their mutation.
-        state.sync_transaction = transaction;
+        match publication {
+            InodePublication::Untracked => {
+                state.sync_target = InodeSyncTarget::Untracked;
+                state.datasync_target = InodeSyncTarget::Untracked;
+            }
+            InodePublication::Metadata(owner) => {
+                state.sync_target = InodeSyncTarget::Transaction(owner.clone());
+                state.datasync_target = InodeSyncTarget::Transaction(owner);
+            }
+            InodePublication::Timestamps(owner) => {
+                state.sync_target = InodeSyncTarget::Transaction(owner);
+            }
+        }
+        if state.is_disk_size_deferred {
+            // A concurrent timestamp publication may decode the staged size
+            // from the same inode-table block during a writeback restart.
+            metadata.disk_size = state.metadata.disk_size;
+        }
         let is_format_changed =
             flags.is_some_and(|flags| (flags ^ self.flags()) & disk_inode::EXT4_EXTENTS_FL != 0);
         if metadata.block != state.metadata.block
@@ -1295,13 +1393,12 @@ impl Ext4Inode {
     /// Forgets initialized-range and sync-target proofs before extent mutation,
     /// including mutations of external leaves that leave the inode root intact.
     /// The caller holds exclusive mount access through `&mut Ext4SbInfo`.
-    pub(crate) fn invalidate_extent_status(&self) {
+    pub(crate) fn invalidate_extent_status(&self, owner: Option<Arc<RuntimeTransaction>>) {
         self.update_state(|state| {
             self.clear_extent_proofs(state);
-            // An external leaf rewrite need not publish an inode-table entry.
-            // Until that mutation reports an owner, fsync must use the mount's
-            // running transaction rather than an older inode-table target.
-            state.sync_transaction = None;
+            let target = owner.map_or(InodeSyncTarget::Untracked, InodeSyncTarget::Transaction);
+            state.sync_target = target.clone();
+            state.datasync_target = target;
         });
     }
 
@@ -1363,6 +1460,20 @@ impl Ext4Inode {
     fn has_initialized_overwrite(&self, start: u64, count: u64, block_size: u32) -> bool {
         self.with_state(|state| {
             state.has_initialized_overwrite(start, count, block_size, self.size())
+        })
+    }
+
+    /// Shared data admission holds EOF stable. A miss repeats preparation under
+    /// exclusive protection to allocate blocks or publish a fresh timestamp.
+    pub(crate) fn can_overwrite_cached_block(
+        &self,
+        logical: LogicalBlock,
+        block_size: u32,
+        timestamp: Ext4Timestamp,
+    ) -> bool {
+        self.with_state(|state| {
+            !state.needs_write_timestamp(timestamp)
+                && state.has_initialized_overwrite(logical.get(), 1, block_size, self.size())
         })
     }
 
@@ -1505,6 +1616,29 @@ impl Ext4Inode {
     /// for ordered writeback.
     pub fn disk_size(&self) -> u64 {
         self.with_state(|state| state.disk_size())
+    }
+
+    /// Stage a split writeback's inode-table size before stopping its handle,
+    /// but expose the larger resident disk size only after the transaction is
+    /// durable. The caller excludes truncation and other same-inode publishers
+    /// of file size through the writeback metadata and drain protocol.
+    pub(crate) fn commit_writeback_size<R>(
+        &self,
+        size: u64,
+        commit: impl FnOnce() -> (R, bool),
+    ) -> R {
+        self.update_state(|state| {
+            debug_assert!(!state.is_disk_size_deferred);
+            state.is_disk_size_deferred = true;
+        });
+        let (result, durable) = commit();
+        self.update_state(|state| {
+            state.is_disk_size_deferred = false;
+            if durable {
+                state.metadata.disk_size = size;
+            }
+        });
+        result
     }
 
     /// Returns the VFS-visible inode size in bytes.
@@ -1673,7 +1807,7 @@ impl Ext4Inode {
     ///
     /// The comparison is stable across the two sections for the writers that
     /// can change a resident write timestamp: buffered writes
-    /// (`write_iter_with_prepare`), `set_times`, `fallocate`, truncate and
+    /// that publish timestamps (`write_iter_with_prepare`), `set_times`, `fallocate`, truncate and
     /// xattr hold the inode data lock exclusively, and writable faults hold it
     /// shared. Metadata paths outside that lock (chmod/chown ctime auto-fill,
     /// quota flag updates, unlink) can publish a different value; when they
@@ -2450,7 +2584,7 @@ fn ensure_ext4_device_id_representable(device: Ext4DeviceId) -> Ext4Result<()> {
     Ok(())
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Returns an inline fast-symlink target, or `None` for a block-mapped target.
     pub(crate) fn fast_symlink_target(&self, inode: &Ext4Inode) -> Ext4Result<Option<Vec<u8>>> {
         inode.fast_symlink_target(
@@ -2559,6 +2693,17 @@ impl Ext4SbInfo {
             self.superblock().features().has_project(),
         )?;
         let inode = Ext4Inode::new(number, kind, flags, permissions, metadata);
+        if kind == InodeKind::RegularFile {
+            let running = self
+                .journal
+                .as_ref()
+                .and_then(|journal| journal.latest_metadata_owner());
+            let target = running.map_or(InodeSyncTarget::Durable, InodeSyncTarget::Transaction);
+            inode.update_state(|state| {
+                state.sync_target = target.clone();
+                state.datasync_target = target;
+            });
+        }
         if validate_block_root {
             self.validate_inode_block_root(&inode)?;
         }
@@ -2903,6 +3048,16 @@ impl Ext4SbInfo {
         handle: &mut JournalHandle<'_>,
         update: impl FnOnce(&Self, &mut [u8]) -> Ext4Result<()>,
     ) -> Ext4Result<()> {
+        self.update_inode_table_metadata(inode, handle, false, update)
+    }
+
+    fn update_inode_table_metadata(
+        &self,
+        inode: &Ext4Inode,
+        handle: &mut JournalHandle<'_>,
+        timestamps_only: bool,
+        update: impl FnOnce(&Self, &mut [u8]) -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
         self.try_expand_inode_extra_isize(inode, handle)?;
 
         let timestamps = inode.pending_timestamps();
@@ -2921,11 +3076,13 @@ impl Ext4SbInfo {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
-        inode.publish_metadata_with_timestamps(
-            updated_inode.metadata,
-            timestamps,
-            Some(handle.transaction()?),
-        )
+        let transaction = handle.transaction()?;
+        let publication = if timestamps_only {
+            InodePublication::Timestamps(transaction)
+        } else {
+            InodePublication::Metadata(transaction)
+        };
+        inode.publish_metadata_and_quotas(updated_inode.metadata, timestamps, publication, None)
     }
 
     /// Stages automatic timestamps once per inode writeback, not per write.
@@ -2943,7 +3100,7 @@ impl Ext4SbInfo {
             self.inode_extra_isize_allocation_blocks(inode),
         )?;
         let mut handle = journal.begin(credits)?;
-        let result = self.update_dirty_inode_metadata(inode, &mut handle, |_, _| Ok(()));
+        let result = self.update_inode_table_metadata(inode, &mut handle, true, |_, _| Ok(()));
         self.complete_metadata_mutation(handle, result)
     }
 
@@ -3144,7 +3301,11 @@ impl Ext4SbInfo {
         inode.publish_metadata_and_quotas(
             decoded.metadata,
             timestamps,
-            Some(handle.transaction()?),
+            if update.mode.is_none() && update.owner.is_none() {
+                InodePublication::Timestamps(handle.transaction()?)
+            } else {
+                InodePublication::Metadata(handle.transaction()?)
+            },
             records,
         )?;
         if let Some(permission) = permission {
@@ -3217,7 +3378,7 @@ impl Ext4SbInfo {
             inode.publish_metadata_and_quotas(
                 decoded.metadata,
                 timestamps,
-                Some(handle.transaction()?),
+                InodePublication::Metadata(handle.transaction()?),
                 records,
             )
         })();
@@ -3287,7 +3448,7 @@ impl Ext4SbInfo {
                 decoded.metadata,
                 Some(flags),
                 persisted,
-                Some(transaction),
+                InodePublication::Metadata(transaction),
                 None,
             );
         });
@@ -3390,7 +3551,10 @@ impl Ext4SbInfo {
     ) -> Ext4Result<()> {
         let transaction = handle.transaction()?;
         self.update_orphan_chain_link(inode.number(), next, handle)?;
-        inode.update_state(|state| state.sync_transaction = Some(transaction));
+        inode.update_state(|state| {
+            state.sync_target = InodeSyncTarget::Transaction(transaction.clone());
+            state.datasync_target = InodeSyncTarget::Transaction(transaction);
+        });
         Ok(())
     }
 
@@ -3483,7 +3647,7 @@ struct InodeLocation {
     inode_size: usize,
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     fn inode_location(&self, number: InodeNumber) -> Ext4Result<InodeLocation> {
         let inode_number = number.get();
         if inode_number == 0 || inode_number > self.superblock().inodes_count() {

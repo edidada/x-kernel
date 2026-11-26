@@ -25,4 +25,5 @@ pub(crate) use superblock::{
 };
 pub(crate) use transaction::{
     JournalCredits, JournalHandle, JournalTransactions, RuntimeTransaction,
+    transaction_is_same_or_older,
 };

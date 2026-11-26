@@ -65,8 +65,8 @@ a whole-disk `^extents` format returns `Unsupported(NonExtentFilesystem)` before
 recovery or root publication. Individual legacy regular inodes support mutation
 when all mappings fit the twelve direct slots and all indirect roots are zero.
 `extent/legacy_mutate.rs` validates pointers and owns truncation/release;
-`file/legacy.rs` performs bounded synchronous ordered writeback, including hole
-allocation, zero padding and quota/i_blocks accounting. Indirect trees remain
+`file/legacy.rs` prepares owned asynchronous writes and publishes successful direct
+slots with zero padding, quota and i_blocks accounting. Indirect trees remain
 read-only; attempts to dirty beyond the direct slots fail before data copying.
 Legacy fallocate remains unsupported.
 
@@ -265,14 +265,13 @@ allocates a nascent KVFS `SuperBlock`; `fill_super` only populates this existing
 device or flags identity. An existing instance with the same identity is reused by the VFS, and on a failed fill the VFS releases the claim and
 wakes the waiters.
 
-The KVFS `SuperBlock` stores a stateless `Ext4SuperOperations` and a unique
-`RwLock<Ext4SbInfo>` private object separately, corresponding to Linux's separate `s_op`/`s_fs_info`; the operation table
-is a genuine Rust `static` shared by all ext4 mounts, not a second filesystem object, and no
-`Arc` is allocated for it at mount time. The private object is owned exclusively by the superblock, and `private::<RwLock<Ext4SbInfo>>()` only returns a reference
-bound to the superblock borrow. Read-only calls may enter in shared mode, while mutations that still jointly modify superblock/group metadata
-are serialized by the write guard. The delalloc mount aggregate is already protected by a separate mutex inside `Ext4SbInfo`,
-and reserve/release/truncate reservation only take the shared mount guard and that real counter lock, no longer taking the
-mount write guard. This mount-level lock does not protect the KVFS inode cache, the AddressSpace or the open-file lifecycle.
+KVFS stores the static `Ext4SuperOperations` table and a per-superblock
+`Ext4Mount`, corresponding to Linux's `s_op` and `s_fs_info`. The mount owns
+the core state under an `RwLock` and shares its `Ext4Storage` with the sync
+paths. Read-only calls take shared access. Mutations that update superblock
+and group metadata take mutation admission followed by exclusive state access.
+The delalloc aggregate has its own mutex and reservation changes can take shared
+mount access. KVFS owns inode identity, AddressSpace and the open-file lifecycle.
 The ext4 private state held by the VFS inode composition is protected by a per-inode
 `RwLock<Ext4InodeState>`, which covers the on-disk metadata working state and the delayed-allocation extents:
 read-only paths (`size`/`stat`/`metadata_snapshot`/delalloc queries) enter in shared mode through `with_state` with a read guard,
@@ -524,7 +523,7 @@ then drain all pending checkpoints; an ordinary mount runs the same sync path ag
 to cover new metadata produced by final inode eviction. A normal commit directly checks the running/committing slots,
 and only a retry targeting an old pending transaction scans the FIFO, so that each commit does not bear a cost proportional to the backlog length.
 
-The checkpoint worker performs two kinds of work under the journal persistence execution lock (production still holds the mount write lock): an explicit sync snapshots the entire queue and drains it; when append
+The checkpoint worker performs two kinds of work under the journal persistence execution lock: an explicit sync snapshots the entire queue and drains it; when append
 returns `JournalBusy`, it selects the shortest contiguous prefix that reaches the space target. Let `A` be the number of descriptor, metadata, revoke, and commit blocks
 actually needed by the current frozen transaction, `B` the worst-case journal overhead corresponding to the mounted transaction credit
 limit, and `C` the total number of usable ring blocks; the reclaim target is then `min(C - 1, A + B)` writable
@@ -599,7 +598,7 @@ revoke still suppresses writeback of old versions through the existing cache rul
 
 This keeps a space budget for the next transaction between frequent barriers that are "just enough for this append" and long synchronous waits for "draining everything",
 without adding a fixed-ratio watermark, background worker, or age trigger. A large transaction or a very small ring may still
-need to drain; the mount write lock still covers device I/O, and no upper bound on the latency of a single commit is provided. Whether throughput and tail latency improve must be re-measured against
+need to drain. File and superblock sync release mount state before journal I/O. Credit restarts inside an active metadata operation can still hold the mutation guard. Whether throughput and tail latency improve must be re-measured against
 the shortest-prefix and full-drain baselines separately; the budget itself does not constitute proof of a performance gain.
 
 Only when the batch drains the FIFO is the recovery state handled according to the policy of the last transaction in the batch; when a suffix is retained, `next_oldest` is used to
@@ -617,15 +616,18 @@ built in the journal. Ordinary inode-table staging and zero-link staging, when p
 also save the `Arc` of the `RuntimeTransaction` that the handle belongs to. The committed state is judged by that object's
 Checkpoint/Finished phase, without comparing a long-kept 32-bit tid against the current sequence;
 long inode residency, checkpoint retirement and sequence wraparound cannot make an old target point to a new transaction again. Each inode
-keeps only the latest target; checkpoint retirement still releases the frozen metadata payload of that object.
+keeps separate full-sync and datasync targets. A timestamp-only inode-table update advances
+the full-sync target. Extent mutations, including external leaf edits, record their handle
+as the target for both intents. A newly loaded regular inode conservatively inherits the
+newest running or committing transaction observed at load. An unattributed publication
+invalidates target evidence. Non-regular inodes continue to select the latest transaction.
 
-`fsync` first completes the required PageCache writeback, full fsync then stages dirty timestamps, and afterwards checks the target
-under the mount write lock. An uncommitted target commits only the transaction it belongs to; a committed target no longer drags along the running transaction newly created
-by another inode, but still performs a device flush, because mapped overwrites without metadata may follow.
-`fdatasync` temporarily uses the same metadata target and does not distinguish timestamp-only transactions.
-Loaded inodes without a target, directories and other non-regular inodes keep the mount-wide commit/flush.
-Metadata publication that does not report a transaction (including xattr) invalidates the old target; an extent mutation
-first invalidates the old target, and only the subsequent inode-table staging restores the target, covering external leaf-only rewrite.
+File sync waits for its finite PageCache data range before sampling the target.
+A newly appended commit covers data completed before the sample through its device flush.
+An already committed target needs a device flush when the inode has a newer completed
+data generation. A successful barrier acknowledges only its sampled generation. At
+counter saturation each subsequent sync keeps its barrier.
+
 Legacy orphan chain pointer updates fall into two classes: the resident inode of the current operation, after its inode-table update succeeds,
 registers the handle's transaction, without overwriting resident timestamps and without confirming dirty timestamps not yet staged. When removing a non-head
 node, the predecessor has only an inode number; splicing its `dtime` chain pointer is internal recovery bookkeeping of the removal transaction,
@@ -633,25 +635,26 @@ does not change the predecessor's file attributes or mapping, and therefore does
 a resident object. The splice, the chain update of the removed inode and the applicable release operations commit in the same transaction; while the transaction is uncommitted,
 recovery still sees the old chain and the inodes not released by that transaction. This exception does not apply to attribute or extent modifications of the predecessor itself.
 A journal abort is checked before any target judgment; commit/flush errors follow the existing abort and VFS error observation paths.
-The mount write lock still covers commit and flush; this step neither splits the lock nor omits the data barrier.
-An abort on the mounted path (including metadata completion of asynchronous writeback) runs inside the mount write guard; before the abort returns it
-publishes the atomic projection, and the guard's Drop observes it before releasing the same write lock and marks the superblock read-only. The same mount
-cannot have another write guard running Drop in the middle of projection publication. A future abort exit moved out of the mount lock must
-publish the superblock read-only state itself and must not rely on another access happening to trigger Drop.
+`Ext4Storage` shares the mounted device, journal, metadata slots and allocator with
+the file and superblock sync executors. Ordinary metadata writers take mutation
+admission before the mount write guard. Range selection, stable data submission and
+mapped completion without reservation or preallocation cleanup can proceed during a
+checkpoint. Admission covers credit preflight through handle stop, transaction freeze
+and the selection of any checkpoint prefix. During regular fsync of a revoke-capable
+transaction, reservation of the append range releases
+mutation admission after all log images are frozen. The journal persistence lock
+continues to serialize disk appends and tail changes. New handle admission can proceed
+on the initialized journal. A durable file target can issue its data barrier without
+taking either mount guard. Both sync executors publish journal abort to the VFS
+superblock before returning.
 `syncfs` and KVFS unmount writeback still commit the running transaction and drain all checkpoints.
-The current ordered-data dependency is recorded by the `ordered_generation` and
-`flushed_generation` of the running transaction: a writeback batch that publishes metadata increments the
-registered generation after a successful data write, and multiple PageCache batches and inodes may share the same transaction. An ordinary batch ending only updates in-memory
-metadata and does not flush by itself; freeze generates the pending-flush bit of the committing phase according to whether the two generations are equal, and persist flushes uniformly before
-any recovery evidence or journal write, and only after success clears the dependency and continues the commit.
-Therefore writeback completion does not mean the current transaction's data is persisted; an inode/filesystem sync or a capacity-pressure commit provides the
-persistence boundary. A metadata-only transaction adds no data flush. Data that only overwrites already mapped blocks and does not exceed `i_disksize`
-is not added to a metadata transaction on the data-only path; the same-device journal flush when an inode sync commits an existing transaction,
-or the direct device flush when there is no transaction, and the final flush of a filesystem sync, guarantee data persistence when the sync returns.
-This path does not promise that content is persisted before the commit record of an unrelated transaction. `flush_ordered_data` snapshots the registered generation before the barrier
-starts, confirms only that generation after success, and does not confirm on failure; an older barrier completing later also cannot lower the confirmed
-generation. No journal/transaction short-state lock is held during the barrier, and dependencies added concurrently are left for a later barrier;
-this confirmation protocol no longer depends on the mount excluding other handles. After freezing, flush and journal I/O are serialized by the persistence execution lock.
+A writeback batch that publishes metadata marks its running transaction as needing
+an ordered-data barrier. Multiple batches and inodes can share that dependency.
+Once all handles stop, the frozen transaction flushes its data before writing
+recovery evidence or the log. New handles register dependencies on the next
+transaction. A metadata-only commit skips the data barrier. Stable overwrites
+within `i_disksize` use the inode's data generation and its fsync or syncfs barrier.
+
 PageCache still aggregates folios up to a fixed limit; the required data blocks of a dirty range have already been brought into delayed-allocation accounting by `write_begin` or
 `page_mkwrite`, and writeback no longer scans the full range to generate a static space/
 credit plan. The actual writeback advances by a byte cursor, and `map_blocks()` is called again
@@ -1313,11 +1316,31 @@ assembly. `file/mapped_writeback.rs` owns initialized mapping plans, task-bound
 BIO waits, and specialized completion. Aligned overwrites without growth prepare
 under mount read protection. Holes, unwritten extents, append, and partial blocks
 prepare under mount write protection, installing unwritten extents for holes.
+For a direct-pointer inode, each new data block is reserved only in the
+allocator's in-memory index. Both the bitmap scanner and speculative preallocation
+exclude it. After every BIO retires the completion claims the successful prefix,
+charges quota and publishes the bitmap, direct pointers and disk size together.
+The inode worker drops the remaining pins on every exit, including preparation
+failure and a successful BIO after an earlier failure. The disk bitmap and inode
+therefore still describe holes if the system stops before publication.
+
 All preparation handles end before data submission; neither journal handles nor
 mount guards cross data-I/O waits. Preparation changes allocation and unwritten
 mappings without initializing extents or advancing `i_disksize`. Space pressure
 may safely commit these changes. A later preparation failure retains installed
 unwritten prefixes for retry and submits no data BIO from that batch.
+
+When credit or pending-free pressure selects a transaction, mounted operations
+release the mount state lock before waiting on the journal. Writeback also yields
+metadata admission once a revoke-capable journal has frozen its images and
+reserved log space. An unrelated inode can open a handle in the next transaction
+during the ordered-data barrier or log write. After persistence, admission is
+reacquired before the mount state lock, and credit and physical availability
+are sampled again. A credit restart stages the prefix size in the inode table,
+stops the handle and waits for the frozen transaction's barrier and commit.
+The resident disk size advances only on durable completion. A per-inode lock covers allocation planning and completion
+across these waits. Compound namespace operations retain their mutation admission
+across prevalidation. Recovery and journals without revoke synchronously checkpoint.
 
 Allocation reuses synchronous preallocation consumption, optional surplus
 registration, and extent insertion. Once the bitmap and unwritten extent own a
@@ -1329,10 +1352,10 @@ BIO assembly and submission run outside mount protection. A single contiguous,
 aligned run takes ownership of the PageCache snapshot; multiple runs own separate
 buffers. Partial initialized blocks require a synchronous read/modify/write
 outside mount protection. Partial unwritten blocks are zero padded, including
-the tail beyond appended EOF. Filesystem blocks larger than cache pages retain
-the synchronous drain path until block-level exclusion prevents overlapping
-partial writes. Allocation, unwritten, and append writes on 1/2/4 KiB blocks use
-the asynchronous data path.
+the tail beyond appended EOF. For extent files with blocks larger than cache pages, the inode queue admits a
+single batch at a time. Its next partial read observes the previous write and
+unwritten conversion. Opportunistic writeback skips a busy inode. Independent
+inodes continue submitting BIOs.
 
 The inode submission mutex serializes preparation and publication. Both the
 local mapped pipeline and deferred queue use `MAX_INFLIGHT_BATCHES` (four);
@@ -1408,7 +1431,7 @@ when the existing All implementation completes data inline; neither raw writebac
 nor a generic data wait alone supplies durability.
 
 Background triggering, asynchronous readahead, global writeback throttling, and
-sync targets for non-regular inodes, and separate fdatasync metadata targets
+precise sync targets for non-regular inodes
 remain outside this stage.
 
 ## Design Decisions
@@ -1481,6 +1504,15 @@ identity established before mount publication. Buffered admission reads the live
 journal abort projection through this retained identity and checks VFS writability;
 it does not acquire mount protection while holding the inode data lock.
 
+Single-folio buffered overwrites can run concurrently when the file has no
+revocable privileges, the 4 KiB extent block is initialized below both EOFs,
+and the resident mtime and ctime already match the current VFS timestamp.
+A lone open writer uses ordinary admission if it can immediately acquire the
+privilege lock, saving the extra mapping check on uncontended files.
+The KVFS data guard stabilizes size and mapping through the write. The usual
+folio lock orders overlapping copies. A timestamp change, allocation, append
+or request spanning folios takes the ordinary exclusive write path.
+
 Write-begin first checks the existing initialized-range cache under inode-state
 protection. A supported extent inode with complete initialized blocks below both
 visible and disk size, and no delayed reservations, needs no mapping lookup or
@@ -1509,7 +1541,7 @@ data wait. Full fsync also stages pending timestamps before selecting the inode'
 metadata transaction target. There is no inode request queue or allocated fsync
 batch: transaction state owns commit progress, and MountedJournal serializes
 persistence. A target already committed by another caller requires no repeated
-journal commit, but still requires a device flush for potentially newer data.
+journal commit. A later data generation still requires a device flush.
 An inode without a tracked target retains the conservative mount-wide fallback.
 
 KVFS checks each open file's independent error cursor after its filesystem callback.

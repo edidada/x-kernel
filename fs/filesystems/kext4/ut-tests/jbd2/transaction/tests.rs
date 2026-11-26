@@ -547,15 +547,19 @@ fn admission_allows_exact_capacity_and_waits_above_limit() {
 #[def_test]
 fn completion_requests_commit_only_after_the_last_handle_closes() {
     let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(35), 2);
-    let mut first = journal.begin(JournalCredits::new(2)).unwrap();
+    let mut first = journal.begin(JournalCredits::one()).unwrap();
     let transaction = first.id();
     first
         .consume_metadata_credit(FilesystemBlock::new(1))
         .unwrap();
-    first
+    let mut second = journal.begin(JournalCredits::one()).unwrap();
+    second
         .consume_metadata_credit(FilesystemBlock::new(2))
         .unwrap();
-    let second = journal.begin(JournalCredits::new(1)).unwrap();
+    assert_eq!(
+        journal.begin(JournalCredits::one()).map(|_| ()),
+        Err(Ext4Error::InsufficientJournalCredits)
+    );
 
     drop(first);
     assert_eq!(

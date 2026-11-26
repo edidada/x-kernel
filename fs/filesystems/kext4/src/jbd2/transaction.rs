@@ -58,8 +58,7 @@ struct RunningTransactionState {
     active_handles: u32,
     reserved_credits: u32,
     used_credits: u32,
-    ordered_generation: u64,
-    flushed_generation: u64,
+    has_unflushed_ordered_data: bool,
     metadata_blocks: BTreeSet<FilesystemBlock>,
     revoked_blocks: BTreeSet<FilesystemBlock>,
 }
@@ -70,14 +69,13 @@ impl RunningTransactionState {
             active_handles: 0,
             reserved_credits: 0,
             used_credits: 0,
-            ordered_generation: 0,
-            flushed_generation: 0,
+            has_unflushed_ordered_data: false,
             metadata_blocks: BTreeSet::new(),
             revoked_blocks: BTreeSet::new(),
         }
     }
 
-    fn begin_handle(&mut self, credits: JournalCredits) -> Ext4Result<()> {
+    fn begin_handle(&mut self, credits: JournalCredits, limit: u32) -> Ext4Result<()> {
         let active_handles = self
             .active_handles
             .checked_add(1)
@@ -86,6 +84,9 @@ impl RunningTransactionState {
             .reserved_credits
             .checked_add(credits.get())
             .ok_or(Ext4Error::Overflow)?;
+        if reserved_credits > limit {
+            return Err(Ext4Error::InsufficientJournalCredits);
+        }
         self.active_handles = active_handles;
         self.reserved_credits = reserved_credits;
         Ok(())
@@ -119,7 +120,7 @@ impl RunningTransactionState {
         FrozenTransactionState {
             reserved_credits: self.reserved_credits,
             used_credits: self.used_credits,
-            has_unflushed_ordered_data: self.ordered_generation != self.flushed_generation,
+            has_unflushed_ordered_data: self.has_unflushed_ordered_data,
             metadata_blocks: Arc::from(self.metadata_blocks.into_iter().collect::<Vec<_>>()),
             revoked_blocks: Arc::from(self.revoked_blocks.into_iter().collect::<Vec<_>>()),
         }
@@ -526,13 +527,17 @@ impl JournalTransactions {
 
         let id = match &mut inner.running {
             Some(transaction) => {
-                transaction.with_running(|running| running.begin_handle(credits))?;
+                transaction.with_running(|running| {
+                    running.begin_handle(credits, self.max_reserved_credits)
+                })?;
                 transaction.id()
             }
             None => {
                 let id = inner.next_transaction;
                 let transaction = Arc::new(RuntimeTransaction::new(id));
-                transaction.with_running(|running| running.begin_handle(credits))?;
+                transaction.with_running(|running| {
+                    running.begin_handle(credits, self.max_reserved_credits)
+                })?;
                 inner.next_transaction = TransactionId::new(id.get().wrapping_add(1));
                 inner.running = Some(transaction);
                 id
@@ -596,6 +601,15 @@ impl JournalTransactions {
         }
         let (active_handles, _) = running.running_state()?;
         Ok((active_handles == 0).then_some(running.id()))
+    }
+
+    pub(crate) fn latest_metadata_owner(&self) -> Option<Arc<RuntimeTransaction>> {
+        let inner = lock(&self.inner);
+        inner
+            .running
+            .as_ref()
+            .or(inner.committing.as_ref())
+            .cloned()
     }
 
     /// Returns the current running transaction, if one exists.
@@ -1007,7 +1021,7 @@ fn is_checkpointed(inner: &JournalInner, transaction: TransactionId) -> bool {
 
 /// JBD2 transaction ids wrap at `u32::MAX`; live transactions are required to
 /// stay within half the sequence space, matching Linux's signed-delta rule.
-const fn transaction_is_same_or_older(
+pub(crate) const fn transaction_is_same_or_older(
     transaction: TransactionId,
     reference: TransactionId,
 ) -> bool {
@@ -1068,30 +1082,7 @@ impl<'a> JournalHandle<'a> {
     /// metadata access can leave the data dependency pending for a later commit.
     pub(crate) fn require_ordered_data_flush(&mut self) -> Ext4Result<()> {
         self.journal.with_running(self.id, |running| {
-            running.ordered_generation = running
-                .ordered_generation
-                .checked_add(1)
-                .ok_or(Ext4Error::Overflow)?;
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    /// Executes a device-wide barrier and acknowledges its dependency snapshot.
-    ///
-    /// Acknowledges only dependencies registered before this barrier started.
-    /// Other handles may register newer writes during I/O; those remain pending.
-    /// The barrier holds no journal/phase lock. Failure acknowledges nothing.
-    pub(crate) fn flush_ordered_data(
-        &mut self,
-        barrier_fn: impl FnOnce() -> Ext4Result<()>,
-    ) -> Ext4Result<()> {
-        let generation = self
-            .journal
-            .with_running(self.id, |running| Ok(running.ordered_generation))?;
-        barrier_fn()?;
-        self.journal.with_running(self.id, |running| {
-            running.flushed_generation = running.flushed_generation.max(generation);
+            running.has_unflushed_ordered_data = true;
             Ok(())
         })
     }

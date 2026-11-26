@@ -834,10 +834,11 @@ impl AddressSpace {
         Err(revert_error.or(resize_error).unwrap_or(error))
     }
 
-    // The caller holds the inode data lock through rollback to keep size and
-    // competing writes stable. Each page step serializes its own copy, dirty
-    // publication and acceptance under that page's folio lock; a batched run
-    // releases its unaccepted tail once after its per-folio locks are released.
+    // The caller holds the inode data lock through rollback. Exclusive access
+    // protects size changes and multi-page writes. Shared access requires the
+    // backend to admit a single-folio overwrite with stable size and mapping.
+    // Each page step holds its folio lock through copy, dirtying and acceptance.
+    // A batch releases its unaccepted tail after releasing the folio locks.
     // Rollback may wait for concurrent writeback; filesystem callbacks have
     // returned before cache shrink, so their locks are released. Writeback
     // completion must not depend on the data lock.

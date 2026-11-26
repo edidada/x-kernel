@@ -30,7 +30,7 @@ use crate::{
 // inode_extra_isize_allocation_blocks whenever inode metadata may be dirtied.
 // A handle extension supplies credits, not admission for those physical blocks.
 pub(crate) struct Ext4QuotaIo<'fs, 'handle, 'journal> {
-    pub(crate) filesystem: &'fs Ext4SbInfo,
+    pub(crate) filesystem: &'fs Ext4SbInfo<'fs>,
     pub(crate) handle: Option<&'handle mut JournalHandle<'journal>>,
 }
 
@@ -82,7 +82,7 @@ fn is_valid_quota_inode(kind: QuotaType, number: u32) -> bool {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Writes each dirty quota record in a bounded transaction, then file info.
     /// Mount write exclusion precedes the sleepable superblock quota lock.
     pub(crate) fn sync_quotas(&mut self, super_block: &SuperBlock) -> KResult<()> {
@@ -276,7 +276,7 @@ fn owner_ids(uid: u32, gid: u32, project_id: u32) -> Ext4Result<[kquota::QuotaId
     ])
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     pub(crate) fn ensure_quota_feature_supported(&self) -> Ext4Result<()> {
         self.superblock().features().validate_writable()
     }
@@ -785,7 +785,7 @@ impl Ext4SbInfo {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     pub(crate) fn prepare_internal_quota(
         &mut self,
         quota: &mut QuotaInfo<Arc<VfsInode>>,
@@ -1043,7 +1043,7 @@ impl crate::vfs::Ext4Mount {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Reads quota state without journal or physical-allocation admission.
     pub(crate) fn read_quota_record<T>(
         &self,

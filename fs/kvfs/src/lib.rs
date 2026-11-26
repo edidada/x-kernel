@@ -58,8 +58,8 @@ pub use direct_io::{
 };
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{
-    FMode, FileDirOperations, FileMappingOperations, FileOperations, FilePollSource, VfsFile,
-    VfsFileBuilder,
+    BufferedOverwriteOperations, FMode, FileDirOperations, FileMappingOperations, FileOperations,
+    FilePollSource, VfsFile, VfsFileBuilder,
 };
 pub(crate) use file_slot::FileSlots;
 pub use file_slot::{DMA_BUF_SLOT, FileSlot};

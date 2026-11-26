@@ -40,7 +40,13 @@ pub(crate) enum BlockReleaseKind {
     MetadataWithoutRevoke,
 }
 
-impl Ext4SbInfo {
+enum BlockClaim<'a, 'j> {
+    Allocate(&'a mut crate::jbd2::JournalHandle<'j>),
+    PinDirect,
+    PublishDirect(&'a mut crate::jbd2::JournalHandle<'j>),
+}
+
+impl Ext4SbInfo<'_> {
     #[allow(dead_code)]
     pub(crate) fn allocate_block(
         &self,
@@ -172,6 +178,80 @@ impl Ext4SbInfo {
         expected_len: BlockCount,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockRunAllocation> {
+        self.claim_group_blocks(
+            alloc,
+            group,
+            goal,
+            min_len,
+            expected_len,
+            BlockClaim::Allocate(handle),
+        )
+    }
+
+    /// A direct-pointer hole has no on-disk unwritten state. Pin its target
+    /// only in RAM until its data BIO completes; a crash discards the pin.
+    pub(crate) fn pin_direct_write_block(&self, inode: &Ext4Inode) -> Ext4Result<FilesystemBlock> {
+        let start = self.block_group_for_inode(inode.number())?;
+        let mut corruption = None;
+        loop {
+            if self.free_blocks_count() == 0 {
+                return Err(Ext4Error::NoSpace);
+            }
+            for group in self.group_scan_order(start)? {
+                let _prefetch = self.prefetch_group_allocation_metadata(group)?;
+                let mut alloc = lock(&self.allocator);
+                match self.claim_group_blocks(
+                    &mut alloc,
+                    group,
+                    None,
+                    BlockCount::new(1),
+                    BlockCount::new(1),
+                    BlockClaim::PinDirect,
+                ) {
+                    Ok(run) => return Ok(FilesystemBlock::new(run.first_block().get())),
+                    Err(Ext4Error::NoSpace) => {}
+                    Err(error @ Ext4Error::Corrupt(_)) => {
+                        corruption.get_or_insert(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if self.discard_preallocs_for_space(1) == 0 {
+                return Err(corruption.unwrap_or(Ext4Error::NoSpace));
+            }
+        }
+    }
+
+    pub(crate) fn publish_direct_write_block(
+        &self,
+        block: FilesystemBlock,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<BlockRunAllocation> {
+        let group = self.block_group_for_block(block)?;
+        let _prefetch = self.prefetch_group_allocation_metadata(group)?;
+        let mut alloc = lock(&self.allocator);
+        if !alloc.direct_write_pins.contains(&block) {
+            return Err(Ext4Error::InvalidJournalTransaction);
+        }
+        self.claim_group_blocks(
+            &mut alloc,
+            group,
+            Some(block),
+            BlockCount::new(1),
+            BlockCount::new(1),
+            BlockClaim::PublishDirect(handle),
+        )
+    }
+
+    fn claim_group_blocks(
+        &self,
+        alloc: &mut AllocatorState,
+        group: BlockGroupNumber,
+        goal: Option<FilesystemBlock>,
+        min_len: BlockCount,
+        expected_len: BlockCount,
+        claim: BlockClaim<'_, '_>,
+    ) -> Ext4Result<BlockRunAllocation> {
         let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
         // Geometry and block locations come from frozen mount tables and need
         // no lock of their own. Callers warm the metadata cache outside the
@@ -203,7 +283,9 @@ impl Ext4SbInfo {
         if alloc.free_blocks_count == 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
         }
-        ensure_metadata_credits(handle, BLOCK_ALLOCATOR_METADATA_CREDITS)?;
+        if let BlockClaim::Allocate(handle) | BlockClaim::PublishDirect(handle) = &claim {
+            ensure_metadata_credits(handle, BLOCK_ALLOCATOR_METADATA_CREDITS)?;
+        }
 
         let had_uninit_block_bitmap = descriptor.has_uninit_block_bitmap();
         let mut bitmap_bytes = if had_uninit_block_bitmap {
@@ -231,7 +313,15 @@ impl Ext4SbInfo {
         // The free-extent cache mirrors the bitmap, so it cannot see either
         // prealloc spaces or uncommitted frees. Snapshot both under the
         // allocator lock instead of making protection depend on cache lifetime.
-        let excluded_ranges = Self::allocation_exclusion_ranges(alloc, range)?;
+        let excluded_ranges = Self::allocation_exclusion_ranges(
+            alloc,
+            range,
+            if matches!(claim, BlockClaim::PublishDirect(_)) {
+                goal
+            } else {
+                None
+            },
+        )?;
         let suggested_goal = ensure_block_group_free_cache_inner(
             alloc,
             group,
@@ -258,7 +348,12 @@ impl Ext4SbInfo {
         // range, or drop it when the range ends at the group's edge. The
         // scanner also skips exclusions reached after this initial hint.
         // A goal outside this group retains the default scan from zero.
-        let scan_goal = suggested_goal.or(goal).and_then(|goal| {
+        let preferred = if matches!(claim, BlockClaim::PublishDirect(_)) {
+            goal
+        } else {
+            suggested_goal.or(goal)
+        };
+        let scan_goal = preferred.and_then(|goal| {
             let bit = range.bit_index(goal).ok()?;
             match range_end_containing(&excluded_ranges, bit) {
                 Some(end_bit) => range.block_at(end_bit).ok(),
@@ -308,6 +403,18 @@ impl Ext4SbInfo {
                 })),
             "block allocator handed out system-zone, preallocated or uncommitted freed blocks"
         );
+
+        let physical = FilesystemBlock::new(allocation.first_block().get());
+        let handle = match claim {
+            BlockClaim::PinDirect => {
+                alloc.direct_write_pins.insert(physical);
+                return Ok(allocation);
+            }
+            BlockClaim::PublishDirect(_) if Some(physical) != goal => {
+                return Err(Ext4Error::InvalidJournalTransaction);
+            }
+            BlockClaim::Allocate(handle) | BlockClaim::PublishDirect(handle) => handle,
+        };
 
         let mut descriptor_bytes = self
             .read_metadata_block(descriptor_block)?
@@ -648,8 +755,19 @@ impl Ext4SbInfo {
     fn allocation_exclusion_ranges(
         alloc: &AllocatorState,
         range: BlockGroupRange,
+        owned_pin: Option<FilesystemBlock>,
     ) -> Ext4Result<Vec<(u32, u32)>> {
         let mut ranges = alloc.prealloc_bit_ranges_in_group(range);
+        for &block in alloc
+            .direct_write_pins
+            .range(range.block_at(0)?..=range.block_at(range.block_count() - 1)?)
+        {
+            if Some(block) == owned_pin {
+                continue;
+            }
+            let bit = range.bit_index(block)?;
+            ranges.push((bit, bit + 1));
+        }
         let mut pending = Vec::new();
         alloc.pending_frees.append_ranges(
             range.group(),

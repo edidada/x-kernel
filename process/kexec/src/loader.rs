@@ -860,7 +860,7 @@ fn sample_exec_security(location: &Path, cred: &Cred, ids_allowed: bool) -> KRes
     // serialization a concurrent revoke/`setxattr` takes, so the executed
     // image's security metadata cannot mix two generations.
     let inode = location.inode();
-    let _privilege_guard = inode.lock_privileges();
+    let _inode_guard = inode.lock_inode_shared();
     let metadata = location.metadata();
     if metadata.mode.node_type() != NodeType::RegularFile {
         return Ok(ExecSecurity::NONE);

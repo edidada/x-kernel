@@ -272,6 +272,7 @@ pub(crate) fn persist_journal_commit(
     previous: Option<&JournalPersistedCommit>,
     commit: &RuntimeTransaction,
     blocks: &[JournalCommitBlock],
+    on_log_reserved: impl FnOnce() -> Ext4Result<()>,
 ) -> Ext4Result<(JournalPersistedCommit, JournalSuperblock)> {
     let required_blocks = journal_blocks_required(superblock, commit, blocks)?;
 
@@ -292,6 +293,9 @@ pub(crate) fn persist_journal_commit(
         }
     };
     ensure_log_space(superblock, tail, start, required_blocks)?;
+    // Frozen images and ring space are fixed. The persistence owner can now
+    // let the next running transaction modify live metadata during log I/O.
+    on_log_reserved()?;
     // A clean journal must become discoverable before its first transaction is
     // emitted. If power is lost after activation but before the commit block,
     // recovery scans an incomplete transaction instead of incorrectly treating

@@ -50,7 +50,7 @@ fn mount_rejects_non_extent_after_superblock_decode() {
 
 #[def_test]
 fn mutable_state_reload_revalidates_mount_features() {
-    let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let (filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     {
         let mut bytes = device.bytes.lock();
         let superblock_bytes = &mut bytes[1024..1024 + superblock::SUPERBLOCK_SIZE];
@@ -114,7 +114,7 @@ fn writable_mount_finalization_persists_unsigned_default() {
 
 #[def_test]
 fn reload_rejects_replayed_descriptor_address_changes() {
-    let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let (filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
 
     // Unchanged descriptors reload into the same mutable state.
     filesystem.metadata_io.invalidate_all();

@@ -22,15 +22,22 @@ use crate::{
 };
 
 fn quota_fixture() -> (Arc<SuperBlock>, Arc<VfsFile>, Arc<TestDevice>) {
-    quota_fixture_at(None)
+    quota_fixture_at(None, false)
 }
 
 fn quota_fixture_at(
     quota_number: Option<InodeNumber>,
+    has_revoke: bool,
 ) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc<TestDevice>) {
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);
-    install_test_internal_journal(&mut filesystem, 9501);
+    if has_revoke {
+        crate::superblock::test_fixtures::install_credit_limited_journal(
+            &mut filesystem, 9502, 341, true,
+        );
+    } else {
+        install_test_internal_journal(&mut filesystem, 9501);
+    }
     let inode = if let Some(quota_number) = quota_number {
         let block = filesystem.inode_table_entry_block(inode.number()).unwrap();
         assert_eq!(
@@ -503,9 +510,16 @@ fn quota_feature_read_only_preparation_preserves_storage() {
 }
 
 fn internal_quota_fixture() -> (Arc<SuperBlock>, Arc<VfsFile>, Arc<TestDevice>) {
-    let (super_block, file, device) = quota_fixture_at(Some(InodeNumber::new(
-        crate::disk::inode::EXT4_USR_QUOTA_INO,
-    )));
+    internal_quota_fixture_with_revoke(false)
+}
+
+fn internal_quota_fixture_with_revoke(
+    has_revoke: bool,
+) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc<TestDevice>) {
+    let (super_block, file, device) = quota_fixture_at(
+        Some(InodeNumber::new(crate::disk::inode::EXT4_USR_QUOTA_INO)),
+        has_revoke,
+    );
     load_user_quota(&super_block, file.inode());
     {
         let mut state = ext4_private(&super_block).unwrap().write(&super_block);
@@ -1100,19 +1114,9 @@ fn a_new_quota_payload_target_still_requires_a_transaction_credit() {
 
 #[def_test]
 fn aborted_suspended_quota_releases_its_file_without_rewriting_recovery_state() {
-    use crate::superblock::test_fixtures::{
-        install_test_journal, test_journal_superblock_bytes_with_blocks,
-    };
-
-    let (super_block, file, device) = internal_quota_fixture();
+    let (super_block, file, device) = internal_quota_fixture_with_revoke(true);
     {
         let mut state = ext4_private(&super_block).unwrap().write(&super_block);
-        let mut bytes = test_journal_superblock_bytes_with_blocks(9502, 1024);
-        bytes[4..8].copy_from_slice(&4_u32.to_be_bytes());
-        crate::jbd2::enable_superblock_revoke(&mut bytes).unwrap();
-        let superblock =
-            crate::jbd2::JournalSuperblock::decode(&bytes, 4096, 1024, [0; 16]).unwrap();
-        install_test_journal(&mut state, superblock);
         assert!(state.journal_supports_revoke());
         let journal = state.metadata_journal().unwrap();
         let mut handle = journal.begin(JournalCredits::new(256)).unwrap();

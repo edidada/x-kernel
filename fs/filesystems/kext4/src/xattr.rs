@@ -256,7 +256,7 @@ struct ExtraIsizeLayoutCandidate {
     inline_capacity: usize,
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Reads all supported extended attributes stored on an inode.
     pub(crate) fn read_xattrs(&self, inode: &Ext4Inode) -> Ext4Result<Vec<Ext4Xattr>> {
         let mut xattrs = Vec::new();

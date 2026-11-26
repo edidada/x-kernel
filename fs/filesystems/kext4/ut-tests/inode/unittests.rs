@@ -43,6 +43,26 @@ fn initialized_ranges_cover_random_overwrites_without_bridging_holes() {
 }
 
 #[def_test]
+fn shared_overwrite_requires_a_written_block_and_current_timestamps() {
+    let now = timestamp(123, 0);
+    let mut metadata = regular_inode_metadata();
+    metadata.disk_size = 2 * 4096 + 1;
+    metadata.mtime = now;
+    metadata.ctime = now;
+    let inode = test_inode(metadata);
+    inode.cache_initialized_blocks(0, 1);
+    inode.cache_initialized_blocks(2, 3);
+    assert!(inode.can_overwrite_cached_block(LogicalBlock::new(0), 4096, now));
+    assert!(!inode.can_overwrite_cached_block(LogicalBlock::new(1), 4096, now));
+    assert!(!inode.can_overwrite_cached_block(LogicalBlock::new(2), 4096, now));
+    inode.set_ctime(timestamp(124, 0));
+    assert!(!inode.can_overwrite_cached_block(LogicalBlock::new(0), 4096, now));
+    inode.set_ctime(now);
+    inode.set_mtime(timestamp(122, 0));
+    assert!(!inode.can_overwrite_cached_block(LogicalBlock::new(0), 4096, now));
+}
+
+#[def_test]
 fn initialized_write_admission_keeps_mapping_format_validation() {
     let mut metadata = regular_inode_metadata();
     metadata.disk_size = 4096;
@@ -100,7 +120,7 @@ fn initialized_overwrites_are_invalidated_by_shrink_and_mapping_changes() {
     assert!(!inode.has_initialized_overwrite(0, 1, 4096));
 
     inode.cache_initialized_blocks(0, 4);
-    inode.invalidate_extent_status();
+    inode.invalidate_extent_status(None);
     assert!(!inode.has_initialized_overwrite(0, 1, 4096));
 
     inode.cache_initialized_blocks(0, 4);
@@ -143,7 +163,7 @@ fn mapping_selector_publication_invalidates_proofs_even_with_unchanged_root() {
             metadata,
             Some(flags),
             PendingInodeTimestamps::default(),
-            None,
+            InodePublication::Untracked,
             None,
         );
         state.extent_status.contains_written(0, 1)
@@ -679,7 +699,7 @@ fn initialized_extent_end_publishes_the_proven_prefix_and_clears_on_shrink() {
     );
     inode.set_size(4096);
     assert_eq!(inode.initialized_extent_end.load(Ordering::Acquire), 0);
-    inode.invalidate_extent_status();
+    inode.invalidate_extent_status(None);
     assert_eq!(inode.initialized_extent_end.load(Ordering::Acquire), 0);
 }
 

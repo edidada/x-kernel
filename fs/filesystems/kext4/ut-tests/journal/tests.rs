@@ -80,14 +80,14 @@ fn exhausted_handle_aborts_and_rejects_following_mutations() {
     assert_eq!(device.write_count(), writes);
 }
 
-fn revoke_journal_test_filesystem(sequence: u32) -> (Ext4SbInfo, Arc<TestDevice>) {
+fn revoke_journal_test_filesystem(sequence: u32) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     revoke_journal_test_filesystem_with_log_blocks(sequence, 1023)
 }
 
 fn revoke_journal_test_filesystem_with_log_blocks(
     sequence: u32,
     log_blocks: u32,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let mut bytes = test_journal_superblock_bytes_with_blocks(sequence, 1024);
     // Keep the valid minimum journal size while limiting its usable log ring.
@@ -108,7 +108,7 @@ fn filled_revoke_journal_test_filesystem(
     sequence: u32,
     log_blocks: u32,
     transactions: usize,
-) -> (Ext4SbInfo, Arc<TestDevice>) {
+) -> (Ext4SbInfo<'static>, Arc<TestDevice>) {
     // Each allocation logs three metadata blocks plus descriptor and commit.
     let (mut filesystem, device) =
         revoke_journal_test_filesystem_with_log_blocks(sequence, log_blocks);
@@ -792,7 +792,7 @@ fn allocate_regular_inode(filesystem: &mut Ext4SbInfo) -> Ext4Inode {
 }
 
 #[def_test]
-fn inode_sync_conservatively_commits_the_current_running_transaction() {
+fn loaded_inode_sync_retains_its_original_transaction() {
     let (mut filesystem, device) = revoke_journal_test_filesystem(504);
     let first = allocate_regular_inode(&mut filesystem);
     let journal = filesystem
@@ -819,7 +819,7 @@ fn inode_sync_conservatively_commits_the_current_running_transaction() {
     filesystem
         .sync_inode(&first, Ext4SyncIntent::DataOnly)
         .expect("sync inode without a running metadata transaction");
-    assert_eq!(device.flush_count(), flushes_before_data_only_sync + 1);
+    assert_eq!(device.flush_count(), flushes_before_data_only_sync);
 
     let _second = allocate_regular_inode(&mut filesystem);
     let second_transaction = journal
@@ -832,15 +832,13 @@ fn inode_sync_conservatively_commits_the_current_running_transaction() {
     let flushes_before_second_sync = device.flush_count();
     filesystem
         .sync_inode(&first, Ext4SyncIntent::FullMetadata)
-        .expect("conservatively sync current transaction");
-    // Allocator accounting no longer replaces the decoded superblock, so
-    // the recovery bit persisted by the first commit is still set and the
-    // second commit skips the redundant evidence write; only the commit
-    // barrier flush remains.
-    assert_eq!(device.flush_count(), flushes_before_second_sync + 1);
-
-    assert_eq!(journal.transactions.running_transaction().unwrap(), None);
-    assert_eq!(pending_checkpoint_count(&filesystem), 2);
+        .expect("reuse the first inode's durable target");
+    assert_eq!(device.flush_count(), flushes_before_second_sync);
+    assert_eq!(
+        journal.transactions.running_transaction().unwrap(),
+        Some(second_transaction)
+    );
+    assert_eq!(pending_checkpoint_count(&filesystem), 1);
 
     filesystem.sync_filesystem().expect("sync remaining work");
     assert_eq!(pending_checkpoint_count(&filesystem), 0);
@@ -881,8 +879,8 @@ fn inode_sync_leaves_newer_unrelated_transaction_running() {
             Some(unrelated)
         );
         assert_eq!(device.write_count(), writes);
-        // Data may have been overwritten since the target committed.
-        assert_eq!(device.flush_count(), flushes + 1);
+        // No newer write completed for this inode.
+        assert_eq!(device.flush_count(), flushes);
     }
 
     // A new mutation on the original inode must replace its completed target.
@@ -918,6 +916,7 @@ fn inode_sync_completed_target_preserves_flush_errors_and_abort() {
         .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
         .unwrap();
     let _other = allocate_regular_inode(&mut filesystem);
+    inode.note_data_completion();
     device.fail_flush_at(device.flush_count() + 1);
     assert_eq!(
         filesystem.sync_inode(&inode, Ext4SyncIntent::DataOnly),
@@ -941,7 +940,7 @@ fn inode_sync_invalidated_mapping_target_uses_conservative_commit() {
         .unwrap();
     let _other = allocate_regular_inode(&mut filesystem);
     let journal = filesystem.metadata_journal().unwrap();
-    inode.invalidate_extent_status();
+    inode.invalidate_extent_status(None);
     filesystem
         .sync_inode(&inode, Ext4SyncIntent::DataOnly)
         .unwrap();
@@ -975,7 +974,15 @@ fn inode_sync_does_not_reuse_target_after_xattr_publication() {
 
 /// Restrict transaction credits without inventing an invalid short journal.
 pub(crate) fn limit_transaction_credits(filesystem: &mut Ext4SbInfo, credits: u32) {
-    let journal = Arc::get_mut(filesystem.journal.as_mut().unwrap()).unwrap();
+    let journal = Arc::get_mut(
+        filesystem
+            .unpublished_storage()
+            .unwrap()
+            .journal
+            .as_mut()
+            .unwrap(),
+    )
+    .unwrap();
     journal.transactions =
         JournalTransactions::new_with_credit_limit(journal.superblock().sequence(), credits);
 }
@@ -1329,7 +1336,7 @@ fn persistence_guard_spans_device_io_and_duplicate_commit_is_a_noop() {
     let journal = filesystem.metadata_journal().unwrap();
     // Install before touching the cache; device and metadata I/O must keep the
     // same backing storage rather than introducing a second buffer identity.
-    filesystem.device = Arc::new(
+    filesystem.unpublished_storage().unwrap().device = Arc::new(
         crate::io::FilesystemDevice::open(
             crate::io::test_block_device(Arc::new(PersistenceProbeDevice {
                 device: device.clone(),
@@ -1340,7 +1347,8 @@ fn persistence_guard_spans_device_io_and_duplicate_commit_is_a_noop() {
         )
         .unwrap(),
     );
-    filesystem.metadata_io = crate::buffer::Ext4MetadataIo::new(filesystem.device.clone());
+    filesystem.unpublished_storage().unwrap().metadata_io =
+        crate::buffer::Ext4MetadataIo::new(filesystem.device.clone());
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
     let transaction = handle.id();
     filesystem
@@ -1405,6 +1413,7 @@ fn competing_commit_request_observes_persisted_target_after_execution_handoff() 
             &persistence,
             transaction,
             RecoveryFlagPolicy::ClearAfterCheckpoint,
+            &mut || {},
         )
         .unwrap();
     drop(persistence);

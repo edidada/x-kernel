@@ -11,7 +11,7 @@ use crate::{
     jbd2::JournalHandle,
 };
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Keeps indirect trees read-only until their allocation and recovery
     /// contracts exist. Every direct pointer is checked before any mutation.
     pub(crate) fn ensure_legacy_direct_mutation_supported(

@@ -111,6 +111,39 @@ fn buffered_preparation_cannot_bypass_inode_write_policy_even_for_empty_requests
     }
 }
 
+struct FailingOverwriteAdmission;
+
+impl BufferedOverwriteOperations for FailingOverwriteAdmission {
+    fn can_overwrite(&self, _file: &VfsFile, _range: Range<u64>) -> VfsResult<bool> {
+        Err(VfsError::Io)
+    }
+}
+
+#[def_test]
+fn shared_overwrite_admission_preserves_position_and_source_on_fallback_or_failure() {
+    let page = memaddr::PAGE_SIZE_4K as u64;
+    for (flags, start, expected) in [
+        (OpenFlags::empty(), page - 2, Err(VfsError::Io)),
+        (OpenFlags::empty(), page - 1, Ok(None)),
+        (OpenFlags::empty(), page * 2, Ok(None)),
+        (OpenFlags::APPEND, 0, Ok(None)),
+        (OpenFlags::DIRECT, 0, Ok(None)),
+        (OpenFlags::DSYNC, 0, Ok(None)),
+        (OpenFlags::SYNC, 0, Ok(None)),
+    ] {
+        let file = status_test_file(FMode::WRITE, flags, NodeFlags::empty());
+        file.inode().set_size(page * 2);
+        let mut pos = start;
+        let mut source = iov_iter_kvec_source(b"ab");
+        assert_eq!(
+            file.try_buffered_overwrite(&FailingOverwriteAdmission, &mut source, &mut pos, start),
+            expected
+        );
+        assert_eq!(source.count(), 2);
+        assert_eq!(pos, start);
+    }
+}
+
 fn sync_test_file(operations: Arc<dyn FileOperations>, mode: FMode) -> Arc<VfsFile> {
     let super_block = crate::nullfs::new_superblock();
     let mount = crate::Mount::new_root(&super_block);

@@ -18,6 +18,7 @@ mod legacy;
 mod mapped_writeback;
 
 pub(crate) use async_writeback::PreparedWriteback;
+pub(crate) use legacy::DirectWritePins;
 pub(crate) use mapped_writeback::{MappedWriteback, PendingMappedWriteback};
 
 /// Completed data reuses the ordered metadata engine without issuing I/O again.
@@ -251,7 +252,7 @@ pub(crate) enum RegularWriteMetadata {
     },
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     pub(crate) fn ensure_regular_file_mutation_supported(
         &self,
         inode: &Ext4Inode,
@@ -265,48 +266,6 @@ impl Ext4SbInfo {
             self.ensure_legacy_direct_mutation_supported(inode)?;
         }
         Ok(())
-    }
-
-    /// Commits metadata needed by this inode without forcing a checkpoint.
-    ///
-    /// The caller drains required data and stages full-sync timestamps first,
-    /// under the existing VFS ordering. Both intents conservatively use the
-    /// inode's latest metadata target; timestamp-only targets are not separated.
-    /// Without tracked ownership, retain mount-wide commit. An already committed
-    /// target still needs a device barrier for later data-only overwrites.
-    pub(crate) fn sync_inode(
-        &mut self,
-        inode: &Ext4Inode,
-        _intent: Ext4SyncIntent,
-    ) -> Ext4Result<()> {
-        let result = self.sync_inode_transaction(inode);
-        result.map_err(|error| self.fail_journal_operation(error))
-    }
-
-    fn sync_inode_transaction(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
-        // Prior durable metadata does not hide a later journal failure.
-        self.ensure_writable()?;
-        if let Some(transaction) = inode.sync_transaction() {
-            if transaction.is_committed() {
-                // A different inode may have committed this target before we
-                // took the mount lock. Do not commit its newer transaction too.
-                // Keep the barrier: mapped data can be newer than the target.
-                return self.flush_device();
-            }
-            return self.commit_metadata_transaction_with_policy(
-                transaction.id(),
-                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-            );
-        }
-        match self.commit_running_metadata_transaction() {
-            Ok(true) => Ok(()),
-            Ok(false) => {
-                // A mapped overwrite may dirty only file data and therefore have no
-                // metadata transaction whose commit barrier can carry durability.
-                self.flush_device()
-            }
-            Err(error) => Err(error),
-        }
     }
 
     /// Reads bytes from a regular file inode.
@@ -542,6 +501,7 @@ impl Ext4SbInfo {
     /// inode, re-evaluated at each settlement (Linux `inode_is_open_for_write`);
     /// prealloc spaces survive writeback settlement only while it holds.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(unittest)]
     pub(crate) fn writeback_ordered_at(
         &mut self,
         inode: &Arc<Ext4Inode>,
@@ -579,6 +539,7 @@ impl Ext4SbInfo {
     /// inode, re-evaluated at each settlement (Linux `inode_is_open_for_write`);
     /// prealloc spaces survive writeback settlement only while it holds.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(unittest)]
     pub(crate) fn writeback_ordered_at_with_prealloc_budget(
         &mut self,
         inode: &Arc<Ext4Inode>,
@@ -589,7 +550,7 @@ impl Ext4SbInfo {
         max_extra_prealloc_blocks: u32,
         is_open_for_write: impl Fn() -> bool,
     ) -> Ext4WritebackResult {
-        self.writeback_ordered_data(
+        let result = self.writeback_ordered_data(
             inode,
             offset,
             OrderedWritebackData::Write(input),
@@ -597,7 +558,9 @@ impl Ext4SbInfo {
             intent,
             max_extra_prealloc_blocks,
             is_open_for_write,
-        )
+        );
+        inode.note_data_completion();
+        result
     }
 
     #[expect(
@@ -629,9 +592,9 @@ impl Ext4SbInfo {
 
         if !inode.has_extents() && !input.is_empty() {
             return match input {
-                OrderedWritebackData::Write(bytes) => self
-                    .writeback_legacy_direct_at(inode, offset, bytes, visible_size, intent)
-                    .map_err(Into::into),
+                OrderedWritebackData::Write(bytes) => {
+                    self.writeback_legacy_direct_at(inode, offset, bytes, visible_size, intent)
+                }
                 OrderedWritebackData::Completed(_) => {
                     Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentInode).into())
                 }
@@ -785,12 +748,28 @@ impl Ext4SbInfo {
                 &mut handle,
             );
             let completion = match result {
-                Ok(OrderedWritebackTransactionProgress::Restart) => self
-                    .complete_metadata_mutation_and_commit_with_policy(
-                        handle,
-                        result,
-                        crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-                    ),
+                Ok(OrderedWritebackTransactionProgress::Restart) => {
+                    // Close the handle before the device barrier, so unrelated
+                    // metadata may enter the next transaction during log I/O.
+                    let size = inode.disk_size().max(cursor.absolute_offset(offset)?);
+                    let transaction = handle.id();
+                    inode.commit_writeback_size(size, || {
+                        let staged = self
+                            .update_regular_inode_write_metadata(
+                                inode,
+                                size,
+                                RegularWriteMetadata::SizeOnly,
+                                &mut handle,
+                            )
+                            .map(|()| OrderedWritebackTransactionProgress::Restart);
+                        let completion = self.complete_metadata_mutation_and_commit_with_policy(
+                            handle,
+                            staged,
+                            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+                        );
+                        (completion, journal.is_committed(transaction))
+                    })
+                }
                 _ => self.complete_metadata_mutation(handle, result),
             };
             // Both explicit restart and handle completion can commit. Query
@@ -1217,14 +1196,6 @@ impl Ext4SbInfo {
                 match handle.reserve_more(JournalCredits::new(additional_credits)) {
                     Ok(()) => {}
                     Err(Ext4Error::InsufficientJournalCredits) => {
-                        handle.flush_ordered_data(|| self.flush_device())?;
-                        let durable_size = inode.disk_size().max(cursor.absolute_offset(offset)?);
-                        self.update_regular_inode_write_metadata(
-                            inode,
-                            durable_size,
-                            RegularWriteMetadata::SizeOnly,
-                            handle,
-                        )?;
                         return Ok(OrderedWritebackTransactionProgress::Restart);
                     }
                     Err(error) => return Err(error),
@@ -1329,7 +1300,7 @@ impl Ext4SbInfo {
             return Ok(None);
         }
         self.ensure_regular_file_mutation_supported(inode)?;
-        if self.journal.is_none() && intent.requires_full_metadata() {
+        if self.journal.is_none() && (intent.requires_full_metadata() || !inode.has_extents()) {
             return Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite));
         }
         let end = offset
@@ -1413,7 +1384,9 @@ impl Ext4SbInfo {
 
         Ok(runs)
     }
+}
 
+impl crate::superblock::Ext4Storage {
     fn write_ordered_run(
         &self,
         run: &AllocatedWriteRun,
@@ -1447,7 +1420,11 @@ impl Ext4SbInfo {
         let is_full_aligned_write =
             run.in_block == 0 && run.write_len == block_count * block_size_usize;
         if is_full_aligned_write {
-            return self.write_contiguous_blocks(run.first_block, run.block_count, input_slice);
+            return self.device.write_contiguous_blocks(
+                run.first_block,
+                run.block_count,
+                input_slice,
+            );
         }
 
         let mut block_bytes = vec![
@@ -1458,7 +1435,8 @@ impl Ext4SbInfo {
         ];
         match partial_block_write {
             PartialBlockWrite::PreserveExisting => {
-                self.read_blocks(run.first_block, run.block_count, &mut block_bytes)?;
+                self.device
+                    .read_blocks(run.first_block, run.block_count, &mut block_bytes)?;
             }
             PartialBlockWrite::ZeroFill => {}
         }
@@ -1470,7 +1448,8 @@ impl Ext4SbInfo {
             .get_mut(run.in_block..target_end)
             .ok_or(Ext4Error::OutOfBounds)?
             .copy_from_slice(input_slice);
-        self.write_contiguous_blocks(run.first_block, run.block_count, &block_bytes)
+        self.device
+            .write_contiguous_blocks(run.first_block, run.block_count, &block_bytes)
     }
 }
 

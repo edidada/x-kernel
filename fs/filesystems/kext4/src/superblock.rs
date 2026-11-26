@@ -478,6 +478,7 @@ pub(crate) struct AllocatorState {
     /// debug-asserted after every mutation.
     pub(crate) preallocated_blocks: u64,
     /// Physical reuse protection, independent of reclaimable bitmap caches.
+    pub(crate) direct_write_pins: alloc::collections::BTreeSet<FilesystemBlock>,
     pub(crate) pending_frees: crate::balloc::pending_free::PendingBlockFrees,
 }
 
@@ -485,10 +486,10 @@ pub(crate) struct AllocatorState {
 ///
 /// KVFS owns resident inode identity. This object owns ext4 superblock state,
 /// including the mount-wide delayed-allocation reservation aggregate.
-pub(crate) struct Ext4SbInfo {
+pub(crate) struct Ext4MountState {
+    pub(crate) storage: Arc<Ext4Storage>,
     /// Back-reference to the VFS owner of quota state and resident identities.
     pub(crate) vfs_superblock: Weak<kvfs::SuperBlock>,
-    pub(crate) allocator: Mutex<AllocatorState>,
     /// Mount-wide delayed-allocation reservation total.
     ///
     /// A dedicated lock keeps the reserve/release/truncate/eviction paths
@@ -505,6 +506,28 @@ pub(crate) struct Ext4SbInfo {
     /// `ORPHAN_PRESENT` live in [`AllocatorState`] and are read through
     /// dedicated accessors.
     pub(crate) superblock: Ext4DiskSuperblock,
+    statfs_mode: Ext4StatFsMode,
+    /// Quota mount policy: one enforcement/request bit per quota class.
+    pub(crate) quota_mount_options: u8,
+    /// Maximum byte size supported by legacy indirect-block inodes.
+    pub(crate) bitmap_maxbytes: u64,
+    // Linux `ext4_sb_info::s_hash_unsigned`: zero for signed algorithms and
+    // three for the corresponding unsigned HTree algorithms.
+    pub(crate) hash_unsigned: u8,
+    pub(crate) orphan_info: Option<OrphanInfo>,
+    // Read-only system zones scanned from the on-disk bitmap at mount time.
+    // Zones are never removed and the release path rejects every system-zone
+    // block unconditionally, matching Linux where a system zone is never
+    // freed. The owner exception is limited to block-reference validation:
+    // `is_inode_physical_block_valid` lets the journal inode map blocks inside
+    // its own protected zone, but such blocks can never be released.
+    system_zones: Vec<SystemZone>,
+}
+
+/// Device, journal, cache and allocator identity shared by persistence and mount operations.
+/// Geometry and device mapping are fixed before the VFS mount is published.
+pub(crate) struct Ext4Storage {
+    pub(crate) allocator: Mutex<AllocatorState>,
     /// Per-group geometry (block/inode bitmap and inode-table addresses)
     /// frozen at mount.
     ///
@@ -520,26 +543,98 @@ pub(crate) struct Ext4SbInfo {
     /// counters and flags stay in [`AllocatorState`] under the allocator
     /// lock.
     group_geometry: Vec<GroupGeometry>,
-    statfs_mode: Ext4StatFsMode,
-    /// Quota mount policy: one enforcement/request bit per quota class.
-    pub(crate) quota_mount_options: u8,
-    /// Maximum byte size supported by legacy indirect-block inodes.
-    pub(crate) bitmap_maxbytes: u64,
-    // Linux `ext4_sb_info::s_hash_unsigned`: zero for signed algorithms and
-    // three for the corresponding unsigned HTree algorithms.
-    pub(crate) hash_unsigned: u8,
     pub(crate) device: Arc<FilesystemDevice>,
     pub(crate) metadata_io: Ext4MetadataIo,
     pub(crate) journal: Option<Arc<MountedJournal>>,
-    pub(crate) orphan_info: Option<OrphanInfo>,
     pub(crate) layout: FilesystemLayout,
-    // Read-only system zones scanned from the on-disk bitmap at mount time.
-    // Zones are never removed and the release path rejects every system-zone
-    // block unconditionally, matching Linux where a system zone is never
-    // freed. The owner exception is limited to block-reference validation:
-    // `is_inode_physical_block_valid` lets the journal inode map blocks inside
-    // its own protected zone, but such blocks can never be released.
-    system_zones: Vec<SystemZone>,
+}
+
+impl core::ops::Deref for Ext4MountState {
+    type Target = Ext4Storage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.storage
+    }
+}
+
+/// Access to one mount. A mounted mutation can yield its state lock only while
+/// no reference into the state is live. The logical operation still owns its
+/// admission across compound metadata updates.
+pub(crate) enum Ext4SbInfo<'a> {
+    Owned(kalloc_types::KBox<Ext4MountState>),
+    Mounted {
+        state: crate::sync::RwLockWriteGuard<'a, Ext4SbInfo<'static>>,
+        writeback_admission: Option<WritebackAdmission<'a>>,
+    },
+}
+
+impl core::ops::Deref for Ext4SbInfo<'_> {
+    type Target = Ext4MountState;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(state) => state,
+            Self::Mounted { state, .. } => state,
+        }
+    }
+}
+
+impl core::ops::DerefMut for Ext4SbInfo<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Owned(state) => state,
+            Self::Mounted { state, .. } => state,
+        }
+    }
+}
+
+/// A writeback operation is stabilized by its inode submission/drain protocol.
+pub(crate) struct WritebackAdmission<'a> {
+    pub(crate) lock: &'a crate::sync::RwLock<()>,
+    pub(crate) guard: Option<crate::sync::RwLockWriteGuard<'a, ()>>,
+}
+
+impl Ext4SbInfo<'_> {
+    /// Drop mount access for persistence. Writeback can additionally yield mutation
+    /// admission once the old metadata images and journal space are fixed.
+    pub(crate) fn with_journal_io<R>(
+        &mut self,
+        io: impl FnOnce(&Ext4Storage, &mut dyn FnMut()) -> R,
+    ) -> R {
+        match self {
+            Self::Owned(state) => io(&state.storage, &mut || {}),
+            Self::Mounted {
+                state,
+                writeback_admission,
+            } => {
+                let storage = state.storage.clone();
+                crate::sync::RwLockWriteGuard::unlocked(state, || {
+                    let result = io(&storage, &mut || {
+                        if let Some(admission) = writeback_admission {
+                            drop(admission.guard.take());
+                        }
+                    });
+                    if let Some(admission) = writeback_admission
+                        && admission.guard.is_none()
+                    {
+                        admission.guard = Some(admission.lock.write());
+                    }
+                    result
+                })
+            }
+        }
+    }
+}
+
+impl Ext4SbInfo<'_> {
+    pub(crate) fn from_state(state: Ext4MountState) -> Ext4Result<Self> {
+        Ok(Self::Owned(kalloc_types::KBox::new(state)?))
+    }
+
+    /// Geometry and storage identities can only be replaced before publication.
+    pub(crate) fn unpublished_storage(&mut self) -> Ext4Result<&mut Ext4Storage> {
+        Arc::get_mut(&mut self.storage).ok_or(Ext4Error::InvalidJournalTransaction)
+    }
 }
 
 pub(crate) struct JournalMarkedEmpty {
@@ -556,7 +651,7 @@ impl Ext4RecoveryCleared {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Builds test mount state and commits writable mount-finalization metadata.
     ///
     /// # Errors
@@ -750,42 +845,46 @@ impl Ext4SbInfo {
             total.saturating_add(state.used_directories_count())
         });
         let block_free_extent_caches = vec![None; group_states.len()];
-        let mut filesystem = Self {
-            allocator: Mutex::new(AllocatorState {
-                free_blocks_count: superblock.on_disk_free_blocks_count(),
-                free_inodes_count: superblock.on_disk_free_inodes_count(),
-                used_directories_count,
-                last_orphan: superblock.last_orphan(),
-                needs_recovery: superblock.features().needs_recovery(),
-                has_orphan_present: superblock.features().has_orphan_present(),
-                groups: group_states,
-                block_free_extent_caches,
-                preallocs_by_group: BTreeMap::new(),
-                preallocated_blocks: 0,
-                pending_frees: Default::default(),
+        let state = Ext4MountState {
+            storage: Arc::new(Ext4Storage {
+                allocator: Mutex::new(AllocatorState {
+                    free_blocks_count: superblock.on_disk_free_blocks_count(),
+                    free_inodes_count: superblock.on_disk_free_inodes_count(),
+                    used_directories_count,
+                    last_orphan: superblock.last_orphan(),
+                    needs_recovery: superblock.features().needs_recovery(),
+                    has_orphan_present: superblock.features().has_orphan_present(),
+                    groups: group_states,
+                    block_free_extent_caches,
+                    preallocs_by_group: BTreeMap::new(),
+                    preallocated_blocks: 0,
+                    pending_frees: Default::default(),
+                    direct_write_pins: Default::default(),
+                }),
+                group_geometry,
+                device: filesystem_device,
+                metadata_io,
+                journal: None,
+                layout,
             }),
             delalloc_reserved_blocks: Mutex::new(0),
             superblock,
-            group_geometry,
             statfs_mode: Ext4StatFsMode::Bsd,
             quota_mount_options: 0,
             bitmap_maxbytes: 0,
             hash_unsigned: 0,
-            device: filesystem_device,
-            metadata_io,
             vfs_superblock: Weak::new(),
-            journal: None,
             orphan_info: None,
-            layout,
             system_zones: Vec::new(),
         };
+        let mut filesystem = Self::from_state(state)?;
         filesystem.initialize_directory_hash_policy()?;
         filesystem.system_zones = filesystem.build_system_zones()?;
         let journal_location = filesystem.journal_location()?;
         if filesystem.needs_recovery() && !allow_recovery {
             return Err(Ext4Error::NeedsRecovery);
         }
-        filesystem.journal = match journal_location {
+        filesystem.unpublished_storage()?.journal = match journal_location {
             JournalLocation::None => None,
             JournalLocation::Internal { inode } => Some(MountedJournal::new(
                 filesystem.load_internal_journal(inode)?,
@@ -814,7 +913,7 @@ impl Ext4SbInfo {
     }
 
     /// Returns the ext4-private legacy indirect-block file-size limit.
-    pub(crate) const fn bitmap_max_file_size(&self) -> u64 {
+    pub(crate) fn bitmap_max_file_size(&self) -> u64 {
         self.bitmap_maxbytes
     }
 
@@ -882,7 +981,7 @@ impl Ext4SbInfo {
     /// with the allocator; use [`Self::free_blocks_count`],
     /// [`Self::free_inodes_count`], [`Self::needs_recovery`], and
     /// [`Self::has_orphan_present`] instead of their on-disk snapshots here.
-    pub(crate) const fn superblock(&self) -> &Ext4DiskSuperblock {
+    pub(crate) fn superblock(&self) -> &Ext4DiskSuperblock {
         &self.superblock
     }
 
@@ -895,7 +994,9 @@ impl Ext4SbInfo {
     pub(crate) fn free_inodes_count(&self) -> u32 {
         lock(&self.allocator).free_inodes_count
     }
+}
 
+impl Ext4Storage {
     /// Returns whether the filesystem currently carries the recovery flag.
     pub(crate) fn needs_recovery(&self) -> bool {
         lock(&self.allocator).needs_recovery
@@ -910,9 +1011,11 @@ impl Ext4SbInfo {
     pub(crate) const fn layout(&self) -> FilesystemLayout {
         self.layout
     }
+}
 
+impl Ext4SbInfo<'_> {
     /// Returns the timestamp limits implied by this filesystem's inode size.
-    pub(crate) const fn timestamp_limits(&self) -> TimestampLimits {
+    pub(crate) fn timestamp_limits(&self) -> TimestampLimits {
         timestamp_limits_for_inode_size(self.superblock.inode_size())
     }
 
@@ -960,7 +1063,8 @@ impl Ext4SbInfo {
             .saturating_sub(self.superblock.reserved_blocks_count())
     }
 
-    /// Returns the physical block for one internal journal block.
+    /// Returns the physical block for inspecting journal images in tests.
+    #[cfg(unittest)]
     pub(crate) fn map_journal_block(&self, block: JournalBlock) -> Ext4Result<FilesystemBlock> {
         JournalBlockMapper::map_journal_block(self, block)
     }
@@ -1055,7 +1159,9 @@ impl Ext4SbInfo {
         self.device
             .write_contiguous_blocks(start, block_count, input)
     }
+}
 
+impl Ext4Storage {
     pub(crate) fn flush_device(&self) -> Ext4Result<()> {
         self.device.flush()
     }
@@ -1063,7 +1169,9 @@ impl Ext4SbInfo {
     pub(crate) fn read_metadata_block(&self, block: FilesystemBlock) -> Ext4Result<MetadataBuffer> {
         self.metadata_io.read_block(block)
     }
+}
 
+impl Ext4SbInfo<'_> {
     /// Warms the metadata cache for `blocks` before the caller takes the
     /// allocator lock, so a cold-cache device read runs while other
     /// allocators can still proceed instead of serializing every one of
@@ -1085,9 +1193,11 @@ impl Ext4SbInfo {
             .map(|block| self.read_metadata_block(*block))
             .collect()
     }
+}
 
+impl Ext4Storage {
     /// Reloads allocator state while preserving the mount's static policy.
-    pub(crate) fn reload_mutable_metadata_state(&mut self) -> Ext4Result<()> {
+    pub(crate) fn reload_mutable_metadata_state(&self) -> Ext4Result<()> {
         let superblock = self.read_primary_superblock()?;
         self.reload_mutable_metadata_state_from(&superblock)
     }
@@ -1106,7 +1216,7 @@ impl Ext4SbInfo {
     }
 
     fn reload_mutable_metadata_state_from(
-        &mut self,
+        &self,
         superblock: &Ext4DiskSuperblock,
     ) -> Ext4Result<()> {
         let layout = FilesystemLayout::derive(superblock)?;
@@ -1213,7 +1323,9 @@ impl Ext4SbInfo {
         }
         Ok(groups)
     }
+}
 
+impl Ext4SbInfo<'_> {
     pub(crate) fn is_inode_physical_block_valid(
         &self,
         inode: InodeNumber,
@@ -1773,7 +1885,9 @@ impl Ext4SbInfo {
             usize::from(self.layout.descriptor_size),
         ))
     }
+}
 
+impl Ext4Storage {
     pub(crate) fn primary_superblock_location(
         &self,
     ) -> Ext4Result<(FilesystemBlock, usize, usize)> {
@@ -1788,7 +1902,9 @@ impl Ext4SbInfo {
             superblock::SUPERBLOCK_SIZE,
         ))
     }
+}
 
+impl Ext4SbInfo<'_> {
     pub(crate) fn is_system_zone_block(&self, block: FilesystemBlock) -> bool {
         let block = block.get();
         let zones = &self.system_zones;
@@ -1849,7 +1965,7 @@ fn add_system_zone_to(
     Ok(())
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     fn statfs_overhead_blocks(&self) -> Ext4Result<u64> {
         let zones = self.system_zones.iter().try_fold(0u64, |blocks, zone| {
             blocks

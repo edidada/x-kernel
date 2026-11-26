@@ -620,8 +620,9 @@ pub fn copy_file_range_as(
     let count = verify_copy_file_range(input, output, input_start, output_start, len as u64)?;
     // A native copy writes the target through the backend, bypassing
     // `VfsFile::write_iter_from`. Probe once (zero-length admission) so each
-    // native chunk can revoke under the mount and privilege locks directly
-    // around the backend copy, as Linux `vfs_copy_file_range()` does with
+    // native chunk can revoke under the superblock write admission and the
+    // inode lock directly around the backend copy, as Linux
+    // `vfs_copy_file_range()` does with
     // `file_remove_privs(file_out)`. The fallback pair step takes the same
     // locks through the normal write path.
     let native_copy = count > 0
@@ -634,7 +635,7 @@ pub fn copy_file_range_as(
         let native = if native_copy {
             let _mount_guard = output.path().lock_writable_mount()?;
             let inode = output.inode();
-            let _privilege_guard = inode.lock_privileges();
+            let _inode_guard = inode.lock_inode_exclusive();
             output.path().file_remove_privs_locked(cred)?;
             output.copy_chunk_from(input, input_pos, output_pos, chunk)
         } else {

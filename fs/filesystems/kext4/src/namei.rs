@@ -206,7 +206,7 @@ impl Ext4Credits {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Creates a regular file in a linear ext4 directory.
     ///
     /// This is the first R7 namei write path. It keeps ext4-specific work in
@@ -3151,7 +3151,7 @@ fn insert_htree_index_entry(
     disk_dir::HTreeCountLimit::decode(bytes, count_offset)
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     fn collect_leaf_records_for_split(
         &self,
         bytes: &[u8],

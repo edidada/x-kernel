@@ -11,15 +11,16 @@ use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::LinuxError;
 use ktime_types::SystemTime;
 use kvfs::{
-    AddressSpace, AddressSpaceOperations, BatchWriteRunTail, BatchedWriteOperations, Dentry,
-    DeviceId, DirContext, FMode, FallocateFlags, FiemapExtentFlags, FiemapExtentInfo, FiemapFlags,
-    FileDirOperations, FileMappingOperations, FileOperations, InodeAttributeOperations,
-    InodeDirOperations, InodeFiemapOperations, InodeOperations, InodeSymlinkOperations, InodeTimes,
-    InodeUpdateTime, Kiocb, LockedDentry, Metadata, MetadataUpdate, NodePermission, NodeType,
-    ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations,
-    Umode, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest,
-    WriteEndRequest, WriteReservation, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
-    XattrSetFlags, default_evict_inode, inode_init_owner,
+    AddressSpace, AddressSpaceOperations, BatchWriteRunTail, BatchedWriteOperations,
+    BufferedOverwriteOperations, Dentry, DeviceId, DirContext, FMode, FallocateFlags,
+    FiemapExtentFlags, FiemapExtentInfo, FiemapFlags, FileDirOperations, FileMappingOperations,
+    FileOperations, InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations,
+    InodeOperations, InodeSymlinkOperations, InodeTimes, InodeUpdateTime, Kiocb, LockedDentry,
+    Metadata, MetadataUpdate, NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs,
+    SuperBlock, SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsFileBuilder,
+    VfsInode, VfsInodeInit, VfsResult, WriteBeginRequest, WriteEndRequest, WriteReservation,
+    WritebackControl, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags, default_evict_inode,
+    inode_init_owner,
 };
 use pagecache::FolioRead;
 
@@ -398,10 +399,7 @@ impl Ext4SuperOperations {
                 if is_read_only {
                     Self::deactivate_internal_quotas(super_block)?;
                     if needs_quota_recovery {
-                        ext4_private(super_block)?
-                            .write(super_block)
-                            .sync_filesystem()
-                            .map_err(into_vfs_err)?;
+                        ext4_private(super_block)?.sync_filesystem(super_block, false)?;
                     }
                 }
                 let root_inode = Self::iget(super_block, InodeNumber::new(EXT4_ROOT_INO))
@@ -624,10 +622,7 @@ impl SuperBlockOperations for Ext4SuperOperations {
 
     fn put_super(&self, super_block: &SuperBlock) -> VfsResult<()> {
         let quota_result = Self::deactivate_internal_quotas(super_block);
-        let filesystem_result = ext4_private(super_block)?
-            .write(super_block)
-            .sync_filesystem()
-            .map_err(into_vfs_err);
+        let filesystem_result = ext4_private(super_block)?.sync_filesystem(super_block, false);
         quota_result.and(filesystem_result)
     }
 
@@ -664,10 +659,7 @@ impl SuperBlockOperations for Ext4SuperOperations {
     }
 
     fn sync_fs(&self, super_block: &SuperBlock) -> VfsResult<()> {
-        let mut state = ext4_private(super_block)?.write(super_block);
-        let quota_result = state.sync_quotas(super_block);
-        let filesystem_result = state.sync_filesystem().map_err(into_vfs_err);
-        quota_result.and(filesystem_result)
+        ext4_private(super_block)?.sync_filesystem(super_block, true)
     }
 
     fn write_inode(&self, inode: &VfsInode, _control: &mut WritebackControl) -> VfsResult<()> {
@@ -1896,7 +1888,30 @@ impl Ext4Inode {
     }
 }
 
+impl BufferedOverwriteOperations for Ext4Inode {
+    fn can_overwrite(&self, file: &VfsFile, range: Range<u64>) -> VfsResult<bool> {
+        let sb = ext4_super_block(file.inode())?;
+        if sb.block_size() != PAGE_SIZE_4K as u64
+            || range.end > sb.max_file_size()
+            || !self.has_extents()
+        {
+            return Ok(false);
+        }
+        ext4_private(&sb)?.ensure_writable().map_err(into_vfs_err)?;
+        let timestamp = system_time_to_ext4(file.inode().current_time());
+        Ok(self.can_overwrite_cached_block(
+            LogicalBlock::new(range.start / sb.block_size()),
+            PAGE_SIZE_4K as u32,
+            timestamp,
+        ))
+    }
+}
+
 impl FileOperations for Ext4Inode {
+    fn buffered_overwrite_operations(&self) -> Option<&dyn BufferedOverwriteOperations> {
+        (self.kind() == InodeKind::RegularFile).then_some(self)
+    }
+
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
         if file.mode().contains(FMode::WRITE) {
             let super_block = inode.super_block()?;
@@ -1982,13 +1997,12 @@ impl FileOperations for Ext4Inode {
         file.mapping().write_and_wait_range(range)?;
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;
-        let mut state = ext4.write(&super_block);
-        if !data_only {
-            state.write_inode_timestamps(self).map_err(into_vfs_err)?;
-        }
-        state
-            .sync_inode(self, Ext4SyncIntent::from_data_only(data_only))
-            .map_err(into_vfs_err)
+        ext4.sync_inode(
+            &super_block,
+            self,
+            Ext4SyncIntent::from_data_only(data_only),
+        )
+        .map_err(into_vfs_err)
     }
 
     fn release(&self, inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {

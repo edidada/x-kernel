@@ -20,7 +20,7 @@ use crate::{
     superblock::{metadata_access_bytes, replace_metadata_access_bytes},
 };
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Bounds independent directory appends without predicting physical placement.
     pub(crate) fn directory_append_metadata_credits(
         &self,
@@ -124,7 +124,7 @@ impl Ext4SbInfo {
         plan: ExtentTailRelease,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<u32> {
-        self.begin_extent_mutation(inode)?;
+        self.begin_extent_mutation(inode, handle)?;
         if plan.remaining.is_empty() {
             plan.path.prune_empty_leaf(self, inode, handle)?;
         } else {
@@ -354,7 +354,7 @@ impl Ext4SbInfo {
         state: ExtentMappingState,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        self.begin_extent_mutation(inode)?;
+        self.begin_extent_mutation(inode, handle)?;
         let logical = logical_block_u32(logical)?;
         let new_extents =
             MutableExtent::from_run(logical, physical, len, state, |block, count| {
@@ -373,7 +373,7 @@ impl Ext4SbInfo {
         state: ExtentMappingState,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        self.begin_extent_mutation(inode)?;
+        self.begin_extent_mutation(inode, handle)?;
 
         let logical = logical_block_u32(logical)?;
         self.update_dirty_inode_metadata(inode, handle, |filesystem, inode_bytes| {
@@ -396,7 +396,7 @@ impl Ext4SbInfo {
         len: BlockCount,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        self.begin_extent_mutation(inode)?;
+        self.begin_extent_mutation(inode, handle)?;
         let range = LogicalExtentRange::new(logical, len)?;
         self.set_extent_range_state_path_local(
             inode,
@@ -414,7 +414,7 @@ impl Ext4SbInfo {
         len: BlockCount,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        self.begin_extent_mutation(inode)?;
+        self.begin_extent_mutation(inode, handle)?;
         let range = LogicalExtentRange::new(logical, len)?;
         if self.try_remove_extent_range_path_local(inode, range, false, handle)? {
             return Ok(());
@@ -446,7 +446,7 @@ impl Ext4SbInfo {
         retain_unwritten: bool,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        self.begin_extent_mutation(inode)?;
+        self.begin_extent_mutation(inode, handle)?;
         let Some(range) = LogicalExtentRange::from_logical_to_tree_end(new_blocks)? else {
             return Ok(());
         };
@@ -995,9 +995,14 @@ impl Ext4SbInfo {
 
     /// Invalidates cached proofs before a mutation can change external leaves.
     /// Keep read-only capability and credit queries free of this side effect.
-    fn begin_extent_mutation(&self, inode: &Ext4Inode) -> Ext4Result<()> {
-        inode.invalidate_extent_status();
-        self.ensure_extent_mutation_supported(inode)
+    fn begin_extent_mutation(
+        &self,
+        inode: &Ext4Inode,
+        handle: &crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<()> {
+        self.ensure_extent_mutation_supported(inode)?;
+        inode.invalidate_extent_status(Some(handle.transaction()?));
+        Ok(())
     }
 
     fn ensure_extent_mutation_supported(&self, inode: &Ext4Inode) -> Ext4Result<()> {

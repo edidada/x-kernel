@@ -482,7 +482,7 @@ fn persisted_commit_marks_journal_active_and_recoverable() {
         committed_blocks(&[(FilesystemBlock::new(800), vec![0x88; BLOCK_SIZE])]);
 
     let (persisted, active_superblock) =
-        persist_journal_commit(&superblock, &journal, None, &commit, &blocks).unwrap();
+        persist_journal_commit(&superblock, &journal, None, &commit, &blocks, || Ok(())).unwrap();
 
     assert_eq!(persisted.log().start(), JournalBlock::new(1));
     assert_eq!(persisted.log().head(), JournalBlock::new(4));
@@ -519,7 +519,7 @@ fn power_loss_after_first_activation_does_not_look_like_a_clean_journal() {
     // descriptor block and models power loss in the reviewed window.
     journal.fail_write_at(1);
     assert!(matches!(
-        persist_journal_commit(&superblock, &journal, None, commit.as_ref(), &blocks),
+        persist_journal_commit(&superblock, &journal, None, commit.as_ref(), &blocks, || Ok(())),
         Err(Ext4Error::Device(DriverError::Io))
     ));
 
@@ -550,7 +550,7 @@ fn checkpoint_finish_marks_journal_empty_after_persisted_commit() {
         committed_blocks(&[(FilesystemBlock::new(900), vec![0x99; BLOCK_SIZE])]);
 
     let (persisted, active_superblock) =
-        persist_journal_commit(&superblock, &journal, None, &commit, &blocks).unwrap();
+        persist_journal_commit(&superblock, &journal, None, &commit, &blocks, || Ok(())).unwrap();
     let clean =
         finish_journal_checkpoint_batch(&active_superblock, &journal, &[persisted], None)
             .unwrap();
@@ -571,7 +571,7 @@ fn persist_commit_rejects_active_journal_without_latest_commit() {
         committed_blocks(&[(FilesystemBlock::new(1000), vec![0xaa; BLOCK_SIZE])]);
 
     assert_eq!(
-        persist_journal_commit(&superblock, &journal, None, &commit, &blocks).map(|_| ()),
+        persist_journal_commit(&superblock, &journal, None, &commit, &blocks, || Ok(())).map(|_| ()),
         Err(Ext4Error::InvalidJournalTransaction)
     );
 }
@@ -616,7 +616,7 @@ fn capped_checkpoint_targets_fit_an_empty_small_ring() {
                 Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge))
             );
             assert_eq!(
-                persist_journal_commit(&superblock, &journal, None, &append, &blocks)
+                persist_journal_commit(&superblock, &journal, None, &append, &blocks, || Ok(()))
                     .map(|_| ()),
                 Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge))
             );
@@ -636,7 +636,7 @@ fn capped_checkpoint_targets_fit_an_empty_small_ring() {
                 Err(Ext4Error::JournalBusy)
             );
         }
-        persist_journal_commit(&superblock, &journal, None, &append, &blocks).unwrap();
+        persist_journal_commit(&superblock, &journal, None, &append, &blocks, || Ok(())).unwrap();
     }
 }
 
@@ -780,9 +780,15 @@ fn checkpoint_targets_preserve_the_spare_block_across_ring_wrap() {
                 SEQUENCE + offset,
                 &[(FilesystemBlock::new(1100), vec![offset as u8; BLOCK_SIZE])],
             );
-            let (persisted, active) =
-                persist_journal_commit(&superblock, &journal, pending.last(), &commit, &blocks)
-                    .unwrap();
+            let (persisted, active) = persist_journal_commit(
+                &superblock,
+                &journal,
+                pending.last(),
+                &commit,
+                &blocks,
+                || Ok(()),
+            )
+            .unwrap();
             pending.push(persisted);
             superblock = active;
         }
@@ -829,15 +835,22 @@ fn appends_commits_and_advances_checkpoint_tail_in_order() {
         &[(FilesystemBlock::new(1200), vec![0xbc; BLOCK_SIZE])],
     );
 
-    let (first, first_superblock) =
-        persist_journal_commit(&superblock, &journal, None, &first_commit, &first_blocks)
-            .unwrap();
+    let (first, first_superblock) = persist_journal_commit(
+        &superblock,
+        &journal,
+        None,
+        &first_commit,
+        &first_blocks,
+        || Ok(()),
+    )
+    .unwrap();
     let (second, second_superblock) = persist_journal_commit(
         &first_superblock,
         &journal,
         Some(&first),
         &second_commit,
         &second_blocks,
+        || Ok(()),
     )
     .unwrap();
 

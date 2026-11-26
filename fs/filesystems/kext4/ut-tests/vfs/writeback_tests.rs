@@ -16,6 +16,7 @@ use crate::{
     superblock::test_fixtures::{
         TEST_FREE_BLOCKS, TestDevice, allocate_checkpointed_regular_inode,
         install_credit_limited_journal, journal_allocator_test_filesystem,
+        journal_allocator_test_filesystem_with_block_size,
         recovery_test_filesystem_with_free_blocks,
     },
     sync::Mutex,
@@ -25,12 +26,16 @@ struct OverwriteDevice {
     storage: Arc<TestDevice>,
     mount: Mutex<Weak<SuperBlock>>,
     writes: Mutex<usize>,
+    flush_peer: Mutex<Option<Arc<VfsFile>>>,
+    stage_peer_during_append: Mutex<Option<Arc<Ext4Inode>>>,
+    write_peer_during_append: Mutex<Option<Arc<VfsFile>>>,
     fail_writes: Mutex<bool>,
     fail_data_reads: Mutex<bool>,
     fail_data_write_at: Mutex<Option<usize>>,
     delayed: Mutex<Vec<block::Bio>>,
     delay_writes: Mutex<bool>,
     hold_writes: Mutex<bool>,
+    fs_block_size: usize,
     data_blocks: Vec<u64>,
     timestamp_update: Mutex<Option<(Weak<Ext4Inode>, Ext4Timestamp)>>,
 }
@@ -57,7 +62,35 @@ impl BlockDeviceOperations for OverwriteDevice {
 
 impl block::BioOperations for OverwriteDevice {
     fn submit_bio(&self, bio: block::Bio) {
-        let block = bio.sector() / (self.block_size() as u64 / 512);
+        if bio.operation() == block::BioOperation::Flush {
+            let peer = self.flush_peer.lock().take();
+            if let Some(peer) = peer {
+                peer.mapping().writepages().unwrap();
+                peer.mapping()
+                    .with_folio(0, |folio| {
+                        let folio = folio.unwrap();
+                        assert!(!folio.is_dirty() && !folio.is_under_writeback());
+                    })
+                    .unwrap();
+            }
+        }
+        let block = bio.sector() / (self.fs_block_size as u64 / 512);
+        if bio.operation() == block::BioOperation::Write && (17..1040).contains(&block) {
+            let data_peer = self.write_peer_during_append.lock().take();
+            if let Some(peer) = data_peer {
+                peer.mapping().writepages().unwrap();
+                assert_eq!(peer.inode().private::<Ext4Inode>().unwrap().disk_size(), PAGE_SIZE_4K as u64);
+            }
+            let peer = self.stage_peer_during_append.lock().take();
+            if let Some(peer) = peer {
+                let sb = self.mount.lock().upgrade().unwrap();
+                ext4_private(&sb)
+                    .unwrap()
+                    .write(&sb)
+                    .write_inode_timestamps(&peer)
+                    .unwrap();
+            }
+        }
         if bio.operation() == block::BioOperation::Read
             && self.data_blocks.contains(&block)
             && *self.fail_data_reads.lock()
@@ -124,11 +157,18 @@ fn overwrite_fixture_with_pages(
 }
 
 fn overwrite_fixture_with_len(len: usize) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc<OverwriteDevice>) {
-    let pages = len.div_ceil(PAGE_SIZE_4K);
-    let (mut filesystem, storage) = if pages == 0 {
+    overwrite_fixture_with_block_size(len, PAGE_SIZE_4K)
+}
+
+fn overwrite_fixture_with_block_size(
+    len: usize,
+    block_size: usize,
+) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc<OverwriteDevice>) {
+    let blocks = len.div_ceil(block_size);
+    let (mut filesystem, storage) = if blocks == 0 {
         recovery_test_filesystem_with_free_blocks(TEST_FREE_BLOCKS + 64)
     } else {
-        journal_allocator_test_filesystem(TEST_FREE_BLOCKS + 64, 0b0011_1111)
+        journal_allocator_test_filesystem_with_block_size(block_size, TEST_FREE_BLOCKS + 64, 0b0011_1111)
     };
     let private = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_credit_limited_journal(&mut filesystem, 8082, 341, true);
@@ -144,7 +184,7 @@ fn overwrite_fixture_with_len(len: usize) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc
         )
         .unwrap();
     filesystem.sync_filesystem().unwrap();
-    let mut data_blocks: Vec<u64> = (0..pages)
+    let mut data_blocks: Vec<u64> = (0..blocks)
         .map(|logical| {
             match filesystem
                 .map_blocks(&private, LogicalBlock::new(logical as u64))
@@ -155,7 +195,7 @@ fn overwrite_fixture_with_len(len: usize) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc
             }
         })
         .collect();
-    if pages == 0 {
+    if blocks == 0 {
         // This fixture reserves blocks 0..7 for fixed metadata and 16..1040
         // for its journal. Capture future data allocations, not journal writes.
         data_blocks = (7..storage.num_blocks())
@@ -166,20 +206,24 @@ fn overwrite_fixture_with_len(len: usize) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc
         storage,
         mount: Mutex::new(Weak::new()),
         writes: Mutex::new(0),
+        flush_peer: Mutex::new(None),
+        stage_peer_during_append: Mutex::new(None),
+        write_peer_during_append: Mutex::new(None),
         fail_writes: Mutex::new(false),
         fail_data_reads: Mutex::new(false),
         fail_data_write_at: Mutex::new(None),
         delayed: Mutex::new(Vec::new()),
         delay_writes: Mutex::new(false),
         hold_writes: Mutex::new(false),
+        fs_block_size: block_size,
         data_blocks,
         timestamp_update: Mutex::new(None),
     });
-    filesystem.device = Arc::new(
+    filesystem.unpublished_storage().unwrap().device = Arc::new(
         FilesystemDevice::open(
             crate::io::test_block_device(device.clone()),
-            PAGE_SIZE_4K,
-            device.num_blocks(),
+            block_size,
+            filesystem.layout().block_count(),
         )
         .unwrap(),
     );
@@ -320,6 +364,97 @@ fn mapped_writepages_releases_mount_protection_and_preserves_sync_barriers() {
 }
 
 #[def_test]
+fn unrelated_mapped_write_completes_inside_journal_flush() {
+    let (sb, file, device) = overwrite_fixture_with_pages(1);
+    let peer = {
+        let mount = ext4_private(&sb).unwrap();
+        let mut state = mount.write(&sb);
+        let private = Arc::new(allocate_checkpointed_regular_inode(&mut state));
+        private.set_size(PAGE_SIZE_4K as u64);
+        state
+            .writeback_ordered_at(
+                &private,
+                0,
+                &vec![0x11; PAGE_SIZE_4K],
+                PAGE_SIZE_4K as u64,
+                Ext4SyncIntent::DataOnly,
+                || false,
+            )
+            .unwrap();
+        state.sync_filesystem().unwrap();
+        let private = Arc::into_inner(private).unwrap();
+        drop(state);
+        let inode = Ext4SuperOperations::iget_from_private(&sb, private).unwrap();
+        let dentry = kvfs::Dentry::new_file_from_inode(inode, None, String::from("peer"));
+        let path = kvfs::Path::new(kvfs::Mount::new_root(&sb), dentry);
+        kvfs::dentry_open(path, OpenFlags::READ_WRITE.bits(), kcred::initial_cred()).unwrap()
+    };
+    for full_sync in [false, true] {
+        peer.write_from(&vec![0x22; PAGE_SIZE_4K], &mut 0).unwrap();
+        file.write_from(&vec![0x33; PAGE_SIZE_4K], &mut 0).unwrap();
+        *device.flush_peer.lock() = Some(peer.clone());
+        file.fsync(!full_sync).unwrap();
+        assert!(device.flush_peer.lock().is_none());
+    }
+    let peer_inode = peer.inode().downcast::<Ext4Inode>().unwrap();
+    peer.write_from(&vec![0x42; PAGE_SIZE_4K], &mut 0).unwrap();
+    peer.mapping().writepages().unwrap();
+    file.write_from(&vec![0x43; PAGE_SIZE_4K], &mut 0).unwrap();
+    file.inode().private::<Ext4Inode>().unwrap().set_mtime(Ext4Timestamp::new(12, 0));
+    peer_inode.set_mtime(Ext4Timestamp::new(13, 0));
+    *device.stage_peer_during_append.lock() = Some(peer_inode.clone());
+    file.fsync(false).unwrap();
+    assert!(device.stage_peer_during_append.lock().is_none());
+    assert!(!peer_inode.sync_transaction().unwrap().is_committed());
+    peer.write_from(&vec![0x44; PAGE_SIZE_4K], &mut 0).unwrap();
+    *device.flush_peer.lock() = Some(peer.clone());
+    ext4_private(&sb)
+        .unwrap()
+        .sync_filesystem(&sb, true)
+        .unwrap();
+    assert!(device.flush_peer.lock().is_none());
+}
+
+#[def_test]
+fn barrier_only_acknowledges_data_completed_before_it_started() {
+    let (_mount, file, device) = overwrite_fixture_with_pages(1);
+    file.write_from(&vec![0x24; PAGE_SIZE_4K], &mut 0).unwrap();
+    file.mapping().writepages().unwrap();
+    file.write_from(&vec![0x25; PAGE_SIZE_4K], &mut 0).unwrap();
+    // An empty range leaves the second write dirty until the flush callback
+    // submits it. The first barrier has already captured the older generation.
+    *device.flush_peer.lock() = Some(file.clone());
+    file.fsync_range(0..0, true).unwrap();
+    assert!(device.flush_peer.lock().is_none());
+    let flushes = device.storage.flush_count();
+    file.fsync(true).unwrap();
+    assert_eq!(device.storage.flush_count(), flushes + 1);
+}
+
+#[def_test]
+fn datasync_leaves_timestamp_only_transaction_for_full_sync() {
+    let (sb, file, device) = overwrite_fixture_with_pages(1);
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    file.write_from(&vec![0x35; PAGE_SIZE_4K], &mut 0).unwrap();
+    file.mapping().writepages().unwrap();
+    ext4_private(&sb)
+        .unwrap()
+        .write(&sb)
+        .write_inode_timestamps(&inode)
+        .unwrap();
+    let target = inode.sync_transaction().unwrap();
+    assert!(!target.is_committed());
+    let flushes = device.storage.flush_count();
+    file.fsync(true).unwrap();
+    assert!(!target.is_committed());
+    assert_eq!(device.storage.flush_count(), flushes + 1);
+    file.fsync(true).unwrap();
+    assert_eq!(device.storage.flush_count(), flushes + 1);
+    file.fsync(false).unwrap();
+    assert!(target.is_committed());
+}
+
+#[def_test]
 fn clean_inode_overwrite_retains_data_barrier_after_an_earlier_commit() {
     for fail_barrier in [false, true] {
         let (mount, file, device) = overwrite_fixture_with_pages(1);
@@ -408,7 +543,7 @@ fn range_fsync_writes_intersecting_folios_and_keeps_siblings_dirty() {
         let flushes = device.storage.flush_count();
         assert_eq!(file.fsync_range(start..start, data_only), Ok(()));
         assert_eq!(*device.writes.lock(), 1);
-        assert!(device.storage.flush_count() > flushes);
+        assert_eq!(device.storage.flush_count(), flushes);
     }
 }
 
@@ -1037,6 +1172,32 @@ fn writeback_reports_pending_io_failure_while_waiting_for_submission() {
 }
 
 #[def_test]
+fn larger_block_partial_writeback_preserves_both_cache_pages() {
+    let block_size = 2 * PAGE_SIZE_4K;
+    let (mount, file, device) = overwrite_fixture_with_block_size(block_size, block_size);
+    *device.hold_writes.lock() = true;
+    for (page, byte) in [(0, 0x32), (1, 0x45)] {
+        let offset = (page * PAGE_SIZE_4K) as u64;
+        let mut position = offset;
+        file.write_from(&vec![byte; PAGE_SIZE_4K], &mut position).unwrap();
+        let mut control = kvfs::WritebackControl::range(offset, PAGE_SIZE_4K)
+            .unwrap()
+            .with_sync_mode(kvfs::WritebackSyncMode::None);
+        file.mapping().writepages_control(&mut control).unwrap();
+        assert_eq!(control.pages_skipped(), page);
+        assert_eq!(device.delayed.lock().len(), 1);
+    }
+    *device.hold_writes.lock() = false;
+    device.finish_held(false);
+    file.fsync(true).unwrap();
+    let private = file.inode().downcast::<Ext4Inode>().unwrap();
+    let mut bytes = vec![0; block_size];
+    ext4_private(&mount).unwrap().read().read_at(&private, 0, &mut bytes).unwrap();
+    assert!(bytes[..PAGE_SIZE_4K].iter().all(|&byte| byte == 0x32));
+    assert!(bytes[PAGE_SIZE_4K..].iter().all(|&byte| byte == 0x45));
+}
+
+#[def_test]
 fn repeated_syncfs_reports_new_failures_without_consuming_mapping_history() {
     let (mount, file, device) = overwrite_fixture_with_len(1024);
     let observer = file
@@ -1194,8 +1355,28 @@ fn async_failure_survives_retry_and_is_seen_by_each_open_file_and_syncfs() {
 
 #[def_test]
 fn async_overwrite_finishes_before_truncate_or_last_writer_close() {
-    for (truncate, pages) in [(true, 1), (false, 1), (true, 0), (false, 0)] {
-        let (_mount, file, device) = overwrite_fixture_with_pages(pages);
+    for (truncate, pages, direct) in [
+        (true, 1, false),
+        (false, 1, false),
+        (true, 0, false),
+        (false, 0, false),
+        (true, 0, true),
+        (false, 0, true),
+        (true, 1, true),
+    ] {
+        let (mount, file, device) = overwrite_fixture_with_pages(pages);
+        if direct {
+            let private = file.inode().private::<Ext4Inode>().unwrap();
+            ext4_private(&mount)
+                .unwrap()
+                .write(&mount)
+                .migrate_inode_mapping(
+                    private,
+                    private.flags() & !crate::disk::inode::EXT4_EXTENTS_FL,
+                    Ext4Timestamp::new(1, 0),
+                )
+                .unwrap();
+        }
         file.write_from(&vec![0x32; PAGE_SIZE_4K], &mut 0).unwrap();
         *device.hold_writes.lock() = true;
         let mut control =
@@ -1389,4 +1570,169 @@ fn failed_async_allocation_retries_existing_unwritten_blocks() {
         );
         assert_eq!(file.fsync(true), Ok(()));
     }
+}
+
+#[def_test]
+fn direct_writeback_pins_holes_until_bios_retire_and_retries_failed_suffix() {
+    let (sb, file, device) = overwrite_fixture_with_len(0);
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let mount = ext4_private(&sb).unwrap();
+    let peer = dirty_new_peer(&sb);
+    let free = {
+        let mut state = mount.write(&sb);
+        state
+            .migrate_inode_mapping(
+                &inode,
+                inode.flags() & !crate::disk::inode::EXT4_EXTENTS_FL,
+                Ext4Timestamp::new(1, 0),
+            )
+            .unwrap();
+        state.sync_filesystem().unwrap();
+        state.free_blocks_count()
+    };
+    let input = vec![0x79; PAGE_SIZE_4K * 2 + 17];
+    file.write_from(&input, &mut 0).unwrap();
+    *device.hold_writes.lock() = true;
+    let mut control = kvfs::WritebackControl::all().with_sync_mode(kvfs::WritebackSyncMode::None);
+    file.mapping().writepages_control(&mut control).unwrap();
+    let mut requests = core::mem::take(&mut *device.delayed.lock());
+    assert_eq!(requests.len(), 3);
+    {
+        let state = mount.read();
+        assert_eq!(state.free_blocks_count(), free);
+        assert_eq!(state.allocator.lock().direct_write_pins.len(), 3);
+        assert_eq!(inode.disk_size(), 0);
+        assert!(inode.raw_i_block().iter().all(|&byte| byte == 0));
+    }
+    *device.hold_writes.lock() = false;
+    peer.mapping().writepages().unwrap();
+    let peer_inode = peer.inode().private::<Ext4Inode>().unwrap();
+    {
+        let state = mount.read();
+        let BlockMapping::Mapped { physical, .. } =
+            state.map_blocks(peer_inode, LogicalBlock::new(0)).unwrap()
+        else {
+            panic!("peer did not allocate a block");
+        };
+        assert!(
+            !state
+                .allocator
+                .lock()
+                .direct_write_pins
+                .contains(&crate::FilesystemBlock::new(physical.get()))
+        );
+    }
+    // A successful suffix must stay unreachable after an earlier BIO fails.
+    device.storage.submit_bio(requests.pop().unwrap());
+    requests.pop().unwrap().end_io(Err(DriverError::Io));
+    device.storage.submit_bio(requests.pop().unwrap());
+    inode.writeback_io().drain();
+    inode.writeback_io().flush_completions().unwrap();
+    {
+        let state = mount.read();
+        assert_eq!(inode.disk_size(), PAGE_SIZE_4K as u64);
+        assert_eq!(state.free_blocks_count(), free - 2);
+        assert!(state.allocator.lock().direct_write_pins.is_empty());
+        assert!(matches!(
+            state.map_blocks(&inode, LogicalBlock::new(2)).unwrap(),
+            BlockMapping::Hole { .. }
+        ));
+    }
+    *device.hold_writes.lock() = false;
+    assert_eq!(file.fsync(true), Err(VfsError::Io));
+    file.fsync(true).unwrap();
+    assert_eq!(file.sync_filesystem(), Err(VfsError::Io));
+    file.sync_filesystem().unwrap();
+    let state = mount.read();
+    let loaded = state.load_inode_private(inode.number()).unwrap();
+    assert!(!loaded.has_extents());
+    assert_eq!(loaded.disk_size(), input.len() as u64);
+    assert_eq!(state.free_blocks_count(), free - 4);
+    let mut output = vec![0; input.len()];
+    assert_eq!(state.read_at(&loaded, 0, &mut output), Ok(input.len()));
+    assert_eq!(output, input);
+}
+
+#[def_test]
+fn writeback_credit_pressure_allows_next_inode_metadata_during_log_io() {
+    let (sb, file, device) = overwrite_fixture_with_pages(1);
+    let mount = ext4_private(&sb).unwrap();
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let peer = dirty_new_peer(&sb);
+    inode.set_mtime(Ext4Timestamp::new(11, 0));
+    mount.write(&sb).write_inode_timestamps(&inode).unwrap();
+    let older = inode.sync_transaction().unwrap();
+    assert!(!older.is_committed());
+    *device.write_peer_during_append.lock() = Some(peer.clone());
+    let mut state = mount.writeback(&sb);
+    // The older inode has retained a credit. Asking for the full journal
+    // budget forces admission to seal and persist that specific transaction.
+    let credits = crate::jbd2::JournalCredits::new(341);
+    let journal = state
+        .metadata_journal_without_allocation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
+        .unwrap();
+    assert!(device.write_peer_during_append.lock().is_none());
+    assert!(older.is_committed());
+    // Re-admission also observes the peer's retained credit and commits it.
+    assert!(
+        peer.inode()
+            .private::<Ext4Inode>()
+            .unwrap()
+            .sync_transaction()
+            .unwrap()
+            .is_committed()
+    );
+    journal.begin(credits).unwrap().stop().unwrap();
+}
+
+fn dirty_new_peer(sb: &Arc<SuperBlock>) -> Arc<VfsFile> {
+    let private = allocate_checkpointed_regular_inode(&mut ext4_private(sb).unwrap().write(sb));
+    let inode = Ext4SuperOperations::iget_from_private(sb, private).unwrap();
+    let dentry = kvfs::Dentry::new_file_from_inode(inode, None, String::from("allocating-peer"));
+    let path = kvfs::Path::new(kvfs::Mount::new_root(sb), dentry);
+    let file =
+        kvfs::dentry_open(path, OpenFlags::READ_WRITE.bits(), kcred::initial_cred()).unwrap();
+    file.write_from(&vec![0x56; PAGE_SIZE_4K], &mut 0).unwrap();
+    file
+}
+
+#[def_test]
+fn space_pressure_commit_keeps_freed_block_excluded_during_unrelated_writeback() {
+    let (sb, file, device) = overwrite_fixture_with_pages(1);
+    let mount = ext4_private(&sb).unwrap();
+    let owner = file.inode().downcast::<Ext4Inode>().unwrap();
+    let BlockMapping::Mapped {
+        physical: freed, ..
+    } = mount
+        .read()
+        .map_blocks(&owner, LogicalBlock::new(0))
+        .unwrap()
+    else {
+        panic!("expected allocated fixture");
+    };
+    let peer = dirty_new_peer(&sb);
+    file.truncate(0).unwrap();
+    let mut state = mount.writeback(&sb);
+    assert!(state.has_pending_block_frees().unwrap());
+    let free_including_pending = state.free_blocks_count();
+    *device.write_peer_during_append.lock() = Some(peer.clone());
+    state
+        .metadata_journal_for_allocation(
+            crate::jbd2::JournalCredits::new(1),
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            free_including_pending,
+        )
+        .unwrap();
+    assert!(device.write_peer_during_append.lock().is_none());
+    assert!(!state.has_pending_block_frees().unwrap());
+    let private = peer.inode().private::<Ext4Inode>().unwrap();
+    let BlockMapping::Mapped { physical, .. } =
+        state.map_blocks(private, LogicalBlock::new(0)).unwrap()
+    else {
+        panic!("peer writeback must finish inside the freeing commit");
+    };
+    assert_ne!(physical, freed);
 }

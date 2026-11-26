@@ -34,6 +34,7 @@ struct QueueState {
 pub(crate) struct InodeWritebackIo {
     state: Mutex<QueueState>,
     work: Mutex<Option<CompletionWork>>,
+    metadata: Mutex<()>,
     changed: WaitQueue,
 }
 
@@ -45,8 +46,15 @@ impl InodeWritebackIo {
                 slots: core::array::from_fn(|_| None),
             }),
             work: Mutex::new(None),
+            metadata: Mutex::new(()),
             changed: WaitQueue::new(),
         }
+    }
+
+    /// A preparing batch and an older completion may both publish mapping
+    /// changes. Keep their same-inode credit estimates valid across log waits.
+    pub(crate) fn lock_metadata(&self) -> ksync::MutexGuard<'_, ()> {
+        self.metadata.lock()
     }
 
     /// Prepares all worker resources before publishing device ownership.
@@ -97,12 +105,17 @@ impl InodeWritebackIo {
 
     /// Caller serializes producers with the inode submission mutex. The worker
     /// may release slots concurrently, but never fills one.
-    pub(crate) fn has_capacity(&self) -> bool {
-        self.state.lock().slots.iter().any(Option::is_none)
+    pub(crate) fn has_capacity(&self, shares_block: bool) -> bool {
+        let state = self.state.lock();
+        if shares_block {
+            state.slots.iter().all(Option::is_none)
+        } else {
+            state.slots.iter().any(Option::is_none)
+        }
     }
 
-    pub(crate) fn wait_capacity(&self) {
-        self.changed.wait_until(|| self.has_capacity());
+    pub(crate) fn wait_capacity(&self, shares_block: bool) {
+        self.changed.wait_until(|| self.has_capacity(shares_block));
     }
 
     /// Installs an entirely prepared request before any BIO can complete.

@@ -232,9 +232,7 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
         context.sync_filesystem()?;
         ext4.suspend_internal_quotas(super_block)
             .map_err(vfs::into_vfs_err)?;
-        ext4.write(super_block)
-            .sync_filesystem()
-            .map_err(vfs::into_vfs_err)?;
+        ext4.sync_filesystem(super_block, false)?;
     }
     let mut state = ext4.write(super_block);
     if is_writable {

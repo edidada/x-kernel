@@ -29,7 +29,7 @@ pub(crate) struct InodeMappingRoot {
     pub(crate) generation: u32,
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Returns the superblock-wide maximum size used by extent-format inodes.
     pub(crate) fn extent_max_file_size(&self) -> Ext4Result<u64> {
         extent_max_file_size(

@@ -19,8 +19,8 @@ use crate::{
         finish_journal_checkpoint_batch, mark_superblock_empty, persist_journal_commit,
     },
     superblock::{
-        Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, InternalJournal, JournalMarkedEmpty,
-        lock,
+        Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, Ext4Storage, InternalJournal,
+        JournalMarkedEmpty, lock,
     },
     types::{BlockCount, FilesystemBlock},
 };
@@ -200,13 +200,134 @@ impl MountedJournal {
         self.transactions.is_aborted()
     }
 
+    pub(crate) fn latest_metadata_owner(&self) -> Option<Arc<RuntimeTransaction>> {
+        self.transactions.latest_metadata_owner()
+    }
+
     #[cfg(unittest)]
     pub(crate) fn running_transaction(&self) -> Ext4Result<Option<TransactionId>> {
         self.transactions.running_transaction()
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4Storage {
+    /// Stable metadata needs only a barrier covering the captured data generation.
+    pub(crate) fn sync_data(
+        &self,
+        inode: &crate::Ext4Inode,
+        generation: u64,
+        needs_barrier: bool,
+    ) -> Ext4Result<()> {
+        if let Some(journal) = &self.journal {
+            journal.transactions.ensure_writable()?;
+        }
+        if needs_barrier {
+            self.flush_device()
+                .map_err(|error| self.fail_journal_operation(error))?;
+            inode.acknowledge_data(generation);
+        }
+        Ok(())
+    }
+}
+
+impl Ext4SbInfo<'_> {
+    /// Sync the inode target sampled after this caller's finite data range
+    /// completed. A concurrent commit may have flushed before that sample.
+    pub(crate) fn sync_inode(
+        &mut self,
+        inode: &crate::Ext4Inode,
+        intent: crate::Ext4SyncIntent,
+    ) -> Ext4Result<()> {
+        use crate::inode::InodeSyncTarget;
+        self.ensure_writable()?;
+        let snapshot = inode.sync_target(intent);
+        if let Some(journal) = self.journal.clone() {
+            let owner = match snapshot.metadata {
+                InodeSyncTarget::Transaction(owner) => Some(owner),
+                InodeSyncTarget::Durable => None,
+                InodeSyncTarget::Untracked => journal.latest_metadata_owner(),
+            };
+            if let Some(owner) = owner
+                && !owner.is_committed()
+            {
+                let issued_barrier =
+                    self.with_persistence(&journal, |storage, persistence, release| {
+                        journal.transactions.ensure_writable()?;
+                        if owner.is_committed() {
+                            return Ok(false);
+                        }
+                        storage.commit_metadata_transaction_inner(
+                            persistence,
+                            owner.id(),
+                            RecoveryFlagPolicy::ClearAfterCheckpoint,
+                            release,
+                        )?;
+                        Ok(true)
+                    })?;
+                if issued_barrier {
+                    inode.acknowledge_data(snapshot.generation);
+                    return Ok(());
+                }
+            }
+        }
+        self.with_journal_io(|storage, release| {
+            release();
+            storage.sync_data(inode, snapshot.generation, snapshot.needs_data_barrier)
+        })
+    }
+
+    /// The journal coordinator can be contended by an earlier fsync or pressure
+    /// commit. A writer that can release admission yields it while waiting, then
+    /// reacquires in the original order and retries before freezing a new target.
+    fn with_persistence<R>(
+        &mut self,
+        journal: &MountedJournal,
+        operation: impl FnOnce(&Ext4Storage, &JournalPersistence<'_>, &mut dyn FnMut()) -> Ext4Result<R>,
+    ) -> Ext4Result<R> {
+        loop {
+            if let Some(guard) = journal.persistence.try_lock() {
+                let persistence = JournalPersistence {
+                    journal,
+                    _guard: guard,
+                };
+                return self.with_journal_io(|storage, release| {
+                    let result = operation(storage, &persistence, release)
+                        .map_err(|error| storage.fail_journal_operation(error));
+                    drop(persistence);
+                    result
+                });
+            }
+            self.with_journal_io(|_, release| {
+                release();
+                drop(journal.lock_persistence());
+            });
+        }
+    }
+
+    pub(crate) fn commit_metadata_transaction_with_policy(
+        &mut self,
+        transaction: TransactionId,
+        policy: RecoveryFlagPolicy,
+    ) -> Ext4Result<()> {
+        let journal = self
+            .journal
+            .clone()
+            .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?;
+        self.with_persistence(&journal, |storage, persistence, release| {
+            storage.commit_metadata_transaction_inner(persistence, transaction, policy, release)
+        })
+    }
+
+    pub(crate) fn commit_metadata_transaction(
+        &mut self,
+        transaction: TransactionId,
+    ) -> Ext4Result<()> {
+        self.commit_metadata_transaction_with_policy(
+            transaction,
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
+    }
+
     /// Rejects further writes using the journal's authoritative abort state.
     pub(crate) fn ensure_writable(&self) -> Ext4Result<()> {
         self.ensure_quota_feature_supported()?;
@@ -235,6 +356,22 @@ impl Ext4SbInfo {
         if self.ensure_quota_feature_supported().is_err() {
             return Ok(());
         }
+        let clear = self.can_clear_orphan_present()?;
+        self.with_journal_io(|storage, _| storage.sync_filesystem(clear))
+    }
+
+    pub(crate) fn can_clear_orphan_present(&self) -> Ext4Result<bool> {
+        if self.has_orphan_present() {
+            self.orphan_file_empty()
+                .map_err(|error| self.fail_journal_operation(error))
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+impl Ext4Storage {
+    pub(crate) fn sync_filesystem(&self, clear_orphan_present: bool) -> Ext4Result<()> {
         let journal = self.journal.as_ref().cloned();
         let persistence = journal.as_ref().map(|journal| journal.lock_persistence());
         let result = (|| {
@@ -245,21 +382,26 @@ impl Ext4SbInfo {
                         persistence,
                         transaction,
                         RecoveryFlagPolicy::ClearAfterCheckpoint,
+                        &mut || {},
                     )?;
                 }
                 self.drain_pending_checkpoints_inner(persistence)?;
-                self.clear_ext4_orphan_present_feature_on_disk()?;
-                self.flush_device()?;
-            } else {
-                self.clear_ext4_orphan_present_feature_on_disk()?;
-                self.flush_device()?;
             }
+            if clear_orphan_present {
+                self.write_ext4_superblock_feature_update(
+                    superblock::clear_ext4_orphan_present_feature,
+                )?;
+                lock(&self.allocator).has_orphan_present = false;
+            }
+            self.flush_device()?;
             let _ = self.metadata_io.reclaim_unused(usize::MAX);
             Ok(())
         })();
         result.map_err(|error| self.fail_journal_operation(error))
     }
+}
 
+impl Ext4SbInfo<'_> {
     pub(crate) fn metadata_journal(&mut self) -> Ext4Result<Arc<MountedJournal>> {
         self.ensure_writable()?;
         let journal = self
@@ -268,16 +410,27 @@ impl Ext4SbInfo {
             .cloned()
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?;
         journal.transactions.ensure_writable()?;
-        let persistence = journal.lock_persistence();
-        let result = (|| {
-            if !journal.supports_revoke() {
-                self.drain_pending_checkpoints_inner(&persistence)?;
-                self.enable_journal_revoke_feature()?;
-            }
-            self.set_ext4_orphan_present_feature()
-        })();
-        result.map_err(|error| self.fail_journal_operation(error))?;
-        drop(persistence);
+        let has_orphan_file = self.superblock.features().has_orphan_file();
+        if journal.supports_revoke() && (!has_orphan_file || self.has_orphan_present()) {
+            return Ok(journal);
+        }
+        self.with_journal_io(|storage, _| {
+            let persistence = journal.lock_persistence();
+            let result = (|| {
+                if !journal.supports_revoke() {
+                    storage.drain_pending_checkpoints_inner(&persistence)?;
+                    storage.enable_journal_revoke_feature(&journal)?;
+                }
+                if has_orphan_file && !storage.has_orphan_present() {
+                    storage.write_ext4_superblock_feature_update(
+                        superblock::set_ext4_orphan_present_feature,
+                    )?;
+                    lock(&storage.allocator).has_orphan_present = true;
+                }
+                Ok(())
+            })();
+            result.map_err(|error| storage.fail_journal_operation(error))
+        })?;
         Ok(journal)
     }
 
@@ -290,13 +443,14 @@ impl Ext4SbInfo {
         credits: JournalCredits,
         recovery_flag_policy: RecoveryFlagPolicy,
     ) -> Ext4Result<Arc<MountedJournal>> {
-        let journal = self.metadata_journal_without_allocation(credits, recovery_flag_policy)?;
-        // Legacy mutation paths without a physical growth bound retain the
-        // conservative boundary; they must not commit from an active handle.
-        if let Some(transaction) = self.freeing_transaction_to_commit(&journal)? {
+        loop {
+            let journal =
+                self.metadata_journal_without_allocation(credits, recovery_flag_policy)?;
+            let Some(transaction) = self.freeing_transaction_to_commit(&journal)? else {
+                return Ok(journal);
+            };
             self.commit_metadata_transaction_with_policy(transaction, recovery_flag_policy)?;
         }
-        Ok(journal)
     }
 
     /// Whether physical-space admission can release space by committing frees.
@@ -311,17 +465,8 @@ impl Ext4SbInfo {
         &self,
         journal: &MountedJournal,
     ) -> Ext4Result<Option<TransactionId>> {
-        let Some(transaction) = journal.transactions.running_transaction()? else {
-            return Ok(None);
-        };
-        if !lock(&self.allocator)
-            .pending_frees
-            .contains_transaction(transaction)
-        {
-            return Ok(None);
-        }
         journal.transactions.ensure_no_active_handles()?;
-        journal.transactions.idle_running_transaction(transaction)
+        Ok(lock(&self.allocator).pending_frees.transaction_to_release())
     }
 
     /// Admits a bounded physical allocation before opening its handle.
@@ -335,38 +480,38 @@ impl Ext4SbInfo {
         recovery_flag_policy: RecoveryFlagPolicy,
         required_blocks: u64,
     ) -> Ext4Result<Arc<MountedJournal>> {
-        let journal = self.metadata_journal_without_allocation(credits, recovery_flag_policy)?;
-        let pending = lock(&self.allocator).pending_frees.block_count();
-        if pending != 0 && required_blocks != 0 {
-            let available = {
-                let alloc = lock(&self.allocator);
-                alloc
+        loop {
+            let journal =
+                self.metadata_journal_without_allocation(credits, recovery_flag_policy)?;
+            let shortage = |alloc: &crate::superblock::AllocatorState| {
+                let pending = alloc.pending_frees.block_count();
+                if pending == 0 {
+                    return 0;
+                }
+                let available = alloc
                     .free_blocks_count
                     .saturating_sub(alloc.preallocated_blocks)
-                    .saturating_sub(pending)
+                    .saturating_sub(alloc.direct_write_pins.len() as u64)
+                    .saturating_sub(pending);
+                required_blocks.saturating_sub(available)
             };
-            if required_blocks > available {
-                // Speculative spaces are reclaimable without a persistence
-                // boundary. Recheck before paying for a freeing transaction.
-                self.discard_preallocs_for_space(required_blocks.saturating_sub(available));
-                let available = {
-                    let alloc = lock(&self.allocator);
-                    alloc
-                        .free_blocks_count
-                        .saturating_sub(alloc.preallocated_blocks)
-                        .saturating_sub(pending)
-                };
-                if required_blocks > available
-                    && let Some(transaction) = self.freeing_transaction_to_commit(&journal)?
-                {
-                    self.commit_metadata_transaction_with_policy(
-                        transaction,
-                        recovery_flag_policy,
-                    )?;
-                }
+            let needed = shortage(&lock(&self.allocator));
+            if needed == 0 {
+                return Ok(journal);
             }
+            self.discard_preallocs_for_space(needed);
+            let transaction = {
+                let alloc = lock(&self.allocator);
+                if shortage(&alloc) == 0 {
+                    return Ok(journal);
+                }
+                alloc.pending_frees.transaction_to_release()
+            };
+            let Some(transaction) = transaction else {
+                return Ok(journal);
+            };
+            self.commit_metadata_transaction_with_policy(transaction, recovery_flag_policy)?;
         }
-        Ok(journal)
     }
 
     /// Admits credits without imposing a physical-allocation boundary.
@@ -381,26 +526,23 @@ impl Ext4SbInfo {
         }
         let journal = self.metadata_journal()?;
         if recovery_flag_policy == RecoveryFlagPolicy::PreserveDuringRecovery {
-            self.commit_running_metadata_transaction_with_policy(recovery_flag_policy)?;
-            self.drain_pending_checkpoints()?;
+            self.with_journal_io(|storage, _| {
+                storage.commit_running_metadata_transaction_with_policy(recovery_flag_policy)?;
+                storage.drain_pending_checkpoints()
+            })?;
             return Ok(journal);
         }
 
-        if let Some(transaction) = journal.transactions.prepare_reservation(credits)? {
+        while let Some(transaction) = journal.transactions.prepare_reservation(credits)? {
             self.commit_metadata_transaction(transaction)?;
         }
         Ok(journal)
     }
+}
 
-    fn enable_journal_revoke_feature(&mut self) -> Ext4Result<()> {
-        if self.journal_supports_revoke() {
-            return Ok(());
-        }
-        let superblock = self
-            .journal
-            .as_ref()
-            .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?
-            .superblock();
+impl Ext4Storage {
+    fn enable_journal_revoke_feature(&self, journal: &MountedJournal) -> Ext4Result<()> {
+        let superblock = journal.superblock();
         if superblock.has_nonzero_log_start() {
             return Ok(());
         }
@@ -417,54 +559,39 @@ impl Ext4SbInfo {
             superblock.max_blocks(),
             superblock.uuid(),
         )?;
-        self.journal
-            .as_ref()
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
-            .replace_superblock(updated);
+        journal.replace_superblock(updated);
         Ok(())
     }
+}
 
-    pub(crate) fn commit_metadata_transaction(
-        &mut self,
-        transaction: TransactionId,
-    ) -> Ext4Result<()> {
-        self.commit_metadata_transaction_with_policy(
-            transaction,
-            RecoveryFlagPolicy::ClearAfterCheckpoint,
-        )
-    }
-
-    pub(crate) fn commit_metadata_transaction_with_policy(
-        &mut self,
-        transaction: TransactionId,
-        recovery_flag_policy: RecoveryFlagPolicy,
-    ) -> Ext4Result<()> {
-        let journal = self
-            .journal
-            .as_ref()
-            .cloned()
-            .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?;
-        let persistence = journal.lock_persistence();
-        let result =
-            self.commit_metadata_transaction_inner(&persistence, transaction, recovery_flag_policy);
-        result.map_err(|error| self.fail_journal_operation(error))
-    }
-
+impl Ext4Storage {
     fn commit_metadata_transaction_inner(
-        &mut self,
+        &self,
         persistence: &JournalPersistence<'_>,
         transaction: TransactionId,
         recovery_flag_policy: RecoveryFlagPolicy,
+        release: &mut dyn FnMut(),
     ) -> Ext4Result<()> {
         let requires_synchronous_checkpoint = !persistence.journal.supports_revoke()
             || recovery_flag_policy == RecoveryFlagPolicy::PreserveDuringRecovery;
-        self.append_metadata_checkpoint_inner(persistence, transaction, recovery_flag_policy)?;
+        self.append_metadata_checkpoint_inner(
+            persistence,
+            transaction,
+            recovery_flag_policy,
+            &mut || {
+                if !requires_synchronous_checkpoint {
+                    release();
+                }
+            },
+        )?;
         if requires_synchronous_checkpoint {
             self.run_checkpoint_worker_inner(persistence, None)?;
         }
         Ok(())
     }
+}
 
+impl Ext4SbInfo<'_> {
     pub(crate) fn finish_metadata_mutation_with_policy(
         &mut self,
         transaction: TransactionId,
@@ -545,15 +672,18 @@ impl Ext4SbInfo {
             Err(error) => Err(self.fail_metadata_mutation(has_updates, error)),
         }
     }
+}
 
-    pub(crate) fn commit_running_metadata_transaction(&mut self) -> Ext4Result<bool> {
+impl Ext4Storage {
+    #[cfg(unittest)]
+    pub(crate) fn commit_running_metadata_transaction(&self) -> Ext4Result<bool> {
         self.commit_running_metadata_transaction_with_policy(
             RecoveryFlagPolicy::ClearAfterCheckpoint,
         )
     }
 
     fn commit_running_metadata_transaction_with_policy(
-        &mut self,
+        &self,
         recovery_flag_policy: RecoveryFlagPolicy,
     ) -> Ext4Result<bool> {
         let Some(journal) = self.journal.as_ref().cloned() else {
@@ -562,18 +692,29 @@ impl Ext4SbInfo {
         let Some(transaction) = journal.transactions.running_transaction()? else {
             return Ok(false);
         };
-        self.commit_metadata_transaction_with_policy(transaction, recovery_flag_policy)?;
+        let persistence = journal.lock_persistence();
+        self.commit_metadata_transaction_inner(
+            &persistence,
+            transaction,
+            recovery_flag_policy,
+            &mut || {},
+        )
+        .map_err(|error| self.fail_journal_operation(error))?;
         Ok(true)
     }
+}
 
+impl Ext4SbInfo<'_> {
     #[cfg(unittest)]
     pub(crate) fn pending_checkpoint_count(&self) -> usize {
         self.journal
             .as_ref()
             .map_or(0, |journal| journal.pending_checkpoint_count())
     }
+}
 
-    pub(crate) fn drain_pending_checkpoints(&mut self) -> Ext4Result<()> {
+impl Ext4Storage {
+    pub(crate) fn drain_pending_checkpoints(&self) -> Ext4Result<()> {
         let Some(journal) = self.journal.as_ref().cloned() else {
             return Ok(());
         };
@@ -583,7 +724,7 @@ impl Ext4SbInfo {
     }
 
     fn drain_pending_checkpoints_inner(
-        &mut self,
+        &self,
         persistence: &JournalPersistence<'_>,
     ) -> Ext4Result<()> {
         while persistence.journal.has_pending_checkpoints() {
@@ -593,10 +734,11 @@ impl Ext4SbInfo {
     }
 
     fn append_metadata_checkpoint_inner(
-        &mut self,
+        &self,
         persistence: &JournalPersistence<'_>,
         transaction: TransactionId,
         recovery_flag_policy: RecoveryFlagPolicy,
+        on_log_reserved: &mut dyn FnMut(),
     ) -> Ext4Result<()> {
         let journal = persistence.journal;
         let Some(commit) = journal.transactions.prepare_commit(transaction)? else {
@@ -607,7 +749,11 @@ impl Ext4SbInfo {
         // pressure is retried inside the operation before it reaches this exit.
         let result = (|| {
             let persisted = loop {
-                match self.persist_metadata_journal_commit_inner(persistence, &commit) {
+                match self.persist_metadata_journal_commit_inner(
+                    persistence,
+                    &commit,
+                    on_log_reserved,
+                ) {
                     Ok(persisted) => break persisted,
                     Err(Ext4Error::JournalBusy) if journal.has_pending_checkpoints() => {
                         self.run_checkpoint_worker_inner(persistence, Some(&commit))?;
@@ -626,7 +772,9 @@ impl Ext4SbInfo {
         })();
         result.map_err(|error| self.abort_metadata_journal(error))
     }
+}
 
+impl Ext4SbInfo<'_> {
     pub(crate) fn fail_metadata_mutation(
         &self,
         has_updates: bool,
@@ -658,10 +806,12 @@ impl Ext4SbInfo {
         let result = self.run_checkpoint_worker_inner(&persistence, None);
         result.map_err(|error| self.fail_journal_operation(error))
     }
+}
 
+impl Ext4Storage {
     /// Restores an append plus transaction budget, or drains for explicit sync.
     fn run_checkpoint_worker_inner(
-        &mut self,
+        &self,
         persistence: &JournalPersistence<'_>,
         append: Option<&Arc<RuntimeTransaction>>,
     ) -> Ext4Result<()> {
@@ -732,7 +882,9 @@ impl Ext4SbInfo {
         }
         error
     }
+}
 
+impl Ext4SbInfo<'_> {
     #[allow(dead_code)]
     pub(crate) fn persist_metadata_journal_commit(
         &mut self,
@@ -744,21 +896,22 @@ impl Ext4SbInfo {
             .cloned()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
         let persistence = journal.lock_persistence();
-        self.persist_metadata_journal_commit_inner(&persistence, commit)
+        self.persist_metadata_journal_commit_inner(&persistence, commit, &mut || {})
     }
+}
 
+impl Ext4Storage {
     fn persist_metadata_journal_commit_inner(
-        &mut self,
+        &self,
         persistence: &JournalPersistence<'_>,
         commit: &Arc<RuntimeTransaction>,
+        on_log_reserved: &mut dyn FnMut(),
     ) -> Ext4Result<JournalPersistedCommit> {
         let journal = persistence.journal;
         journal.transactions.validate_committing(commit)?;
         // Batches that publish metadata join this dependency. Freeze excludes
         // new handles, so one barrier orders their data before journal I/O.
-        commit.flush_ordered_data(|| self.flush_device())?;
         let previous = journal.newest_persisted_commit()?;
-        self.set_ext4_needs_recovery_feature()?;
         let superblock = journal.superblock();
         let mut blocks = self.metadata_io.journal_commit_blocks(commit)?;
         self.merge_runtime_features_into_journaled_superblock(commit.id(), &mut blocks)?;
@@ -768,6 +921,11 @@ impl Ext4SbInfo {
             previous.as_ref(),
             commit.as_ref(),
             &blocks,
+            || {
+                on_log_reserved();
+                commit.flush_ordered_data(|| self.flush_device())?;
+                self.set_ext4_needs_recovery_feature()
+            },
         ) {
             Ok(persisted) => persisted,
             Err(error) => {
@@ -817,7 +975,7 @@ impl Ext4SbInfo {
     /// The persistence guard spans selection through retirement, so
     /// `next_oldest` identifies the unchanged suffix, if one remains.
     fn finish_metadata_journal_checkpoint_batch_with_policy<'a>(
-        &mut self,
+        &self,
         persistence: &JournalPersistence<'_>,
         persisted: impl IntoIterator<Item = &'a JournalPersistedCommit>,
         next_oldest: Option<&'a JournalPersistedCommit>,
@@ -860,7 +1018,9 @@ impl Ext4SbInfo {
         }
         Ok(())
     }
+}
 
+impl Ext4SbInfo<'_> {
     fn mark_journal_clean(
         &mut self,
         applied: JournalReplayApplied,
@@ -926,7 +1086,9 @@ impl Ext4SbInfo {
             report: Ext4RecoveryReport::from_journal_report(marked.report),
         })
     }
+}
 
+impl Ext4Storage {
     fn ensure_journal_superblock_has_zero_start(&self) -> Ext4Result<()> {
         let journal = self
             .journal
@@ -938,7 +1100,7 @@ impl Ext4SbInfo {
         Ok(())
     }
 
-    fn set_ext4_needs_recovery_feature(&mut self) -> Ext4Result<()> {
+    fn set_ext4_needs_recovery_feature(&self) -> Ext4Result<()> {
         if self.needs_recovery() {
             return Ok(());
         }
@@ -948,31 +1110,17 @@ impl Ext4SbInfo {
         lock(&self.allocator).needs_recovery = true;
         Ok(())
     }
+}
 
-    fn set_ext4_orphan_present_feature(&mut self) -> Ext4Result<()> {
-        if !self.superblock.features().has_orphan_file() || self.has_orphan_present() {
-            return Ok(());
-        }
-        self.write_ext4_superblock_feature_update(superblock::set_ext4_orphan_present_feature)?;
-        lock(&self.allocator).has_orphan_present = true;
-        Ok(())
-    }
-
-    fn clear_ext4_orphan_present_feature_on_disk(&mut self) -> Ext4Result<()> {
-        if !self.has_orphan_present() || !self.orphan_file_empty()? {
-            return Ok(());
-        }
-        self.write_ext4_superblock_feature_update(superblock::clear_ext4_orphan_present_feature)?;
-        lock(&self.allocator).has_orphan_present = false;
-        Ok(())
-    }
-
-    fn clear_ext4_needs_recovery_feature_on_disk(&mut self) -> Ext4Result<()> {
+impl Ext4Storage {
+    fn clear_ext4_needs_recovery_feature_on_disk(&self) -> Ext4Result<()> {
         self.write_ext4_superblock_feature_update(superblock::clear_ext4_needs_recovery_feature)?;
         lock(&self.allocator).needs_recovery = false;
         Ok(())
     }
+}
 
+impl Ext4SbInfo<'_> {
     fn clear_ext4_recovery_features_on_disk(&mut self) -> Ext4Result<()> {
         self.write_ext4_superblock_feature_update(|bytes| {
             superblock::clear_ext4_needs_recovery_feature(bytes)?;
@@ -983,7 +1131,9 @@ impl Ext4SbInfo {
         alloc.has_orphan_present = false;
         Ok(())
     }
+}
 
+impl Ext4Storage {
     fn write_ext4_superblock_feature_update(
         &self,
         update: impl FnOnce(&mut [u8]) -> Ext4Result<()>,
@@ -1024,7 +1174,7 @@ fn mutation_error_requires_abort(error: Ext4Error) -> bool {
     )
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Cleans orphan metadata left after a fully checkpointed transaction.
     ///
     /// Structurally valid inodes whose format KExt4 cannot yet mutate remain
@@ -1110,7 +1260,7 @@ impl Ext4SbInfo {
     }
 }
 
-impl JournalBlockMapper for Ext4SbInfo {
+impl JournalBlockMapper for crate::superblock::Ext4Storage {
     fn map_journal_block(&self, block: JournalBlock) -> Ext4Result<FilesystemBlock> {
         self.journal
             .as_ref()
@@ -1119,7 +1269,7 @@ impl JournalBlockMapper for Ext4SbInfo {
     }
 }
 
-impl JournalBlockReader for Ext4SbInfo {
+impl JournalBlockReader for crate::superblock::Ext4Storage {
     fn read_journal_block(&self, block: JournalBlock, output: &mut [u8]) -> Ext4Result<()> {
         let expected =
             usize::try_from(self.layout.block_size()).map_err(|_| Ext4Error::Overflow)?;
@@ -1134,7 +1284,7 @@ impl JournalBlockReader for Ext4SbInfo {
     }
 }
 
-impl JournalBlockWriter for Ext4SbInfo {
+impl JournalBlockWriter for crate::superblock::Ext4Storage {
     fn write_journal_block(&self, block: JournalBlock, input: &[u8]) -> Ext4Result<()> {
         let expected =
             usize::try_from(self.layout.block_size()).map_err(|_| Ext4Error::Overflow)?;
@@ -1207,7 +1357,7 @@ impl JournalBlockWriter for Ext4SbInfo {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4Storage {
     fn write_journal_physical_run(
         &self,
         physical: FilesystemBlock,
@@ -1241,3 +1391,32 @@ unittest::path_mod_test!(recovery_tests, "../ut-tests/journal/recovery_tests.rs"
 
 #[cfg(unittest)]
 unittest::path_mod_test!(component_tests, "../ut-tests/journal/component_tests.rs");
+
+impl JournalBlockMapper for Ext4SbInfo<'_> {
+    fn map_journal_block(&self, block: JournalBlock) -> Ext4Result<FilesystemBlock> {
+        self.storage.map_journal_block(block)
+    }
+}
+impl JournalBlockReader for Ext4SbInfo<'_> {
+    fn read_journal_block(&self, block: JournalBlock, output: &mut [u8]) -> Ext4Result<()> {
+        self.storage.read_journal_block(block, output)
+    }
+}
+impl JournalBlockWriter for Ext4SbInfo<'_> {
+    fn write_journal_block(&self, block: JournalBlock, input: &[u8]) -> Ext4Result<()> {
+        self.storage.write_journal_block(block, input)
+    }
+
+    fn write_journal_blocks(
+        &self,
+        start: JournalBlock,
+        count: u32,
+        input: &[u8],
+    ) -> Ext4Result<()> {
+        self.storage.write_journal_blocks(start, count, input)
+    }
+
+    fn flush_journal(&self) -> Ext4Result<()> {
+        self.storage.flush_journal()
+    }
+}

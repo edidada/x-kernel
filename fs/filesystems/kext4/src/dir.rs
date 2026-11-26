@@ -133,7 +133,7 @@ struct ScannedDirectoryEntry<'a> {
     next_offset: u64,
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Interprets the inode index flag in the mounted feature set.
     pub(crate) fn is_indexed_directory(&self, inode: &Ext4Inode) -> bool {
         self.superblock().features().has_dir_index() && inode.has_indexed_directory()

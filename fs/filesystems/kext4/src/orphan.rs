@@ -113,7 +113,7 @@ impl OrphanInfo {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Initializes orphan-file state after journal replay has established the
     /// authoritative home-block contents.
     pub(crate) fn initialize_orphan_info(&mut self) -> Ext4Result<()> {
@@ -286,11 +286,12 @@ impl Ext4SbInfo {
             return Ok(());
         }
         if self.superblock().features().has_orphan_file() {
-            let info = self
+            let state: &mut crate::superblock::Ext4MountState = self;
+            let info = state
                 .orphan_info
                 .as_mut()
                 .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidOrphanFile))?;
-            match info.add(inode, &self.metadata_io, handle, &self.superblock) {
+            match info.add(inode, &state.storage.metadata_io, handle, &state.superblock) {
                 Ok(()) => return Ok(()),
                 Err(Ext4Error::NoSpace) => {}
                 Err(error) => return Err(error),
@@ -325,12 +326,19 @@ impl Ext4SbInfo {
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
+        let state: &mut crate::superblock::Ext4MountState = self;
         match inode.orphan_location() {
-            Some(OrphanLocation::File { index }) => self
+            Some(OrphanLocation::File { index }) => state
                 .orphan_info
                 .as_mut()
                 .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidOrphanFile))?
-                .remove(inode, index, &self.metadata_io, handle, &self.superblock),
+                .remove(
+                    inode,
+                    index,
+                    &state.storage.metadata_io,
+                    handle,
+                    &state.superblock,
+                ),
             Some(OrphanLocation::LegacyList) => self.remove_orphan_from_legacy_list(inode, handle),
             None => Ok(()),
         }

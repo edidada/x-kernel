@@ -66,7 +66,7 @@ fn mount_hash_policy_rejects_invalid_default_hash() {
     );
 }
 
-fn interleaved_journal_filesystem() -> Ext4SbInfo {
+fn interleaved_journal_filesystem() -> Ext4SbInfo<'static> {
     use super::test_fixtures::*;
 
     let group = AllocatorGroupSpec {
@@ -112,7 +112,7 @@ fn interleaved_journal_filesystem() -> Ext4SbInfo {
         .unwrap();
         logical_start += len;
     }
-    filesystem.journal = Some(
+    filesystem.unpublished_storage().unwrap().journal = Some(
         MountedJournal::new(
             InternalJournal {
                 superblock: JournalSuperblock::decode(
@@ -164,7 +164,7 @@ fn recovery_refresh_keeps_interleaved_journal_blocks_protected() {
 #[def_test]
 fn recovery_refresh_rejects_journal_ranges_overlapping_metadata() {
     let mut filesystem = interleaved_journal_filesystem();
-    filesystem.journal = Some(
+    filesystem.unpublished_storage().unwrap().journal = Some(
         MountedJournal::new(
             InternalJournal {
                 superblock: filesystem.journal.as_ref().unwrap().superblock(),

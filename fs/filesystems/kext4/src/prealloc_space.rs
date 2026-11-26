@@ -544,7 +544,7 @@ impl AllocatorState {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Birth entry: allocates the write run's blocks and, inside the *same*
     /// allocator-lock section, samples and registers the trailing free run
     /// as this inode's prealloc space. Linux counterpart: `ext4_mb_new_blocks`,
@@ -750,6 +750,14 @@ impl Ext4SbInfo {
                 "KExt4 prealloc window spans block groups: {:?} + {}",
                 phys_start, phys_len,
             );
+            return 0;
+        }
+        if alloc
+            .direct_write_pins
+            .range(phys_start..FilesystemBlock::new(phys_end))
+            .next()
+            .is_some()
+        {
             return 0;
         }
         if alloc.group_prealloc_overlaps(group, phys_start, phys_end) {

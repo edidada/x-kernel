@@ -58,7 +58,9 @@ fn pending_ranges_merge_clip_and_complete_by_exact_transaction() {
         ranges,
         [(FilesystemBlock::new(20), FilesystemBlock::new(30))]
     );
+    assert_eq!(pending.transaction_to_release(), Some(old));
     pending.complete(old);
+    assert_eq!(pending.transaction_to_release(), Some(next));
     assert_eq!(pending.block_count(), 2);
     assert!(pending.contains_transaction(next));
     assert!(!pending.contains_transaction(old));

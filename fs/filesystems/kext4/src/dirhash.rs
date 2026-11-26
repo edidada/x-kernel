@@ -59,7 +59,7 @@ impl DirectoryHash {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Applies the mount-wide signedness policy to an on-disk HTree version.
     pub(crate) fn htree_hash(
         &self,

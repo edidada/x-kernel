@@ -46,7 +46,7 @@ fn worker_preparation_failure_leaves_queue_unpublished_and_retryable() {
     assert!(matches!(result, Err(Ext4Error::Allocation(kerrno::KError::NoMemory))));
     assert_eq!(Arc::weak_count(&queue), 0);
     assert_eq!(queue.snapshot(), 0);
-    assert!(queue.has_capacity());
+    assert!(queue.has_capacity(false));
 
     let io = queue.prepare(vec![512]).unwrap();
     assert_eq!(queue.snapshot(), 0);
@@ -97,7 +97,7 @@ fn finish_owner_failure_records_error_before_capture_drop_and_allows_retry() {
     assert_eq!(*events.lock(), vec!["error", "drop"]);
     assert_eq!(device.write_count(), writes);
     assert_eq!(queue.snapshot(), sequence);
-    assert!(queue.has_capacity());
+    assert!(queue.has_capacity(false));
 
     let retry_events = Arc::new(ksync::Mutex::new(vec![]));
     let probe = FinishDropProbe(retry_events.clone());
@@ -124,7 +124,7 @@ fn finish_owner_failure_records_error_before_capture_drop_and_allows_retry() {
     assert_eq!(*retry_events.lock(), vec!["call", "drop"]);
 }
 
-fn mapped_overwrite_fixture() -> (Ext4SbInfo, Ext4Inode, Arc<TestDevice>) {
+fn mapped_overwrite_fixture() -> (Ext4SbInfo<'static>, Ext4Inode, Arc<TestDevice>) {
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);
     let setup = JournalTransactions::new(TransactionId::new(931));

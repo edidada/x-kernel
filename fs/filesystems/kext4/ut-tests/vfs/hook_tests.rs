@@ -32,7 +32,10 @@ use crate::{
 /// Mounts `private` on a writable superblock and opens it for read-write,
 /// mirroring `read_tests::cached_file`. The returned file keeps one writable
 /// open, so `write_count() == 1` meets the close hook's gate.
-fn writable_mount(filesystem: Ext4SbInfo, private: Ext4Inode) -> (Arc<SuperBlock>, Arc<VfsFile>) {
+fn writable_mount(
+    filesystem: Ext4SbInfo<'static>,
+    private: Ext4Inode,
+) -> (Arc<SuperBlock>, Arc<VfsFile>) {
     let super_block = SuperBlock::new_with_flags_and_private(
         &crate::FILE_SYSTEM_TYPE,
         &EXT4_SUPER_OPERATIONS,

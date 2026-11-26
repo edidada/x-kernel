@@ -43,7 +43,7 @@ impl JournalCredits {
     }
 }
 
-impl Ext4SbInfo {
+impl Ext4SbInfo<'_> {
     /// Prepares a regular-file disk-size change using Linux-style ordering.
     ///
     /// Grow zeroes any mapped old EOF tail before committing a larger

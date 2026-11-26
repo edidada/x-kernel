@@ -135,12 +135,32 @@ pub trait FileMappingOperations: Send + Sync {
     fn page_mkwrite(&self, file: &VfsFile, pos: u64, len: usize) -> VfsResult<()>;
 }
 
+/// Optional admission for single-folio buffered overwrites inside EOF.
+pub trait BufferedOverwriteOperations: Send + Sync {
+    /// Returns whether the regular buffered copy needs no allocation or metadata change.
+    ///
+    /// KVFS holds shared inode privilege and data guards. The nonempty range
+    /// lies in one folio inside EOF. Returning `true` admits a buffered copy
+    /// through the normal write-begin/end hooks in place of `write_iter`.
+    /// These hooks must support concurrent overwrites without changing EOF or
+    /// reserving space. Returning `false` must leave the ordinary path usable.
+    ///
+    /// # Errors
+    /// Return the write admission error when this request must fail before copying.
+    fn can_overwrite(&self, file: &VfsFile, range: Range<u64>) -> VfsResult<bool>;
+}
+
 /// File operations installed on file-capable inodes.
 ///
 /// The same operation table is attached to the inode and used by opened file
 /// descriptions. Implementations that need per-open behavior may update the
 /// [`VfsFileBuilder`] during `open`.
 pub trait FileOperations: Send + Sync + 'static {
+    /// Returns shared buffered overwrite admission for files that support it.
+    fn buffered_overwrite_operations(&self) -> Option<&dyn BufferedOverwriteOperations> {
+        None
+    }
+
     /// Returns shared file-mapping fault operations when this file needs them.
     fn mapping_operations(&self) -> Option<&dyn FileMappingOperations> {
         None
@@ -686,7 +706,7 @@ impl VfsFileBuilder {
 
     /// Records where and under what name this open created its entry.
     ///
-    /// Called from the creation branch while the parent's namespace lock is
+    /// Called from the creation branch while the parent's inode lock is
     /// still held; the created dentry's own location is mutable afterwards, so
     /// attribution uses this snapshot.
     pub(crate) fn set_created_under(&mut self, parent: Arc<VfsInode>, name: &str) {
@@ -1172,7 +1192,7 @@ impl VfsFile {
     /// Returns the parent identity and the name this file's entry was created
     /// with, when the open that produced this file created it.
     ///
-    /// Both were captured inside the creation's namespace lock, so they stay
+    /// Both were captured inside the creation's inode lock, so they stay
     /// correct even if the entry is renamed before the caller reads them.
     pub fn created_under(&self) -> Option<(&Arc<VfsInode>, &str)> {
         self.created_under
@@ -1457,30 +1477,88 @@ impl VfsFile {
         // Linux `vfs_write()` drops set-UID/set-GID bits and the file
         // capability attribute before the filesystem sees the data, so a
         // writable privileged executable cannot keep authority it no longer
-        // matches. The privilege lock covers the revocation and the backend
+        // matches. The inode lock covers the revocation and the backend
         // write, so a concurrent `setxattr` cannot install a capability
         // between them. An empty or doomed write changes no content and takes
         // no revocation; it still reaches the backend so its own checks report
         // as before.
         let revokes_privileges = iter.count() > 0 && !beyond_size_limit && writes;
-        let privilege_inode = revokes_privileges.then(|| self.inode());
-        let _privilege_guard = privilege_inode
-            .as_ref()
-            .map(|inode| inode.lock_privileges());
-        if revokes_privileges {
-            self.path()
-                .file_remove_privs_locked_inode(self.inode(), cred)?;
-        }
+        let inode = self.inode();
+        let _inode_guard = if revokes_privileges {
+            let mut exclusive = None;
+            if let Some(ops) = self.operations().buffered_overwrite_operations() {
+                // A single open writer usually needs no shared admission. Try
+                // once so concurrent pwrite through that same description can
+                // still take the shared path when the inode is contended.
+                if inode.write_count() == 1 {
+                    exclusive = inode.try_lock_inode_exclusive();
+                }
+                if exclusive.is_none()
+                    && let Some(written) = self.try_buffered_overwrite(ops, iter, pos, start)?
+                {
+                    return Ok(written);
+                }
+            }
+            let guard = exclusive.unwrap_or_else(|| inode.lock_inode_exclusive());
+            self.path().file_remove_privs_locked_inode(inode, cred)?;
+            Some(guard)
+        } else {
+            None
+        };
         let mut iocb = Kiocb::new(self, start);
         let written = self.operations().write_iter(&mut iocb, iter)?;
+        Ok(self.finish_content_write(pos, iocb.ki_pos(), written))
+    }
+
+    fn try_buffered_overwrite(
+        &self,
+        ops: &dyn BufferedOverwriteOperations,
+        iter: &mut IovIterSource<'_>,
+        pos: &mut u64,
+        start: u64,
+    ) -> VfsResult<Option<usize>> {
+        let count = iter.count();
+        let page_offset = (start % memaddr::PAGE_SIZE_4K as u64) as usize;
+        if count > memaddr::PAGE_SIZE_4K - page_offset {
+            return Ok(None);
+        }
+        let Some(end) = start.checked_add(count as u64) else {
+            return Ok(None);
+        };
+        let inode = self.inode();
+        let Some(_privileges) = inode.lock_unprivileged_write() else {
+            return Ok(None);
+        };
+        let _data = inode.lock_data_shared();
+        let flags = self.flags();
+        if flags
+            .intersects(OpenFlags::APPEND | OpenFlags::DIRECT | OpenFlags::SYNC | OpenFlags::DSYNC)
+            || end > inode.size()
+        {
+            return Ok(None);
+        }
+        inode.check_mutable()?;
+        self.check_write_flags(flags)?;
+        if !ops.can_overwrite(self, start..end)? {
+            return Ok(None);
+        }
+        let written = self.mapping().perform_write(start, iter, count)?;
+        Ok(Some(self.finish_content_write(
+            pos,
+            start + written as u64,
+            written,
+        )))
+    }
+
+    fn finish_content_write(&self, pos: &mut u64, end: u64, written: usize) -> usize {
         if written != 0 {
             // Invalidate content-keyed consumers (the exec ELF header cache).
             self.inode().bump_content_generation();
         }
         if !self.is_stream() && written != 0 {
-            *pos = iocb.ki_pos();
+            *pos = end;
         }
-        Ok(written)
+        written
     }
 
     pub(crate) fn file_accessed(&self) {
@@ -1845,10 +1923,10 @@ impl VfsFile {
         if !operations.supported_fallocate_modes().contains(flags) {
             return Err(VfsError::from(LinuxError::EOPNOTSUPP));
         }
-        let _privilege_guard = inode.lock_privileges();
-        // Fileattr publication also takes the privilege lock, keeping this
+        let _inode_guard = inode.lock_inode_exclusive();
+        // Fileattr publication also takes the inode lock, keeping this
         // policy stable until the backend completes. Revoke privileges before
-        // taking data protection: revocation takes namespace exclusion.
+        // taking the data lock, under the inode lock held here.
         inode.check_mutable()?;
         if inode.flags().contains(NodeFlags::APPEND_ONLY)
             && !(flags & !FallocateFlags::KEEP_SIZE).is_empty()
