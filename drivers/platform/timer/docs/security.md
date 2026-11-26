@@ -3,7 +3,7 @@
 ## Scope and trust model
 
 This analysis covers the entire crate: `src/lib.rs`, `src/arm_generic.rs`,
-`src/riscv_sbi.rs`, `src/x86_lapic_tsc.rs`, `src/resume_counter.rs`, and
+`src/riscv_sbi.rs`, `src/tick_scale.rs`, `src/x86_lapic_tsc.rs`, `src/resume_counter.rs`, and
 `src/resume_notifications.rs`, plus guest fixtures in `ut-tests/`, including the ARM
 `arm-timer-resume-fixup` and `vmm` paths.
 
@@ -37,7 +37,8 @@ identity or permission checks; access is through privileged kernel code.
 | Device tree through ARM `config_from_device_tree` | Looks for `arm,armv8-timer` or `arm,armv7-timer`. Reads `interrupts`, `interrupt-names`, and `clock-frequency`. Missing node or usable interrupt returns `None`; the current AArch64 platform boot hook requires a result with `expect`. |
 | ARM interrupt properties to `timer_irq_from_device_tree` | Parses complete 12-byte entries, accepts type 0 or 1, and adds the corresponding SPI or PPI base. Names use valid UTF-8 entries, with positional fallback. The parser does not validate the resulting ID against controller capacity. |
 | ARM `clock-frequency` to `timer_frequency_from_device_tree` | Accepts a 4- or 8-byte big-endian value. Missing or malformed properties yield `None`, so `init` reads `CNTFRQ_EL0`. `init` rejects zero IRQs, zero frequency, and frequency above `u32::MAX` Hz. |
-| Platform timebase to RISC-V `init` | Rejects zero IRQ or frequency. It does not reject a zero nanoseconds-per-tick scale caused by frequency above 1 GHz. |
+| Platform timebase to RISC-V `init` | `kplat-riscv64` reads `/cpus` `timebase-frequency` (4 or 8 bytes); a missing, malformed, or zero value selects 10 MHz. `init` rejects zero IRQs, zero frequency, and frequency above `u32::MAX` Hz. |
+| Counter frequency to `TickScale::new` | Called by `riscv_sbi::init` and by `kplat-loongarch64` with the CPUCFG-derived rate. Panics on zero or above `u32::MAX` Hz. |
 | Counter registers, LAPIC, ARM timer registers, and SBI | Register accessibility, timer availability, and interrupt routing are platform prerequisites. The RISC-V backend discards SBI return values. |
 
 There are no user pointers, DMA buffers, file contents, network payloads, or
@@ -84,7 +85,7 @@ pending flags.
 | T-01 | CPU or hypervisor reports a plausible but incorrect TSC rate. | Medium: elapsed time and deadlines are distorted. | Vendor and numeric checks reject unsupported encodings; TCG prefers measurement. An in-range enumerated value is trusted without independent cross-checking. |
 | T-02 | PIT is absent, stuck, or delayed by emulation or host scheduling. | Medium: calibration fails or produces inaccurate time. | Each observation bounds the interval with a pre-poll read that a "still counting" poll proved early and a post-terminal-count read; preemption widens the interval instead of shifting both ends. The programming window is bounded, checked against the measured interval, and its midpoint used. A sample is trusted only within 2%; otherwise the tightest interval is reported as degraded only within 25%, and wider intervals fail discovery instead of being trusted. Two stalled countdowns abandon discovery, while host-pause rejections are retried within the eight-sample budget. |
 | T-03 | Another CPU or driver reprograms PIT channel 2 during calibration. | Medium: corrupted samples or disrupted device use. | Bootstrap-only ownership and local IRQ masking prevent the expected competitors. Violating boot ownership remains unsupported. |
-| T-04 | Firmware supplies extreme frequency values or unusable ARM interrupt data. | Medium: boot panic, incorrect time, or missing timer delivery. | Checked frequency scaling, x86 range filters, ARM property-length checks, and initialization assertions limit accepted data. ARM interrupt capacity and the RISC-V conversion scale remain platform responsibilities. |
+| T-04 | Firmware supplies extreme frequency values or unusable ARM interrupt data. | Medium: boot panic, incorrect time, or missing timer delivery. | Checked frequency scaling, x86 range filters, ARM property-length checks, and initialization assertions limit accepted data. ARM interrupt capacity remains a platform responsibility; a plausible but wrong RISC-V device-tree timebase is trusted. |
 | T-05 | TSC rate changes or CPU counters are unsynchronized. | Medium: drift or cross-CPU time regression. | The backend relies on a stable, system-consistent TSC. It provides no runtime recalibration or synchronization repair. |
 | T-06 | Timer operations run before local setup or ARM counter samples race. | High: invalid hardware access or inconsistent logical time. | Platform boot order establishes local state; APIC access guards its borrow. ARM sampling and updates share an IRQ-safe lock. |
 | T-07 | Timer register or SBI service behavior differs from platform assumptions. | Medium: timer interrupts arrive late, early, or stop. | ARM and x86 clamp relative counts to their register ranges. x86 still assumes a fixed LAPIC rate, and the RISC-V backend does not report SBI failures. |
@@ -97,7 +98,7 @@ pending flags.
 | F-02 | PIT terminal count is stale or the TSC budget expires. | Sample returns `None`. | Calibration falls back to other samples or sources. | 3 | Fixed sample count and discovery order preserve a bounded fallback path. |
 | F-03 | Required configuration or conversion state is invalid or missing. | Assertions or ratio lookups panic. | Boot or the calling kernel path stops. | 2 | Platform initialization must establish the documented prerequisites. |
 | F-04 | LAPIC rate differs from the fixed event rate. | Counts represent the wrong duration. | Deadline delivery is early or late. | 2 | Software can recheck early deadlines; late delivery remains a platform timing limitation. |
-| F-05 | RISC-V timebase produces a zero or truncated scale. | Conversion divides by zero or loses precision. | Panic or systematic time error. | 2 | Platform configuration must provide a usable timebase; current initialization checks only nonzero frequency. |
+| F-05 | RISC-V timebase is above `u32::MAX` Hz or absent from the device tree. | `init` panics, or the 10 MHz fallback is used. | Boot panic, or wrong time on hardware with another rate. | 2 | Firmware must describe the timebase; the fallback is reported on the boot console. |
 | F-06 | ARM timer node or usable IRQ is absent. | Discovery returns `None`. | The current platform boot hook panics. | 2 | Correct firmware timer data is required; malformed frequency data alone falls back to `CNTFRQ_EL0`. |
 
 ## Failure handling and resource recovery
@@ -128,8 +129,8 @@ Accuracy depends on the chosen frequency and backend conversion precision.
 x86 ratios truncate the frequency to kHz, Intel base frequency is a fallback
 estimate, and accepted CPUID values remain trusted. The PIT tick budget depends
 on the nominal TSC rate; the iteration cap independently limits polling.
-The LAPIC event rate is fixed. RISC-V integer scaling and ignored SBI results
-are additional limits. ARM resume repair preserves logical progression under
+The LAPIC event rate is fixed. Ignored RISC-V SBI results are an additional
+limit. ARM resume repair preserves logical progression under
 its execution assumptions; it does not reconstruct elapsed suspend time from
 an independent clock.
 
@@ -145,6 +146,8 @@ an independent clock.
   a bounded degraded result, or fails, that transient rejections are retried
   without aborting, and that the early abort stops the stalled-countdown search
   after the configured number of samples. These tests use no real hardware.
+- `ut-tests/tick_scale.rs` checks `TickScale` against exact arithmetic,
+  including frequencies that do not divide 1 GHz.
 - Inspect the assertions in each backend's initialization and the ARM property
   parsers when changing accepted firmware inputs.
 - Check every PIT early return against the guard lifetime, the independent

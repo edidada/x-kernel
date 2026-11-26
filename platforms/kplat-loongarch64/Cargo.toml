@@ -40,6 +40,7 @@ kbuild_config = { workspace = true }
 kernel_boot = { workspace = true }
 memspace = { workspace = true }
 rtc_driver = { workspace = true }
+timer_driver = { workspace = true }
 unittest = { workspace = true }
 
 [target.'cfg(target_arch = "loongarch64")'.dependencies]

@@ -3,14 +3,15 @@
 // See LICENSES for license details.
 
 use khal::time::{ClockEventIf, CounterSourceIf, TimerTicks};
-use ktime_types::{Frequency, NANOS_PER_SEC, TimeSpan};
+use ktime_types::{Frequency, TimeSpan};
 use lazyinit::LazyInit;
 use loongArch64::{register::tcfg, time::Time};
+use timer_driver::tick_scale::TickScale;
 
 const TIMER_IRQ: usize = 11;
 const MIN_TIMER_TICKS: u64 = 4;
 
-static NANOS_PER_TICK: LazyInit<u64> = LazyInit::new();
+static TICK_SCALE: LazyInit<TickScale> = LazyInit::new();
 
 #[inline]
 fn read_timer_ticks_raw() -> u64 {
@@ -19,12 +20,12 @@ fn read_timer_ticks_raw() -> u64 {
 
 #[inline]
 fn ticks_to_nanos(ticks: u64) -> u64 {
-    ticks * *NANOS_PER_TICK
+    TICK_SCALE.ticks_to_nanos(ticks)
 }
 
 #[inline]
 fn nanos_to_ticks(nanos: u64) -> u64 {
-    nanos / *NANOS_PER_TICK
+    TICK_SCALE.nanos_to_ticks(nanos)
 }
 
 pub(super) fn init_percpu() {
@@ -34,8 +35,15 @@ pub(super) fn init_percpu() {
     kirq::enable(TIMER_IRQ, true);
 }
 
+/// Installs the counter conversion for the stable-counter frequency.
+///
+/// # Panics
+///
+/// Panics when the reported frequency is zero or does not fit in `u32` Hz.
 pub(super) fn early_init() {
-    NANOS_PER_TICK.init_once(NANOS_PER_SEC / loongArch64::time::get_timer_freq() as u64);
+    TICK_SCALE.init_once(TickScale::new(Frequency::from_hz(
+        loongArch64::time::get_timer_freq() as u64,
+    )));
 }
 
 #[kiface::provide]
@@ -68,7 +76,9 @@ impl ClockEventIf {
     }
 
     fn arm_timer_after(interval: TimeSpan) {
-        let init_value = nanos_to_ticks(interval.as_nanos_u64_saturating())
+        // Rounding up keeps a sub-tick remainder from firing before the deadline.
+        let init_value = TICK_SCALE
+            .nanos_to_ticks_ceil(interval.as_nanos_u64_saturating())
             .max(MIN_TIMER_TICKS)
             .saturating_add(MIN_TIMER_TICKS - 1)
             / MIN_TIMER_TICKS

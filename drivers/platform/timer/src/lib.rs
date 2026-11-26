@@ -17,6 +17,7 @@ pub enum TimerSource {
 pub mod arm_generic;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv_sbi;
+pub mod tick_scale;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_lapic_tsc;
 

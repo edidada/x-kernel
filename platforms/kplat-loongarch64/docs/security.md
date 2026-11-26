@@ -108,8 +108,9 @@ no user-space input.
   in SMP builds. Locks do not nest across controllers or span kirq callbacks.
   NMI control is unsupported. EIO ISR completion remains a single W1C write,
   independent of the configuration lock; it must not become an ISR RMW.
-- `NANOS_PER_TICK` (`LazyInit<u64>`): the counter-frequency conversion,
-  computed once in `early_init`.
+- `TICK_SCALE` (`LazyInit<TickScale>`): the counter-frequency conversion,
+  computed once in `early_init`, which panics on a zero frequency or one
+  above `u32::MAX` Hz.
 - The GED sleep-control mapping: one byte, mapped only in the
   `power_off` terminal path.
 
