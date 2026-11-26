@@ -532,8 +532,13 @@ impl ProcessRuntime {
         let retired = {
             let mut manager = self.timer_manager().lock();
             let retired = manager.clear_posix_timers();
-            self.process
-                .set_cpu_timers_armed(manager.any_cpu_timer_armed());
+            // Clearing only disarms: no rising edge, zero seed sample. Publish
+            // the gate under the lock, atomic with the clear.
+            self.process.publish_cpu_timer_gate(
+                manager.any_cpu_timer_armed(),
+                manager.cpu_timer_nextevt(),
+                ktime_types::TaskCputime::default(),
+            );
             retired
         };
         drop(retired);
@@ -556,17 +561,28 @@ impl ksignal::TimerSignalOrigin for ProcessRuntime {
             .timer_manager()
             .lock()
             .posix_timer_record_needs_cpu_times(timer_id, record);
-        let process_sched_runtime = if needs_cpu_times {
-            self.process.process_cpu_time()
+        // Only the record's own timer can raise the gate, and it does so iff it
+        // is a process-CPU timer (`needs_cpu_times`): `any_cpu_timer_armed` counts
+        // process-CPU timers alone, so a wall-clock record neither arms the gate
+        // nor needs the group clock for its deadline. Sample the group before the
+        // manager lock only in that case (armed reads the accumulator, inactive
+        // walks); the sample doubles as the rising-edge seed. A wall-clock record
+        // takes no sample, as before the accumulator existed.
+        let sample = if needs_cpu_times {
+            self.process.cpu_timer_group_sample()
         } else {
-            ktime_types::TimeSpan::ZERO
+            ktime_types::TaskCputime::default()
         };
+        let process_sched_runtime = ktime_types::TimeSpan::from_nanos(sample.sum_exec_runtime);
         let delivery = {
             let mut manager = self.timer_manager().lock();
             let delivery =
                 manager.progress_posix_timer_record(timer_id, record, process_sched_runtime);
-            self.process
-                .set_cpu_timers_armed(manager.any_cpu_timer_armed());
+            self.process.publish_cpu_timer_gate(
+                manager.any_cpu_timer_armed(),
+                manager.cpu_timer_nextevt(),
+                sample,
+            );
             delivery
         };
         if let Some(delivery) = delivery {
@@ -579,16 +595,26 @@ impl ksignal::TimerSignalOrigin for ProcessRuntime {
             .timer_manager()
             .lock()
             .posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq);
-        let process_sched_runtime = if needs_cpu_times {
-            self.process.process_cpu_time()
+        // As in record_available: only a process-CPU dequeue (`needs_cpu_times`)
+        // can raise the gate or needs the group clock for its deadline, so only
+        // it samples the group; a wall-clock dequeue takes no sample.
+        let sample = if needs_cpu_times {
+            self.process.cpu_timer_group_sample()
         } else {
-            ktime_types::TimeSpan::ZERO
+            ktime_types::TaskCputime::default()
         };
-        let mut manager = self.timer_manager().lock();
-        let should_deliver =
-            manager.on_timer_signal_dequeued(timer_id, signal_seq, process_sched_runtime);
-        self.process
-            .set_cpu_timers_armed(manager.any_cpu_timer_armed());
+        let process_sched_runtime = ktime_types::TimeSpan::from_nanos(sample.sum_exec_runtime);
+        let should_deliver = {
+            let mut manager = self.timer_manager().lock();
+            let should_deliver =
+                manager.on_timer_signal_dequeued(timer_id, signal_seq, process_sched_runtime);
+            self.process.publish_cpu_timer_gate(
+                manager.any_cpu_timer_armed(),
+                manager.cpu_timer_nextevt(),
+                sample,
+            );
+            should_deliver
+        };
         if should_deliver {
             ksignal::SignalDequeueAction::Deliver
         } else {

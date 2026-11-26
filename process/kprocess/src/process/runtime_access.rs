@@ -15,7 +15,7 @@ use kerrno::{KError, KResult};
 use khal::paging::MappingFlags;
 use ksignal::api::ProcessSignalManager;
 use ksync::{Mutex, MutexGuard};
-use ktime_types::TimeSpan;
+use ktime_types::{TaskCputime, TimeSpan};
 use ktimer::{PosixTimerConfig, PosixTimerCreateNotify, TimerDelivery};
 use memaddr::VirtAddr;
 use memspace::{
@@ -690,16 +690,36 @@ impl Process {
     /// teardown reaches directly without this wrapper. Read-only timer
     /// queries deliberately bypass this helper to avoid the gate rescan.
     ///
+    /// `seed_sample` is the group CPU-time sample the caller walked *before*
+    /// taking the manager lock; on a rising edge the gate publication seeds the
+    /// running accumulator from it before arming (see
+    /// [`Process::publish_cpu_timer_gate`]). Callers that cannot produce a
+    /// rising edge pass a sample the publication then ignores: disarm/delete
+    /// pass a zero sample, while an already-armed poll reuses the accumulator
+    /// snapshot it took for the pass.
+    ///
     /// The armed-poll path performs one extra runtime lookup on top of the
     /// gate check; that path only runs while CPU timers exist.
     fn with_timer_manager_mut<R>(
         &self,
+        seed_sample: TaskCputime,
         f: impl FnOnce(&mut ktimer::ProcessTimerManager) -> KResult<R>,
     ) -> KResult<R> {
         let runtime = self.runtime()?;
         let mut manager = runtime.timer_manager().lock();
         let result = f(&mut manager);
-        self.set_cpu_timers_armed(manager.any_cpu_timer_armed());
+        // Derive AND publish the gate inside the manager lock, atomic with the
+        // mutation, so a concurrent arm/disarm cannot interleave a stale gate
+        // write. On a rising edge publish_cpu_timer_gate seeds the accumulator
+        // from `seed_sample` before storing armed (Linux seed-before-active).
+        // The caller walked `seed_sample` before taking this lock: the
+        // membership lock must precede, never nest inside, the manager mutex.
+        self.publish_cpu_timer_gate(
+            manager.any_cpu_timer_armed(),
+            manager.cpu_timer_nextevt(),
+            seed_sample,
+        );
+        drop(manager);
         result
     }
 
@@ -749,7 +769,13 @@ impl Process {
         let result = {
             let mut manager = runtime.timer_manager().lock();
             let result = manager.create_posix_timer(config);
-            self.set_cpu_timers_armed(manager.any_cpu_timer_armed());
+            // Creation admits a disarmed timer, so it never raises the gate;
+            // the seed sample is unused. Publish under the lock regardless.
+            self.publish_cpu_timer_gate(
+                manager.any_cpu_timer_armed(),
+                manager.cpu_timer_nextevt(),
+                TaskCputime::default(),
+            );
             result
         };
         result.map_err(|rejected| {
@@ -787,8 +813,11 @@ impl Process {
         interval: TimeSpan,
         value: TimeSpan,
     ) -> KResult<((TimeSpan, TimeSpan), Option<TimerDelivery>)> {
-        let process_sched_runtime = self.process_cpu_time();
-        self.with_timer_manager_mut(|manager| {
+        // Walk the group sample before the manager lock: it both feeds the
+        // SCHED deadline and seeds the accumulator on a rising edge.
+        let sample = self.cpu_timer_group_sample();
+        let process_sched_runtime = TimeSpan::from_nanos(sample.sum_exec_runtime);
+        self.with_timer_manager_mut(sample, |manager| {
             manager.set_posix_timer(timer_id, absolute, interval, value, process_sched_runtime)
         })
         .map(|update| update.finish())
@@ -801,8 +830,10 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when runtime is gone and forwards the
     /// matching `ktimer::ProcessTimerManager::delete_posix_timer` error contract.
     pub fn delete_posix_timer(&self, timer_id: i32) -> KResult<()> {
-        let retired =
-            self.with_timer_manager_mut(|manager| manager.delete_posix_timer(timer_id))?;
+        // Deleting a timer only ever disarms: no rising edge, zero seed sample.
+        let retired = self.with_timer_manager_mut(TaskCputime::default(), |manager| {
+            manager.delete_posix_timer(timer_id)
+        })?;
         drop(retired);
         Ok(())
     }
@@ -829,7 +860,7 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when the weak process runtime can no longer
     /// be upgraded.
     pub fn get_itimer(&self, timer_type: ITimerType) -> KResult<(TimeSpan, TimeSpan)> {
-        let sample = self.thread_group_cputime();
+        let sample = self.cpu_timer_group_sample();
         self.runtime().map(|runtime| {
             runtime
                 .timer_manager()
@@ -850,8 +881,8 @@ impl Process {
         interval: TimeSpan,
         remaining: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
-        let sample = self.thread_group_cputime();
-        self.with_timer_manager_mut(|manager| {
+        let sample = self.cpu_timer_group_sample();
+        self.with_timer_manager_mut(sample, |manager| {
             Ok(manager.set_itimer(timer_type, interval, remaining, sample))
         })
     }
@@ -866,18 +897,24 @@ impl Process {
     ///
     /// One raw [`TaskCputime`](ktime_types::TaskCputime) snapshot feeds every
     /// timer in the pass: like Linux `posix-cpu-timers`, expiry never consumes
-    /// the adjusted split, and all clocks share a single time base.
+    /// the adjusted split, and all clocks share a single time base. The snapshot
+    /// is the running group accumulator, sampled lock-free exactly as Linux
+    /// `check_process_timers` does once group accounting is active — no
+    /// membership walk and no re-sync, because every tick and scheduler commit
+    /// already feeds the accumulator while armed.
     ///
-    /// The periodic tick requests coalesced user-return work only while the
-    /// process may have an armed CPU timer. Recheck that gate here so a
-    /// concurrent disarm can avoid sampling. The timer manager re-derives it
-    /// after each poll, including one-shot expiry.
+    /// The periodic tick requests coalesced user-return work only on a plausible
+    /// expiry. Recheck the armed gate here so a concurrent disarm can avoid
+    /// sampling. The timer manager re-derives it after each poll, including
+    /// one-shot expiry.
     pub(crate) fn poll_cpu_timers(&self) -> KResult<Vec<TimerDelivery>> {
         if !self.cpu_timers_armed() {
             return Ok(Vec::new());
         }
-        let sample = self.thread_group_cputime();
-        self.with_timer_manager_mut(|manager| Ok(manager.poll_cpu_timers(sample)))
+        let sample = self.cpu_timer_sample();
+        // An armed poll only ever expires/disarms: no rising edge, so the seed
+        // sample is unused; reuse the accumulator snapshot taken for the pass.
+        self.with_timer_manager_mut(sample, |manager| Ok(manager.poll_cpu_timers(sample)))
     }
 
     /// Updates the current executable metadata snapshot.

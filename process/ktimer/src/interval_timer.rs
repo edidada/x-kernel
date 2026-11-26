@@ -143,6 +143,25 @@ impl ITimer {
         self.deadline
     }
 
+    /// The armed CPU-clock deadline in nanoseconds since the clock origin, if
+    /// this timer is armed on a process-CPU clock.
+    ///
+    /// Consumed by `ProcessTimerManager::cpu_timer_nextevt` to cache the
+    /// earliest expiry per CPU clock base for the periodic-tick fastpath.
+    /// Returns `None` for an unarmed or wall-clock timer.
+    pub(crate) fn cpu_deadline_ns(&self) -> Option<u64> {
+        match self.deadline? {
+            TimerInstant::ProcessCpu(instant) => Some(
+                instant
+                    .span_since_origin()
+                    .as_nanos()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            ),
+            _ => None,
+        }
+    }
+
     /// Test observation of the runtime alarm registration.
     #[cfg(unittest)]
     pub(crate) fn alarm_deadline(&self) -> Option<MonotonicInstant> {

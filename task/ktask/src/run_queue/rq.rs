@@ -256,6 +256,16 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         should_preempt: bool,
     ) {
         if !is_idle {
+            // Mirror Linux `account_group_exec_runtime`: hand this task's
+            // committed runtime delta to per-group CPU-timer accounting. The
+            // runtime callback is lock-free and gates on the armed flag itself,
+            // so an idle or non-timer process pays one atomic load. This is an
+            // observation feed only — it never changes pick or vruntime state.
+            if elapsed > 0
+                && let Some(runtime) = self.current_task.user_runtime()
+            {
+                runtime.account_group_runtime(elapsed);
+            }
             #[cfg(feature = "sched_stat")]
             if should_preempt && elapsed > 0 {
                 sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).tick_preempt);

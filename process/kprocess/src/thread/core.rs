@@ -23,7 +23,9 @@ use super::{
 };
 use crate::{
     Pid, Process, ProcessForkConfig, ProcessRuntime, Tid, allocate_thread_task_number,
-    fork_process_runtime, process_runtime::ExitAddressSpace,
+    fork_process_runtime,
+    process::{CPU_BASE_PROF, CPU_BASE_SCHED, CPU_BASE_VIRT},
+    process_runtime::ExitAddressSpace,
 };
 
 /// The current user thread handle.
@@ -833,9 +835,20 @@ impl Thread {
     /// Charges one periodic accounting tick to the interrupted context.
     ///
     /// Owning-CPU only, from the periodic tick with IRQs masked. `user_tick`
-    /// classifies the interrupted frame; `tick_ns` is `TICK_NSEC`.
+    /// classifies the interrupted frame; `tick_ns` is `TICK_NSEC`. Alongside the
+    /// thread's raw counter, the same charge goes to the running group
+    /// accumulator while CPU timers are armed — Linux `account_group_user_time`
+    /// / `account_group_system_time`, gated by `get_running_cputimer`.
     pub(crate) fn account_tick(&self, user_tick: bool, tick_ns: u64) {
         self.time.account_tick(user_tick, tick_ns);
+        let group = self.process();
+        if group.cpu_timers_armed() {
+            if user_tick {
+                group.add_group_user_time(tick_ns);
+            } else {
+                group.add_group_system_time(tick_ns);
+            }
+        }
     }
 
     /// Returns this thread's adjusted user/system time.
@@ -852,14 +865,38 @@ impl Thread {
 
     /// Requests a CPU-timer poll for this task at its next user return.
     ///
-    /// Called from interrupt context by the periodic tick. Requests are
-    /// coalesced: the `Release` store publishes this tick's raw counter
-    /// additions, and repeated ticks before a return add no work. Gated by
-    /// the process armed flag, so a task group with no CPU timers never sets
-    /// the bit. See [`Thread::cpu_timer_work_pending`] for the ordering
-    /// contract.
+    /// Called from interrupt context by the periodic tick. This is the tick
+    /// fastpath equivalent of Linux `fastpath_timer_check`: gate on the armed
+    /// flag and an already-pending request (Linux `scheduled`), sample the
+    /// running group accumulator, and set the work bit only when some CPU-clock
+    /// base has reached its earliest deadline. A tick that arrives while the
+    /// group is disarmed, or whose sample predates every armed deadline, adds
+    /// no work — so a busy process without a near expiry stops paying for a
+    /// user-return poll on every tick.
+    ///
+    /// Sampling the *group* accumulator (not just this thread) is what fixes
+    /// process-timer starvation: whichever thread takes the tick contributes the
+    /// whole group's advance, so a thread blocked in long kernel mode still lets
+    /// a sibling's tick detect the expiry and request its own return poll.
+    ///
+    /// Coalescing and ordering are unchanged: the `Release` store publishes this
+    /// tick's raw and accumulator additions; the user-return `Acquire` load and
+    /// `AcqRel` swap consume exactly one request. See
+    /// [`Thread::cpu_timer_work_pending`] for the full contract. A missed
+    /// detection is never lost — the armed flag plus the authoritative
+    /// user-return walk keep expiry correct; only the *timing* of the request
+    /// is a (necessarily conservative) heuristic here, as in Linux.
     pub(crate) fn request_cpu_timer_work(&self) {
-        if self.process().cpu_timers_armed() {
+        let group = self.process();
+        if !group.cpu_timers_armed() || self.cpu_timer_work_pending.load(Ordering::Relaxed) {
+            return;
+        }
+        let sample = group.cpu_timer_sample();
+        let expired = (sample.utime.saturating_add(sample.stime)
+            >= group.cpu_nextevt(CPU_BASE_PROF))
+            || (sample.utime >= group.cpu_nextevt(CPU_BASE_VIRT))
+            || (sample.sum_exec_runtime >= group.cpu_nextevt(CPU_BASE_SCHED));
+        if expired {
             self.cpu_timer_work_pending.store(true, Ordering::Release);
         }
     }

@@ -356,6 +356,15 @@ impl PosixTimer {
         self.spec.deadline().is_some()
     }
 
+    /// The armed process-CPU deadline in scheduler-runtime nanoseconds since
+    /// the clock origin, if this is an armed process-CPU timer; `None`
+    /// otherwise. Consumed by `ProcessTimerManager::cpu_timer_nextevt`.
+    pub(crate) fn cpu_deadline_ns(&self) -> Option<u64> {
+        self.is_process_cpu()
+            .then(|| self.spec.cpu_deadline_ns())
+            .flatten()
+    }
+
     pub(crate) fn arm_deadline(&mut self, owner_pid: Pid) {
         let runtime_deadline = self
             .spec

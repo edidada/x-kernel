@@ -92,6 +92,16 @@ impl UserTaskRuntime for Thread {
         self.request_cpu_timer_work();
     }
 
+    fn account_group_runtime(&self, delta_ns: u64) {
+        // Feed the running group accumulator's scheduler clock while CPU timers
+        // are armed, mirroring the tick's user/system feed. Gated like
+        // `get_running_cputimer`; the delta never touches fair-scheduling state.
+        let group = self.process();
+        if group.cpu_timers_armed() {
+            group.add_group_exec_runtime(delta_ns);
+        }
+    }
+
     fn set_user_mm_resident_cpu(&self, cpu_id: LogicalCpuId) {
         self.set_process_mm_resident_cpu(cpu_id);
     }

@@ -65,6 +65,93 @@ impl ThreadCpuTime {
     }
 }
 
+/// Lock-free running group CPU-timer accumulator.
+///
+/// Matches Linux `thread_group_cputimer.cputime_atomic`: a group-wide
+/// `{utime, stime, sum_exec_runtime}` triple advanced by every member's tick
+/// (user/system) and scheduler runtime commit (exec), gated on the armed flag
+/// the way `get_running_cputimer()` returns `NULL` when `timers_active` is
+/// false. The periodic tick cannot afford a membership walk (`Process::
+/// thread_group_cputime` holds the membership lock and is task-context only),
+/// so it samples this accumulator instead to decide whether a CPU timer may
+/// have expired; the authoritative user-return poll still walks the group and
+/// lifts this value back up with [`Self::seed_from`].
+///
+/// The three counters are independent atomics advanced with relaxed adds — a
+/// non-uniform snapshot is acceptable because the fastpath is a heuristic that
+/// can only defer expiry to a later tick, never fabricate one. It is seeded on
+/// every `false -> true` armed transition (absolute `TIMER_ABSTIME` deadlines
+/// need a clock synced to the walked group total at start) and the seed uses
+/// [`Self::seed_from`] so a concurrent feed cannot move it backwards.
+pub(crate) struct ThreadGroupCputimer {
+    utime_ns: AtomicU64,
+    stime_ns: AtomicU64,
+    sum_exec_runtime_ns: AtomicU64,
+}
+
+impl ThreadGroupCputimer {
+    /// Creates a zeroed accumulator; the armed gate decides when it is fed.
+    pub(crate) const fn new() -> Self {
+        Self {
+            utime_ns: AtomicU64::new(0),
+            stime_ns: AtomicU64::new(0),
+            sum_exec_runtime_ns: AtomicU64::new(0),
+        }
+    }
+
+    /// Charges one user tick to the group accumulator (owner-CPU tick, IRQs off).
+    pub(crate) fn add_user_time(&self, delta_ns: u64) {
+        self.utime_ns.fetch_add(delta_ns, Ordering::Relaxed);
+    }
+
+    /// Charges one system tick to the group accumulator (owner-CPU tick, IRQs off).
+    pub(crate) fn add_system_time(&self, delta_ns: u64) {
+        self.stime_ns.fetch_add(delta_ns, Ordering::Relaxed);
+    }
+
+    /// Charges committed scheduler runtime to the group accumulator.
+    pub(crate) fn add_exec_runtime(&self, delta_ns: u64) {
+        self.sum_exec_runtime_ns
+            .fetch_add(delta_ns, Ordering::Relaxed);
+    }
+
+    /// Lock-free triple read for the tick fastpath and group queries.
+    pub(crate) fn sample(&self) -> TaskCputime {
+        TaskCputime {
+            utime: self.utime_ns.load(Ordering::Relaxed),
+            stime: self.stime_ns.load(Ordering::Relaxed),
+            sum_exec_runtime: self.sum_exec_runtime_ns.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Raises each field to at least `total` (compare-exchange-max).
+    ///
+    /// Seeds the accumulator on the `false -> true` armed transition from an
+    /// authoritative [`TaskCputime`] group walk, applied before the gate is
+    /// published. Taking the max — never an add or a plain store — is what makes
+    /// this safe against a concurrent tick: the seed is a lower bound, ticks only
+    /// add, and a feed that races the seed's load is preserved by the retry.
+    /// Mirrors Linux `update_gt_cputime`.
+    ///
+    /// [`Process::thread_group_cputime`]: crate::Process::thread_group_cputime
+    pub(crate) fn seed_from(&self, total: TaskCputime) {
+        raise(&self.utime_ns, total.utime);
+        raise(&self.stime_ns, total.stime);
+        raise(&self.sum_exec_runtime_ns, total.sum_exec_runtime);
+    }
+}
+
+/// Raise `counter` to at least `target`, retrying while another writer advances it.
+fn raise(counter: &AtomicU64, target: u64) {
+    let mut current = counter.load(Ordering::Relaxed);
+    while current < target {
+        match counter.compare_exchange_weak(current, target, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 /// Monotonic adjustment state, owned by both a thread and a thread group.
 ///
 /// Its lock is independent of the membership domain: `adjust` runs after the

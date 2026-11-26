@@ -380,9 +380,12 @@ impl Process {
 
     /// Returns the scheduler runtime of all current and exited group members.
     ///
-    /// Call in task context without a run-queue or membership lock.
+    /// Like Linux `cpu_clock_sample_group` for `CPUCLOCK_SCHED`, an armed group
+    /// reads the running accumulator lock-free; an inactive group walks the
+    /// membership ledger. Call in task context without a run-queue or membership
+    /// lock.
     pub fn process_cpu_time(&self) -> ktime_types::TimeSpan {
-        ktime_types::TimeSpan::from_nanos(self.thread_group_cputime().sum_exec_runtime)
+        ktime_types::TimeSpan::from_nanos(self.cpu_timer_group_sample().sum_exec_runtime)
     }
 
     /// Samples the group's raw user/system split and scheduler runtime.

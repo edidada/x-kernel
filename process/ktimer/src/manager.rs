@@ -81,6 +81,13 @@ pub struct ProcessTimerManager {
 }
 
 impl ProcessTimerManager {
+    /// CPU-clock base indices for the returned array, matching the kernel-side
+    /// `CPUCLOCK_PROF`/`CPUCLOCK_VIRT`/`CPUCLOCK_SCHED` layout that
+    /// `Process::cpu_timer_nextevt` publishes for the tick fastpath.
+    const BASE_PROF: usize = 0;
+    const BASE_SCHED: usize = 2;
+    const BASE_VIRT: usize = 1;
+
     /// Creates a new [`ProcessTimerManager`].
     pub fn new(owner_pid: Pid) -> Self {
         Self {
@@ -216,6 +223,34 @@ impl ProcessTimerManager {
         self.posix_timers
             .values()
             .any(|timer| timer.is_process_cpu() && timer.is_armed())
+    }
+
+    /// Earliest armed deadline per CPU-clock base, in that base's clock units
+    /// (nanoseconds), with `u64::MAX` meaning no armed timer on that clock.
+    ///
+    /// Mirrors Linux `posix_cputimers.bases[].nextevt`. The periodic tick
+    /// cannot take this manager's sleeping lock, so the gate boundaries publish
+    /// this cache alongside the armed flag; the tick compares a lock-free
+    /// running-accumulator sample against it to decide, cheaply, whether a CPU
+    /// timer may have expired. Deriving it walks the (short) CPU-timer set, so
+    /// it stays correct across every arm/disarm/expiry re-derivation.
+    pub fn cpu_timer_nextevt(&self) -> [u64; 3] {
+        let inactive = u64::MAX;
+        let mut nextevt = [inactive; 3];
+        if let Some(deadline_ns) = self.itimers[ITIMER_PROF_INDEX].cpu_deadline_ns() {
+            nextevt[Self::BASE_PROF] = deadline_ns;
+        }
+        if let Some(deadline_ns) = self.itimers[ITIMER_VIRTUAL_INDEX].cpu_deadline_ns() {
+            nextevt[Self::BASE_VIRT] = deadline_ns;
+        }
+        for timer in self.posix_timers.values() {
+            if let Some(deadline_ns) = timer.cpu_deadline_ns()
+                && deadline_ns < nextevt[Self::BASE_SCHED]
+            {
+                nextevt[Self::BASE_SCHED] = deadline_ns;
+            }
+        }
+        nextevt
     }
 
     /// Publishes a POSIX timer from an already validated configuration.

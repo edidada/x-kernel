@@ -137,6 +137,16 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     /// implementations must be lock-free and non-blocking, and must not settle
     /// a remote task.
     fn on_periodic_tick(&self, _user_tick: bool, _tick_ns: u64) {}
+    /// Charges committed scheduler runtime to per-group CPU-timer accounting.
+    ///
+    /// Called on the current task from the run-queue account path with
+    /// `delta_ns`, the runtime advanced since its previous account point. Runs
+    /// with IRQs masked under the run-queue lock: implementations must be
+    /// lock-free and non-blocking. Matches Linux `account_group_exec_runtime`,
+    /// whose delta is real scheduler runtime, not a nominal tick. It never
+    /// changes fair-scheduling state — it is an observation fed to the armed
+    /// CPU-timer running accumulator.
+    fn account_group_runtime(&self, _delta_ns: u64) {}
     /// Marks that the current CPU may retain TLB state for this task's user
     /// address space.
     fn set_user_mm_resident_cpu(&self, _cpu_id: LogicalCpuId) {}

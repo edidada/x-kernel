@@ -129,7 +129,7 @@ pub use thread::{
     current_user_process, current_user_process_address_space, current_user_process_fs_context,
     current_user_thread, current_user_tid, try_current_user_process, with_current_user_thread,
 };
-pub(crate) use thread::{PrevCputime, TaskCputime};
+pub(crate) use thread::{PrevCputime, TaskCputime, ThreadGroupCputimer};
 pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers_for, spawn_alarm_task,
 };

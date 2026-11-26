@@ -16,7 +16,7 @@ use alloc::{
 };
 use core::{
     fmt,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 
 pub use exec_fs::ExecFsGuard;
@@ -37,13 +37,27 @@ use thread_membership::{ThreadGroupExitState, ThreadMembership};
 use tree::{ChildSlotAdapter, GroupMembership, ParentRelation};
 
 use crate::{
-    AsThread, Pid, PrevCputime, ProcessGroup, ProcessRuntime, Session,
-    lifecycle::ProcessLifecycleState, process_domain, publication::PublishedProcessSlot,
+    AsThread, Pid, PrevCputime, ProcessGroup, ProcessRuntime, Session, TaskCputime,
+    ThreadGroupCputimer, lifecycle::ProcessLifecycleState, process_domain,
+    publication::PublishedProcessSlot,
 };
 
 /// Sentinel stored in [`Process::visible_parent`] when the parent has no PID
 /// projection in the child's active namespace.
 pub(crate) const NO_VISIBLE_PARENT: u32 = u32::MAX;
+
+/// Number of CPU-clock bases a process CPU timer can target: PROF, VIRT, SCHED.
+/// Matches Linux `CPUCLOCK_MAX` and the `posix_cputimers.bases[]` array.
+pub(crate) const CPU_TIMER_BASES: usize = 3;
+/// Base index for the PROF clock (`utime + stime`), like Linux `CPUCLOCK_PROF`.
+pub(crate) const CPU_BASE_PROF: usize = 0;
+/// Base index for the VIRT clock (`utime`), like Linux `CPUCLOCK_VIRT`.
+pub(crate) const CPU_BASE_VIRT: usize = 1;
+/// Base index for the SCHED clock (`sum_exec_runtime`), like Linux `CPUCLOCK_SCHED`.
+pub(crate) const CPU_BASE_SCHED: usize = 2;
+/// Stored in a `cpu_timer_nextevt` base when no timer is armed on that clock,
+/// like Linux `expiry_cache_is_inactive` (all bases `U64_MAX`).
+pub(crate) const CPU_NEXT_EVT_INACTIVE: u64 = u64::MAX;
 
 /// Stable process identity with parent/group relations, exit state and runtime capabilities.
 pub struct Process {
@@ -85,6 +99,20 @@ pub struct Process {
     /// concurrent arm may be delayed until the next tick. Living on `Process`
     /// lets the IRQ path skip the runtime weak upgrade.
     cpu_timers_armed: AtomicBool,
+
+    /// Lock-free running group CPU-timer accumulator fed by every member's
+    /// tick and scheduler commit while [`Process::cpu_timers_armed`] is set.
+    /// The periodic tick samples it to filter CPU-timer expiry without a
+    /// membership walk. See [`ThreadGroupCputimer`].
+    cpu_timer_running: ThreadGroupCputimer,
+    /// Earliest pending CPU-timer deadline per clock base, in clock units
+    /// (ns), indexed [`CPU_BASE_PROF`]/[`CPU_BASE_VIRT`]/[`CPU_BASE_SCHED`];
+    /// [`CPU_NEXT_EVT_INACTIVE`] when that base has no armed timer.
+    ///
+    /// Matches Linux `posix_cputimers.bases[].nextevt`. Re-derived from the
+    /// timer manager on each arm/disarm/poll boundary; the tick fastpath reads
+    /// it lock-free (it cannot take the manager's sleeping lock).
+    cpu_timer_nextevt: [AtomicU64; CPU_TIMER_BASES],
 
     /// Whether this thread group is a child subreaper (`PR_SET_CHILD_SUBREAPER`).
     ///
@@ -319,10 +347,122 @@ impl Process {
     /// - `armed`: new gate value; `true` while any CPU-time-driven timer may
     ///   be armed.
     ///
-    /// Locking: lock-free; callers derive `armed` from the timer manager while
-    /// holding its lock, so the gate cannot lag a concurrent arm.
+    /// Locking: lock-free primitive; every production writer reaches it through
+    /// [`Self::publish_cpu_timer_gate`] under the manager lock, so the gate never
+    /// lags or overwrites a concurrent arm/disarm.
     pub(crate) fn set_cpu_timers_armed(&self, armed: bool) {
         self.cpu_timers_armed.store(armed, Ordering::Release)
+    }
+
+    /// Publishes the tick CPU-timer fastpath gate atomically with a
+    /// timer-manager mutation, seeding the running accumulator before arming.
+    ///
+    /// Callers invoke this while they hold the manager lock, immediately after
+    /// deriving `armed` and `nextevt` from it. Because the gate is written only
+    /// under that lock, the derivation and the store form one critical section
+    /// (Linux publishes `timers_active`/`nextevt` under `siglock`): a concurrent
+    /// arm/disarm cannot interleave a stale gate write, so the gate can never
+    /// lag or overwrite a fresher one.
+    ///
+    /// On the `false -> true` edge the accumulator is seeded from `seed_sample`
+    /// *before* `armed` is stored, exactly as Linux `thread_group_start_cputime`
+    /// orders `update_gt_cputime` before `WRITE_ONCE(timers_active)`. This closes
+    /// the window in which a concurrent sampler could observe `armed == true`
+    /// while the accumulator still held its pre-arm (stale-low) value: such a
+    /// read would make `CLOCK_PROCESS_CPUTIME_ID` non-monotonic and let a
+    /// relative CPU timer arm against a stale clock and fire early.
+    /// [`ThreadGroupCputimer::seed_from`] is compare-exchange-max and takes no
+    /// lock, so it commutes with concurrent tick feeds and nests safely inside
+    /// the manager lock.
+    ///
+    /// Parameters:
+    /// - `armed`: whether any CPU timer remains armed, derived from the manager.
+    /// - `nextevt`: earliest deadline per clock base derived from the manager.
+    /// - `seed_sample`: authoritative group sample walked by the caller *before*
+    ///   taking the manager lock (the membership lock must precede, never nest
+    ///   inside, the manager mutex). Unused unless this call is a rising edge.
+    ///
+    /// Returns whether this call was the `false -> true` edge (and thus seeded).
+    ///
+    /// Residual window: the manager lock sleeps with IRQs enabled, so ticks
+    /// landing between the caller's pre-lock walk and this publication are
+    /// neither fed (`armed` still false) nor captured by the already-taken
+    /// sample. The accumulator can therefore lag the true group total by that
+    /// bounded gap — a *monotonic, conservative* under-count (clocks read low,
+    /// timers fire late, never early), never the backwards jump or premature
+    /// expiry a stale-low armed read would cause. Linux admits no such gap only
+    /// because `siglock` is irqsave and runs the walk inside the same critical
+    /// section; the sleeping manager lock trades that zero-gap for this bounded
+    /// lag, within the tick granularity CPU accounting already tolerates.
+    pub(crate) fn publish_cpu_timer_gate(
+        &self,
+        armed: bool,
+        nextevt: [u64; CPU_TIMER_BASES],
+        seed_sample: TaskCputime,
+    ) -> bool {
+        let rising = armed && !self.cpu_timers_armed();
+        if rising {
+            self.cpu_timer_running.seed_from(seed_sample);
+        }
+        for (base, event) in self.cpu_timer_nextevt.iter().zip(nextevt) {
+            base.store(event, Ordering::Relaxed);
+        }
+        self.set_cpu_timers_armed(armed);
+        rising
+    }
+
+    /// Lock-free running-group CPU-time sample for the periodic-tick fastpath.
+    pub(crate) fn cpu_timer_sample(&self) -> TaskCputime {
+        self.cpu_timer_running.sample()
+    }
+
+    /// Samples the group's raw CPU clocks for a task-context CPU-timer pass.
+    ///
+    /// Mirrors Linux `cpu_clock_sample_group`: while the running accumulator is
+    /// active (armed) read it lock-free, exactly as the tick fastpath does; only
+    /// an inactive group falls back to the authoritative membership walk. The
+    /// accumulator is fed by every tick and scheduler runtime commit while armed
+    /// and seeded once on the `false -> true` edge, so it is the group's live
+    /// time source — a timer pass neither walks membership nor re-syncs it
+    /// (Linux `check_process_timers` samples it directly). The arm-edge seed is
+    /// applied by [`Self::publish_cpu_timer_gate`] before it stores `armed`, so
+    /// an armed read never observes an unseeded accumulator.
+    pub(crate) fn cpu_timer_group_sample(&self) -> TaskCputime {
+        if self.cpu_timers_armed() {
+            self.cpu_timer_sample()
+        } else {
+            self.thread_group_cputime()
+        }
+    }
+
+    /// Returns base `base`'s earliest armed CPU-timer deadline, or
+    /// [`CPU_NEXT_EVT_INACTIVE`] when no timer is armed on that clock.
+    pub(crate) fn cpu_nextevt(&self, base: usize) -> u64 {
+        self.cpu_timer_nextevt[base].load(Ordering::Relaxed)
+    }
+
+    /// Charges one user tick to the running group accumulator.
+    ///
+    /// Caller gates on [`Process::cpu_timers_armed`], mirroring Linux
+    /// `get_running_cputimer()` returning `NULL` while timers are inactive.
+    pub(crate) fn add_group_user_time(&self, delta_ns: u64) {
+        self.cpu_timer_running.add_user_time(delta_ns);
+    }
+
+    /// Charges one system tick to the running group accumulator.
+    ///
+    /// Gated like [`Process::add_group_user_time`].
+    pub(crate) fn add_group_system_time(&self, delta_ns: u64) {
+        self.cpu_timer_running.add_system_time(delta_ns);
+    }
+
+    /// Charges committed scheduler runtime to the running group accumulator.
+    ///
+    /// Gated like [`Process::add_group_user_time`]; like Linux
+    /// `account_group_exec_runtime`, the delta is real scheduler runtime, not
+    /// a nominal tick.
+    pub(crate) fn add_group_exec_runtime(&self, delta_ns: u64) {
+        self.cpu_timer_running.add_exec_runtime(delta_ns);
     }
 
     /// Returns `true` if the [`Process`] is the init process.
@@ -464,6 +604,8 @@ impl Process {
                     .map_or_else(|| Arc::new(Vec::new()), |parent| parent.saved_aux()),
             ),
             cpu_timers_armed: AtomicBool::new(false),
+            cpu_timer_running: ThreadGroupCputimer::new(),
+            cpu_timer_nextevt: [const { AtomicU64::new(CPU_NEXT_EVT_INACTIVE) }; CPU_TIMER_BASES],
             lifecycle: ProcessLifecycleState::new(),
             child_subreaper: AtomicBool::new(false),
             children: SpinNoIrq::new(LinkedList::new(ChildSlotAdapter::NEW)),

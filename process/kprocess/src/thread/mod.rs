@@ -13,7 +13,7 @@ pub use core::{
     CurrentThread, NiceValue, PagefaultGuard, PreparedUserClone, SchedulerParameters, Thread,
 };
 
-pub(crate) use cpu_time::{PrevCputime, TaskCputime};
+pub(crate) use cpu_time::{PrevCputime, TaskCputime, ThreadGroupCputimer};
 pub use current::{
     CurrentFiles, current_files, current_fs_context, current_thread_cpu_clock, current_user_mm_id,
     current_user_pid, current_user_ppid, current_user_process, current_user_process_address_space,
