@@ -189,6 +189,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "apploader_service"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "kpoll",
+ "ktask",
+ "ktime_types",
+ "log",
+ "posix-ipc",
+ "sha2 0.11.1",
+ "tipc",
+ "zerocopy",
+]
+
+[[package]]
 name = "arm-gic-driver"
 version = "0.17.13"
 dependencies = [
@@ -1470,11 +1485,13 @@ dependencies = [
 name = "entry"
 version = "0.3.0-dev"
 dependencies = [
+ "apploader_service",
  "fs_context",
  "kbuild_config",
  "kcpu_id_map",
  "kcred",
  "kernel-image-metadata",
+ "kerrno",
  "kfeat",
  "khal",
  "kiface",
@@ -2646,6 +2663,7 @@ name = "kfeat"
 version = "0.3.0-dev"
 dependencies = [
  "alloc-engine",
+ "apploader_service",
  "backtrace",
  "devfs",
  "devpts",
@@ -4749,6 +4767,7 @@ dependencies = [
  "posix-ipc",
  "posix-types",
  "tee_kernel",
+ "tee_task_iface",
  "unittest",
 ]
 

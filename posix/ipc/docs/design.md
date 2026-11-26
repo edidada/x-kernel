@@ -66,12 +66,20 @@ it takes manager then segment locks to recheck removal and attachment count.
 when the rechecked attachment count is zero. `clear_proc_shm` removes all ranges
 for a PID without unmapping them: the process-exit caller handles mm release.
 
+Kernel callers without a current user process can use `read_shm_segment` to copy
+an entire authorized segment. It clones the backing-file reference, requires the
+destination length to equal the segment's declared byte size, and reads until
+the destination is full. The caller must authorize the shmid before entry; the
+helper itself does not check segment ownership or permissions.
+
 ## Execution context and concurrency
 
 Syscall entries require a current user thread, scheduler, allocator, filesystem
 and address-space facilities. They can sleep on mutexes and copy user memory;
 they must not run in interrupt context or early boot. Kernel tests can construct
 standalone queues and can construct segment backing using explicit credentials.
+`read_shm_segment` requires sleepable kernel-task context but no current user
+process.
 A concrete queue usage sequence is `tests_msg::test_message_queue_remove_updates_accounting`
 in `ut-tests/msg.rs`: create, enqueue, remove and verify accounting.
 

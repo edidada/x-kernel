@@ -12,6 +12,9 @@ shared by parsing and stack construction, keeping each failure condition a disti
 
 `ElfHeadersBuilder` borrows the ELF file header, checks the program header entry size and the table range,
 and then copies the full program header table passed in into a uniform `ProgramHeader64` array.
+`header()` exposes the borrowed parsed header so external loaders such as `process/kexec` can validate
+class, data, machine, type, and header sizes before calling `build()`; the reference borrows the original
+input buffer and must not be retained past it.
 `ElfParser` borrows these headers and chooses the load offset according to the ELF type.
 During construction, it looks for the segment that covers the file offset of the program header table, and computes
 the virtual address of the program header table using checked addition and integer conversion. A missing covering segment and an address overflow return

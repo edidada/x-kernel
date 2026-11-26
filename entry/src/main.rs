@@ -76,6 +76,11 @@ fn print_boot_info() {
     image_metadata::print();
 }
 
+#[cfg(all(not(feature = "unittest"), target_arch = "aarch64"))]
+fn launch_dynamic_ta(image: alloc::vec::Vec<u8>) -> kerrno::KResult {
+    posix_process::spawn_dynamic_ta(image, ksyscall::handle_syscall)
+}
+
 #[cfg(not(feature = "unittest"))]
 fn kernel_main() {
     use alloc::{borrow::ToOwned, vec::Vec};
@@ -85,6 +90,9 @@ fn kernel_main() {
     runtime::init_runtime();
 
     kruntime::run_boot_benchmarks();
+
+    #[cfg(target_arch = "aarch64")]
+    apploader_service::start(launch_dynamic_ta);
 
     let args = CMDLINE
         .iter()

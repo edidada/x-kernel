@@ -22,6 +22,7 @@ dma-trace = ["kfeat/dma-trace"]
 [dependencies]
 kvfs.workspace = true
 kcred.workspace = true
+kerrno.workspace = true
 fs_context.workspace = true
 xcover.workspace = true
 kfeat.workspace = true
@@ -47,6 +48,9 @@ unittest_support = { workspace = true, optional = true }
 
 [target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dependencies]
 tee_kernel.workspace = true
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+apploader_service.workspace = true
 
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]

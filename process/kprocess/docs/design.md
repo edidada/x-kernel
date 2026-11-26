@@ -147,6 +147,9 @@ retains init identity; orphan reparenting reserves an init relation slot.
   caller initializer while the task is still private, then publishes it.
   `PublishedUserTask::commit` runs parent-side writeback before activation;
   abort/drop rolls back publication.
+- Dynamic TA creation builds a parentless user process with
+  `build_process_thread`, which returns cgroup reservation, thread identity, and
+  runtime construction failures instead of panicking.
 - `ksyscall`'s clone path calls `PidFd::new_file` (process pidfd, reporting the
   thread-group leader) or `PidFd::new_file_for_task` (thread pidfd for
   `CLONE_THREAD | CLONE_PIDFD`, reporting the thread's own tid). Both anchor
@@ -400,6 +403,9 @@ identities start Running even before publication; “prepared” or “exiting�
 control-flow phases, not extra enum variants. Exit changes Running to Zombie
 for waitable policy or Dead for autoreap, reparents children to init and resets
 their exit signal to SIGCHLD. Init is excluded from this normal exit transition.
+Any other parentless process is always autoreaped: no user process can wait for
+it, so exit clears its published identity instead of retaining an unreclaimable
+zombie.
 A consuming wait changes Zombie to Dead and removes parent membership;
 `WaitReapMode::Peek` leaves it intact. A scan returns Ready, NoMatchingChild or
 NoWaitableChild according to selector, exit-signal class and actual state.

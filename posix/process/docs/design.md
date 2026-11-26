@@ -40,8 +40,9 @@ mounted at their original scope with `unittest::path_mod_test!`. Their
 ## Purpose and scope
 
 This crate orchestrates user-thread execution, PID 1 construction and exit.
-The complete implementation is `src/lib.rs`, `src/init_process.rs` and
-`src/runtime.rs`. `kprocess` owns process identities, runtime resources,
+The complete implementation is `src/lib.rs`, `src/init_process.rs`,
+`src/runtime.rs` and `src/dynamic_ta.rs`; `src/dynamic_ta_stub.rs` provides the
+unsupported entry point for builds without the AArch64 apploader. `kprocess` owns process identities, runtime resources,
 publication and process relationships; `kexec` owns executable loading;
 `ksyscall` owns syscall decoding. This crate supplies the trap loop and orders
 calls to those owners rather than duplicating their registries.
@@ -93,6 +94,13 @@ A concrete integration example is `spawn_init_process` in `src/init_process.rs`:
 it shows identity/runtime preparation, task construction, publication and the
 observable effect (the initial image enters userspace on its own kernel stack).
 
+`spawn_dynamic_ta` is a second entry point for an already accepted kernel-owned
+TA image. It reads `.ta_head`, derives the logical `/tee/ta/{uuid}.ta` identity,
+loads the ELF without a VFS lookup, creates a parentless process and first thread,
+initializes the TEE context, then publishes and activates the task. The global
+init process must already exist. The caller owns signature policy; this function
+checks metadata and ELF layout only.
+
 ## Execution context
 
 `spawn_init_process` runs from a PID-less late-init kernel thread after the
@@ -100,6 +108,10 @@ allocator, scheduler, root filesystem, initial filesystem context and stdio
 providers are available. The first root PID allocation must yield 1. It keeps
 the task's default all-online-CPU affinity. Its `after_init_exit` callback runs
 on the init task when the loop ends and normally shuts the system down.
+
+`spawn_dynamic_ta` runs from a sleepable kernel task after global init exists,
+without requiring a current user process. The created TA initially uses the
+current init filesystem snapshot and initial credentials.
 
 `do_exit`, `do_exit_worker`, `raise_signal_fatal` and `check_signals` are
 current-user-thread paths;
@@ -238,6 +250,8 @@ Stop currently terminates the group with exit code 1; CoreDump terminates with
 128 plus the signal number and does not write a core image. Cleanup errors
 are generally logged or ignored so teardown
 can continue; these are current limitations, not complete Linux compatibility.
+Dynamic TA signature policy, duplicate-UUID policy, and least-privilege
+filesystem/credential derivation remain caller or deployment concerns.
 
 ## PM cooperative safe point
 

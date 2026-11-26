@@ -615,6 +615,46 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<shmid_ds>) -> KResult<isize
     Ok(0)
 }
 
+/// Copies an entire SysV segment into a kernel buffer without a current user process.
+///
+/// This is a kernel-side helper that reads the whole shared-memory segment
+/// (looked up by `shmid`) into a buffer, rather than mapping the segment into
+/// some user process's address space and letting the user read/write it
+/// directly like `shmat` does.
+///
+/// The caller must authorize the segment ID before calling this helper. The
+/// segment's backing file stays alive while it is read, even if its creator
+/// concurrently detaches or marks it for removal. This may sleep.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` for an unknown ID or a destination whose length does
+/// not equal the segment size; forwards backing-file read errors.
+pub fn read_shm_segment(shmid: i32, dest: &mut [u8]) -> KResult {
+    let segment = SHM_MANAGER
+        .lock()
+        .get_inner_by_shmid(shmid)
+        .ok_or(KError::InvalidInput)?;
+    let file = {
+        let segment = segment.lock();
+        if dest.len() != segment.shmid_ds.shm_segsz as usize {
+            return Err(KError::InvalidInput);
+        }
+        segment.file.clone()
+    };
+
+    let mut offset = 0_u64;
+    let mut copied = 0;
+    while copied < dest.len() {
+        let read = file.read_from(&mut dest[copied..], &mut offset)?;
+        if read == 0 {
+            return Err(KError::InvalidData);
+        }
+        copied += read;
+    }
+    Ok(())
+}
+
 /// Unmaps the current process attachment at an exact registered start address.
 ///
 /// Returns zero after accounting cleanup and any final marked-segment removal.

@@ -39,6 +39,12 @@ impl<'a> ElfHeadersBuilder<'a> {
         }))
     }
 
+    /// Returns the parsed ELF file header so callers can validate class,
+    /// data, machine, type, and header sizes before building.
+    pub fn header(&self) -> &xmas_elf::header::Header<'a> {
+        &self.0.header
+    }
+
     /// Returns the byte range occupied by the program-header table.
     ///
     /// The range is derived from untrusted ELF fields and is therefore checked

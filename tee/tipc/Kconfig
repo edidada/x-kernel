@@ -8,9 +8,17 @@ config KFEAT_TIPC
 
 config KFEAT_VSOCK_TIPC_BRIDGE
     bool "Enable Trusty-compatible vsock-TIPC bridge"
-    depends on KFEAT_TIPC && KFEAT_VSOCK
+    depends on KFEAT_TIPC && KFEAT_VSOCK && KFEAT_TEE && ARCH_AARCH64
     help
       Enable the kernel bridge that maps selected host vsock ports to Trusty
       IPC services and exposes the Trusty vsock forwarder service to TAs.
+
+config KFEAT_DYNAMIC_APPLOADER
+    bool "Enable dynamic TA apploader"
+    depends on KFEAT_VSOCK_TIPC_BRIDGE
+    help
+      Publish com.android.trusty.apploader.secure and allow the preinstalled
+      apploader TA to launch in-memory TA images through the vsock-TIPC
+      bridge. The acceptance apploader does not implement signature policy.
 
 endmenu

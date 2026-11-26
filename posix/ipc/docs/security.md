@@ -23,6 +23,7 @@ fault isolation to `filemap`/`memspace`.
 | `sys_shmat` | User ID/address/flags into MM | Unknown ID, unrounded unaligned address or SHM_REMAP with an address that is zero after rounding → InvalidInput; no free range → NoMemory; mapping errors propagate. Flags are truncated; segment lock is released before mapping. |
 | `sys_shmctl` | User command and `shmid_ds` buffer | Unknown ID/command → InvalidInput; fault-aware copies propagate. IPC_STAT with null buffer succeeds without copying. IPC_SET replaces the whole structure. |
 | `sys_shmdt` | User start address into attachment lookup | Unknown address/segment/range → InvalidInput; MM errors propagate before accounting removal. |
+| `read_shm_segment` | Kernel-authorized shmid and destination buffer | Unknown ID or destination-size mismatch → InvalidInput; a zero-byte backing read before the destination is full → InvalidData; other backing read errors propagate. The helper does not validate the caller's ownership of the shmid. |
 
 `has_ipc_permission` mirrors Linux `ipcperms()`. Both the creator and current
 owner UIDs select the owner class; both creator and current owner GIDs select the
@@ -82,6 +83,7 @@ are released across MM calls or that attachment publication is atomic.
 | T-04 | Forged shm metadata corrupts accounting | Medium | IPC_SET provides arbitrary count/permission/size fields. | No field-level restriction exists in this path; document the limitation and require restricted updates for stronger isolation. |
 | T-05 | Concurrent detach/removal frees metadata prematurely | Medium | IPC_RMID races detach or process exit. | Recheck `rmid` and zero attachment count while holding manager then segment; file/mapping references preserve backing ownership. Attach publication still spans separate phases. |
 | T-06 | Lock inversion blocks IPC users | Medium | A path takes manager while holding segment/queue lock. | Current removal paths drop the object lock before manager acquisition; preserve that order. MM/user-copy calls under object locks still require provider-compatible context. |
+| T-07 | Kernel helper reads a segment the caller was not authorized to access. | High | A kernel caller passes an arbitrary shmid to `read_shm_segment`. | The helper only looks up the ID. Callers must authenticate the request and bind it to a segment they own or are explicitly allowed to read. |
 
 ## Failure modes and management
 

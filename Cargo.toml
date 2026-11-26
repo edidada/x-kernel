@@ -319,6 +319,7 @@ vdev-vpl011 = { path = "virt/vdev/vpl011" }
 # Internal: Trusty IPC
 tipc = { path = "tee/tipc" }
 tipc_handle = { path = "tee/tipc_handle" }
+apploader_service = { path = "tee/apploader_service" }
 
 # Internal: utilities and tooling
 backtrace = { path = "util/backtrace" }
@@ -368,6 +369,7 @@ linux_sysno = { path = "api/linux_sysno", default-features = false }
 linkme = "0.3.33"
 lock_api = { version = "0.4", default-features = false }
 log = "0.4"
+sha2 = { version = "0.11", default-features = false }
 int_ratio = "0.1"
 ouroboros = { version = "0.18.5", default-features = false }
 paste = "1.0"

@@ -32,7 +32,7 @@ const SCRIPT_RECURSION_MAX: usize = 4;
 const ELF_HEADER_READ_SIZE: usize = 4096;
 const INTERPRETER_PATH_MAX: usize = 4096;
 
-fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
+pub(super) fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
     let mut mapping_flags = MappingFlags::USER;
     if flags.is_read() {
         mapping_flags |= MappingFlags::READ;
@@ -44,6 +44,18 @@ fn mapping_flags(flags: xmas_elf::program::Flags) -> MappingFlags {
         mapping_flags |= MappingFlags::EXECUTE;
     }
     mapping_flags
+}
+
+/// Converts raw auxv bytes into the flat `(type, value)` word sequence used by
+/// `/proc/<pid>/auxv` and `PR_GET_AUXV`.
+pub(super) fn auxv_bytes_to_words(auxv: &[u8]) -> Vec<u64> {
+    auxv.chunks_exact(core::mem::size_of::<u64>())
+        .map(|chunk| {
+            u64::from_ne_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])
+        })
+        .collect()
 }
 
 fn open_exec_file(location: &Path, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
@@ -455,14 +467,7 @@ impl PreparedExecImage {
     /// Returns the exec-time auxv as the flat `(type, value)` word sequence
     /// reported by `/proc/<pid>/auxv` and `PR_GET_AUXV`.
     pub fn saved_aux_words(&self) -> Vec<u64> {
-        self.auxv
-            .chunks_exact(core::mem::size_of::<u64>())
-            .map(|chunk| {
-                u64::from_ne_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ])
-            })
-            .collect()
+        auxv_bytes_to_words(&self.auxv)
     }
 }
 
@@ -951,7 +956,7 @@ fn script_interpreter_args(
     Ok(args)
 }
 
-fn prepare_initial_stack(
+pub(super) fn prepare_initial_stack(
     args: &[String],
     envs: &[String],
     auxv: &[AuxEntry],
@@ -1067,9 +1072,23 @@ pub fn load_prepared_user_app(
         (probe.observe)(uspace);
         return Err(KError::NoMemory);
     }
+    map_initial_stack_and_heap(uspace, prepared.user_sp, &prepared.stack_data)?;
+    Ok((prepared.entry, prepared.user_sp))
+}
+
+/// Maps and populates the initial user stack and anonymous heap.
+///
+/// `user_sp` is the exact stack pointer inside the stack mapping and
+/// `stack_data` is the encoded initial frame written at that address. The
+/// caller must have installed the executable image first and still owns
+/// commitment and failure policy; a failure can leave partial mappings.
+pub(super) fn map_initial_stack_and_heap(
+    uspace: &mut MmSpace,
+    user_sp: VirtAddr,
+    stack_data: &[u8],
+) -> KResult<()> {
     let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);
     let ustack_start = ustack_top - kaddr_layout::USER_STACK_SIZE;
-    let user_sp = prepared.user_sp;
 
     debug!("Mapping user stack: {ustack_start:#x?} -> {ustack_top:#x?}");
 
@@ -1087,7 +1106,7 @@ pub fn load_prepared_user_app(
         (ustack_top - user_sp_aligned).align_up_4k(),
         MappingFlags::READ | MappingFlags::WRITE,
     )?;
-    uspace.write(user_sp, &prepared.stack_data)?;
+    uspace.write(user_sp, stack_data)?;
 
     let heap_start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE);
     let heap_size = kaddr_layout::USER_HEAP_SIZE;
@@ -1099,7 +1118,7 @@ pub fn load_prepared_user_app(
         VmRuntimeRef::new_anon_private(heap_start, PageSize::Size4K),
     )?;
 
-    Ok((prepared.entry, user_sp))
+    Ok(())
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/loader.rs");

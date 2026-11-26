@@ -188,6 +188,8 @@ Signal delivery during sleepable old-MM teardown would violate this contract.
   contract, while failures after it are fatal and cannot roll it back.
 - Running → Zombie/Dead and Zombie → Dead consumption are domain transactions.
   Acquire-load exited flags are advisory for compound decisions.
+- Parentless non-init processes exit directly to Dead and clear published
+  identity; they never require an unavailable user-space waiter.
 - Publication may retain strong Process identity after runnable threads vanish.
   Runtime availability and lifecycle liveness are separate; do not use Weak
   upgrade as authorization to target an exited process.
@@ -319,6 +321,7 @@ the runtime stays pinned through this unlocked cleanup as well.
 | T-10 | `de_thread` sweep kills sibling threads while another executor also sends signals | Medium | Exec races a second `kill`/`tgkill` | Concurrent `exec` serializes on the process `exec` gate, so only one thread sweeps; a spurious non-fatal wake cannot be mistaken for the winner's kill. The sweep owns each sibling and joins it before the address-space swap. Swept targets skip the group-exit marking and never record the process exit code, but a delivered fatal signal bumps the process fatal-signal epoch (the sweep's own kill bypasses it) and a concurrent `exit_group()` marks the group exited, so either aborts the exec with the racing signal instead of being absorbed or undone. |
 | T-11 | `/proc/<pid>/exe` follows to a backing file that outlives the process | Medium | Magic-link open races final exit | The backing `Arc<VfsFile>` is read from a snapshot; a concurrent teardown may detach owners, so the follow returns NotFound when the backing file is gone, never a stale path string alone. |
 | T-12 | Last-thread cleanup runs twice or completion becomes visible before cleanup | Medium | Concurrent exits or thread publication race the final membership removal | Reserve cleanup only on actual final-member removal, reject later publication, retire the TID after unlocking, and let POSIX publish completion only after its explicit cleanup stages. |
+| T-13 | Parentless process leaves an unreclaimable zombie | Medium | A runtime-created process exits without a parent | Exit selects autoreap, publishes Dead, removes the parent link when present, and clears published identity. |
 
 ## Failure modes and handling
 

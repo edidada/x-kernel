@@ -46,15 +46,16 @@ credential commit, and post-exec policy belong to callers.
 
 `src/lib.rs` re-exports `ExecSource`, `ExecContext`, `ExecRequest`, `BinPrm`,
 `PreparedExecImage`, `PartialInstallProbe`, `prepare_user_app_request`,
-`load_prepared_user_app`, and `clear_elf_cache`.
-`src/elf_image.rs` validates ELF
-metadata, normalizes load segments, and plans executable/interpreter addresses.
+`load_prepared_user_app`, `load_user_elf_image`, and `clear_elf_cache`.
+`src/elf_image.rs` validates file-backed ELF metadata, normalizes load segments,
+and plans executable/interpreter addresses. `src/elf_mem_loader.rs` loads an
+accepted kernel-owned static AArch64 ELF without opening a VFS file.
 `src/loader.rs` contains VFS loading, request preparation, the global `ElfLoader`,
 and `ElfCacheEntry`.
 `src/lru_cache.rs` is a private capacity-bounded cache using vector storage and
 indexed MRU/LRU links; its production capacity is 32.
 
-Guest unit tests live in `ut-tests/{elf_image,loader,lru_cache}.rs` and are
+Guest unit tests live in `ut-tests/{elf_image,elf_mem_loader,loader,lru_cache}.rs` and are
 mounted by `unittest::path_mod_test!` under their original source modules.
 The ELF fixtures remain crate-visible to the loader tests; normal builds
 exclude these modules through `cfg(unittest)`.
@@ -69,6 +70,9 @@ The public interaction directions are:
 - `ExecRequest::prepare` resolves and pins a `BinPrm` without changing an address
   space. Full preparation accepts either a pathname or an already resolved
   request after this inspection step.
+- `posix/process::spawn_dynamic_ta` passes an accepted kernel-owned TA image and
+  an empty `MmSpace` to `load_user_elf_image`, which maps it without a VFS
+  lookup and returns the entry point and initial stack pointer.
 - `devfs` memory-tracking support calls `clear_elf_cache`; the operation removes
   cache visibility while in-flight prepared requests retain their `Arc` entries.
 - `kexec` calls VFS for resolution and reads, `filemap` for private executable
@@ -110,6 +114,8 @@ loading may run from a kernel bootstrap task: `kprocess::current_fs_context`
 then uses the initialized global `INIT_FS`, so no user Thread is required. A
 user-task caller instead needs its process filesystem context still attached.
 The caller supplies exclusive `&mut MmSpace` and owns execution handoff.
+`load_user_elf_image` needs only a fresh `MmSpace` and readable kernel memory; it
+does not require a current user process or filesystem context.
 
 ## Request preparation and image algorithms
 
@@ -195,6 +201,14 @@ process `ExecMetadata` so `/proc/<pid>/exe` follows the same file that pinned th
 image, including `execveat(AT_EMPTY_PATH)` on a memfd. An `O_PATH` descriptor
 carries no read permission, so it is reopened through its recorded path like
 Linux `do_open_execat()` instead of being read through the descriptor.
+
+The in-memory path accepts 64-bit little-endian AArch64 executable or position-
+independent ELF. It rejects `PT_INTERP` and `PT_DYNAMIC` (dynamic-relocation
+tables are not supported yet), validates program headers, entry
+executability, page permissions and a 64 MiB mapping bound, maps the signal
+trampoline, copies loadable bytes into private anonymous pages, creates the stack
+and heap, and returns `(entry, user_sp)`. A failure after mapping starts leaves a
+partial address space; callers must discard the whole `MmSpace`.
 
 ## Commit boundary and error handling
 

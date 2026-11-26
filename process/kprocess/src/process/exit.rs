@@ -356,6 +356,7 @@ impl Process {
             let snapshot = self.exit_parent_snapshot();
             let prepared = self.prepare_child_exit_signal_for_snapshot(&snapshot, &prepare_sigchld);
             let autoreap = publication.autoreap()
+                || snapshot.parent.is_none()
                 || prepared
                     .as_ref()
                     .is_some_and(|(_, should_autoreap)| *should_autoreap);
@@ -465,8 +466,10 @@ impl Process {
             return (false, Vec::new());
         }
 
-        if autoreap && let Some(parent) = parent {
-            Self::remove_child_from_parent_locked(domain, parent, self);
+        if autoreap {
+            if let Some(parent) = parent {
+                Self::remove_child_from_parent_locked(domain, parent, self);
+            }
             self.clear_published_identity_locked(domain);
         }
 

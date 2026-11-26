@@ -1,0 +1,11 @@
+[package]
+name = "dynamic-ta-pingpong"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+rust_libtipc = { package = "rkutipc", version = "0.1.0" }
+
+[workspace]

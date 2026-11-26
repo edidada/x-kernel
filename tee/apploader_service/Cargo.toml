@@ -1,0 +1,27 @@
+[package]
+name = "apploader_service"
+description = "Kernel-side memory receiver for dynamic Trusty applications"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+dynamic_apploader = []
+
+[dependencies]
+kerrno.workspace = true
+kpoll.workspace = true
+ktime_types.workspace = true
+ktask.workspace = true
+log.workspace = true
+posix-ipc.workspace = true
+sha2.workspace = true
+tipc.workspace = true
+zerocopy.workspace = true
+
+[lints]
+workspace = true

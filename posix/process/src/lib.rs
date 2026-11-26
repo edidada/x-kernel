@@ -9,6 +9,7 @@
 //! dispatches syscalls and faults, checks signals and orders last-thread cleanup.
 //! [`spawn_init_process`] documents the complete image/runtime/publication
 //! sequence; its source shows the required provider calls in order.
+//! [`spawn_dynamic_ta`] builds a fresh process from an accepted memory image.
 //!
 //! ```no_run
 //! # fn publish_prepared(
@@ -41,8 +42,17 @@ extern crate alloc;
 #[macro_use]
 extern crate klogger;
 
+#[cfg(all(feature = "dynamic_apploader", target_arch = "aarch64"))]
+mod dynamic_ta;
+#[cfg(not(all(feature = "dynamic_apploader", target_arch = "aarch64")))]
+mod dynamic_ta_stub;
 mod init_process;
 mod runtime;
+
+#[cfg(all(feature = "dynamic_apploader", target_arch = "aarch64"))]
+pub use dynamic_ta::spawn_dynamic_ta;
+#[cfg(not(all(feature = "dynamic_apploader", target_arch = "aarch64")))]
+pub use dynamic_ta_stub::spawn_dynamic_ta;
 pub use init_process::spawn_init_process;
 pub use runtime::{
     check_signals, do_exit, do_exit_worker, exec_de_thread, new_user_task, prepare_user_entry,

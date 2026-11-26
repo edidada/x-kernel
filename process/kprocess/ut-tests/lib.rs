@@ -2677,6 +2677,38 @@ fn test_finalize_process_exit_is_idempotent_after_autoreap() {
 }
 
 #[def_test(serial)]
+fn parentless_process_after_init_has_own_group_and_autoreaps() {
+    let init = ensure_init();
+    let task_number = kidentity::allocate_root_pid_handle().unwrap();
+    let process = Process::new_init_with_task_number(task_number);
+    let group = process.group();
+    assert!(!process.is_init());
+    assert!(process.parent().is_none());
+    assert_eq!(group.pgid(), process.pid());
+    assert!(!Arc::ptr_eq(&group, &init.group()));
+    assert_eq!(group.processes().len(), 1);
+
+    process_publication().publish_process_identity(&process);
+    assert_eq!(group.processes().len(), 1);
+
+    assert!(!process_exit::complete_process_exit(&process));
+    assert!(process.is_exited());
+    assert!(!process.is_waitable_zombie());
+    assert!(group.processes().is_empty());
+    assert!(
+        init.children()
+            .iter()
+            .all(|child| child.pid() != process.pid())
+    );
+
+    let task_number = kidentity::allocate_root_pid_handle().unwrap();
+    let uncommitted = Process::new_init_with_task_number(task_number);
+    let abandoned_group = uncommitted.group();
+    drop(uncommitted);
+    assert!(abandoned_group.processes().is_empty());
+}
+
+#[def_test(serial)]
 fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
     let init = ensure_init();
     let proc = init.fork(600);

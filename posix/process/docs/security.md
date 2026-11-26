@@ -33,7 +33,7 @@ retry, sleeping reclaim or NOFAIL guarantee is introduced.
 
 ## Scope, trust and assets
 
-The analysis covers all three source files and their optional TEE/TIPC paths.
+The analysis covers all four source files and their optional TEE/TIPC paths.
 Protected assets are the current thread's identity, saved user context, address
 space ownership, runtime handles and parent-visible completion. `kprocess`
 provides identity/publication and owner-slot synchronization, `memspace` handles
@@ -64,6 +64,10 @@ destruction continues through the scheduler's existing ownership protocol.
 to those providers. `load_prepared_user_app` receives only an unpublished empty
 MM and owned preparation result. Publication follows successful installation;
 missing argv or bootstrap failures panic.
+`spawn_dynamic_ta` accepts only a kernel-owned `Vec<u8>` from a trusted caller.
+That caller must enforce TA signature and authorization policy; the process layer
+checks `.ta_head`, ELF layout and task construction. The image is copied into new
+anonymous pages and the source buffer can then be released.
 `run_user_thread_loop` receives architecture trap results and the saved user
 context. It uses structured MM fault outcomes and signal actions, not raw
 user-supplied exception interpretations.
@@ -149,6 +153,7 @@ must retain the ordering described in the design document.
 | T-06 | A pending termination signal leaves a thread blocked indefinitely. | Medium | A sender queues a signal between the signal check and a later interrupt-flag clear. | Clear old interrupt state before checking pending signals; retain later notifications through timer polling, preemption and userspace reentry. Recheck newly raised interrupts before reentry; CPU kick behavior is provided by the task layer. |
 | T-07 | `exec_de_thread` kills siblings while another executor also signals them. | Medium | Exec races a second `kill`/`tgkill`, or a sibling is in uninterruptible work. | The sweep is owned by the execing thread and joins every sibling before the address-space swap; a racing signal to an already-dying sibling is harmless. A sibling stuck in uninterruptible work delays the execing thread until it exits (Linux has the same property). |
 | T-08 | A failed or stalled ReleaseOwner leaves stale manager sessions. | Medium | The manager is unreachable or exceeds the exit cleanup deadline. | The client uses one absolute 1-second deadline, clears local handles and continues exit without retry; manager-side sessions may remain and their numeric-PID risk is documented in `tee_kernel/docs/security.md`. |
+| T-09 | An unauthenticated or duplicate dynamic TA image is launched. | High | A trusted caller skips signature verification, reuses a UUID, or invokes launch before init exists. | The loader validates metadata and ELF structure only. Callers must enforce signature and duplicate-instance policy, and invoke it only after global init is established. |
 
 ## Failure-mode analysis
 

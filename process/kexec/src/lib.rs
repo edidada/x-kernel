@@ -7,6 +7,8 @@
 //! Create an [`ExecRequest`], optionally call [`ExecRequest::prepare`] to pin and
 //! inspect the executable. [`prepare_user_app_request`] validates and owns the
 //! image/stack; [`load_prepared_user_app`] installs it into a user-empty MM.
+//! [`load_user_elf_image`] installs an already accepted static AArch64 image
+//! held in kernel memory into a user-empty MM without opening a file.
 //! The loader owns image layout; MM owns mappings and pages. Callers own the
 //! commitment boundary and failure policy; neither loader operation clears an MM.
 //!
@@ -38,6 +40,7 @@ extern crate alloc;
 extern crate klogger;
 
 mod elf_image;
+mod elf_mem_loader;
 mod loader;
 mod lru_cache;
 
@@ -47,7 +50,10 @@ pub use filemap::PrivateFileViewSpec;
 #[cfg(unittest)]
 pub use loader::PartialInstallProbe;
 
-pub use self::loader::{
-    BinPrm, ExecContext, ExecRequest, ExecSource, PreparedExecImage, clear_elf_cache,
-    load_prepared_user_app, prepare_user_app_request,
+pub use self::{
+    elf_mem_loader::load_user_elf_image,
+    loader::{
+        BinPrm, ExecContext, ExecRequest, ExecSource, PreparedExecImage, clear_elf_cache,
+        load_prepared_user_app, prepare_user_app_request,
+    },
 };

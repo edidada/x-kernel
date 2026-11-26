@@ -347,6 +347,13 @@ The bridge v1 forwards message bytes only.
 If a TIPC message carries a handle or memref, the bridge treats the message as unsupported and closes the connection;
 forwarding object capabilities across vsock requires a separate capability model and lifecycle design.
 
+`apploader_service` is another kernel caller: it publishes
+`com.android.trusty.apploader.secure`, accepts only TA-originated connections,
+revalidates the fixed apploader UUID after the TIPC ACL, and delivers dynamic TA
+images through SysV shared-memory control messages. Image length/digest checks
+and signature policy belong to that service; TIPC provides only port ACLs and
+message transport.
+
 ## Drop / Resource Release
 
 - `IpcPort::drop` calls `close`, removes itself from the registry, and closes pending channels.

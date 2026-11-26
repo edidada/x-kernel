@@ -14,7 +14,7 @@ description = "Top-level feature selection for x-kernel"
 # through feature edges rather than direct code references. The `smp` and `vmm`
 # edges are load-bearing: crates such as karch, kplat and page_table gate code
 # on `feature = "smp"`, so removing the edge would silently drop that code.
-ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "karch", "kbpf", "kipi", "kirq", "knet", "kplat", "krcu", "kspin", "ksync", "ktask", "ktimer_core", "ktracing", "memspace", "fs_boot", "page_table", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kvmm", "kvmm-api", "kprocess", "kruntime", "ksyscall", "linux_sysno", "pagecache"]
+ignored = ["apploader_service", "alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "karch", "kbpf", "kipi", "kirq", "knet", "kplat", "krcu", "kspin", "ksync", "ktask", "ktimer_core", "ktracing", "memspace", "fs_boot", "page_table", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kvmm", "kvmm-api", "kprocess", "kruntime", "ksyscall", "linux_sysno", "pagecache"]
 
 [features]
 default = []
@@ -218,6 +218,11 @@ ta_verify_with_root = ["tee_ta_sign", "tee_task_iface/ta_verify_with_root"]
 # Trusty IPC
 tipc = ["ksyscall/tipc", "kprocess/tipc", "linux_sysno/tipc"]
 vsock_tipc_bridge = ["knet/vsock_tipc_bridge", "kruntime/vsock_tipc_bridge"]
+dynamic_apploader = [
+    "ksyscall/dynamic_apploader",
+    "dep:apploader_service",
+    "apploader_service/dynamic_apploader",
+]
 
 # Pmu
 pmu = ["kruntime/pmu", "khal/pmu", "kplat-aarch64?/pmu"]
@@ -276,6 +281,7 @@ khal.workspace = true
 inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
+apploader_service = { workspace = true, optional = true }
 kruntime.workspace = true
 krcu.workspace = true
 kxarray = { workspace = true, optional = true }

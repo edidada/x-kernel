@@ -3,12 +3,13 @@
 ## Scope, assets, and trust model
 
 This analysis covers all production code in `src/lib.rs`, `src/elf_image.rs`,
-`src/loader.rs`, and `src/lru_cache.rs`. Test-only modules, including
-`ut-tests/elf_image.rs`, are excluded because they are not linked into a normal
-kernel image. Assets are the target address space, executable identity,
-file-derived mapping permissions/offsets, and owned argument/environment data.
-The loader trusts MM and VFS ownership contracts but not executable bytes,
-interpreter paths, or ELF metadata. Callers own syscall buffer copying and the
+`src/loader.rs`, `src/elf_mem_loader.rs`, and `src/lru_cache.rs`. Test-only
+modules, including `ut-tests/elf_image.rs`, are excluded because they are not
+linked into a normal kernel image. Assets are the target address space,
+executable identity, file-derived or upload-supplied mapping
+permissions/offsets, and owned argument/environment data. The loaders trust MM
+and VFS ownership contracts but not executable bytes, interpreter paths, or ELF
+metadata. Callers own syscall buffer copying, TA signature policy, and the
 process-wide exec protocol.
 
 VFS is responsible for path-walk integrity, execute-permission decisions, and
@@ -36,6 +37,9 @@ bytes from the kernel entropy pool, while `AT_EXECFN` points to a dedicated copy
 of the originally requested executable display path, survives script redirects,
 and does not depend on `argv[0]`. A script interpreter line must be UTF-8 and
 select a non-empty interpreter before another path lookup begins.
+`load_user_elf_image` treats its byte slice as untrusted executable data supplied
+by a trusted upload boundary. It rejects external interpreters, dynamic-relocation
+tables, and write-execute page combinations, but does not verify signatures.
 
 There is no direct user-pointer, MMIO, DMA, firmware, FFI call, or assembly here.
 The signing feature delegates TA verification to `tee_task_iface`; MM methods
@@ -92,6 +96,7 @@ global allocator failure or nested allocation recovery.
 | T-05 | Prepared entry is evicted before commit | Low | Concurrent loads or explicit cache flush during the prepare/commit gap | A dangling parsed-header view could otherwise cause invalid reads or wrong mappings. | `PreparedElfImage` retains an `Arc<ElfCacheEntry>`; `LruCache::flush` removes reuse visibility but cannot invalidate the request. |
 | T-06 | Wrong executable authority | High | Consumer substitutes display text for a resolved object or supplies stale credentials | The kernel could execute a different file or bypass the intended authorization decision. | `ExecRequest::prepare` retains the resolved `Path` and checks `Permission::MAY_EXEC` with the supplied snapshot. Caller ownership of snapshot freshness and the broader exec authorization remains explicit. |
 | T-07 | TA signature rejection | High | Verification under `tee_ta_sign` fails or is bypassed | An untrusted TA image could execute. | `ElfLoader::ensure_cached` requests `tee_task_iface` verification and maps rejection to `PermissionDenied` before cache insertion. Cache coherence remains a separate assumption. |
+| T-08 | Unauthenticated in-memory TA execution | High | A caller passes bytes to `load_user_elf_image` without a signature-policy check | An unauthenticated dynamic TA could execute with kernel-granted process state. | The loader validates ELF layout and mapping safety and rejects `PT_INTERP` and write-execute pages. The caller must authenticate the image before invoking it. |
 
 ## Failure modes and effects (FMEA)
 

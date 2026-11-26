@@ -153,6 +153,7 @@ This crate is not responsible for privacy policy beyond access control:
 - `HandleTable` is a process-local data structure of `tipc-handle`, but the lock is provided by the caller.
 - Kernel-internal callers use the `ipc_port_*`, `IpcChan`, and `HandleSet` object APIs directly; a separate `ktipc` facade is not yet provided.
 - The vsock-TIPC bridge v1 forwards only message bytes, not handles or memrefs.
+- `apploader_service`'s fixed peer UUID, image length/digest checks, and signature policy belong to that service's boundary; TIPC provides only port ACLs and message transport.
 
 ## Audit Checklist
 

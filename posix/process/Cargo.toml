@@ -10,8 +10,9 @@ repository.workspace = true
 documentation.workspace = true
 
 [features]
-tee = ["kprocess/tee", "dep:tee_kernel"]
+tee = ["kprocess/tee", "dep:tee_kernel", "dep:tee_task_iface"]
 tipc = ["kprocess/tipc"]
+dynamic_apploader = ["tee"]
 
 [dependencies]
 kalloc-types.workspace = true
@@ -40,6 +41,7 @@ unittest.workspace = true
 posix-fs.workspace = true
 posix-ipc.workspace = true
 tee_kernel = { workspace = true, optional = true }
+tee_task_iface = { workspace = true, optional = true }
 
 [lints]
 workspace = true

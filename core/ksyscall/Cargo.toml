@@ -20,6 +20,7 @@ tee = [
     "posix-process/tee",
     "tipc?/tee",
 ]
+dynamic_apploader = ["posix-process/dynamic_apploader"]
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 
 [package.metadata.cargo-shear]
